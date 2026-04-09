@@ -10,4 +10,6 @@ public sealed class AgentOptions
     public int HeartbeatIntervalSeconds { get; set; } = 30;
     public int HeartbeatJitterSeconds { get; set; } = 5;
     public string Version { get; set; } = "2.0.0";
+    public string? SqlServer { get; set; }
+    public string? SqlDatabase { get; set; }
 }

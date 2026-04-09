@@ -1,6 +1,8 @@
 using Serilog;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Ipc;
+using SuavoAgent.Core.State;
 using SuavoAgent.Core.Workers;
 
 Log.Logger = new LoggerConfiguration()
@@ -32,6 +34,28 @@ try
     });
 
     builder.Services.AddHostedService<HeartbeatWorker>();
+
+    builder.Services.AddSingleton<AgentStateDb>(sp =>
+    {
+        var dbPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "state.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        return new AgentStateDb(dbPath, "temp-dev-password"); // TODO: DPAPI in production
+    });
+
+    builder.Services.AddSingleton<IpcPipeServer>(sp =>
+    {
+        var logger = sp.GetRequiredService<ILogger<IpcPipeServer>>();
+        return new IpcPipeServer("SuavoAgent", msg =>
+        {
+            logger.LogDebug("IPC: {Command}", msg.Command);
+            return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(msg.RequestId, true, "ack", null));
+        }, logger);
+    });
+
+    builder.Services.AddHostedService<RxDetectionWorker>();
+    builder.Services.AddHostedService<WritebackProcessor>();
 
     builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));
 
