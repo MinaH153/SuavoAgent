@@ -6,17 +6,19 @@ public sealed class AgentStateDb : IDisposable
 {
     private readonly SqliteConnection _conn;
 
-    public AgentStateDb(string dbPath, string password)
+    public AgentStateDb(string dbPath, string? password = null)
     {
         SQLitePCL.Batteries_V2.Init();
 
-        var connStr = new SqliteConnectionStringBuilder
+        var builder = new SqliteConnectionStringBuilder
         {
             DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
-            Password = password
-        }.ToString();
+        };
+        if (!string.IsNullOrEmpty(password))
+            builder.Password = password;
 
+        var connStr = builder.ToString();
         _conn = new SqliteConnection(connStr);
         _conn.Open();
         InitSchema();

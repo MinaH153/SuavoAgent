@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
@@ -9,21 +10,27 @@ public sealed class HeartbeatWorker : BackgroundService
 {
     private readonly ILogger<HeartbeatWorker> _logger;
     private readonly AgentOptions _options;
-    private readonly SuavoCloudClient _cloudClient;
+    private readonly SuavoCloudClient? _cloudClient;
     private int _consecutiveFailures;
 
     public HeartbeatWorker(
         ILogger<HeartbeatWorker> logger,
         IOptions<AgentOptions> options,
-        SuavoCloudClient cloudClient)
+        IServiceProvider serviceProvider)
     {
         _logger = logger;
         _options = options.Value;
-        _cloudClient = cloudClient;
+        _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (_cloudClient == null)
+        {
+            _logger.LogWarning("Heartbeat disabled — no cloud client configured");
+            return;
+        }
+
         _logger.LogInformation("Heartbeat worker started. Interval: {Interval}s", _options.HeartbeatIntervalSeconds);
 
         while (!stoppingToken.IsCancellationRequested)

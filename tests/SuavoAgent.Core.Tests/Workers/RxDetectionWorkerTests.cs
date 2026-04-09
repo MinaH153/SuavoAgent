@@ -1,6 +1,6 @@
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Logging.Abstractions;
-using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Workers;
 using Xunit;
@@ -12,15 +12,14 @@ public class RxDetectionWorkerTests
     [Fact]
     public void InitialState_NotConnected()
     {
-        var options = Options.Create(new AgentOptions { ApiKey = "test-key" });
-        var client = new SuavoCloudClient(options.Value);
+        var services = new ServiceCollection();
+        var sp = services.BuildServiceProvider();
+        var options = Options.Create(new AgentOptions());
         var worker = new RxDetectionWorker(
-            NullLogger<RxDetectionWorker>.Instance, options, client);
+            NullLogger<RxDetectionWorker>.Instance, options, sp);
 
         Assert.False(worker.IsSqlConnected);
         Assert.Equal(0, worker.LastDetectedCount);
         Assert.Null(worker.LastDetectionTime);
-
-        client.Dispose();
     }
 }

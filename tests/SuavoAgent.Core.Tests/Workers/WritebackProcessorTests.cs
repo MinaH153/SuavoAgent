@@ -17,7 +17,7 @@ public class WritebackProcessorTests : IDisposable
     public WritebackProcessorTests()
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"suavo_wp_{Guid.NewGuid():N}.db");
-        _db = new AgentStateDb(_dbPath, "test-pw");
+        _db = new AgentStateDb(_dbPath);
         _pipe = new IpcPipeServer("SuavoWPTest", msg =>
             Task.FromResult(new IpcResponse(msg.RequestId, true, "ok", null)),
             NullLogger<IpcPipeServer>.Instance);

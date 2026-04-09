@@ -27,11 +27,15 @@ try
 
     builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
 
-    builder.Services.AddSingleton<SuavoCloudClient>(sp =>
+    var agentOpts = builder.Configuration.GetSection("Agent").Get<AgentOptions>() ?? new AgentOptions();
+    if (!string.IsNullOrWhiteSpace(agentOpts.ApiKey))
     {
-        var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value;
-        return new SuavoCloudClient(options);
-    });
+        builder.Services.AddSingleton(new SuavoCloudClient(agentOpts));
+    }
+    else
+    {
+        Log.Warning("No ApiKey configured — cloud sync disabled. Set Agent:ApiKey in appsettings.json");
+    }
 
     builder.Services.AddHostedService<HeartbeatWorker>();
 
@@ -41,7 +45,7 @@ try
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "state.db");
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        return new AgentStateDb(dbPath, "temp-dev-password"); // TODO: DPAPI in production
+        return new AgentStateDb(dbPath); // TODO: Add SQLCipher encryption with DPAPI key for production
     });
 
     builder.Services.AddSingleton<IpcPipeServer>(sp =>

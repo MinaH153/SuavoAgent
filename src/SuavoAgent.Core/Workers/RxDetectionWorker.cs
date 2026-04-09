@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Adapters.PioneerRx.Sql;
 using SuavoAgent.Core.Cloud;
@@ -10,7 +11,7 @@ public sealed class RxDetectionWorker : BackgroundService
 {
     private readonly ILogger<RxDetectionWorker> _logger;
     private readonly AgentOptions _options;
-    private readonly SuavoCloudClient _cloudClient;
+    private readonly SuavoCloudClient? _cloudClient;
     private PioneerRxSqlEngine? _sqlEngine;
     private bool _sqlConnected;
     private readonly List<string> _knownColumns = new();
@@ -23,11 +24,11 @@ public sealed class RxDetectionWorker : BackgroundService
     public RxDetectionWorker(
         ILogger<RxDetectionWorker> logger,
         IOptions<AgentOptions> options,
-        SuavoCloudClient cloudClient)
+        IServiceProvider serviceProvider)
     {
         _logger = logger;
         _options = options.Value;
-        _cloudClient = cloudClient;
+        _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

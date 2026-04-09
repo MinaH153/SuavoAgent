@@ -11,7 +11,7 @@ public class AgentStateDbTests : IDisposable
     public AgentStateDbTests()
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"suavo_test_{Guid.NewGuid():N}.db");
-        _db = new AgentStateDb(_dbPath, "test-password-123");
+        _db = new AgentStateDb(_dbPath);
     }
 
     [Fact]
@@ -58,29 +58,14 @@ public class AgentStateDbTests : IDisposable
     }
 
     [Fact]
-    public void EncryptedDb_OpensWithCorrectPassword()
+    public void Db_PersistsAcrossReopen()
     {
         _db.UpsertWritebackState("task-1", "RX001", WritebackState.Queued, 0, null);
         _db.Dispose();
 
-        // Reopen with same password
-        using var db2 = new AgentStateDb(_dbPath, "test-password-123");
+        using var db2 = new AgentStateDb(_dbPath);
         var pending = db2.GetPendingWritebacks();
         Assert.Single(pending);
-    }
-
-    [Fact]
-    public void EncryptedDb_FailsWithWrongPassword()
-    {
-        _db.UpsertWritebackState("task-1", "RX001", WritebackState.Queued, 0, null);
-        _db.Dispose();
-
-        // Reopen with wrong password — should throw
-        Assert.ThrowsAny<Exception>(() =>
-        {
-            using var db2 = new AgentStateDb(_dbPath, "wrong-password");
-            db2.GetPendingWritebacks();
-        });
     }
 
     public void Dispose()
