@@ -1,0 +1,107 @@
+using Stateless;
+
+namespace SuavoAgent.Core.State;
+
+public enum WritebackState
+{
+    Queued,
+    BlockedInteractive,
+    Claimed,
+    InProgress,
+    VerifyPending,
+    Verified,
+    Done,
+    ManualReview
+}
+
+public enum WritebackTrigger
+{
+    Claim,
+    UserActive,
+    UserIdle,
+    StartUia,
+    WriteComplete,
+    VerifyMatch,
+    VerifyMismatch,
+    SystemError,
+    BusinessError,
+    SyncComplete,
+    HelperDisconnected
+}
+
+public class WritebackStateMachine
+{
+    private readonly StateMachine<WritebackState, WritebackTrigger> _machine;
+    private readonly string _taskId;
+    private readonly Action<string, WritebackState> _onStateChanged;
+    private int _retryCount;
+
+    public const int MaxRetries = 3;
+    public WritebackState CurrentState => _machine.State;
+    public string TaskId => _taskId;
+    public int RetryCount => _retryCount;
+
+    public WritebackStateMachine(
+        string taskId,
+        WritebackState initialState,
+        Action<string, WritebackState> onStateChanged)
+    {
+        _taskId = taskId;
+        _onStateChanged = onStateChanged;
+        _retryCount = 0;
+
+        _machine = new StateMachine<WritebackState, WritebackTrigger>(initialState);
+
+        _machine.Configure(WritebackState.Queued)
+            .Permit(WritebackTrigger.Claim, WritebackState.Claimed)
+            .Permit(WritebackTrigger.HelperDisconnected, WritebackState.BlockedInteractive)
+            .Permit(WritebackTrigger.UserActive, WritebackState.BlockedInteractive);
+
+        _machine.Configure(WritebackState.BlockedInteractive)
+            .Permit(WritebackTrigger.UserIdle, WritebackState.Queued);
+
+        _machine.Configure(WritebackState.Claimed)
+            .Permit(WritebackTrigger.StartUia, WritebackState.InProgress)
+            .Permit(WritebackTrigger.SystemError, WritebackState.Queued)
+            .Permit(WritebackTrigger.HelperDisconnected, WritebackState.BlockedInteractive);
+
+        _machine.Configure(WritebackState.InProgress)
+            .Permit(WritebackTrigger.WriteComplete, WritebackState.VerifyPending)
+            .Permit(WritebackTrigger.SystemError, WritebackState.Queued)
+            .Permit(WritebackTrigger.BusinessError, WritebackState.ManualReview)
+            .Permit(WritebackTrigger.HelperDisconnected, WritebackState.BlockedInteractive);
+
+        _machine.Configure(WritebackState.VerifyPending)
+            .Permit(WritebackTrigger.VerifyMatch, WritebackState.Verified)
+            .Permit(WritebackTrigger.VerifyMismatch, WritebackState.InProgress)
+            .Permit(WritebackTrigger.SystemError, WritebackState.Queued);
+
+        _machine.Configure(WritebackState.Verified)
+            .Permit(WritebackTrigger.SyncComplete, WritebackState.Done);
+
+        // ManualReview and Done are terminal — no outgoing triggers
+
+        _machine.OnTransitioned(t =>
+        {
+            if (t.Trigger == WritebackTrigger.SystemError)
+                _retryCount++;
+
+            _onStateChanged(_taskId, t.Destination);
+        });
+    }
+
+    public bool CanFire(WritebackTrigger trigger) => _machine.CanFire(trigger);
+
+    public void Fire(WritebackTrigger trigger)
+    {
+        if (_retryCount >= MaxRetries && trigger == WritebackTrigger.SystemError)
+        {
+            // Force to ManualReview instead of retry
+            _machine.Fire(WritebackTrigger.BusinessError);
+            return;
+        }
+        _machine.Fire(trigger);
+    }
+
+    public bool IsTerminal => CurrentState is WritebackState.Done or WritebackState.ManualReview;
+}
