@@ -1,4 +1,5 @@
 using SuavoAgent.Contracts.Models;
+using Xunit;
 
 namespace SuavoAgent.Contracts.Tests.Models;
 

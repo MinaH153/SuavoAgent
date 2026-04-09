@@ -18,7 +18,7 @@ public sealed class HmacSigner
         var message = $"{timestamp}:{body}";
         var messageBytes = Encoding.UTF8.GetBytes(message);
         var hash = HMACSHA256.HashData(_keyBytes, messageBytes);
-        return Convert.ToHexStringLower(hash);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     public static bool IsWithinReplayWindow(string timestamp, TimeSpan window)

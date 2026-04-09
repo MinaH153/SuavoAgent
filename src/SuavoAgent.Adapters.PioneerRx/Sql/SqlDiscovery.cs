@@ -52,14 +52,17 @@ public static class SqlDiscovery
             var endpoint = new IPEndPoint(IPAddress.Parse(targetIp), 1434);
             await udp.SendAsync(new byte[] { 0x02 }, 1, endpoint);
 
-            var receiveTask = udp.ReceiveAsync(ct);
-            var timeoutTask = Task.Delay(timeoutMs, ct);
-
-            var completed = await Task.WhenAny(receiveTask, timeoutTask);
-            if (completed == timeoutTask)
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(timeoutMs);
+            UdpReceiveResult result;
+            try
+            {
+                result = await udp.ReceiveAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
                 return null;
-
-            var result = await receiveTask;
+            }
             var responseStr = Encoding.ASCII.GetString(result.Buffer, 3, result.Buffer.Length - 3);
             logger.LogDebug("SQL Browser response from {Ip}: {Response}", targetIp, responseStr);
 

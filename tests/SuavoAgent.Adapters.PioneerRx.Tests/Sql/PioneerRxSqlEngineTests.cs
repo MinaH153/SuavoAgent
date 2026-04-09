@@ -1,5 +1,6 @@
 using SuavoAgent.Adapters.PioneerRx;
 using SuavoAgent.Adapters.PioneerRx.Sql;
+using Xunit;
 
 namespace SuavoAgent.Adapters.PioneerRx.Tests.Sql;
 

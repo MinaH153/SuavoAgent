@@ -1,4 +1,5 @@
 using SuavoAgent.Core.Cloud;
+using Xunit;
 
 namespace SuavoAgent.Core.Tests.Cloud;
 
