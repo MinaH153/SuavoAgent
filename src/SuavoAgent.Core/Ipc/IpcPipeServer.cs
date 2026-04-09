@@ -1,0 +1,124 @@
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using SuavoAgent.Contracts.Ipc;
+
+namespace SuavoAgent.Core.Ipc;
+
+public sealed class IpcPipeServer : IDisposable
+{
+    private readonly string _pipeName;
+    private readonly ILogger<IpcPipeServer> _logger;
+    private readonly Func<IpcMessage, Task<IpcResponse>> _handler;
+    private CancellationTokenSource? _cts;
+    private Task? _listenTask;
+    private bool _isConnected;
+
+    public bool IsConnected => _isConnected;
+    public string PipeName => _pipeName;
+
+    public IpcPipeServer(string pipeName, Func<IpcMessage, Task<IpcResponse>> handler, ILogger<IpcPipeServer> logger)
+    {
+        _pipeName = pipeName;
+        _handler = handler;
+        _logger = logger;
+    }
+
+    public void Start(CancellationToken ct)
+    {
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _listenTask = ListenLoop(_cts.Token);
+    }
+
+    private async Task ListenLoop(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            NamedPipeServerStream? pipe = null;
+            try
+            {
+                pipe = new NamedPipeServerStream(
+                    _pipeName,
+                    PipeDirection.InOut,
+                    1,
+                    PipeTransmissionMode.Byte,
+                    PipeOptions.Asynchronous);
+
+                _logger.LogDebug("Waiting for Helper connection on pipe {Name}...", _pipeName);
+                await pipe.WaitForConnectionAsync(ct);
+                _isConnected = true;
+                _logger.LogInformation("Helper connected on pipe {Name}", _pipeName);
+
+                await HandleConnection(pipe, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Pipe connection error");
+                _isConnected = false;
+                await Task.Delay(1000, ct);
+            }
+            finally
+            {
+                _isConnected = false;
+                pipe?.Dispose();
+            }
+        }
+    }
+
+    private async Task HandleConnection(NamedPipeServerStream pipe, CancellationToken ct)
+    {
+        using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
+        using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
+
+        while (!ct.IsCancellationRequested && pipe.IsConnected)
+        {
+            try
+            {
+                var line = await reader.ReadLineAsync(ct);
+                if (line == null) break; // Client disconnected
+
+                var message = JsonSerializer.Deserialize<IpcMessage>(line);
+                if (message == null) continue;
+
+                _logger.LogDebug("IPC received: {Command} [{RequestId}]", message.Command, message.RequestId);
+
+                var response = await _handler(message);
+                var responseLine = JsonSerializer.Serialize(response);
+                await writer.WriteLineAsync(responseLine);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (IOException)
+            {
+                _logger.LogInformation("Helper disconnected");
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "IPC message handling error");
+            }
+        }
+
+        _isConnected = false;
+        _logger.LogInformation("Helper connection closed");
+    }
+
+    public async Task<IpcResponse?> SendCommandAsync(IpcMessage command, TimeSpan timeout)
+    {
+        // Push model not yet implemented — protocol is currently request-response (Helper sends, Core responds)
+        _logger.LogDebug("SendCommand not yet implemented for push model");
+        return await Task.FromResult<IpcResponse?>(null);
+    }
+
+    public void Dispose()
+    {
+        _cts?.Cancel();
+        _cts?.Dispose();
+    }
+}
