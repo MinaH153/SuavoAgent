@@ -7,41 +7,80 @@ namespace SuavoAgent.Adapters.PioneerRx.Tests.Sql;
 public class PioneerRxSqlEngineTests
 {
     [Fact]
-    public void BuildReadyRxQuery_ExcludesPhiColumns()
+    public void BuildDeliveryQuery_UsesRealSchema()
     {
-        var query = PioneerRxSqlEngine.BuildReadyRxQuery(
-            new[] { "RxNumber", "DrugName", "PatientName", "NDC", "PatientDOB" },
-            PioneerRxConstants.ReadyStatusValues);
-        Assert.DoesNotContain("PatientName", query);
-        Assert.DoesNotContain("PatientDOB", query);
-        Assert.Contains("RxNumber", query);
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(3);
+        Assert.Contains("Prescription.RxTransaction rt", query);
+        Assert.Contains("Prescription.Rx r", query);
+        Assert.Contains("rt.RxID = r.RxID", query);
+        Assert.DoesNotContain("dbo.", query);
     }
 
     [Fact]
-    public void BuildReadyRxQuery_UsesParameterPlaceholders()
+    public void BuildDeliveryQuery_UsesParameterPlaceholders()
     {
-        var query = PioneerRxSqlEngine.BuildReadyRxQuery(
-            new[] { "RxNumber", "Status" }, new[] { "Ready", "Filled" });
-        Assert.Contains("@status", query);
-        Assert.DoesNotContain("'Ready'", query);
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(3);
+        Assert.Contains("@status0", query);
+        Assert.Contains("@status1", query);
+        Assert.Contains("@status2", query);
+        Assert.DoesNotContain("'53ce4c47", query); // no hardcoded GUIDs
     }
 
     [Fact]
-    public void BuildReadyRxQuery_LimitsTo50()
+    public void BuildDeliveryQuery_LimitsTo50()
     {
-        var query = PioneerRxSqlEngine.BuildReadyRxQuery(new[] { "RxNumber" }, new[] { "Ready" });
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
         Assert.Contains("TOP 50", query);
+    }
+
+    [Fact]
+    public void BuildDeliveryQuery_FiltersRecentDateFilled()
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
+        Assert.Contains("DateFilled >= DATEADD(day, -7", query);
+    }
+
+    [Fact]
+    public void BuildDeliveryQuery_SelectsNoPhiColumns()
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(3);
+        Assert.DoesNotContain("PatientID", query);
+        Assert.DoesNotContain("PatientName", query);
+        Assert.DoesNotContain("Person.Patient", query);
+    }
+
+    [Fact]
+    public void BuildDeliveryQuery_SelectsOperationalColumns()
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
+        Assert.Contains("r.RxNumber", query);
+        Assert.Contains("r.MedicationDescription", query);
+        Assert.Contains("rt.DispensedQuantity", query);
+        Assert.Contains("rt.DaysSupply", query);
+        Assert.Contains("rt.RxTransactionStatusTypeID", query);
+        Assert.Contains("r.DispensedNDC", query);
+        Assert.Contains("r.PrescribedNDC", query);
+        Assert.Contains("rt.RefillNumber", query);
+    }
+
+    [Fact]
+    public void BuildDeliveryQuery_OrdersByDateFilledDesc()
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
+        Assert.Contains("ORDER BY rt.DateFilled DESC", query);
     }
 
     [Theory]
     [InlineData("PatientName")]
     [InlineData("PatientSSN")]
     [InlineData("DiagnosisCode")]
+    [InlineData("PatientID")]
+    [InlineData("PersonID")]
     public void IsPhiColumn_BlocksPhi(string col) => Assert.True(PioneerRxSqlEngine.IsPhiColumn(col));
 
     [Theory]
     [InlineData("RxNumber")]
-    [InlineData("DrugName")]
-    [InlineData("NDC")]
+    [InlineData("MedicationDescription")]
+    [InlineData("DispensedNDC")]
     public void IsPhiColumn_AllowsOperational(string col) => Assert.False(PioneerRxSqlEngine.IsPhiColumn(col));
 }

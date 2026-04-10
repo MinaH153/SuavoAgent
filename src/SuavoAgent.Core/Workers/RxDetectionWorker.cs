@@ -14,7 +14,6 @@ public sealed class RxDetectionWorker : BackgroundService
     private readonly SuavoCloudClient? _cloudClient;
     private PioneerRxSqlEngine? _sqlEngine;
     private bool _sqlConnected;
-    private readonly List<string> _knownColumns = new();
 
     public int DetectionIntervalSeconds { get; set; } = 300;
     public int LastDetectedCount { get; private set; }
@@ -52,7 +51,7 @@ public sealed class RxDetectionWorker : BackgroundService
                     }
                 }
 
-                var readyRxs = await _sqlEngine!.ReadReadyPrescriptionsAsync(_knownColumns, stoppingToken);
+                var readyRxs = await _sqlEngine!.ReadReadyPrescriptionsAsync(stoppingToken);
                 LastDetectedCount = readyRxs.Count;
                 LastDetectionTime = DateTimeOffset.UtcNow;
 
@@ -86,7 +85,7 @@ public sealed class RxDetectionWorker : BackgroundService
     private async Task TryConnectSqlAsync(CancellationToken ct)
     {
         var server = _options.SqlServer ?? "localhost";
-        var database = _options.SqlDatabase ?? "PioneerRx";
+        var database = _options.SqlDatabase ?? "PioneerPharmacySystem";
 
         _sqlEngine?.Dispose();
         _sqlEngine = new PioneerRxSqlEngine(
@@ -105,6 +104,8 @@ public sealed class RxDetectionWorker : BackgroundService
 
     private async Task SyncToCloudAsync(IReadOnlyList<RxReadyForDelivery> rxs, CancellationToken ct)
     {
+        if (_cloudClient is null) return;
+
         try
         {
             var payload = new
