@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Cloud;
@@ -12,6 +13,7 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly AgentOptions _options;
     private readonly SuavoCloudClient? _cloudClient;
     private int _consecutiveFailures;
+    private bool _updateInProgress;
 
     public HeartbeatWorker(
         ILogger<HeartbeatWorker> logger,
@@ -31,6 +33,9 @@ public sealed class HeartbeatWorker : BackgroundService
             return;
         }
 
+        // Cleanup old binary from a previous self-update
+        SelfUpdater.CleanupOldBinary(_logger);
+
         _logger.LogInformation("Heartbeat worker started. Interval: {Interval}s", _options.HeartbeatIntervalSeconds);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -42,14 +47,18 @@ public sealed class HeartbeatWorker : BackgroundService
                     agentId = _options.AgentId,
                     version = _options.Version,
                     pharmacyId = _options.PharmacyId,
-                    memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
+                    memoryUsageMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
                     uptime = (long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds,
                     status = "online"
                 };
 
-                await _cloudClient.HeartbeatAsync(payload, stoppingToken);
+                var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
                 _consecutiveFailures = 0;
                 _logger.LogDebug("Heartbeat OK");
+
+                // Check for pending self-update
+                if (response.HasValue && !_updateInProgress)
+                    await CheckForUpdateAsync(response.Value, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -74,5 +83,44 @@ public sealed class HeartbeatWorker : BackgroundService
         }
 
         _logger.LogInformation("Heartbeat worker stopped");
+    }
+
+    private async Task CheckForUpdateAsync(JsonElement response, CancellationToken ct)
+    {
+        try
+        {
+            if (!response.TryGetProperty("data", out var data)) return;
+            if (!data.TryGetProperty("pendingUpdate", out var update)) return;
+            if (update.ValueKind == JsonValueKind.Null) return;
+
+            var url = update.TryGetProperty("url", out var u) ? u.GetString() : null;
+            var sha256 = update.TryGetProperty("sha256", out var s) ? s.GetString() : null;
+            var version = update.TryGetProperty("version", out var v) ? v.GetString() : null;
+
+            if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha256))
+            {
+                _logger.LogDebug("Pending update missing url or sha256 — skipping");
+                return;
+            }
+
+            // Don't update to the same version we're already running
+            if (version == _options.Version)
+            {
+                _logger.LogDebug("Already running v{Version} — skipping update", version);
+                return;
+            }
+
+            _updateInProgress = true;
+            _logger.LogInformation("Pending update detected: v{Version} sha:{Sha}", version, sha256);
+
+            await SelfUpdater.TryApplyUpdateAsync(url, sha256, version ?? "unknown", _logger, ct);
+            // If we get here, update failed (TryApplyUpdateAsync exits on success)
+            _updateInProgress = false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Update check failed");
+            _updateInProgress = false;
+        }
     }
 }
