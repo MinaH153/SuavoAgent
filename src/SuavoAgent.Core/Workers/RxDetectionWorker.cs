@@ -108,31 +108,30 @@ public sealed class RxDetectionWorker : BackgroundService
 
         try
         {
+            // POST /api/agent/sync — matches cloud endpoint's expected format
             var payload = new
             {
-                agentId = _options.AgentId,
-                pharmacyId = _options.PharmacyId,
-                prescriptions = rxs.Select(rx => new
+                snapshotType = "rx_delivery_queue",
+                data = new
                 {
-                    rx.RxNumber,
-                    rx.FillNumber,
-                    rx.DrugName,
-                    rx.Ndc,
-                    rx.Quantity,
-                    rx.DaysSupply,
-                    rx.StatusText,
-                    rx.IsControlled,
-                    rx.DrugSchedule,
-                    rx.PatientIdRequired,
-                    rx.CounselingRequired,
-                    detectedAt = rx.DetectedAt.ToString("o"),
-                    source = rx.Source.ToString()
-                }).ToArray(),
-                syncedAt = DateTimeOffset.UtcNow.ToString("o")
+                    rxDeliveryQueue = rxs.Select(rx => new
+                    {
+                        rxNumber = rx.RxNumber,
+                        drugName = rx.DrugName,
+                        fillNumber = rx.FillNumber,
+                        quantity = rx.Quantity,
+                        daysSupply = rx.DaysSupply,
+                        statusGuid = rx.StatusText,
+                        detectedAt = rx.DetectedAt.ToString("o")
+                    }).ToArray(),
+                    totalDetected = rxs.Count,
+                    syncedAt = DateTimeOffset.UtcNow.ToString("o")
+                },
+                sqlConnected = true
             };
 
-            await _cloudClient.HeartbeatAsync(payload, ct);
-            _logger.LogDebug("Synced {Count} prescriptions to cloud", rxs.Count);
+            var result = await _cloudClient.SyncRxAsync(payload, ct);
+            _logger.LogInformation("Synced {Count} prescriptions to cloud", rxs.Count);
         }
         catch (Exception ex)
         {

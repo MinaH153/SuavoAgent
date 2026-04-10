@@ -23,11 +23,21 @@ public sealed class SuavoCloudClient : IDisposable
 
     public async Task<JsonElement?> HeartbeatAsync(object payload, CancellationToken ct)
     {
+        return await PostSignedAsync("/api/agent/heartbeat", payload, ct);
+    }
+
+    public async Task<JsonElement?> SyncRxAsync(object payload, CancellationToken ct)
+    {
+        return await PostSignedAsync("/api/agent/sync", payload, ct);
+    }
+
+    private async Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct)
+    {
         var body = JsonSerializer.Serialize(payload);
         var timestamp = DateTimeOffset.UtcNow.ToString("o");
         var signature = _signer.Sign(timestamp, body);
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/agent/heartbeat");
+        using var request = new HttpRequestMessage(HttpMethod.Post, path);
         request.Content = new StringContent(body, Encoding.UTF8, "application/json");
         request.Headers.Add("x-agent-id", _options.AgentId);
         request.Headers.Add("x-timestamp", timestamp);
