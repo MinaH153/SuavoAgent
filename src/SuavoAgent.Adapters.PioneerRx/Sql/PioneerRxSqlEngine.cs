@@ -159,12 +159,12 @@ WHERE Description IN ({statusParams})";
     rt.DaysSupply,
     rt.RxTransactionStatusTypeID,
     rt.PromiseTime,
-    r.RxNumber,
-    r.MedicationDescription,
-    r.PrescribedNDC,
-    r.DispensedNDC
+    a.RxNumber,
+    a.MedicationDescription,
+    a.PrescribedNDC,
+    a.DispensedNDC
 FROM Prescription.RxTransaction rt
-JOIN Prescription.Rx r ON rt.RxID = r.RxID
+JOIN RxLocal.ActiveRx a ON rt.RxID = a.RxID
 WHERE rt.RxTransactionStatusTypeID IN ({statusParams})
     AND rt.DateFilled >= DATEADD(day, -7, CAST(GETDATE() AS DATE))
 ORDER BY rt.DateFilled DESC";

@@ -11,9 +11,10 @@ public class PioneerRxSqlEngineTests
     {
         var query = PioneerRxSqlEngine.BuildDeliveryQuery(3);
         Assert.Contains("Prescription.RxTransaction rt", query);
-        Assert.Contains("Prescription.Rx r", query);
-        Assert.Contains("rt.RxID = r.RxID", query);
+        Assert.Contains("RxLocal.ActiveRx a", query);
+        Assert.Contains("rt.RxID = a.RxID", query);
         Assert.DoesNotContain("dbo.", query);
+        Assert.DoesNotContain("Prescription.Rx r", query);
     }
 
     [Fact]
@@ -53,13 +54,13 @@ public class PioneerRxSqlEngineTests
     public void BuildDeliveryQuery_SelectsOperationalColumns()
     {
         var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
-        Assert.Contains("r.RxNumber", query);
-        Assert.Contains("r.MedicationDescription", query);
+        Assert.Contains("a.RxNumber", query);
+        Assert.Contains("a.MedicationDescription", query);
         Assert.Contains("rt.DispensedQuantity", query);
         Assert.Contains("rt.DaysSupply", query);
         Assert.Contains("rt.RxTransactionStatusTypeID", query);
-        Assert.Contains("r.DispensedNDC", query);
-        Assert.Contains("r.PrescribedNDC", query);
+        Assert.Contains("a.DispensedNDC", query);
+        Assert.Contains("a.PrescribedNDC", query);
         Assert.Contains("rt.RefillNumber", query);
     }
 
