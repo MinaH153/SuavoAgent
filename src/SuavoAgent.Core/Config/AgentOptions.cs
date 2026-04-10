@@ -12,4 +12,6 @@ public sealed class AgentOptions
     public string Version { get; set; } = "2.0.0";
     public string? SqlServer { get; set; }
     public string? SqlDatabase { get; set; }
+    public string? SqlUser { get; set; }
+    public string? SqlPassword { get; set; }
 }

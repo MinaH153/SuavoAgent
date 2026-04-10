@@ -92,7 +92,8 @@ public sealed class RxDetectionWorker : BackgroundService
         _sqlEngine = new PioneerRxSqlEngine(
             server, database,
             Microsoft.Extensions.Logging.LoggerFactory.Create(b => b.AddConsole())
-                .CreateLogger<PioneerRxSqlEngine>());
+                .CreateLogger<PioneerRxSqlEngine>(),
+            _options.SqlUser, _options.SqlPassword);
 
         _sqlConnected = await _sqlEngine.TryConnectAsync(ct);
 

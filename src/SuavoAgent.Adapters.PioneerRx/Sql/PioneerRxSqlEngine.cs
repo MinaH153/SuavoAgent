@@ -12,19 +12,34 @@ public sealed class PioneerRxSqlEngine : IDisposable
 
     public bool IsConnected => _connection?.State == System.Data.ConnectionState.Open;
 
-    public PioneerRxSqlEngine(string server, string database, ILogger<PioneerRxSqlEngine> logger)
+    public PioneerRxSqlEngine(string server, string database, ILogger<PioneerRxSqlEngine> logger,
+        string? sqlUser = null, string? sqlPassword = null)
     {
         _logger = logger;
-        _connectionString = new SqlConnectionStringBuilder
+        var builder = new SqlConnectionStringBuilder
         {
             DataSource = server,
             InitialCatalog = database,
-            IntegratedSecurity = true,
             ConnectTimeout = 10,
             CommandTimeout = 30,
             Encrypt = SqlConnectionEncryptOption.Optional,
             TrustServerCertificate = true
-        }.ConnectionString;
+        };
+
+        if (!string.IsNullOrEmpty(sqlUser) && !string.IsNullOrEmpty(sqlPassword))
+        {
+            builder.IntegratedSecurity = false;
+            builder.UserID = sqlUser;
+            builder.Password = sqlPassword;
+            _logger.LogInformation("SQL using SQL Auth as {User}", sqlUser);
+        }
+        else
+        {
+            builder.IntegratedSecurity = true;
+            _logger.LogInformation("SQL using Windows Auth");
+        }
+
+        _connectionString = builder.ConnectionString;
     }
 
     public async Task<bool> TryConnectAsync(CancellationToken ct)
