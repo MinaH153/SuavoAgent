@@ -35,10 +35,10 @@ public class PioneerRxSqlEngineTests
     }
 
     [Fact]
-    public void BuildDeliveryQuery_FiltersRecentDateFilled()
+    public void BuildDeliveryQuery_NoDateFilter()
     {
         var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
-        Assert.Contains("DateFilled >= DATEADD(day, -7", query);
+        Assert.DoesNotContain("DATEADD", query);
     }
 
     [Fact]

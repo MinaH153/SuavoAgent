@@ -166,7 +166,6 @@ WHERE Description IN ({statusParams})";
 FROM Prescription.RxTransaction rt
 JOIN RxLocal.ActiveRx a ON rt.RxID = a.RxID
 WHERE rt.RxTransactionStatusTypeID IN ({statusParams})
-    AND rt.DateFilled >= DATEADD(day, -7, CAST(GETDATE() AS DATE))
 ORDER BY rt.DateFilled DESC";
     }
 
