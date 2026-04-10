@@ -159,12 +159,9 @@ WHERE Description IN ({statusParams})";
     rt.DaysSupply,
     rt.RxTransactionStatusTypeID,
     rt.PromiseTime,
-    a.RxNumber,
-    a.MedicationDescription,
-    a.PrescribedNDC,
-    a.DispensedNDC
+    r.RxNumber
 FROM Prescription.RxTransaction rt
-JOIN RxLocal.ActiveRx a ON rt.RxID = a.RxID
+JOIN Prescription.Rx r ON rt.RxID = r.RxID
 WHERE rt.RxTransactionStatusTypeID IN ({statusParams})
 ORDER BY rt.DateFilled DESC";
     }
@@ -174,18 +171,15 @@ ORDER BY rt.DateFilled DESC";
 
     private static RxReadyForDelivery MapRxFromReader(SqlDataReader reader)
     {
-        var dispensedNdc = GetStringOrDefault(reader, "DispensedNDC");
-        var prescribedNdc = GetStringOrDefault(reader, "PrescribedNDC");
-
         return new RxReadyForDelivery(
             RxNumber: GetIntOrDefault(reader, "RxNumber").ToString(),
             FillNumber: GetIntOrDefault(reader, "RefillNumber"),
-            DrugName: GetStringOrDefault(reader, "MedicationDescription"),
-            Ndc: dispensedNdc.Length > 0 ? dispensedNdc : prescribedNdc,
+            DrugName: "", // TODO: join Item/Drug table for medication name
+            Ndc: "",      // TODO: join Item/Drug table for NDC
             Quantity: GetDecimalOrDefault(reader, "DispensedQuantity"),
             DaysSupply: GetIntOrDefault(reader, "DaysSupply"),
             StatusText: GetGuidOrDefault(reader, "RxTransactionStatusTypeID").ToString(),
-            IsControlled: false, // TODO: join Drug table for DEA schedule
+            IsControlled: false,
             DrugSchedule: null,
             PatientIdRequired: false,
             CounselingRequired: false,
