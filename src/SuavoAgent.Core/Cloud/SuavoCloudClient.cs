@@ -39,9 +39,9 @@ public sealed class SuavoCloudClient : IDisposable
 
         using var request = new HttpRequestMessage(HttpMethod.Post, path);
         request.Content = new StringContent(body, Encoding.UTF8, "application/json");
-        request.Headers.Add("x-agent-id", _options.AgentId);
-        request.Headers.Add("x-timestamp", timestamp);
-        request.Headers.Add("x-signature", signature);
+        request.Headers.Add("x-agent-api-key", _options.ApiKey);
+        request.Headers.Add("x-agent-timestamp", timestamp);
+        request.Headers.Add("x-agent-signature", signature);
 
         using var response = await _http.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
