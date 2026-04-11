@@ -237,8 +237,10 @@ public sealed class HeartbeatWorker : BackgroundService
 
     private async Task HandleFetchPatientAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
     {
-        var rxNumber = scEl.TryGetProperty("rxNumber", out var rx) ? rx.GetString() ?? "" : "";
-        var requesterId = scEl.TryGetProperty("requesterId", out var ri) ? ri.GetString() ?? "" : "";
+        // rxNumber and requesterId are nested under the "data" sub-object of the signed command envelope
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var rxNumber = dataEl.TryGetProperty("rxNumber", out var rx) ? rx.GetString() ?? "" : "";
+        var requesterId = dataEl.TryGetProperty("requesterId", out var ri) ? ri.GetString() ?? "" : "";
 
         if (string.IsNullOrEmpty(rxNumber))
         {
