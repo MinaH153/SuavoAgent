@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 
 namespace SuavoAgent.Core.State;
 
@@ -198,6 +199,81 @@ public sealed class AgentStateDb : IDisposable
             """;
         cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
         cmd.ExecuteNonQuery();
+    }
+
+    public static void MigrateToEncrypted(string dbPath, string password, ILogger logger)
+    {
+        var bakPath = dbPath + ".bak";
+
+        // Clean up leftover .bak from crashed migration
+        if (File.Exists(bakPath))
+        {
+            SecureDelete(bakPath);
+            logger.LogInformation("Cleaned up unencrypted backup from previous migration");
+        }
+
+        // Test if DB is already encrypted
+        try
+        {
+            using var testDb = new AgentStateDb(dbPath, password);
+            testDb.Dispose();
+            return; // Already encrypted
+        }
+        catch { /* Not encrypted — proceed with migration */ }
+
+        // Test if DB is unencrypted
+        try
+        {
+            using var plainDb = new AgentStateDb(dbPath);
+            plainDb.Dispose();
+        }
+        catch
+        {
+            logger.LogWarning("state.db is neither encrypted nor plain — recreating");
+            SecureDelete(dbPath);
+            return;
+        }
+
+        logger.LogInformation("Migrating state.db to encrypted storage...");
+
+        var encPath = dbPath + ".enc";
+        using (var plain = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            plain.Open();
+            using var encConn = new SqliteConnection($"Data Source={encPath};Password={password}");
+            encConn.Open();
+            plain.BackupDatabase(encConn);
+        }
+
+        File.Move(dbPath, bakPath);
+        File.Move(encPath, dbPath);
+
+        // Verify encrypted DB works
+        using (var verify = new AgentStateDb(dbPath, password))
+        {
+            verify.GetAuditEntryCount();
+        }
+
+        SecureDelete(bakPath);
+        logger.LogInformation("Migration complete — state.db is now encrypted");
+    }
+
+    private static void SecureDelete(string path)
+    {
+        if (!File.Exists(path)) return;
+        var length = new FileInfo(path).Length;
+        using (var fs = File.OpenWrite(path))
+        {
+            var zeros = new byte[4096];
+            var remaining = length;
+            while (remaining > 0)
+            {
+                var chunk = (int)Math.Min(remaining, zeros.Length);
+                fs.Write(zeros, 0, chunk);
+                remaining -= chunk;
+            }
+        }
+        File.Delete(path);
     }
 
     public void Dispose()
