@@ -8,7 +8,7 @@ public class WritebackStateMachineTests
     private readonly List<(string TaskId, WritebackState State)> _transitions = new();
 
     private WritebackStateMachine Create(WritebackState initial = WritebackState.Queued) =>
-        new("task-001", initial, (id, state) => _transitions.Add((id, state)));
+        new("task-001", initial, (id, prev, state, trigger) => _transitions.Add((id, state)));
 
     [Fact]
     public void HappyPath_QueuedToDone()

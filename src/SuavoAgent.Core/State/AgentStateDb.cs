@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 
@@ -57,6 +59,23 @@ public sealed class AgentStateDb : IDisposable
             );
             """;
         cmd.ExecuteNonQuery();
+
+        // Migrate: add columns for chained audit entries
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN event_type TEXT DEFAULT 'writeback_transition'");
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN command_id TEXT");
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN requester_id TEXT");
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN rx_number TEXT");
+    }
+
+    private void TryAlter(string sql)
+    {
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
+        catch { /* Column already exists */ }
     }
 
     public void UpsertWritebackState(string taskId, string rxNumber, WritebackState state, int retryCount, string? error)
@@ -102,6 +121,10 @@ public sealed class AgentStateDb : IDisposable
         return results;
     }
 
+    private static readonly string AuditChainSeed =
+        Convert.ToBase64String(SHA256.HashData(
+            Encoding.UTF8.GetBytes("SuavoAgent-audit-chain-v1")));
+
     public void AppendAuditEntry(string taskId, WritebackState from, WritebackState to, WritebackTrigger trigger, string? prevHash)
     {
         using var cmd = _conn.CreateCommand();
@@ -123,6 +146,88 @@ public sealed class AgentStateDb : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM audit_entries";
         return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    public string? GetLastAuditHash()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT prev_hash FROM audit_entries ORDER BY id DESC LIMIT 1";
+        var result = cmd.ExecuteScalar();
+        return result is DBNull or null ? null : (string)result;
+    }
+
+    public static string ComputeAuditHash(string prevHash, string taskId, string eventType,
+        string fromState, string toState, string trigger, string timestamp)
+    {
+        var payload = $"{prevHash}|{taskId}|{eventType}|{fromState}|{toState}|{trigger}|{timestamp}";
+        return Convert.ToBase64String(
+            SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
+    }
+
+    public string AppendChainedAuditEntry(AuditEntry entry) =>
+        AppendChainedAuditEntry(entry, DateTimeOffset.UtcNow.ToString("o"));
+
+    internal string AppendChainedAuditEntry(AuditEntry entry, string timestamp)
+    {
+        var prevHash = GetLastAuditHash() ?? AuditChainSeed;
+        var newHash = ComputeAuditHash(prevHash, entry.TaskId, entry.EventType,
+            entry.FromState, entry.ToState, entry.Trigger, timestamp);
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO audit_entries (task_id, from_state, to_state, trigger, timestamp, prev_hash,
+                                       event_type, command_id, requester_id, rx_number)
+            VALUES (@taskId, @from, @to, @trigger, @timestamp, @prevHash,
+                    @eventType, @commandId, @requesterId, @rxNumber)
+            """;
+        cmd.Parameters.AddWithValue("@taskId", entry.TaskId);
+        cmd.Parameters.AddWithValue("@from", entry.FromState);
+        cmd.Parameters.AddWithValue("@to", entry.ToState);
+        cmd.Parameters.AddWithValue("@trigger", entry.Trigger);
+        cmd.Parameters.AddWithValue("@timestamp", timestamp);
+        cmd.Parameters.AddWithValue("@prevHash", newHash);
+        cmd.Parameters.AddWithValue("@eventType", entry.EventType);
+        cmd.Parameters.AddWithValue("@commandId", (object?)entry.CommandId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@requesterId", (object?)entry.RequesterId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@rxNumber", (object?)entry.RxNumber ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+        return newHash;
+    }
+
+    public bool VerifyAuditChain()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT task_id, event_type, from_state, to_state, trigger, timestamp, prev_hash
+            FROM audit_entries ORDER BY id ASC
+            """;
+        using var reader = cmd.ExecuteReader();
+        var expectedPrev = AuditChainSeed;
+        while (reader.Read())
+        {
+            var taskId = reader.GetString(0);
+            var eventType = reader.IsDBNull(1) ? "writeback_transition" : reader.GetString(1);
+            var from = reader.GetString(2);
+            var to = reader.GetString(3);
+            var trigger = reader.GetString(4);
+            var timestamp = reader.GetString(5);
+            var storedHash = reader.IsDBNull(6) ? null : reader.GetString(6);
+
+            var computed = ComputeAuditHash(expectedPrev, taskId, eventType, from, to, trigger, timestamp);
+            if (storedHash != computed) return false;
+            expectedPrev = computed;
+        }
+        return true;
+    }
+
+    internal void TamperAuditEntryForTest(int id, string fromState, string toState)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE audit_entries SET from_state = @from, to_state = @to WHERE id = @id";
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.AddWithValue("@from", fromState);
+        cmd.Parameters.AddWithValue("@to", toState);
+        cmd.ExecuteNonQuery();
     }
 
     public void InsertUnsyncedBatch(string payload)

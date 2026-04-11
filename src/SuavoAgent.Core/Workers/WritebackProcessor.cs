@@ -126,15 +126,20 @@ public sealed class WritebackProcessor : BackgroundService
         await Task.CompletedTask;
     }
 
-    private void OnStateChanged(string taskId, WritebackState newState)
+    private void OnStateChanged(string taskId, WritebackState previousState, WritebackState newState, WritebackTrigger trigger)
     {
-        _logger.LogInformation("Writeback {TaskId} -> {State}", taskId, newState);
+        _logger.LogInformation("Writeback {TaskId} {From} -> {To} ({Trigger})",
+            taskId, previousState, newState, trigger);
 
         var machine = _machines.GetValueOrDefault(taskId);
         if (machine != null)
         {
             _stateDb.UpsertWritebackState(taskId, "", newState, machine.RetryCount, null);
         }
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            taskId, "writeback_transition",
+            previousState.ToString(), newState.ToString(), trigger.ToString()));
 
         if (newState is WritebackState.Done or WritebackState.ManualReview)
         {

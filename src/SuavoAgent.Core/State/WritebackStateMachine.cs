@@ -33,7 +33,7 @@ public class WritebackStateMachine
 {
     private readonly StateMachine<WritebackState, WritebackTrigger> _machine;
     private readonly string _taskId;
-    private readonly Action<string, WritebackState> _onStateChanged;
+    private readonly Action<string, WritebackState, WritebackState, WritebackTrigger> _onStateChanged;
     private int _retryCount;
 
     public const int MaxRetries = 3;
@@ -44,7 +44,7 @@ public class WritebackStateMachine
     public WritebackStateMachine(
         string taskId,
         WritebackState initialState,
-        Action<string, WritebackState> onStateChanged)
+        Action<string, WritebackState, WritebackState, WritebackTrigger> onStateChanged)
     {
         _taskId = taskId;
         _onStateChanged = onStateChanged;
@@ -86,7 +86,7 @@ public class WritebackStateMachine
             if (t.Trigger == WritebackTrigger.SystemError)
                 _retryCount++;
 
-            _onStateChanged(_taskId, t.Destination);
+            _onStateChanged(_taskId, t.Source, t.Destination, t.Trigger);
         });
     }
 
