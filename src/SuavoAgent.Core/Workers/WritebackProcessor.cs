@@ -52,13 +52,13 @@ public sealed class WritebackProcessor : BackgroundService
 
     private void RecoverPendingWritebacks()
     {
-        var pending = _stateDb.GetPendingWritebacks();
-        foreach (var (taskId, state, rxNumber, retryCount) in pending)
+        var pending = _stateDb.GetDueWritebacks();
+        foreach (var (taskId, state, rxNumber, retryCount, _) in pending)
         {
             _logger.LogInformation("Recovering writeback {TaskId} in state {State} (retries: {Retries})",
                 taskId, state, retryCount);
 
-            var machine = new WritebackStateMachine(taskId, state, OnStateChanged);
+            var machine = new WritebackStateMachine(taskId, state, OnStateChanged, retryCount);
             _machines[taskId] = machine;
         }
         _logger.LogInformation("Recovered {Count} pending writebacks", pending.Count);
@@ -126,15 +126,31 @@ public sealed class WritebackProcessor : BackgroundService
         await Task.CompletedTask;
     }
 
-    private void OnStateChanged(string taskId, WritebackState newState)
+    private void OnStateChanged(string taskId, WritebackState previousState, WritebackState newState, WritebackTrigger trigger)
     {
-        _logger.LogInformation("Writeback {TaskId} -> {State}", taskId, newState);
+        _logger.LogInformation("Writeback {TaskId} {From} -> {To} ({Trigger})",
+            taskId, previousState, newState, trigger);
 
         var machine = _machines.GetValueOrDefault(taskId);
         if (machine != null)
         {
             _stateDb.UpsertWritebackState(taskId, "", newState, machine.RetryCount, null);
+
+            // Exponential backoff: 1min, 5min, 15min
+            if (trigger == WritebackTrigger.SystemError)
+            {
+                var delays = new[] { 60, 300, 900 };
+                var retryCount = machine.RetryCount;
+                if (retryCount > 0 && retryCount <= delays.Length)
+                {
+                    _stateDb.UpdateNextRetryAt(taskId, DateTimeOffset.UtcNow.AddSeconds(delays[retryCount - 1]));
+                }
+            }
         }
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            taskId, "writeback_transition",
+            previousState.ToString(), newState.ToString(), trigger.ToString()));
 
         if (newState is WritebackState.Done or WritebackState.ManualReview)
         {

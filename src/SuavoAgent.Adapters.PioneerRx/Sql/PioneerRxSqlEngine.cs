@@ -18,34 +18,30 @@ public sealed class PioneerRxSqlEngine : IDisposable
     {
         _logger = logger;
 
-        // Raw connection string — bypasses SqlConnectionStringBuilder which has
-        // cross-compilation issues with Encrypt/TrustServerCertificate property setters.
-        // PioneerRx SQL Server uses self-signed certs, so Encrypt=false is required.
-        var parts = new List<string>
-        {
-            $"Data Source={server}",
-            $"Initial Catalog={database}",
-            "Connect Timeout=10",
-            "Command Timeout=30",
-            "Encrypt=true",
-            "TrustServerCertificate=true",
-            "Max Pool Size=1",
-            "Min Pool Size=0"
-        };
+        var csb = new SqlConnectionStringBuilder();
+        csb.DataSource = server;
+        csb.InitialCatalog = database;
+        csb.ApplicationName = "PioneerPharmacy";
+        csb.ConnectTimeout = 30;
+        csb.MaxPoolSize = 1;
+        csb.MinPoolSize = 0;
+        // Use indexer for Encrypt/TrustServerCertificate (cross-compile safe)
+        csb["Encrypt"] = "true";
+        csb["TrustServerCertificate"] = "true";
 
         if (!string.IsNullOrEmpty(sqlUser) && !string.IsNullOrEmpty(sqlPassword))
         {
-            parts.Add($"User ID={sqlUser}");
-            parts.Add($"Password={sqlPassword}");
+            csb.UserID = sqlUser;
+            csb.Password = sqlPassword;
             _logger.LogInformation("SQL using SQL Auth as {User}", sqlUser);
         }
         else
         {
-            parts.Add("Integrated Security=true");
+            csb.IntegratedSecurity = true;
             _logger.LogInformation("SQL using Windows Auth");
         }
 
-        _connectionString = string.Join(";", parts);
+        _connectionString = csb.ConnectionString;
     }
 
     public async Task<bool> TryConnectAsync(CancellationToken ct)
@@ -283,6 +279,117 @@ ORDER BY rt.DateFilled DESC";
     }
 
     /// <summary>
+    /// PHI-free metadata query — no Person JOIN, no patient data.
+    /// Used for detection polling (HIPAA 164.502(b) minimum necessary).
+    /// </summary>
+    public static string BuildMetadataQuery(IReadOnlyList<string> statusNames)
+    {
+        var statusParams = string.Join(", ", statusNames.Select((_, i) => $"@status{i}"));
+        return $"""
+            SELECT TOP 50
+                r.RxNumber,
+                rt.DateFilled,
+                rt.DispensedQuantity,
+                i.ItemName AS TradeName,
+                i.NDC,
+                rt.RxTransactionStatusTypeID AS StatusGuid
+            FROM Prescription.RxTransaction rt
+            JOIN Prescription.Rx r ON rt.RxID = r.RxID
+            LEFT JOIN Inventory.Item i ON rt.DispensedItemID = i.ItemID
+            LEFT JOIN Prescription.RxTransactionStatusType st ON rt.RxTransactionStatusTypeID = st.RxTransactionStatusTypeID
+            WHERE st.Description IN ({statusParams})
+              AND rt.DateFilled >= @cutoff
+            ORDER BY rt.DateFilled DESC
+            """;
+    }
+
+    /// <summary>
+    /// PHI-free detection query — returns only operational metadata.
+    /// HIPAA 164.502(b) minimum necessary: no Person JOIN, no patient data.
+    /// </summary>
+    public async Task<IReadOnlyList<RxMetadata>> ReadReadyMetadataAsync(CancellationToken ct)
+    {
+        if (_connection is null || _connection.State != System.Data.ConnectionState.Open)
+            return Array.Empty<RxMetadata>();
+
+        var statusNames = PioneerRxConstants.DeliveryReadyStatusNames;
+        var query = BuildMetadataQuery(statusNames);
+
+        await using var cmd = new SqlCommand(query, _connection);
+        cmd.CommandTimeout = 30;
+        for (int i = 0; i < statusNames.Count; i++)
+            cmd.Parameters.AddWithValue($"@status{i}", statusNames[i]);
+        cmd.Parameters.AddWithValue("@cutoff", DateTime.UtcNow.AddDays(-30));
+
+        var results = new List<RxMetadata>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new RxMetadata(
+                RxNumber: GetIntOrDefault(reader, "RxNumber").ToString(),
+                DrugName: GetStringOrDefault(reader, "TradeName"),
+                Ndc: GetStringOrDefault(reader, "NDC"),
+                DateFilled: reader.IsDBNull(reader.GetOrdinal("DateFilled"))
+                    ? null : reader.GetDateTime(reader.GetOrdinal("DateFilled")),
+                Quantity: GetDecimalOrDefault(reader, "DispensedQuantity"),
+                StatusGuid: GetGuidOrDefault(reader, "StatusGuid"),
+                DetectedAt: DateTimeOffset.UtcNow));
+        }
+
+        _logger.LogDebug("Read {Count} ready metadata (PHI-free) from SQL", results.Count);
+        return results;
+    }
+
+    /// <summary>
+    /// Targeted patient fetch — PHI returned only for a single approved Rx.
+    /// Called on-demand after delivery approval (HIPAA minimum necessary).
+    /// </summary>
+    public static string BuildPatientQuery()
+    {
+        return """
+            SELECT TOP 1
+                per.FirstName,
+                LEFT(per.LastName, 1) AS LastInitial,
+                per.Phone1 AS Phone,
+                per.Address1,
+                per.Address2,
+                per.City,
+                per.State,
+                per.Zip
+            FROM Prescription.RxTransaction rt
+            JOIN Prescription.Rx r ON rt.RxID = r.RxID
+            LEFT JOIN Person.Patient pat ON r.PatientID = pat.PatientID
+            JOIN Person.Person per ON pat.PersonID = per.PersonID
+            WHERE r.RxNumber = @rxNumber
+            """;
+    }
+
+    public async Task<RxPatientDetails?> PullPatientForRxAsync(string rxNumber, CancellationToken ct)
+    {
+        if (_connection is null || _connection.State != System.Data.ConnectionState.Open)
+            return null;
+
+        await using var cmd = new SqlCommand(BuildPatientQuery(), _connection);
+        cmd.CommandTimeout = 15;
+        cmd.Parameters.AddWithValue("@rxNumber", rxNumber);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+
+        return new RxPatientDetails(
+            RxNumber: rxNumber,
+            FirstName: GetStringOrDefault(reader, "FirstName"),
+            LastInitial: GetStringOrDefault(reader, "LastInitial"),
+            Phone: GetStringOrDefault(reader, "Phone"),
+            Address1: GetStringOrDefault(reader, "Address1"),
+            Address2: GetStringOrDefault(reader, "Address2"),
+            City: GetStringOrDefault(reader, "City"),
+            State: GetStringOrDefault(reader, "State"),
+            Zip: GetStringOrDefault(reader, "Zip"));
+    }
+
+    /// <summary>
     /// Discovers table schemas for Prescription.Rx and related tables.
     /// Runs once on connect — used to find medication/drug name columns.
     /// </summary>
@@ -297,7 +404,9 @@ ORDER BY rt.DateFilled DESC";
 SELECT TABLE_SCHEMA + '.' + TABLE_NAME AS full_name, COLUMN_NAME
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE (TABLE_SCHEMA = 'Prescription' AND TABLE_NAME IN ('Rx', 'RxTransaction'))
-   OR (TABLE_NAME LIKE '%Medication%' OR TABLE_NAME LIKE '%Drug%' OR TABLE_NAME LIKE '%Item%')
+   OR (TABLE_SCHEMA = 'Inventory' AND TABLE_NAME IN ('Item', 'ItemMaster'))
+   OR (TABLE_SCHEMA = 'Person' AND TABLE_NAME IN ('Person', 'Address', 'Phone'))
+   OR (TABLE_NAME LIKE '%Medication%' OR TABLE_NAME LIKE '%Drug%')
 ORDER BY full_name, ORDINAL_POSITION";
 
             await using var cmd = new SqlCommand(query, _connection);

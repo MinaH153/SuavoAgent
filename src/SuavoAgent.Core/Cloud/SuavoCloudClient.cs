@@ -14,9 +14,14 @@ public sealed class SuavoCloudClient : IDisposable
     {
         _options = options;
         _signer = new HmacSigner(options.ApiKey ?? throw new InvalidOperationException("ApiKey is required"));
+
+        var uri = new Uri(options.CloudUrl);
+        if (uri.Scheme != Uri.UriSchemeHttps)
+            throw new InvalidOperationException($"CloudUrl must use HTTPS, got: {uri.Scheme}");
+
         _http = new HttpClient
         {
-            BaseAddress = new Uri(options.CloudUrl),
+            BaseAddress = uri,
             Timeout = TimeSpan.FromSeconds(30)
         };
     }
@@ -29,6 +34,11 @@ public sealed class SuavoCloudClient : IDisposable
     public async Task<JsonElement?> SyncRxAsync(object payload, CancellationToken ct)
     {
         return await PostSignedAsync("/api/agent/sync", payload, ct);
+    }
+
+    public async Task SendPatientDetailsAsync(string rxNumber, object details, string commandId, CancellationToken ct)
+    {
+        await PostSignedAsync("/api/agent/patient-details", new { rxNumber, details, commandId }, ct);
     }
 
     private async Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct)
@@ -51,6 +61,21 @@ public sealed class SuavoCloudClient : IDisposable
             return null;
 
         return JsonSerializer.Deserialize<JsonElement>(responseBody);
+    }
+
+    public record AuditArchiveAck(string ArchiveId, string ArchiveDigest, string Timestamp);
+
+    public async Task<AuditArchiveAck?> UploadAuditArchiveAsync(string archiveJson, string digest, CancellationToken ct)
+    {
+        var response = await PostSignedAsync("/api/agent/audit-archive",
+            new { archive = archiveJson, archiveDigest = digest }, ct);
+        if (response == null) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<AuditArchiveAck>(response.Value.GetRawText(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch { return null; }
     }
 
     public void Dispose() => _http.Dispose();

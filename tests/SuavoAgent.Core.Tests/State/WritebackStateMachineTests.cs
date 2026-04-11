@@ -8,7 +8,7 @@ public class WritebackStateMachineTests
     private readonly List<(string TaskId, WritebackState State)> _transitions = new();
 
     private WritebackStateMachine Create(WritebackState initial = WritebackState.Queued) =>
-        new("task-001", initial, (id, state) => _transitions.Add((id, state)));
+        new("task-001", initial, (id, prev, state, trigger) => _transitions.Add((id, state)));
 
     [Fact]
     public void HappyPath_QueuedToDone()
@@ -105,5 +105,66 @@ public class WritebackStateMachineTests
         var sm = Create();
         Assert.Equal(WritebackState.Queued, sm.CurrentState);
         Assert.False(sm.IsTerminal);
+    }
+
+    [Fact]
+    public void VerifyMismatchLoop_ForcesManualReviewAfterMax()
+    {
+        var sm = Create();
+        sm.Fire(WritebackTrigger.Claim);
+        sm.Fire(WritebackTrigger.StartUia);
+
+        for (int i = 0; i < WritebackStateMachine.MaxVerifyAttempts; i++)
+        {
+            sm.Fire(WritebackTrigger.WriteComplete);
+            sm.Fire(WritebackTrigger.VerifyMismatch);
+        }
+
+        // Next mismatch should force ManualReview
+        sm.Fire(WritebackTrigger.WriteComplete);
+        sm.Fire(WritebackTrigger.VerifyMismatch);
+
+        Assert.Equal(WritebackState.ManualReview, sm.CurrentState);
+        Assert.True(sm.IsTerminal);
+    }
+
+    [Fact]
+    public void MaxRetries_FromClaimed_ForcesManualReview()
+    {
+        // SF-23: SystemError at max retries from Claimed must not throw
+        var sm = Create(WritebackState.Queued);
+        for (int i = 0; i < WritebackStateMachine.MaxRetries; i++)
+        {
+            sm.Fire(WritebackTrigger.Claim);
+            sm.Fire(WritebackTrigger.SystemError);
+        }
+        // Next error from Claimed state
+        sm.Fire(WritebackTrigger.Claim);
+        sm.Fire(WritebackTrigger.SystemError);
+
+        Assert.Equal(WritebackState.ManualReview, sm.CurrentState);
+    }
+
+    [Fact]
+    public void MaxRetries_FromVerifyPending_ForcesManualReview()
+    {
+        // SF-23: SystemError at max retries from VerifyPending must not throw
+        var sm = Create();
+        sm.Fire(WritebackTrigger.Claim);
+        sm.Fire(WritebackTrigger.StartUia);
+        sm.Fire(WritebackTrigger.WriteComplete);
+
+        // Burn through retries from VerifyPending
+        for (int i = 0; i < WritebackStateMachine.MaxRetries; i++)
+        {
+            sm.Fire(WritebackTrigger.SystemError);
+            sm.Fire(WritebackTrigger.Claim);
+            sm.Fire(WritebackTrigger.StartUia);
+            sm.Fire(WritebackTrigger.WriteComplete);
+        }
+        // Now at max retries, fire SystemError from VerifyPending
+        sm.Fire(WritebackTrigger.SystemError);
+
+        Assert.Equal(WritebackState.ManualReview, sm.CurrentState);
     }
 }

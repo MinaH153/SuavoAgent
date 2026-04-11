@@ -1,9 +1,37 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Serilog;
+using SuavoAgent.Core;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Workers;
+
+// Bootstrap self-update — runs before any DI/config
+{
+    var dataDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "SuavoAgent");
+    Directory.CreateDirectory(Path.Combine(dataDir, "logs"));
+
+    using var serilogLogger = new LoggerConfiguration()
+        .WriteTo.Console()
+        .WriteTo.File(
+            Path.Combine(dataDir, "logs", "startup-.log"),
+            rollingInterval: RollingInterval.Day,
+            retainedFileCountLimit: 7)
+        .CreateLogger();
+
+    using var earlyLogFactory = LoggerFactory.Create(lb => lb.AddSerilog(serilogLogger));
+    var earlyLog = earlyLogFactory.CreateLogger("SuavoAgent.Bootstrap");
+
+    if (SuavoAgent.Core.Cloud.SelfUpdater.CheckPendingUpdate(earlyLog))
+    {
+        serilogLogger.Information("Bootstrap update applied — restarting");
+        Environment.Exit(1);
+    }
+}
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Debug()
@@ -45,6 +73,52 @@ try
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent");
         Directory.CreateDirectory(dataDir);
+
+        // ACL-lock ProgramData\SuavoAgent to SYSTEM, LocalService, Administrators only (HIPAA 164.312(a)(2)(iv))
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                var dirInfo = new DirectoryInfo(dataDir);
+                var dirSecurity = dirInfo.GetAccessControl();
+                dirSecurity.SetAccessRuleProtection(true, false); // Remove inherited rules
+                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.LocalSystemSid, null),
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.LocalServiceSid, null),
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null),
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                // NetworkService needs write for Broker logs
+                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.NetworkServiceSid, null),
+                    System.Security.AccessControl.FileSystemRights.Modify,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                dirInfo.SetAccessControl(dirSecurity);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to set ACL on data directory — may require elevated privileges");
+            }
+        }
+
         var dbPath = Path.Combine(dataDir, "state.db");
 
         // DPAPI-protected encryption key. No-op with bundle_e_sqlite3,
@@ -59,14 +133,14 @@ try
                 {
                     var enc = File.ReadAllBytes(keyPath);
                     var dec = System.Security.Cryptography.ProtectedData.Unprotect(
-                        enc, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+                        enc, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
                     dbPassword = Convert.ToBase64String(dec);
                 }
                 else
                 {
                     var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
                     var enc = System.Security.Cryptography.ProtectedData.Protect(
-                        key, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+                        key, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
                     File.WriteAllBytes(keyPath, enc);
                     dbPassword = Convert.ToBase64String(key);
                     Log.Information("Generated DPAPI-protected database key");
@@ -78,6 +152,13 @@ try
             Log.Warning(ex, "DPAPI key generation failed — state DB unencrypted");
         }
 
+        // Migrate existing unencrypted DB to encrypted if key is available
+        if (File.Exists(dbPath) && !string.IsNullOrEmpty(dbPassword))
+        {
+            var dbLogger = sp.GetRequiredService<ILogger<AgentStateDb>>();
+            AgentStateDb.MigrateToEncrypted(dbPath, dbPassword, dbLogger);
+        }
+
         return new AgentStateDb(dbPath, dbPassword);
     });
 
@@ -87,7 +168,19 @@ try
         return new IpcPipeServer("SuavoAgent", msg =>
         {
             logger.LogDebug("IPC: {Command}", msg.Command);
-            return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(msg.RequestId, true, "ack", null));
+
+            if (msg.Command == SuavoAgent.Contracts.Ipc.IpcCommands.GetHealth)
+            {
+                var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+                var db = sp.GetRequiredService<AgentStateDb>();
+                var snapshot = new HealthSnapshot(opts, db, sp, DateTimeOffset.UtcNow);
+                var data = snapshot.Take();
+                return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                    msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, data, null));
+            }
+
+            return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
         }, logger);
     });
 

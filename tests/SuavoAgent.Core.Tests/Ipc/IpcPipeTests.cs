@@ -1,5 +1,4 @@
 using System.IO.Pipes;
-using System.Text;
 using System.Text.Json;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Core.Ipc;
@@ -19,7 +18,7 @@ public class IpcPipeTests
         // Server handler echoes back
         var server = new IpcPipeServer(pipeName, msg =>
         {
-            return Task.FromResult(new IpcResponse(msg.RequestId, true, $"echo:{msg.Command}", null));
+            return Task.FromResult(new IpcResponse(msg.Id, IpcStatus.Ok, msg.Command, null, null));
         }, logger);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -28,24 +27,22 @@ public class IpcPipeTests
         // Give server time to start listening
         await Task.Delay(100);
 
-        // Client connects and sends
+        // Client connects and sends using framed protocol
         using var clientPipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
         await clientPipe.ConnectAsync(5000, cts.Token);
 
-        using var writer = new StreamWriter(clientPipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
-        using var reader = new StreamReader(clientPipe, Encoding.UTF8, leaveOpen: true);
+        var request = new IpcRequest("req-001", IpcCommands.Ping, 1, null);
+        var requestJson = JsonSerializer.Serialize(request);
+        await IpcFraming.WriteFrameAsync(clientPipe, requestJson, cts.Token);
 
-        var msg = new IpcMessage(1, "req-001", IpcCommands.Ping, null);
-        await writer.WriteLineAsync(JsonSerializer.Serialize(msg));
+        var responseJson = await IpcFraming.ReadFrameAsync(clientPipe, cts.Token);
+        Assert.NotNull(responseJson);
 
-        var responseLine = await reader.ReadLineAsync(cts.Token);
-        Assert.NotNull(responseLine);
-
-        var response = JsonSerializer.Deserialize<IpcResponse>(responseLine);
+        var response = JsonSerializer.Deserialize<IpcResponse>(responseJson);
         Assert.NotNull(response);
-        Assert.True(response.Success);
-        Assert.Equal("req-001", response.RequestId);
-        Assert.Equal("echo:ping", response.Result);
+        Assert.Equal(IpcStatus.Ok, response.Status);
+        Assert.Equal("req-001", response.Id);
+        Assert.Equal(IpcCommands.Ping, response.Command);
 
         server.Dispose();
     }
@@ -57,7 +54,7 @@ public class IpcPipeTests
         var logger = NullLogger<IpcPipeServer>.Instance;
 
         var server = new IpcPipeServer(pipeName, msg =>
-            Task.FromResult(new IpcResponse(msg.RequestId, true, "ok", null)), logger);
+            Task.FromResult(new IpcResponse(msg.Id, IpcStatus.Ok, msg.Command, null, null)), logger);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         server.Start(cts.Token);

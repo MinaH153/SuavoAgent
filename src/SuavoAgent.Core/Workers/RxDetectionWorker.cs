@@ -1,8 +1,10 @@
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Adapters.PioneerRx.Sql;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.State;
 using SuavoAgent.Contracts.Models;
 
 namespace SuavoAgent.Core.Workers;
@@ -13,30 +15,35 @@ public sealed class RxDetectionWorker : BackgroundService
     private readonly ILoggerFactory _loggerFactory;
     private readonly AgentOptions _options;
     private readonly SuavoCloudClient? _cloudClient;
+    private readonly AgentStateDb _stateDb;
     private PioneerRxSqlEngine? _sqlEngine;
     private bool _sqlConnected;
-    private IReadOnlyList<RxReadyForDelivery>? _unsyncedBatch;
 
     public int DetectionIntervalSeconds { get; set; } = 300;
     public int LastDetectedCount { get; private set; }
     public DateTimeOffset? LastDetectionTime { get; private set; }
     public bool IsSqlConnected => _sqlConnected;
+    public PioneerRxSqlEngine? SqlEngine => _sqlEngine;
 
     public RxDetectionWorker(
         ILogger<RxDetectionWorker> logger,
         ILoggerFactory loggerFactory,
         IOptions<AgentOptions> options,
+        AgentStateDb stateDb,
         IServiceProvider serviceProvider)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
         _options = options.Value;
+        _stateDb = stateDb;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Rx detection worker started");
+
+        _stateDb.PurgeExpiredDeadLetters();
 
         await TryConnectSqlAsync(stoppingToken);
 
@@ -55,23 +62,31 @@ public sealed class RxDetectionWorker : BackgroundService
                     }
                 }
 
-                // Retry unsynced batch from previous cycle first
-                if (_unsyncedBatch is { Count: > 0 })
+                // Retry persisted unsynced batches first
+                var pendingBatches = _stateDb.GetPendingBatches();
+                if (pendingBatches.Count > 0)
                 {
-                    _logger.LogInformation("Retrying {Count} unsynced prescriptions from previous cycle", _unsyncedBatch.Count);
-                    if (await TrySyncToCloudAsync(_unsyncedBatch, stoppingToken))
-                        _unsyncedBatch = null;
+                    _logger.LogInformation("Retrying {Count} persisted unsynced batches", pendingBatches.Count);
+                    foreach (var batch in pendingBatches)
+                    {
+                        if (await TrySyncPayloadToCloudAsync(batch.Payload, stoppingToken))
+                            _stateDb.DeleteBatch(batch.Id);
+                        else
+                            _stateDb.IncrementBatchRetry(batch.Id);
+                    }
                 }
 
-                var readyRxs = await _sqlEngine!.ReadReadyPrescriptionsAsync(stoppingToken);
+                // PHI-free detection: metadata only, no Person JOIN (HIPAA 164.502(b))
+                var readyRxs = await _sqlEngine!.ReadReadyMetadataAsync(stoppingToken);
                 LastDetectedCount = readyRxs.Count;
                 LastDetectionTime = DateTimeOffset.UtcNow;
 
                 if (readyRxs.Count > 0)
                 {
-                    _logger.LogInformation("Detected {Count} ready prescriptions", readyRxs.Count);
-                    if (!await TrySyncToCloudAsync(readyRxs, stoppingToken))
-                        _unsyncedBatch = readyRxs; // persist for retry next cycle
+                    _logger.LogInformation("Detected {Count} ready prescriptions (metadata-only)", readyRxs.Count);
+                    var json = SerializeRxBatch(readyRxs);
+                    if (!await TrySyncPayloadToCloudAsync(json, stoppingToken))
+                        _stateDb.InsertUnsyncedBatch(json);
                 }
                 else
                 {
@@ -150,52 +165,49 @@ public sealed class RxDetectionWorker : BackgroundService
         }
     }
 
-    private async Task<bool> TrySyncToCloudAsync(IReadOnlyList<RxReadyForDelivery> rxs, CancellationToken ct)
+    /// <summary>
+    /// Serializes PHI-free metadata batch. Contains ZERO patient data.
+    /// Patient data is only accessible via signed fetch_patient command.
+    /// </summary>
+    internal static string SerializeRxBatch(IReadOnlyList<RxMetadata> rxs)
+    {
+        var payload = new
+        {
+            snapshotType = "rx_delivery_queue",
+            data = new
+            {
+                rxDeliveryQueue = rxs.Select(rx => new
+                {
+                    rxNumber = rx.RxNumber,
+                    drugName = rx.DrugName,
+                    ndc = rx.Ndc,
+                    dateFilled = rx.DateFilled?.ToString("o"),
+                    quantity = rx.Quantity,
+                    statusGuid = rx.StatusGuid.ToString(),
+                    detectedAt = rx.DetectedAt.ToString("o")
+                }).ToArray(),
+                totalDetected = rxs.Count,
+                syncedAt = DateTimeOffset.UtcNow.ToString("o")
+            },
+            sqlConnected = true
+        };
+        return JsonSerializer.Serialize(payload);
+    }
+
+    private async Task<bool> TrySyncPayloadToCloudAsync(string json, CancellationToken ct)
     {
         if (_cloudClient is null) return true; // no cloud = nothing to sync
 
         try
         {
-            // POST /api/agent/sync — matches cloud endpoint's expected format
-            var payload = new
-            {
-                snapshotType = "rx_delivery_queue",
-                data = new
-                {
-                    rxDeliveryQueue = rxs.Select(rx => new
-                    {
-                        rxNumber = rx.RxNumber,
-                        drugName = rx.DrugName,
-                        ndc = rx.Ndc,
-                        fillNumber = rx.FillNumber,
-                        quantity = rx.Quantity,
-                        daysSupply = rx.DaysSupply,
-                        statusGuid = rx.StatusText,
-                        isControlled = rx.IsControlled,
-                        drugSchedule = rx.DrugSchedule,
-                        patientFirstName = rx.PatientFirstName,
-                        patientLastInitial = rx.PatientLastInitial,
-                        patientPhone = rx.PatientPhone,
-                        deliveryAddress1 = rx.DeliveryAddress1,
-                        deliveryAddress2 = rx.DeliveryAddress2,
-                        deliveryCity = rx.DeliveryCity,
-                        deliveryState = rx.DeliveryState,
-                        deliveryZip = rx.DeliveryZip,
-                        detectedAt = rx.DetectedAt.ToString("o")
-                    }).ToArray(),
-                    totalDetected = rxs.Count,
-                    syncedAt = DateTimeOffset.UtcNow.ToString("o")
-                },
-                sqlConnected = true
-            };
-
-            var result = await _cloudClient.SyncRxAsync(payload, ct);
-            _logger.LogInformation("Synced {Count} prescriptions to cloud", rxs.Count);
+            var payload = JsonSerializer.Deserialize<JsonElement>(json);
+            await _cloudClient.SyncRxAsync(payload, ct);
+            _logger.LogInformation("Synced batch to cloud");
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Cloud sync FAILED for {Count} prescriptions — will retry next cycle", rxs.Count);
+            _logger.LogError(ex, "Cloud sync FAILED — will retry next cycle");
             return false;
         }
     }
