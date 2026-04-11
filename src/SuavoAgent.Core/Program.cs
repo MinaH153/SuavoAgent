@@ -71,6 +71,44 @@ try
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent");
         Directory.CreateDirectory(dataDir);
+
+        // ACL-lock ProgramData\SuavoAgent to SYSTEM, LocalService, Administrators only (HIPAA 164.312(a)(2)(iv))
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                var dirInfo = new DirectoryInfo(dataDir);
+                var dirSecurity = dirInfo.GetAccessControl();
+                dirSecurity.SetAccessRuleProtection(true, false); // Remove inherited rules
+                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.LocalSystemSid, null),
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.LocalServiceSid, null),
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null),
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                dirInfo.SetAccessControl(dirSecurity);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to set ACL on data directory — may require elevated privileges");
+            }
+        }
+
         var dbPath = Path.Combine(dataDir, "state.db");
 
         // DPAPI-protected encryption key. No-op with bundle_e_sqlite3,
@@ -102,6 +140,13 @@ try
         catch (Exception ex)
         {
             Log.Warning(ex, "DPAPI key generation failed — state DB unencrypted");
+        }
+
+        // Migrate existing unencrypted DB to encrypted if key is available
+        if (File.Exists(dbPath) && !string.IsNullOrEmpty(dbPassword))
+        {
+            var dbLogger = sp.GetRequiredService<ILogger<AgentStateDb>>();
+            AgentStateDb.MigrateToEncrypted(dbPath, dbPassword, dbLogger);
         }
 
         return new AgentStateDb(dbPath, dbPassword);
