@@ -119,6 +119,8 @@ WHERE Description IN ({statusParams})";
 
     private bool _itemJoinFailed;
     private bool _patientJoinFailed;
+    private int _queryCount;
+    private const int TierRecoveryInterval = 10; // retry full query every 10 cycles
 
     public async Task<IReadOnlyList<RxReadyForDelivery>> ReadReadyPrescriptionsAsync(CancellationToken ct)
     {
@@ -126,6 +128,15 @@ WHERE Description IN ({statusParams})";
             return Array.Empty<RxReadyForDelivery>();
 
         var statusGuids = _deliveryReadyGuids ?? FallbackGuids();
+
+        // Auto-recover: periodically retry higher tiers in case failure was transient
+        _queryCount++;
+        if (_queryCount % TierRecoveryInterval == 0 && (_itemJoinFailed || _patientJoinFailed))
+        {
+            _logger.LogInformation("Tier recovery: retrying full query after {Count} cycles", _queryCount);
+            _itemJoinFailed = false;
+            _patientJoinFailed = false;
+        }
 
         // Tier 1: Full query — Item + Patient (drug names + delivery address)
         if (!_itemJoinFailed && !_patientJoinFailed)
