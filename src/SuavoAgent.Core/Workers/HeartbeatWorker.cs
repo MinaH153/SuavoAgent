@@ -66,6 +66,10 @@ public sealed class HeartbeatWorker : BackgroundService
                 _consecutiveFailures = 0;
                 _logger.LogDebug("Heartbeat OK");
 
+                // Check for remote decommission (kill switch)
+                if (response.HasValue)
+                    CheckForDecommission(response.Value);
+
                 // Check for pending self-update
                 if (response.HasValue && !_updateInProgress)
                     await CheckForUpdateAsync(response.Value, stoppingToken);
@@ -93,6 +97,54 @@ public sealed class HeartbeatWorker : BackgroundService
         }
 
         _logger.LogInformation("Heartbeat worker stopped");
+    }
+
+    /// <summary>
+    /// Checks heartbeat response for decommission flag. If set, the agent
+    /// stops all services, deletes itself, and removes the Windows service registration.
+    /// This is the remote kill switch — one-click from dashboard, zero trace on pharmacy PC.
+    /// </summary>
+    private void CheckForDecommission(JsonElement response)
+    {
+        try
+        {
+            if (!response.TryGetProperty("data", out var data)) return;
+            if (!data.TryGetProperty("decommission", out var decom)) return;
+            if (decom.ValueKind != JsonValueKind.True) return;
+
+            _logger.LogWarning("DECOMMISSION received — removing agent from this machine");
+
+            if (OperatingSystem.IsWindows())
+            {
+                // Run cleanup in a detached process so it can delete the running binary
+                var script = @"
+                    Start-Sleep 3
+                    Stop-Service SuavoAgent.Core -Force -ErrorAction SilentlyContinue
+                    Stop-Service SuavoAgent.Broker -Force -ErrorAction SilentlyContinue
+                    Start-Sleep 2
+                    sc.exe delete SuavoAgent.Core 2>$null
+                    sc.exe delete SuavoAgent.Broker 2>$null
+                    Remove-Item 'C:\Program Files\Suavo' -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-Item ""$env:ProgramData\SuavoAgent"" -Recurse -Force -ErrorAction SilentlyContinue
+                ";
+
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"{script.Replace("\"", "\\\"")}\"",
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+                System.Diagnostics.Process.Start(psi);
+
+                _logger.LogWarning("Decommission script launched — agent will terminate in ~5 seconds");
+                Environment.Exit(0);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Decommission check failed");
+        }
     }
 
     private async Task CheckForUpdateAsync(JsonElement response, CancellationToken ct)
