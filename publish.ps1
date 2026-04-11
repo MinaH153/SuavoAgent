@@ -53,3 +53,36 @@ Get-ChildItem $OutputDir -Recurse -Filter "*.exe" | ForEach-Object {
     $sizeMb = [math]::Round($_.Length / 1MB, 1)
     Write-Host "  $($_.Directory.Name)\$($_.Name) - $sizeMb MB"
 }
+
+# ── Generate checksums ──
+Write-Host "`n--- Generating checksums ---" -ForegroundColor Yellow
+$checksumFile = Join-Path $OutputDir "checksums.sha256"
+$checksums = @()
+foreach ($bin in @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe")) {
+    # EXEs are in subdirectories: Core/, Broker/, Helper/
+    $subdir = $bin -replace "^SuavoAgent\.(.+)\.exe$", '$1'
+    $path = Join-Path $OutputDir (Join-Path $subdir $bin)
+    if (Test-Path $path) {
+        $hash = (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
+        $checksums += "$hash  $bin"
+        Write-Host "  $bin: $hash" -ForegroundColor Gray
+    }
+}
+$checksums | Out-File -FilePath $checksumFile -Encoding UTF8
+Write-Host "Checksums written to $checksumFile" -ForegroundColor Green
+
+# ── Sign checksums with ECDSA (if signing key available) ──
+$signingKeyPath = Join-Path $env:HOME ".suavo" "signing-key.pem"
+if (Test-Path $signingKeyPath) {
+    Write-Host "Signing checksums..." -ForegroundColor Yellow
+    $sigFile = "$checksumFile.sig"
+    $checksumBytes = [System.IO.File]::ReadAllBytes($checksumFile)
+    $ecdsa = [System.Security.Cryptography.ECDsa]::Create()
+    $keyPem = Get-Content $signingKeyPath -Raw
+    $ecdsa.ImportFromPem($keyPem)
+    $sig = $ecdsa.SignData($checksumBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    [System.Convert]::ToHexString($sig).ToLower() | Out-File -FilePath $sigFile -Encoding UTF8 -NoNewline
+    Write-Host "Signature written to $sigFile" -ForegroundColor Green
+} else {
+    Write-Host "WARNING: No signing key at $signingKeyPath - checksums unsigned" -ForegroundColor Red
+}

@@ -308,6 +308,39 @@ Write-Step "Phase 3: Downloading SuavoAgent binaries"
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path "$dataDir\logs" -Force | Out-Null
 
+# Download and verify checksums
+$checksumUrl = "$base/checksums.sha256"
+$checksumSigUrl = "$base/checksums.sha256.sig"
+$checksumPath = Join-Path $installDir "checksums.sha256"
+$checksumSigPath = Join-Path $installDir "checksums.sha256.sig"
+
+Write-Host "  Downloading checksums..." -ForegroundColor Gray
+Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath -UseBasicParsing
+Invoke-WebRequest -Uri $checksumSigUrl -OutFile $checksumSigPath -UseBasicParsing
+
+# Verify ECDSA signature of checksums
+$publicKeyDer = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJJO30pUIre7wuMN5I1FQmlEDpTIM0dmhPjaGtlG7gm+47G7lKHuJV4lQ3eWhZNqe1eviOZkt+9VnWnQUSJGvsg=="
+$ecdsa = [System.Security.Cryptography.ECDsa]::Create()
+$ecdsa.ImportSubjectPublicKeyInfo([System.Convert]::FromBase64String($publicKeyDer), [ref]$null)
+$checksumBytes = [System.IO.File]::ReadAllBytes($checksumPath)
+$sigHex = (Get-Content $checksumSigPath -Raw).Trim()
+$sigBytes = [System.Convert]::FromHexString($sigHex)
+$valid = $ecdsa.VerifyData($checksumBytes, $sigBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+
+if (-not $valid) {
+    Write-Error "CRITICAL: Checksum signature verification FAILED - aborting install"
+    Remove-Item $checksumPath, $checksumSigPath -Force -ErrorAction SilentlyContinue
+    exit 1
+}
+Write-Host "  Checksum signature verified (ECDSA P-256)" -ForegroundColor Green
+
+# Parse expected hashes
+$expectedHashes = @{}
+Get-Content $checksumPath | ForEach-Object {
+    $parts = $_ -split "  ", 2
+    if ($parts.Count -eq 2) { $expectedHashes[$parts[1].Trim()] = $parts[0].Trim() }
+}
+
 $binaries = @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe")
 foreach ($bin in $binaries) {
     $url = "$base/$bin"
@@ -322,6 +355,14 @@ foreach ($bin in $binaries) {
         Write-Fail "Download failed for $bin — $($_.Exception.Message)"
         exit 1
     }
+    # Verify SHA256 hash against signed checksums
+    $actualHash = (Get-FileHash -Path $dst -Algorithm SHA256).Hash.ToLower()
+    if ($expectedHashes.ContainsKey($bin) -and $actualHash -ne $expectedHashes[$bin]) {
+        Write-Error "CRITICAL: SHA256 mismatch for $bin - expected $($expectedHashes[$bin]), got $actualHash"
+        foreach ($b in $binaries) { Remove-Item (Join-Path $installDir $b) -Force -ErrorAction SilentlyContinue }
+        exit 1
+    }
+    Write-Host "  $bin verified: $actualHash" -ForegroundColor Green
 }
 
 # ════════════════════════════════════════════
