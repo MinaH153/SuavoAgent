@@ -21,6 +21,22 @@ public static class SelfUpdater
     private const string UpdatePublicKeyDer =
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJJO30pUIre7wuMN5I1FQmlEDpTIM0dmhPjaGtlG7gm+47G7lKHuJV4lQ3eWhZNqe1eviOZkt+9VnWnQUSJGvsg==";
 
+    private static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "github.com",
+        "suavollc.com",
+        "raw.githubusercontent.com",
+        "objects.githubusercontent.com",
+        "github-releases.githubusercontent.com"
+    };
+
+    public static bool IsAllowedUrl(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        return uri.Scheme == "https" && AllowedHosts.Contains(uri.Host);
+    }
+
     public static async Task<bool> TryApplyUpdateAsync(
         string downloadUrl, string expectedSha256, string version, string? signature,
         ILogger logger, CancellationToken ct)
@@ -39,11 +55,7 @@ public static class SelfUpdater
         try
         {
             // 0a. Validate URL — only HTTPS from trusted domains
-            if (!Uri.TryCreate(downloadUrl, UriKind.Absolute, out var uri)
-                || uri.Scheme != Uri.UriSchemeHttps
-                || (!uri.Host.EndsWith("github.com", StringComparison.OrdinalIgnoreCase)
-                    && !uri.Host.EndsWith("suavollc.com", StringComparison.OrdinalIgnoreCase)
-                    && !uri.Host.EndsWith("githubusercontent.com", StringComparison.OrdinalIgnoreCase)))
+            if (!IsAllowedUrl(downloadUrl))
             {
                 logger.LogWarning("Untrusted update URL rejected: {Url}", downloadUrl);
                 return false;
