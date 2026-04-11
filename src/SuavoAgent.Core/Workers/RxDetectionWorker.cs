@@ -76,13 +76,14 @@ public sealed class RxDetectionWorker : BackgroundService
                     }
                 }
 
-                var readyRxs = await _sqlEngine!.ReadReadyPrescriptionsAsync(stoppingToken);
+                // PHI-free detection: metadata only, no Person JOIN (HIPAA 164.502(b))
+                var readyRxs = await _sqlEngine!.ReadReadyMetadataAsync(stoppingToken);
                 LastDetectedCount = readyRxs.Count;
                 LastDetectionTime = DateTimeOffset.UtcNow;
 
                 if (readyRxs.Count > 0)
                 {
-                    _logger.LogInformation("Detected {Count} ready prescriptions", readyRxs.Count);
+                    _logger.LogInformation("Detected {Count} ready prescriptions (metadata-only)", readyRxs.Count);
                     var json = SerializeRxBatch(readyRxs);
                     if (!await TrySyncPayloadToCloudAsync(json, stoppingToken))
                         _stateDb.InsertUnsyncedBatch(json);
@@ -164,7 +165,11 @@ public sealed class RxDetectionWorker : BackgroundService
         }
     }
 
-    private static string SerializeRxBatch(IReadOnlyList<RxReadyForDelivery> rxs)
+    /// <summary>
+    /// Serializes PHI-free metadata batch. Contains ZERO patient data.
+    /// Patient data is only accessible via signed fetch_patient command.
+    /// </summary>
+    internal static string SerializeRxBatch(IReadOnlyList<RxMetadata> rxs)
     {
         var payload = new
         {
@@ -176,20 +181,9 @@ public sealed class RxDetectionWorker : BackgroundService
                     rxNumber = rx.RxNumber,
                     drugName = rx.DrugName,
                     ndc = rx.Ndc,
-                    fillNumber = rx.FillNumber,
+                    dateFilled = rx.DateFilled?.ToString("o"),
                     quantity = rx.Quantity,
-                    daysSupply = rx.DaysSupply,
-                    statusGuid = rx.StatusText,
-                    isControlled = rx.IsControlled,
-                    drugSchedule = rx.DrugSchedule,
-                    patientFirstName = rx.PatientFirstName,
-                    patientLastInitial = rx.PatientLastInitial,
-                    patientPhone = rx.PatientPhone,
-                    deliveryAddress1 = rx.DeliveryAddress1,
-                    deliveryAddress2 = rx.DeliveryAddress2,
-                    deliveryCity = rx.DeliveryCity,
-                    deliveryState = rx.DeliveryState,
-                    deliveryZip = rx.DeliveryZip,
+                    statusGuid = rx.StatusGuid.ToString(),
                     detectedAt = rx.DetectedAt.ToString("o")
                 }).ToArray(),
                 totalDetected = rxs.Count,

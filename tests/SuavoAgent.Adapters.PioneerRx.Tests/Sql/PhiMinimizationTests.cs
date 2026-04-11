@@ -37,4 +37,22 @@ public class PhiMinimizationTests
             PioneerRxConstants.DeliveryReadyStatusNames);
         Assert.Contains("TOP 50", query);
     }
+
+    [Fact]
+    public void BuildMetadataQuery_HasDateCutoff()
+    {
+        var query = PioneerRxSqlEngine.BuildMetadataQuery(
+            PioneerRxConstants.DeliveryReadyStatusNames);
+        Assert.Contains("@cutoff", query);
+    }
+
+    [Fact]
+    public void BuildFullDeliveryQuery_ContainsPersonJoin()
+    {
+        // This query exists for PullPatientForRxAsync — NOT for detection.
+        // Verify it does contain PHI columns (it should, by design).
+        var query = PioneerRxSqlEngine.BuildFullDeliveryQuery(3);
+        Assert.Contains("Person.Person", query);
+        Assert.Contains("FirstName", query);
+    }
 }

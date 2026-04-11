@@ -308,6 +308,43 @@ ORDER BY rt.DateFilled DESC";
     }
 
     /// <summary>
+    /// PHI-free detection query — returns only operational metadata.
+    /// HIPAA 164.502(b) minimum necessary: no Person JOIN, no patient data.
+    /// </summary>
+    public async Task<IReadOnlyList<RxMetadata>> ReadReadyMetadataAsync(CancellationToken ct)
+    {
+        if (_connection is null || _connection.State != System.Data.ConnectionState.Open)
+            return Array.Empty<RxMetadata>();
+
+        var statusNames = PioneerRxConstants.DeliveryReadyStatusNames;
+        var query = BuildMetadataQuery(statusNames);
+
+        await using var cmd = new SqlCommand(query, _connection);
+        cmd.CommandTimeout = 30;
+        for (int i = 0; i < statusNames.Count; i++)
+            cmd.Parameters.AddWithValue($"@status{i}", statusNames[i]);
+        cmd.Parameters.AddWithValue("@cutoff", DateTime.UtcNow.AddDays(-30));
+
+        var results = new List<RxMetadata>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new RxMetadata(
+                RxNumber: GetIntOrDefault(reader, "RxNumber").ToString(),
+                DrugName: GetStringOrDefault(reader, "TradeName"),
+                Ndc: GetStringOrDefault(reader, "NDC"),
+                DateFilled: reader.IsDBNull(reader.GetOrdinal("DateFilled"))
+                    ? null : reader.GetDateTime(reader.GetOrdinal("DateFilled")),
+                Quantity: GetDecimalOrDefault(reader, "DispensedQuantity"),
+                StatusGuid: GetGuidOrDefault(reader, "StatusGuid"),
+                DetectedAt: DateTimeOffset.UtcNow));
+        }
+
+        _logger.LogDebug("Read {Count} ready metadata (PHI-free) from SQL", results.Count);
+        return results;
+    }
+
+    /// <summary>
     /// Targeted patient fetch — PHI returned only for a single approved Rx.
     /// Called on-demand after delivery approval (HIPAA minimum necessary).
     /// </summary>
