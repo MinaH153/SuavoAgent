@@ -18,34 +18,29 @@ public sealed class PioneerRxSqlEngine : IDisposable
     {
         _logger = logger;
 
-        // Raw connection string — bypasses SqlConnectionStringBuilder which has
-        // cross-compilation issues with Encrypt/TrustServerCertificate property setters.
-        // PioneerRx SQL Server uses self-signed certs, so Encrypt=false is required.
-        var parts = new List<string>
-        {
-            $"Data Source={server}",
-            $"Initial Catalog={database}",
-            "Connect Timeout=10",
-            "Command Timeout=30",
-            "Encrypt=true",
-            "TrustServerCertificate=true",
-            "Max Pool Size=1",
-            "Min Pool Size=0"
-        };
+        var csb = new SqlConnectionStringBuilder();
+        csb.DataSource = server;
+        csb.InitialCatalog = database;
+        csb.ConnectTimeout = 30;
+        csb.MaxPoolSize = 1;
+        csb.MinPoolSize = 0;
+        // Use indexer for Encrypt/TrustServerCertificate (cross-compile safe)
+        csb["Encrypt"] = "true";
+        csb["TrustServerCertificate"] = "true";
 
         if (!string.IsNullOrEmpty(sqlUser) && !string.IsNullOrEmpty(sqlPassword))
         {
-            parts.Add($"User ID={sqlUser}");
-            parts.Add($"Password={sqlPassword}");
+            csb.UserID = sqlUser;
+            csb.Password = sqlPassword;
             _logger.LogInformation("SQL using SQL Auth as {User}", sqlUser);
         }
         else
         {
-            parts.Add("Integrated Security=true");
+            csb.IntegratedSecurity = true;
             _logger.LogInformation("SQL using Windows Auth");
         }
 
-        _connectionString = string.Join(";", parts);
+        _connectionString = csb.ConnectionString;
     }
 
     public async Task<bool> TryConnectAsync(CancellationToken ct)

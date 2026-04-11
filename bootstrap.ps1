@@ -21,6 +21,11 @@ param(
     [string]$ReleaseTag = "v2.0.0-alpha"
 )
 
+if ($ReleaseTag -notmatch '^v\d+\.\d+\.\d+') {
+    Write-Error "Invalid release tag format: $ReleaseTag"
+    exit 1
+}
+
 $ErrorActionPreference = "Stop"
 $installDir = "C:\Program Files\Suavo\Agent"
 $dataDir = "$env:ProgramData\SuavoAgent"

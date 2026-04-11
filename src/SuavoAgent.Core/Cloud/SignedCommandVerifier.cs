@@ -45,8 +45,9 @@ public class SignedCommandVerifier
 
         if (!DateTimeOffset.TryParse(cmd.Timestamp, out var ts))
             return new(false, "Invalid timestamp format");
-        if (DateTimeOffset.UtcNow - ts > _timestampWindow)
-            return new(false, "Timestamp expired");
+        var skew = (DateTimeOffset.UtcNow - ts).Duration();
+        if (skew > _timestampWindow)
+            return new(false, "Timestamp out of window");
 
         lock (_usedNonces)
         {

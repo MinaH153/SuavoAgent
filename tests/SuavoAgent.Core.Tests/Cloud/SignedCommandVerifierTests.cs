@@ -65,6 +65,14 @@ public class SignedCommandVerifierTests
     }
 
     [Fact]
+    public void Verify_FutureTimestamp_Fails()
+    {
+        var cmd = CreateSignedCommand("force_sync",
+            timestamp: DateTimeOffset.UtcNow.AddSeconds(400));
+        Assert.False(_verifier.Verify(cmd).IsValid);
+    }
+
+    [Fact]
     public void Verify_UnknownKeyId_Fails()
     {
         var cmd = CreateSignedCommand("force_sync", keyId: "unknown-key");

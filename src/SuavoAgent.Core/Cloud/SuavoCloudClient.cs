@@ -14,9 +14,14 @@ public sealed class SuavoCloudClient : IDisposable
     {
         _options = options;
         _signer = new HmacSigner(options.ApiKey ?? throw new InvalidOperationException("ApiKey is required"));
+
+        var uri = new Uri(options.CloudUrl);
+        if (uri.Scheme != Uri.UriSchemeHttps)
+            throw new InvalidOperationException($"CloudUrl must use HTTPS, got: {uri.Scheme}");
+
         _http = new HttpClient
         {
-            BaseAddress = new Uri(options.CloudUrl),
+            BaseAddress = uri,
             Timeout = TimeSpan.FromSeconds(30)
         };
     }

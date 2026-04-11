@@ -449,6 +449,7 @@ public sealed class AgentStateDb : IDisposable
                 fs.Write(zeros, 0, chunk);
                 remaining -= chunk;
             }
+            fs.Flush();
         }
         File.Delete(path);
     }

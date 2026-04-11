@@ -39,9 +39,7 @@ public sealed class HeartbeatWorker : BackgroundService
         _stateDb = stateDb;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
 
-        // Initialize signed command verifier with the update signing key.
-        // In production, command signing would use a dedicated key — sharing
-        // the update key is a placeholder until key rotation is implemented.
+        // TODO: Generate separate command-signing key pair at install time. Currently shares update key.
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
         if (!string.IsNullOrEmpty(agentId))
@@ -72,6 +70,8 @@ public sealed class HeartbeatWorker : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            _stateDb.PruneOldNonces(TimeSpan.FromMinutes(10));
+
             try
             {
                 // Read Rx detection state if available
@@ -242,9 +242,9 @@ public sealed class HeartbeatWorker : BackgroundService
         var rxNumber = dataEl.TryGetProperty("rxNumber", out var rx) ? rx.GetString() ?? "" : "";
         var requesterId = dataEl.TryGetProperty("requesterId", out var ri) ? ri.GetString() ?? "" : "";
 
-        if (string.IsNullOrEmpty(rxNumber))
+        if (string.IsNullOrEmpty(rxNumber) || rxNumber.Length > 20)
         {
-            _logger.LogWarning("fetch_patient missing rxNumber");
+            _logger.LogWarning("fetch_patient: invalid rxNumber format");
             return;
         }
 
@@ -360,7 +360,7 @@ public sealed class HeartbeatWorker : BackgroundService
 
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
-                    FileName = "powershell.exe",
+                    FileName = @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
                     Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"{script.Replace("\"", "\\\"")}\"",
                     CreateNoWindow = true,
                     UseShellExecute = false
