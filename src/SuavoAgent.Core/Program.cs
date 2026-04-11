@@ -188,6 +188,13 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<RxDetectionWorker>());
     builder.Services.AddHostedService<WritebackProcessor>();
 
+    // Learning Agent — only active when LearningMode is enabled
+    if (agentOpts.LearningMode)
+    {
+        builder.Services.AddHostedService<SuavoAgent.Core.Workers.LearningWorker>();
+        Log.Information("Learning mode enabled — LearningWorker registered");
+    }
+
     builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));
 
     var host = builder.Build();

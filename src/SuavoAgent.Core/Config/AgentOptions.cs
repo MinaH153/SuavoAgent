@@ -17,6 +17,12 @@ public sealed class AgentOptions
     public string? SqlPassword { get; set; }
 
     /// <summary>
+    /// When true, agent runs in learning mode (30-day observation).
+    /// When false, uses the existing PioneerRx adapter directly.
+    /// </summary>
+    public bool LearningMode { get; set; }
+
+    /// <summary>
     /// Multi-pharmacy config. When populated, each entry gets its own detection worker.
     /// Backwards-compatible: if empty, falls back to the top-level SqlServer/PharmacyId fields.
     /// </summary>
