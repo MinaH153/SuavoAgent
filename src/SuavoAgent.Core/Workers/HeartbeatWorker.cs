@@ -108,10 +108,17 @@ public sealed class HeartbeatWorker : BackgroundService
             var url = update.TryGetProperty("url", out var u) ? u.GetString() : null;
             var sha256 = update.TryGetProperty("sha256", out var s) ? s.GetString() : null;
             var version = update.TryGetProperty("version", out var v) ? v.GetString() : null;
+            var signature = update.TryGetProperty("signature", out var sig) ? sig.GetString() : null;
 
             if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha256))
             {
                 _logger.LogDebug("Pending update missing url or sha256 — skipping");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(signature))
+            {
+                _logger.LogWarning("Pending update has no Ed25519 signature — rejecting");
                 return;
             }
 
@@ -125,7 +132,7 @@ public sealed class HeartbeatWorker : BackgroundService
             _updateInProgress = true;
             _logger.LogInformation("Pending update detected: v{Version} sha:{Sha}", version, sha256);
 
-            await SelfUpdater.TryApplyUpdateAsync(url, sha256, version ?? "unknown", _logger, ct);
+            await SelfUpdater.TryApplyUpdateAsync(url, sha256, version ?? "unknown", signature, _logger, ct);
             // If we get here, update failed (TryApplyUpdateAsync exits on success)
             _updateInProgress = false;
         }
