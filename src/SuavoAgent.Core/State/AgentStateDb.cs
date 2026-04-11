@@ -69,6 +69,9 @@ public sealed class AgentStateDb : IDisposable
         TryAlter("ALTER TABLE audit_entries ADD COLUMN command_id TEXT");
         TryAlter("ALTER TABLE audit_entries ADD COLUMN requester_id TEXT");
         TryAlter("ALTER TABLE audit_entries ADD COLUMN rx_number TEXT");
+
+        // Migrate: add next_retry_at for exponential backoff
+        TryAlter("ALTER TABLE writeback_states ADD COLUMN next_retry_at TEXT");
     }
 
     private void TryAlter(string sql)
@@ -121,6 +124,39 @@ public sealed class AgentStateDb : IDisposable
             {
                 results.Add((reader.GetString(0), state, reader.GetString(2), reader.GetInt32(3)));
             }
+        }
+        return results;
+    }
+
+    public void UpdateNextRetryAt(string taskId, DateTimeOffset nextRetry)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE writeback_states SET next_retry_at = @nextRetry WHERE task_id = @taskId";
+        cmd.Parameters.AddWithValue("@taskId", taskId);
+        cmd.Parameters.AddWithValue("@nextRetry", nextRetry.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<(string TaskId, WritebackState State, string RxNumber, int RetryCount, DateTimeOffset? NextRetryAt)>
+        GetDueWritebacks()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT task_id, state, rx_number, retry_count, next_retry_at FROM writeback_states
+            WHERE state NOT IN ('Done', 'ManualReview')
+              AND (next_retry_at IS NULL OR next_retry_at <= @now)
+            ORDER BY created_at ASC
+            """;
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+
+        var results = new List<(string, WritebackState, string, int, DateTimeOffset?)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var stateStr = reader.GetString(1);
+            if (!Enum.TryParse<WritebackState>(stateStr, out var state)) continue;
+            DateTimeOffset? nextRetry = reader.IsDBNull(4) ? null : DateTimeOffset.Parse(reader.GetString(4));
+            results.Add((reader.GetString(0), state, reader.GetString(2), reader.GetInt32(3), nextRetry));
         }
         return results;
     }

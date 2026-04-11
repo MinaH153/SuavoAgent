@@ -52,8 +52,8 @@ public sealed class WritebackProcessor : BackgroundService
 
     private void RecoverPendingWritebacks()
     {
-        var pending = _stateDb.GetPendingWritebacks();
-        foreach (var (taskId, state, rxNumber, retryCount) in pending)
+        var pending = _stateDb.GetDueWritebacks();
+        foreach (var (taskId, state, rxNumber, retryCount, _) in pending)
         {
             _logger.LogInformation("Recovering writeback {TaskId} in state {State} (retries: {Retries})",
                 taskId, state, retryCount);
@@ -135,6 +135,17 @@ public sealed class WritebackProcessor : BackgroundService
         if (machine != null)
         {
             _stateDb.UpsertWritebackState(taskId, "", newState, machine.RetryCount, null);
+
+            // Exponential backoff: 1min, 5min, 15min
+            if (trigger == WritebackTrigger.SystemError)
+            {
+                var delays = new[] { 60, 300, 900 };
+                var retryCount = machine.RetryCount;
+                if (retryCount > 0 && retryCount <= delays.Length)
+                {
+                    _stateDb.UpdateNextRetryAt(taskId, DateTimeOffset.UtcNow.AddSeconds(delays[retryCount - 1]));
+                }
+            }
         }
 
         _stateDb.AppendChainedAuditEntry(new AuditEntry(
