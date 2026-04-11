@@ -58,7 +58,7 @@ public sealed class WritebackProcessor : BackgroundService
             _logger.LogInformation("Recovering writeback {TaskId} in state {State} (retries: {Retries})",
                 taskId, state, retryCount);
 
-            var machine = new WritebackStateMachine(taskId, state, OnStateChanged);
+            var machine = new WritebackStateMachine(taskId, state, OnStateChanged, retryCount);
             _machines[taskId] = machine;
         }
         _logger.LogInformation("Recovered {Count} pending writebacks", pending.Count);

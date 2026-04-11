@@ -44,11 +44,12 @@ public class WritebackStateMachine
     public WritebackStateMachine(
         string taskId,
         WritebackState initialState,
-        Action<string, WritebackState, WritebackState, WritebackTrigger> onStateChanged)
+        Action<string, WritebackState, WritebackState, WritebackTrigger> onStateChanged,
+        int initialRetryCount = 0)
     {
         _taskId = taskId;
         _onStateChanged = onStateChanged;
-        _retryCount = 0;
+        _retryCount = initialRetryCount;
 
         _machine = new StateMachine<WritebackState, WritebackTrigger>(initialState);
 
