@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
@@ -19,6 +20,12 @@ public sealed class HeartbeatWorker : BackgroundService
     private int _consecutiveFailures;
     private bool _updateInProgress;
     private long? _decommissionPendingSince;
+    private string? _lastUpdateChannel;
+    private readonly DateTimeOffset _startTime = DateTimeOffset.UtcNow;
+    private int _helperConsecutiveFailures;
+    private bool _lastAuditChainValid = true;
+    private int _lastRxCount;
+    private DateTimeOffset? _lastSyncAt;
 
     public HeartbeatWorker(
         ILogger<HeartbeatWorker> logger,
@@ -56,6 +63,11 @@ public sealed class HeartbeatWorker : BackgroundService
         // Cleanup old binary from a previous self-update
         SelfUpdater.CleanupOldBinary(_logger);
 
+        // Verify audit chain integrity on startup (HIPAA 164.312(c))
+        _lastAuditChainValid = _stateDb.VerifyAuditChain();
+        if (!_lastAuditChainValid)
+            _logger.LogWarning("HIPAA ALERT: Audit chain integrity verification FAILED");
+
         _logger.LogInformation("Heartbeat worker started. Interval: {Interval}s", _options.HeartbeatIntervalSeconds);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -66,23 +78,61 @@ public sealed class HeartbeatWorker : BackgroundService
                 var rxWorker = _serviceProvider.GetService<RxDetectionWorker>();
                 var sqlConnected = rxWorker?.IsSqlConnected ?? false;
                 var rxReadyCount = rxWorker?.LastDetectedCount ?? 0;
+                _lastRxCount = rxReadyCount;
+
+                // Read Helper IPC state
+                var ipcServer = _serviceProvider.GetService<IpcPipeServer>();
 
                 var payload = new
                 {
                     agentId = _options.AgentId,
                     version = _options.Version,
                     pharmacyId = _options.PharmacyId,
-                    memoryUsageMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
-                    uptime = (long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds,
+                    updateChannel = _lastUpdateChannel ?? "stable",
+                    machineFingerprint = _options.MachineFingerprint,
+                    uptimeSeconds = (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
+                    memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
                     status = "online",
-                    sqlConnected,
-                    rxReadyCount,
-                    pioneerrxStatus = sqlConnected ? "connected" : "not_connected"
+                    pioneerrxStatus = sqlConnected ? "connected" : "not_connected",
+                    sql = new
+                    {
+                        connected = sqlConnected,
+                        lastRxCount = _lastRxCount
+                    },
+                    helper = new
+                    {
+                        attached = ipcServer?.IsConnected ?? false,
+                        consecutiveFailures = _helperConsecutiveFailures
+                    },
+                    writeback = new
+                    {
+                        pending = _stateDb.GetPendingWritebacks().Count,
+                        manualReview = 0
+                    },
+                    audit = new
+                    {
+                        chainValid = _lastAuditChainValid,
+                        entryCount = _stateDb.GetAuditEntryCount()
+                    },
+                    sync = new
+                    {
+                        unsyncedBatches = _stateDb.GetPendingBatches().Count,
+                        deadLetterCount = _stateDb.GetDeadLetterCount(),
+                        lastSyncAt = _lastSyncAt?.ToString("o")
+                    }
                 };
 
                 var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
                 _consecutiveFailures = 0;
                 _logger.LogDebug("Heartbeat OK");
+
+                // Echo updateChannel from server for canary rollout tracking
+                if (response.HasValue &&
+                    response.Value.TryGetProperty("data", out var respData) &&
+                    respData.TryGetProperty("updateChannel", out var channel))
+                {
+                    _lastUpdateChannel = channel.GetString();
+                }
 
                 // Decommission timeout check (1 hour auto-cancel)
                 if (_decommissionPendingSince != null &&
