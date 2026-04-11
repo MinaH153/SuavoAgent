@@ -18,6 +18,7 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly SignedCommandVerifier? _commandVerifier;
     private int _consecutiveFailures;
     private bool _updateInProgress;
+    private long? _decommissionPendingSince;
 
     public HeartbeatWorker(
         ILogger<HeartbeatWorker> logger,
@@ -83,9 +84,19 @@ public sealed class HeartbeatWorker : BackgroundService
                 _consecutiveFailures = 0;
                 _logger.LogDebug("Heartbeat OK");
 
-                // Check for remote decommission (kill switch)
+                // Decommission timeout check (1 hour auto-cancel)
+                if (_decommissionPendingSince != null &&
+                    Stopwatch.GetElapsedTime(_decommissionPendingSince.Value) > TimeSpan.FromHours(1))
+                {
+                    _logger.LogInformation("Decommission timed out — cancelling");
+                    _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                        _options.AgentId ?? "", "decommission", "DecommissionPending", "", "decommission_cancelled_timeout"));
+                    _decommissionPendingSince = null;
+                }
+
+                // Check for remote decommission (two-phase)
                 if (response.HasValue)
-                    CheckForDecommission(response.Value);
+                    await CheckForDecommissionAsync(response.Value, stoppingToken);
 
                 // Check for pending self-update
                 if (response.HasValue && !_updateInProgress)
@@ -218,11 +229,12 @@ public sealed class HeartbeatWorker : BackgroundService
     }
 
     /// <summary>
-    /// Checks heartbeat response for decommission flag. If set, the agent
-    /// stops all services, deletes itself, and removes the Windows service registration.
-    /// This is the remote kill switch — one-click from dashboard, zero trace on pharmacy PC.
+    /// Two-phase decommission with audit archive preservation (HIPAA 164.530(j)).
+    /// Phase 1: enter pending state, audit logged, wait 5+ minutes.
+    /// Phase 2: archive audit chain to cloud, verify ACK digest, then cleanup.
+    /// Blocks if archive upload fails. 1h timeout auto-cancels in main loop.
     /// </summary>
-    private void CheckForDecommission(JsonElement response)
+    private async Task CheckForDecommissionAsync(JsonElement response, CancellationToken ct)
     {
         try
         {
@@ -230,11 +242,58 @@ public sealed class HeartbeatWorker : BackgroundService
             if (!data.TryGetProperty("decommission", out var decom)) return;
             if (decom.ValueKind != JsonValueKind.True) return;
 
-            _logger.LogWarning("DECOMMISSION received — removing agent from this machine");
+            var agentId = _options.AgentId ?? "";
 
+            // Phase 1: first decommission command — enter pending state
+            if (_decommissionPendingSince == null)
+            {
+                _decommissionPendingSince = Stopwatch.GetTimestamp();
+                _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                    agentId, "decommission", "", "DecommissionPending", "decommission_phase1"));
+                _logger.LogWarning("DECOMMISSION phase 1 — awaiting confirmation (5+ min)");
+                return;
+            }
+
+            // Phase 2: second command — must be 5+ minutes after phase 1
+            var elapsed = Stopwatch.GetElapsedTime(_decommissionPendingSince.Value);
+            if (elapsed < TimeSpan.FromMinutes(5))
+            {
+                _logger.LogInformation("Decommission phase 2 too early ({Elapsed}) — waiting", elapsed);
+                return;
+            }
+
+            _logger.LogWarning("DECOMMISSION phase 2 — archiving audit data");
+            var chainValid = _stateDb.VerifyAuditChain();
+            var auditJson = _stateDb.ExportAuditArchiveJson();
+            var statesJson = _stateDb.ExportWritebackStatesJson();
+            var archivePayload = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                agentId,
+                auditEntries = auditJson,
+                writebackStates = statesJson,
+                auditChainValid = chainValid
+            });
+            var digest = Convert.ToBase64String(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(archivePayload)));
+
+            var ack = _cloudClient != null
+                ? await _cloudClient.UploadAuditArchiveAsync(archivePayload, digest, ct)
+                : null;
+            if (ack == null || ack.ArchiveDigest != digest)
+            {
+                _logger.LogWarning("Decommission BLOCKED — archive upload failed or ACK mismatch");
+                _decommissionPendingSince = null;
+                return;
+            }
+
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                agentId, "decommission", "DecommissionPending", "Decommissioned", "decommission_phase2"));
+            _logger.LogWarning("Audit archived (id={ArchiveId}) — removing agent", ack.ArchiveId);
+
+            // Proceed with cleanup
             if (OperatingSystem.IsWindows())
             {
-                // Run cleanup in a detached process so it can delete the running binary
                 var script = @"
                     Start-Sleep 3
                     Stop-Service SuavoAgent.Core -Force -ErrorAction SilentlyContinue

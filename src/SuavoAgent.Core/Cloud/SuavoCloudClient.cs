@@ -58,5 +58,20 @@ public sealed class SuavoCloudClient : IDisposable
         return JsonSerializer.Deserialize<JsonElement>(responseBody);
     }
 
+    public record AuditArchiveAck(string ArchiveId, string ArchiveDigest, string Timestamp);
+
+    public async Task<AuditArchiveAck?> UploadAuditArchiveAsync(string archiveJson, string digest, CancellationToken ct)
+    {
+        var response = await PostSignedAsync("/api/agent/audit-archive",
+            new { archive = archiveJson, archiveDigest = digest }, ct);
+        if (response == null) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<AuditArchiveAck>(response.Value.GetRawText(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch { return null; }
+    }
+
     public void Dispose() => _http.Dispose();
 }

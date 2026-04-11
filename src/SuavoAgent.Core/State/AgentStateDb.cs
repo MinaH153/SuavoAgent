@@ -270,6 +270,38 @@ public sealed class AgentStateDb : IDisposable
         cmd.ExecuteNonQuery();
     }
 
+    public string ExportAuditArchiveJson()
+    {
+        var entries = new List<Dictionary<string, object?>>();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM audit_entries ORDER BY id ASC";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var row = new Dictionary<string, object?>();
+            for (int i = 0; i < reader.FieldCount; i++)
+                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+            entries.Add(row);
+        }
+        return System.Text.Json.JsonSerializer.Serialize(entries);
+    }
+
+    public string ExportWritebackStatesJson()
+    {
+        var states = new List<Dictionary<string, object?>>();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM writeback_states";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var row = new Dictionary<string, object?>();
+            for (int i = 0; i < reader.FieldCount; i++)
+                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+            states.Add(row);
+        }
+        return System.Text.Json.JsonSerializer.Serialize(states);
+    }
+
     public void InsertUnsyncedBatch(string payload)
     {
         using var cmd = _conn.CreateCommand();
