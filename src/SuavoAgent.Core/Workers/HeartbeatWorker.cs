@@ -39,13 +39,12 @@ public sealed class HeartbeatWorker : BackgroundService
         _stateDb = stateDb;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
 
-        // TODO: Generate separate command-signing key pair at install time. Currently shares update key.
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
         if (!string.IsNullOrEmpty(agentId))
         {
             _commandVerifier = new SignedCommandVerifier(
-                new Dictionary<string, string> { ["suavo-cmd-v1"] = SelfUpdater.UpdatePublicKeyDer },
+                new Dictionary<string, string> { ["suavo-cmd-v1"] = SelfUpdater.CommandPublicKeyDer },
                 agentId, fingerprint);
         }
     }
@@ -58,8 +57,8 @@ public sealed class HeartbeatWorker : BackgroundService
             return;
         }
 
-        // Cleanup old binary from a previous self-update
-        SelfUpdater.CleanupOldBinary(_logger);
+        // Cleanup old binaries from a previous self-update
+        SelfUpdater.CleanupOldBinaries(_logger);
 
         // Verify audit chain integrity on startup (HIPAA 164.312(c))
         _lastAuditChainValid = _stateDb.VerifyAuditChain();
@@ -378,8 +377,9 @@ public sealed class HeartbeatWorker : BackgroundService
     }
 
     /// <summary>
-    /// Self-update via signed command envelope. Extracts url/sha256/version
-    /// from the signed command's data fields and delegates to SelfUpdater.
+    /// 3-binary package update via signed command envelope. Parses UpdateManifest
+    /// from the command's data fields, downloads all binaries, writes sentinel, exits.
+    /// CheckPendingUpdate in Program.cs finishes the swap on restart.
     /// Only reachable via ECDSA-signed command envelope.
     /// </summary>
     private async Task HandleUpdateAsync(JsonElement scEl, CancellationToken ct)
@@ -388,29 +388,35 @@ public sealed class HeartbeatWorker : BackgroundService
 
         try
         {
-            var url = scEl.TryGetProperty("url", out var u) ? u.GetString() : null;
-            var sha256 = scEl.TryGetProperty("sha256", out var s) ? s.GetString() : null;
-            var version = scEl.TryGetProperty("version", out var v) ? v.GetString() : null;
-            var signature = scEl.TryGetProperty("binarySignature", out var sig) ? sig.GetString() : null;
+            var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+            var manifestStr = dataEl.TryGetProperty("manifest", out var m) ? m.GetString() : null;
+            var signatureHex = dataEl.TryGetProperty("manifestSignature", out var sig) ? sig.GetString() : null;
 
-            if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha256))
+            if (string.IsNullOrEmpty(manifestStr))
             {
-                _logger.LogWarning("Signed update command missing url or sha256 — rejecting");
+                _logger.LogWarning("Signed update command missing manifest — rejecting");
                 return;
             }
 
-            // Don't update to the same version we're already running
-            if (version == _options.Version)
+            var manifest = UpdateManifest.Parse(manifestStr);
+            if (manifest is null)
             {
-                _logger.LogDebug("Already running v{Version} — skipping update", version);
+                _logger.LogWarning("Signed update command has malformed manifest — rejecting");
+                return;
+            }
+
+            if (manifest.Version == _options.Version)
+            {
+                _logger.LogDebug("Already running v{Version} — skipping update", manifest.Version);
                 return;
             }
 
             _updateInProgress = true;
-            _logger.LogInformation("Signed update command: v{Version} sha:{Sha}", version, sha256);
+            _logger.LogInformation("Signed package update: v{Version} ({Count} binaries)",
+                manifest.Version, 3);
 
-            await SelfUpdater.TryApplyUpdateAsync(url, sha256, version ?? "unknown", signature, _logger, ct);
-            // If we get here, update failed (TryApplyUpdateAsync exits on success)
+            await SelfUpdater.TryApplyPackageUpdateAsync(manifest, signatureHex ?? "", _logger, ct);
+            // If we get here, update failed (TryApplyPackageUpdateAsync exits on success)
             _updateInProgress = false;
         }
         catch (Exception ex)

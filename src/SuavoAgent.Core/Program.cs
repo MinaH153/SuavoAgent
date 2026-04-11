@@ -101,6 +101,14 @@ try
                     System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
                     System.Security.AccessControl.PropagationFlags.None,
                     System.Security.AccessControl.AccessControlType.Allow));
+                // NetworkService needs write for Broker logs
+                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.NetworkServiceSid, null),
+                    System.Security.AccessControl.FileSystemRights.Modify,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
                 dirInfo.SetAccessControl(dirSecurity);
             }
             catch (Exception ex)

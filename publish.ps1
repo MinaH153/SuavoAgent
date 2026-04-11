@@ -86,3 +86,14 @@ if (Test-Path $signingKeyPath) {
 } else {
     Write-Host "WARNING: No signing key at $signingKeyPath - checksums unsigned" -ForegroundColor Red
 }
+
+# ── Display command signing key info ──
+$cmdKeyPath = Join-Path $env:HOME ".suavo" "cmd-signing-key.pem"
+if (Test-Path $cmdKeyPath) {
+    Write-Host "`n--- Command signing key ---" -ForegroundColor Yellow
+    Write-Host "Key: $cmdKeyPath" -ForegroundColor Gray
+    Write-Host "Use this key to sign control-plane commands (fetch_patient, decommission, update)" -ForegroundColor Gray
+} else {
+    Write-Host "WARNING: No command signing key at $cmdKeyPath" -ForegroundColor Red
+    Write-Host "Generate with: openssl ecparam -genkey -name prime256v1 -noout | openssl ec -outform PEM > $cmdKeyPath" -ForegroundColor Red
+}

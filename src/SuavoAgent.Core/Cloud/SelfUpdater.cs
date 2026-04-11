@@ -16,11 +16,16 @@ namespace SuavoAgent.Core.Cloud;
 /// </summary>
 public static class SelfUpdater
 {
-    // ECDSA P-256 public key (DER SubjectPublicKeyInfo, Base64).
-    // Private key stored in macOS Keychain / secure vault.
-    // Internal so HeartbeatWorker can reuse for signed command verification.
+    // ECDSA P-256 public key for update manifest verification.
+    // Private key: ~/.suavo/signing-key.pem (Joshua's Mac).
     internal const string UpdatePublicKeyDer =
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJJO30pUIre7wuMN5I1FQmlEDpTIM0dmhPjaGtlG7gm+47G7lKHuJV4lQ3eWhZNqe1eviOZkt+9VnWnQUSJGvsg==";
+
+    // ECDSA P-256 public key for signed control-plane commands (fetch_patient, decommission, update).
+    // Separate from update key — compromise of one doesn't grant the other.
+    // Private key: ~/.suavo/cmd-signing-key.pem (Joshua's Mac).
+    internal const string CommandPublicKeyDer =
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1mIlEiYIEqjp/YBymnFH9FEUxYFXd+Y25cPiF5wdcEo9CP+760IMxHgajrUt9A3zJ47dwV893LWwlZ1/nDP3YA==";
 
     private static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -38,6 +43,7 @@ public static class SelfUpdater
         return uri.Scheme == "https" && AllowedHosts.Contains(uri.Host);
     }
 
+    [Obsolete("Use TryApplyPackageUpdateAsync for 3-binary updates")]
     public static async Task<bool> TryApplyUpdateAsync(
         string downloadUrl, string expectedSha256, string version, string? signature,
         ILogger logger, CancellationToken ct)
@@ -166,6 +172,121 @@ public static class SelfUpdater
 
     private static bool ContainsControlChars(string s) =>
         s.AsSpan().IndexOfAny('\n', '\r', '|') >= 0;
+
+    /// <summary>
+    /// 3-binary package update: downloads Core, Broker, Helper to .exe.new,
+    /// verifies each SHA256, writes update-pending.flag sentinel, then exits
+    /// so SCM restarts and CheckPendingUpdate finishes the swap.
+    /// </summary>
+    public static async Task<bool> TryApplyPackageUpdateAsync(
+        UpdateManifest manifest, string signatureHex, ILogger logger, CancellationToken ct)
+    {
+        var installDir = Path.GetDirectoryName(Environment.ProcessPath);
+        if (string.IsNullOrEmpty(installDir))
+        {
+            logger.LogWarning("Cannot determine install dir — skipping package update");
+            return false;
+        }
+
+        // Validate manifest signature
+        if (!VerifyManifestSignature(manifest.ToCanonical(), signatureHex, logger))
+            return false;
+
+        // Validate all URLs
+        var downloads = new[]
+        {
+            (Url: manifest.CoreUrl, Sha256: manifest.CoreSha256, Binary: "SuavoAgent.Core.exe"),
+            (Url: manifest.BrokerUrl, Sha256: manifest.BrokerSha256, Binary: "SuavoAgent.Broker.exe"),
+            (Url: manifest.HelperUrl, Sha256: manifest.HelperSha256, Binary: "SuavoAgent.Helper.exe"),
+        };
+
+        foreach (var d in downloads)
+        {
+            if (!IsAllowedUrl(d.Url))
+            {
+                logger.LogWarning("Untrusted URL in manifest for {Binary}: {Url}", d.Binary, d.Url);
+                return false;
+            }
+        }
+
+        // Validate runtime
+        if (!manifest.MatchesRuntime("net8.0", "win-x64"))
+        {
+            logger.LogWarning("Manifest runtime mismatch: {Runtime}/{Arch}", manifest.Runtime, manifest.Arch);
+            return false;
+        }
+
+        var stagedFiles = new List<string>();
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+
+            foreach (var d in downloads)
+            {
+                var newPath = Path.Combine(installDir, d.Binary + ".new");
+                stagedFiles.Add(newPath);
+
+                logger.LogInformation("Downloading {Binary} from {Url}", d.Binary, d.Url);
+                await using var stream = await http.GetStreamAsync(d.Url, ct);
+                await using var file = File.Create(newPath);
+                await stream.CopyToAsync(file, ct);
+                file.Close();
+
+                var actualHash = await ComputeSha256Async(newPath, ct);
+                if (!string.Equals(actualHash, d.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    logger.LogWarning("SHA256 mismatch for {Binary}: expected {Expected}, got {Actual}",
+                        d.Binary, d.Sha256, actualHash);
+                    CleanupStagedFiles(installDir);
+                    return false;
+                }
+                logger.LogInformation("{Binary} verified: {Hash}", d.Binary, actualHash);
+            }
+
+            // Write sentinel: line 1 = manifest canonical, line 2 = signature hex
+            var sentinelPath = Path.Combine(installDir, "update-pending.flag");
+            await File.WriteAllTextAsync(sentinelPath,
+                $"{manifest.ToCanonical()}\n{signatureHex}", ct);
+
+            logger.LogInformation("Staged {Count} binaries, sentinel written — exiting for restart",
+                stagedFiles.Count);
+            Environment.Exit(1);
+            return true; // unreachable
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Package update failed — cleaning up staged files");
+            CleanupStagedFiles(installDir);
+            return false;
+        }
+    }
+
+    private static void CleanupStagedFiles(string installDir)
+    {
+        foreach (var f in Directory.GetFiles(installDir, "*.exe.new"))
+            try { File.Delete(f); } catch { }
+        var sentinel = Path.Combine(installDir, "update-pending.flag");
+        try { if (File.Exists(sentinel)) File.Delete(sentinel); } catch { }
+    }
+
+    public static void CleanupOldBinaries(ILogger logger)
+    {
+        var installDir = Path.GetDirectoryName(Environment.ProcessPath);
+        if (string.IsNullOrEmpty(installDir)) return;
+
+        foreach (var oldFile in Directory.GetFiles(installDir, "*.exe.old"))
+        {
+            try
+            {
+                File.Delete(oldFile);
+                logger.LogInformation("Cleaned up {File}", Path.GetFileName(oldFile));
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Could not delete {File} — will retry next startup", Path.GetFileName(oldFile));
+            }
+        }
+    }
 
     public static void CleanupOldBinary(ILogger logger)
     {

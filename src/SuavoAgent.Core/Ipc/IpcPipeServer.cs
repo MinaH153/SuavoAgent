@@ -1,5 +1,4 @@
 using System.IO.Pipes;
-using System.Text;
 using System.Text.Json;
 using SuavoAgent.Contracts.Ipc;
 
@@ -9,7 +8,7 @@ public sealed class IpcPipeServer : IDisposable
 {
     private readonly string _pipeName;
     private readonly ILogger<IpcPipeServer> _logger;
-    private readonly Func<IpcMessage, Task<IpcResponse>> _handler;
+    private readonly Func<IpcRequest, Task<IpcResponse>> _handler;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
     private bool _isConnected;
@@ -17,7 +16,7 @@ public sealed class IpcPipeServer : IDisposable
     public bool IsConnected => _isConnected;
     public string PipeName => _pipeName;
 
-    public IpcPipeServer(string pipeName, Func<IpcMessage, Task<IpcResponse>> handler, ILogger<IpcPipeServer> logger)
+    public IpcPipeServer(string pipeName, Func<IpcRequest, Task<IpcResponse>> handler, ILogger<IpcPipeServer> logger)
     {
         _pipeName = pipeName;
         _handler = handler;
@@ -66,24 +65,21 @@ public sealed class IpcPipeServer : IDisposable
 
     private async Task HandleConnection(NamedPipeServerStream pipe, CancellationToken ct)
     {
-        using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
-        using var writer = new StreamWriter(pipe, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
-
         while (!ct.IsCancellationRequested && pipe.IsConnected)
         {
             try
             {
-                var line = await reader.ReadLineAsync(ct);
-                if (line == null) break; // Client disconnected
+                var json = await IpcFraming.ReadFrameAsync(pipe, ct);
+                if (json == null) break; // Client disconnected
 
-                var message = JsonSerializer.Deserialize<IpcMessage>(line);
-                if (message == null) continue;
+                var request = JsonSerializer.Deserialize<IpcRequest>(json);
+                if (request == null) continue;
 
-                _logger.LogDebug("IPC received: {Command} [{RequestId}]", message.Command, message.RequestId);
+                _logger.LogDebug("IPC received: {Command} [{Id}]", request.Command, request.Id);
 
-                var response = await _handler(message);
-                var responseLine = JsonSerializer.Serialize(response);
-                await writer.WriteLineAsync(responseLine);
+                var response = await _handler(request);
+                var responseJson = JsonSerializer.Serialize(response);
+                await IpcFraming.WriteFrameAsync(pipe, responseJson, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -104,9 +100,9 @@ public sealed class IpcPipeServer : IDisposable
         _logger.LogInformation("Helper connection closed");
     }
 
-    public async Task<IpcResponse?> SendCommandAsync(IpcMessage command, TimeSpan timeout)
+    public async Task<IpcResponse?> SendCommandAsync(IpcRequest command, TimeSpan timeout)
     {
-        // Push model not yet implemented — protocol is currently request-response (Helper sends, Core responds)
+        // Push model not yet implemented -- protocol is currently request-response (Helper sends, Core responds)
         _logger.LogDebug("SendCommand not yet implemented for push model");
         return await Task.FromResult<IpcResponse?>(null);
     }
