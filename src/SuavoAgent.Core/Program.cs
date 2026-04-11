@@ -1,9 +1,35 @@
+using Microsoft.Extensions.Logging;
 using Serilog;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Workers;
+
+// Bootstrap self-update — runs before any DI/config
+{
+    var dataDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "SuavoAgent");
+    Directory.CreateDirectory(Path.Combine(dataDir, "logs"));
+
+    using var serilogLogger = new LoggerConfiguration()
+        .WriteTo.Console()
+        .WriteTo.File(
+            Path.Combine(dataDir, "logs", "startup-.log"),
+            rollingInterval: RollingInterval.Day,
+            retainedFileCountLimit: 7)
+        .CreateLogger();
+
+    using var earlyLogFactory = LoggerFactory.Create(lb => lb.AddSerilog(serilogLogger));
+    var earlyLog = earlyLogFactory.CreateLogger("SuavoAgent.Bootstrap");
+
+    if (SuavoAgent.Core.Cloud.SelfUpdater.CheckPendingUpdate(earlyLog))
+    {
+        serilogLogger.Information("Bootstrap update applied — restarting");
+        Environment.Exit(1);
+    }
+}
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Debug()
@@ -87,7 +113,8 @@ try
         return new IpcPipeServer("SuavoAgent", msg =>
         {
             logger.LogDebug("IPC: {Command}", msg.Command);
-            return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(msg.RequestId, true, "ack", null));
+            return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
         }, logger);
     });
 
