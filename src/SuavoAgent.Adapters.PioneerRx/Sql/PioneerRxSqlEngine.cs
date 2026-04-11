@@ -27,7 +27,7 @@ public sealed class PioneerRxSqlEngine : IDisposable
             $"Initial Catalog={database}",
             "Connect Timeout=10",
             "Command Timeout=30",
-            "Encrypt=false",
+            "Encrypt=true",
             "TrustServerCertificate=true",
             "Max Pool Size=1",
             "Min Pool Size=0"

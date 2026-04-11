@@ -58,8 +58,6 @@ public sealed class HeartbeatWorker : BackgroundService
                     uptime = (long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds,
                     status = "online",
                     sqlConnected,
-                    sqlServer = _options.SqlServer,
-                    sqlDatabase = _options.SqlDatabase,
                     rxReadyCount,
                     pioneerrxStatus = sqlConnected ? "connected" : "not_connected"
                 };

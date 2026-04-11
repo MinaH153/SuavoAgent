@@ -5,21 +5,21 @@ using Microsoft.Extensions.Logging;
 namespace SuavoAgent.Core.Cloud;
 
 /// <summary>
-/// Downloads a new agent binary, verifies Ed25519 signature + SHA256, swaps in-place, exits.
+/// Downloads a new agent binary, verifies ECDSA P-256 signature + SHA256, swaps in-place, exits.
 /// Windows service auto-restart policy brings the new binary online.
 ///
 /// Security model:
 ///   - Private key: stored on Joshua's machine, signs update manifests
-///   - Public key: embedded here, verifies signatures
+///   - Public key: embedded here (ECDSA P-256), verifies signatures
 ///   - Even if the cloud is fully compromised, attacker cannot push a malicious binary
 ///     without the private key (which never leaves the signing machine)
 /// </summary>
 public static class SelfUpdater
 {
-    // Ed25519 public key — embedded at compile time. Private key is in /tmp/suavo-update-signing.pem
-    // (move to a secure vault before production).
-    private const string UpdatePublicKeyPem =
-        "MCowBQYDK2VwAyEA/eKzJBbCgOCSllNMltf1MDrCDNqPC9HX9x9p+CEToWU=";
+    // ECDSA P-256 public key (DER SubjectPublicKeyInfo, Base64).
+    // Private key stored in macOS Keychain / secure vault.
+    private const string UpdatePublicKeyDer =
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJJO30pUIre7wuMN5I1FQmlEDpTIM0dmhPjaGtlG7gm+47G7lKHuJV4lQ3eWhZNqe1eviOZkt+9VnWnQUSJGvsg==";
 
     public static async Task<bool> TryApplyUpdateAsync(
         string downloadUrl, string expectedSha256, string version, string? signature,
@@ -49,7 +49,7 @@ public static class SelfUpdater
                 return false;
             }
 
-            // 0b. Verify Ed25519 signature of the update manifest
+            // 0b. Verify ECDSA P-256 signature of the update manifest
             if (!VerifyManifestSignature(downloadUrl, expectedSha256, version, signature, logger))
                 return false;
 
@@ -78,9 +78,9 @@ public static class SelfUpdater
             File.Move(newExe, currentExe);
             logger.LogInformation("Binary swapped: v{Version} is now in place", version);
 
-            // 4. Exit — service manager restarts us with the new binary
+            // 4. Exit with non-zero code — SCM only auto-restarts on failure
             logger.LogInformation("Exiting for restart with new binary...");
-            Environment.Exit(0);
+            Environment.Exit(1);
             return true;
         }
         catch (Exception ex)
@@ -94,7 +94,8 @@ public static class SelfUpdater
     }
 
     /// <summary>
-    /// Verifies Ed25519 signature over the manifest: "{url}\n{sha256}\n{version}".
+    /// Verifies ECDSA P-256 signature over the manifest.
+    /// Manifest format: "{url}|{sha256}|{version}" (pipe-delimited, no newlines).
     /// Signature is hex-encoded in the heartbeat response.
     /// </summary>
     private static bool VerifyManifestSignature(
@@ -106,20 +107,23 @@ public static class SelfUpdater
             return false;
         }
 
+        // Reject fields containing pipe or control characters (prevents injection)
+        if (ContainsControlChars(url) || ContainsControlChars(sha256) || ContainsControlChars(version))
+        {
+            logger.LogWarning("Manifest fields contain control characters — rejecting");
+            return false;
+        }
+
         try
         {
-            var publicKeyBytes = Convert.FromBase64String(UpdatePublicKeyPem);
-            using var ed = ECDsa.Create();
-            ed.ImportSubjectPublicKeyInfo(publicKeyBytes, out _);
+            using var ecdsa = ECDsa.Create();
+            ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(UpdatePublicKeyDer), out _);
 
-            var manifest = $"{url}\n{sha256}\n{version}";
+            var manifest = $"{url}|{sha256}|{version}";
             var manifestBytes = Encoding.UTF8.GetBytes(manifest);
             var signatureBytes = Convert.FromHexString(signatureHex);
 
-            // Ed25519 keys imported via SubjectPublicKeyInfo use ECDSA verify path
-            // For pure Ed25519, .NET 8 doesn't have a dedicated Ed25519 class in ECDsa.
-            // We use the EdDSA path via the imported key.
-            var valid = ed.VerifyData(manifestBytes, signatureBytes, HashAlgorithmName.SHA512);
+            var valid = ecdsa.VerifyData(manifestBytes, signatureBytes, HashAlgorithmName.SHA256);
 
             if (!valid)
             {
@@ -127,7 +131,7 @@ public static class SelfUpdater
                 return false;
             }
 
-            logger.LogInformation("Update manifest signature verified (Ed25519)");
+            logger.LogInformation("Update manifest signature verified (ECDSA P-256)");
             return true;
         }
         catch (Exception ex)
@@ -136,6 +140,9 @@ public static class SelfUpdater
             return false;
         }
     }
+
+    private static bool ContainsControlChars(string s) =>
+        s.AsSpan().IndexOfAny('\n', '\r', '|') >= 0;
 
     public static void CleanupOldBinary(ILogger logger)
     {
