@@ -57,6 +57,10 @@ public sealed class AgentStateDb : IDisposable
                 status TEXT DEFAULT 'pending',
                 expires_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS command_nonces (
+                nonce TEXT PRIMARY KEY,
+                received_at TEXT NOT NULL
+            );
             """;
         cmd.ExecuteNonQuery();
 
@@ -379,6 +383,28 @@ public sealed class AgentStateDb : IDisposable
             }
         }
         File.Delete(path);
+    }
+
+    public bool TryRecordNonce(string nonce)
+    {
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO command_nonces (nonce, received_at) VALUES (@nonce, @now)";
+            cmd.Parameters.AddWithValue("@nonce", nonce);
+            cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+            cmd.ExecuteNonQuery();
+            return true;
+        }
+        catch { return false; }
+    }
+
+    public void PruneOldNonces(TimeSpan maxAge)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM command_nonces WHERE received_at < @cutoff";
+        cmd.Parameters.AddWithValue("@cutoff", DateTimeOffset.UtcNow.Subtract(maxAge).ToString("o"));
+        cmd.ExecuteNonQuery();
     }
 
     public void Dispose()
