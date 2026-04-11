@@ -166,6 +166,47 @@ WHERE rt.RxTransactionStatusTypeID IN ({statusParams})
 ORDER BY rt.DateFilled DESC";
     }
 
+    /// <summary>
+    /// Discovers table schemas for Prescription.Rx and related tables.
+    /// Runs once on connect — used to find medication/drug name columns.
+    /// </summary>
+    public async Task<Dictionary<string, List<string>>> DiscoverSchemaAsync(CancellationToken ct)
+    {
+        var result = new Dictionary<string, List<string>>();
+        if (_connection is null) return result;
+
+        try
+        {
+            const string query = @"
+SELECT TABLE_SCHEMA + '.' + TABLE_NAME AS full_name, COLUMN_NAME
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE (TABLE_SCHEMA = 'Prescription' AND TABLE_NAME IN ('Rx', 'RxTransaction'))
+   OR (TABLE_NAME LIKE '%Medication%' OR TABLE_NAME LIKE '%Drug%' OR TABLE_NAME LIKE '%Item%')
+ORDER BY full_name, ORDINAL_POSITION";
+
+            await using var cmd = new SqlCommand(query, _connection);
+            cmd.CommandTimeout = 10;
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+
+            while (await reader.ReadAsync(ct))
+            {
+                var table = reader.GetString(0);
+                var column = reader.GetString(1);
+                if (!result.ContainsKey(table))
+                    result[table] = new List<string>();
+                result[table].Add(column);
+            }
+
+            _logger.LogInformation("Schema discovery: found {TableCount} tables", result.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Schema discovery failed");
+        }
+
+        return result;
+    }
+
     public static bool IsPhiColumn(string columnName) =>
         PioneerRxConstants.PhiColumnBlocklist.Contains(columnName);
 

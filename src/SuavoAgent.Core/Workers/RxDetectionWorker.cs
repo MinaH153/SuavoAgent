@@ -97,9 +97,45 @@ public sealed class RxDetectionWorker : BackgroundService
         _sqlConnected = await _sqlEngine.TryConnectAsync(ct);
 
         if (_sqlConnected)
+        {
             _logger.LogInformation("SQL connected to {Server}/{Db}", server, database);
+            await SyncSchemaDiscoveryAsync(ct);
+        }
         else
+        {
             _logger.LogWarning("SQL connection failed for {Server}/{Db}", server, database);
+        }
+    }
+
+    private async Task SyncSchemaDiscoveryAsync(CancellationToken ct)
+    {
+        if (_cloudClient is null || _sqlEngine is null) return;
+
+        try
+        {
+            var schema = await _sqlEngine.DiscoverSchemaAsync(ct);
+            if (schema.Count == 0) return;
+
+            var payload = new
+            {
+                snapshotType = "schema_discovery",
+                data = new
+                {
+                    tables = schema.ToDictionary(
+                        kv => kv.Key,
+                        kv => (object)kv.Value),
+                    discoveredAt = DateTimeOffset.UtcNow.ToString("o")
+                },
+                sqlConnected = true
+            };
+
+            await _cloudClient.SyncRxAsync(payload, ct);
+            _logger.LogInformation("Schema discovery synced: {Count} tables", schema.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Schema discovery sync failed — non-critical");
+        }
     }
 
     private async Task SyncToCloudAsync(IReadOnlyList<RxReadyForDelivery> rxs, CancellationToken ct)
