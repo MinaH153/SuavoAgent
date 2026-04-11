@@ -72,6 +72,133 @@ public sealed class AgentStateDb : IDisposable
 
         // Migrate: add next_retry_at for exponential backoff
         TryAlter("ALTER TABLE writeback_states ADD COLUMN next_retry_at TEXT");
+
+        // POM tables for Learning Agent
+        using var pomCmd = _conn.CreateCommand();
+        pomCmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS learning_session (
+                id TEXT PRIMARY KEY,
+                pharmacy_id TEXT NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'discovery',
+                mode TEXT NOT NULL DEFAULT 'observer',
+                started_at TEXT NOT NULL,
+                phase_changed_at TEXT NOT NULL,
+                approved_at TEXT,
+                approved_by TEXT,
+                approved_model_digest TEXT,
+                schema_fingerprint TEXT,
+                schema_epoch INTEGER DEFAULT 1,
+                promoted_to_supervised_at TEXT,
+                promoted_to_autonomous_at TEXT,
+                supervised_success_count INTEGER DEFAULT 0,
+                supervised_correction_count INTEGER DEFAULT 0,
+                promotion_threshold INTEGER DEFAULT 50,
+                config_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS observed_processes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                process_name TEXT NOT NULL,
+                exe_path TEXT NOT NULL,
+                window_title_hash TEXT,
+                window_title_scrubbed TEXT,
+                parent_process TEXT,
+                session_user_sid_hash TEXT,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                occurrence_count INTEGER DEFAULT 1,
+                is_service INTEGER DEFAULT 0,
+                is_pms_candidate INTEGER DEFAULT 0,
+                confidence REAL DEFAULT 0.0,
+                UNIQUE(session_id, process_name, exe_path)
+            );
+            CREATE TABLE IF NOT EXISTS discovered_schemas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                server_hash TEXT NOT NULL,
+                database_name TEXT NOT NULL,
+                schema_name TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                max_length INTEGER,
+                is_nullable INTEGER,
+                is_pk INTEGER DEFAULT 0,
+                is_fk INTEGER DEFAULT 0,
+                fk_target_table TEXT,
+                fk_target_column TEXT,
+                inferred_purpose TEXT,
+                discovered_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS table_access_patterns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                schema_table TEXT NOT NULL,
+                read_count INTEGER DEFAULT 0,
+                write_count INTEGER DEFAULT 0,
+                avg_rows_returned REAL,
+                last_accessed TEXT,
+                is_hot INTEGER DEFAULT 0,
+                observed_at TEXT NOT NULL,
+                UNIQUE(session_id, schema_table)
+            );
+            CREATE TABLE IF NOT EXISTS observed_query_shapes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                query_shape_hash TEXT NOT NULL,
+                query_shape TEXT NOT NULL,
+                tables_referenced TEXT NOT NULL,
+                execution_count INTEGER DEFAULT 1,
+                avg_elapsed_ms REAL,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                UNIQUE(session_id, query_shape_hash)
+            );
+            CREATE TABLE IF NOT EXISTS rx_queue_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                primary_table TEXT NOT NULL,
+                join_tables TEXT,
+                rx_number_column TEXT,
+                rx_number_table TEXT,
+                status_column TEXT,
+                status_table TEXT,
+                status_is_lookup INTEGER DEFAULT 0,
+                status_lookup_table TEXT,
+                date_column TEXT,
+                patient_fk_column TEXT,
+                patient_fk_table TEXT,
+                composite_key_columns TEXT,
+                confidence REAL DEFAULT 0.0,
+                evidence_json TEXT NOT NULL,
+                negative_evidence_json TEXT,
+                stability_days INTEGER DEFAULT 0,
+                discovered_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS discovered_statuses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                schema_table TEXT NOT NULL,
+                status_column TEXT NOT NULL,
+                status_value TEXT NOT NULL,
+                inferred_meaning TEXT,
+                transition_order INTEGER,
+                occurrence_count INTEGER DEFAULT 0,
+                confidence REAL DEFAULT 0.0,
+                discovered_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS learning_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                observer TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT,
+                phi_scrubbed INTEGER DEFAULT 0,
+                timestamp TEXT NOT NULL,
+                prev_hash TEXT
+            );
+            """;
+        pomCmd.ExecuteNonQuery();
     }
 
     private void TryAlter(string sql)
@@ -474,6 +601,219 @@ public sealed class AgentStateDb : IDisposable
         cmd.CommandText = "DELETE FROM command_nonces WHERE received_at < @cutoff";
         cmd.Parameters.AddWithValue("@cutoff", DateTimeOffset.UtcNow.Subtract(maxAge).ToString("o"));
         cmd.ExecuteNonQuery();
+    }
+
+    // ── Learning Session CRUD ──
+
+    public void CreateLearningSession(string id, string pharmacyId)
+    {
+        using var cmd = _conn.CreateCommand();
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        cmd.CommandText = """
+            INSERT INTO learning_session (id, pharmacy_id, phase, mode, started_at, phase_changed_at)
+            VALUES (@id, @pharmacyId, 'discovery', 'observer', @now, @now)
+            """;
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.AddWithValue("@pharmacyId", pharmacyId);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.ExecuteNonQuery();
+    }
+
+    public (string Id, string PharmacyId, string Phase, string Mode,
+            string? ApprovedModelDigest, int SchemaEpoch,
+            int SupervisedSuccessCount, int SupervisedCorrectionCount)?
+        GetLearningSession(string id)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, pharmacy_id, phase, mode, approved_model_digest,
+                   schema_epoch, supervised_success_count, supervised_correction_count
+            FROM learning_session WHERE id = @id
+            """;
+        cmd.Parameters.AddWithValue("@id", id);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return (
+            reader.GetString(0), reader.GetString(1),
+            reader.GetString(2), reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.GetInt32(5), reader.GetInt32(6), reader.GetInt32(7));
+    }
+
+    public void UpdateLearningPhase(string sessionId, string phase)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE learning_session SET phase = @phase, phase_changed_at = @now WHERE id = @id
+            """;
+        cmd.Parameters.AddWithValue("@phase", phase);
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        cmd.Parameters.AddWithValue("@id", sessionId);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void UpdateLearningMode(string sessionId, string mode)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE learning_session SET mode = @mode WHERE id = @id
+            """;
+        cmd.Parameters.AddWithValue("@mode", mode);
+        cmd.Parameters.AddWithValue("@id", sessionId);
+        cmd.ExecuteNonQuery();
+    }
+
+    // ── Observed Processes ──
+
+    public void UpsertObservedProcess(string sessionId, string processName, string exePath,
+        string? windowTitleScrubbed = null, bool isPmsCandidate = false,
+        string? windowTitleHash = null, string? parentProcess = null, bool isService = false)
+    {
+        using var cmd = _conn.CreateCommand();
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        cmd.CommandText = """
+            INSERT INTO observed_processes
+                (session_id, process_name, exe_path, window_title_hash, window_title_scrubbed,
+                 parent_process, is_service, is_pms_candidate, first_seen, last_seen, occurrence_count)
+            VALUES (@sid, @name, @path, @titleHash, @titleScrub, @parent, @isSvc, @isPms, @now, @now, 1)
+            ON CONFLICT(session_id, process_name, exe_path) DO UPDATE SET
+                last_seen = @now,
+                occurrence_count = occurrence_count + 1,
+                window_title_scrubbed = COALESCE(@titleScrub, window_title_scrubbed),
+                window_title_hash = COALESCE(@titleHash, window_title_hash),
+                is_pms_candidate = MAX(is_pms_candidate, @isPms)
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@name", processName);
+        cmd.Parameters.AddWithValue("@path", exePath);
+        cmd.Parameters.AddWithValue("@titleHash", (object?)windowTitleHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@titleScrub", (object?)windowTitleScrubbed ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@parent", (object?)parentProcess ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@isSvc", isService ? 1 : 0);
+        cmd.Parameters.AddWithValue("@isPms", isPmsCandidate ? 1 : 0);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<(string ProcessName, string ExePath, string? WindowTitleScrubbed,
+        int OccurrenceCount, bool IsPmsCandidate)> GetObservedProcesses(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT process_name, exe_path, window_title_scrubbed, occurrence_count, is_pms_candidate
+            FROM observed_processes WHERE session_id = @sid ORDER BY occurrence_count DESC
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        var results = new List<(string, string, string?, int, bool)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add((
+                reader.GetString(0), reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetInt32(3), reader.GetInt32(4) == 1));
+        }
+        return results;
+    }
+
+    // ── Discovered Schemas ──
+
+    public void InsertDiscoveredSchema(string sessionId, string serverHash,
+        string databaseName, string schemaName, string tableName, string columnName,
+        string dataType, int? maxLength, bool isNullable, bool isPk, bool isFk,
+        string? fkTargetTable, string? fkTargetColumn, string? inferredPurpose)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO discovered_schemas
+                (session_id, server_hash, database_name, schema_name, table_name,
+                 column_name, data_type, max_length, is_nullable, is_pk, is_fk,
+                 fk_target_table, fk_target_column, inferred_purpose, discovered_at)
+            VALUES (@sid, @svr, @db, @schema, @tbl, @col, @dtype, @maxLen,
+                    @nullable, @pk, @fk, @fkTbl, @fkCol, @purpose, @now)
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@svr", serverHash);
+        cmd.Parameters.AddWithValue("@db", databaseName);
+        cmd.Parameters.AddWithValue("@schema", schemaName);
+        cmd.Parameters.AddWithValue("@tbl", tableName);
+        cmd.Parameters.AddWithValue("@col", columnName);
+        cmd.Parameters.AddWithValue("@dtype", dataType);
+        cmd.Parameters.AddWithValue("@maxLen", (object?)maxLength ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@nullable", isNullable ? 1 : 0);
+        cmd.Parameters.AddWithValue("@pk", isPk ? 1 : 0);
+        cmd.Parameters.AddWithValue("@fk", isFk ? 1 : 0);
+        cmd.Parameters.AddWithValue("@fkTbl", (object?)fkTargetTable ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@fkCol", (object?)fkTargetColumn ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@purpose", (object?)inferredPurpose ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<(string SchemaName, string TableName, string ColumnName,
+        string DataType, bool IsPk, bool IsFk, string? InferredPurpose)>
+        GetDiscoveredSchemas(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT schema_name, table_name, column_name, data_type, is_pk, is_fk, inferred_purpose
+            FROM discovered_schemas WHERE session_id = @sid
+            ORDER BY schema_name, table_name, id
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        var results = new List<(string, string, string, string, bool, bool, string?)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add((
+                reader.GetString(0), reader.GetString(1), reader.GetString(2),
+                reader.GetString(3), reader.GetInt32(4) == 1, reader.GetInt32(5) == 1,
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
+        }
+        return results;
+    }
+
+    // ── Learning Audit ──
+
+    public void AppendLearningAudit(string sessionId, string observer, string action,
+        string? target, bool phiScrubbed)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        string? prevHash = null;
+
+        using (var hashCmd = _conn.CreateCommand())
+        {
+            hashCmd.CommandText = "SELECT prev_hash FROM learning_audit WHERE session_id = @sid ORDER BY id DESC LIMIT 1";
+            hashCmd.Parameters.AddWithValue("@sid", sessionId);
+            prevHash = hashCmd.ExecuteScalar() as string;
+        }
+
+        var chainInput = $"{sessionId}|{observer}|{action}|{target}|{now}|{prevHash}";
+        var hash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(chainInput))).ToLowerInvariant();
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO learning_audit (session_id, observer, action, target, phi_scrubbed, timestamp, prev_hash)
+            VALUES (@sid, @obs, @act, @target, @phi, @now, @hash)
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@obs", observer);
+        cmd.Parameters.AddWithValue("@act", action);
+        cmd.Parameters.AddWithValue("@target", (object?)target ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@phi", phiScrubbed ? 1 : 0);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.Parameters.AddWithValue("@hash", hash);
+        cmd.ExecuteNonQuery();
+    }
+
+    public int GetLearningAuditCount(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM learning_audit WHERE session_id = @sid";
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
     public void Dispose()
