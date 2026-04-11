@@ -18,7 +18,8 @@ public static class SelfUpdater
 {
     // ECDSA P-256 public key (DER SubjectPublicKeyInfo, Base64).
     // Private key stored in macOS Keychain / secure vault.
-    private const string UpdatePublicKeyDer =
+    // Internal so HeartbeatWorker can reuse for signed command verification.
+    internal const string UpdatePublicKeyDer =
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJJO30pUIre7wuMN5I1FQmlEDpTIM0dmhPjaGtlG7gm+47G7lKHuJV4lQ3eWhZNqe1eviOZkt+9VnWnQUSJGvsg==";
 
     private static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)

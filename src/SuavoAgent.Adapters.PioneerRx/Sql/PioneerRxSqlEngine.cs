@@ -331,6 +331,31 @@ ORDER BY rt.DateFilled DESC";
             """;
     }
 
+    public async Task<RxPatientDetails?> PullPatientForRxAsync(string rxNumber, CancellationToken ct)
+    {
+        if (_connection is null || _connection.State != System.Data.ConnectionState.Open)
+            return null;
+
+        await using var cmd = new SqlCommand(BuildPatientQuery(), _connection);
+        cmd.CommandTimeout = 15;
+        cmd.Parameters.AddWithValue("@rxNumber", rxNumber);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+
+        return new RxPatientDetails(
+            RxNumber: rxNumber,
+            FirstName: GetStringOrDefault(reader, "FirstName"),
+            LastInitial: GetStringOrDefault(reader, "LastInitial"),
+            Phone: GetStringOrDefault(reader, "Phone"),
+            Address1: GetStringOrDefault(reader, "Address1"),
+            Address2: GetStringOrDefault(reader, "Address2"),
+            City: GetStringOrDefault(reader, "City"),
+            State: GetStringOrDefault(reader, "State"),
+            Zip: GetStringOrDefault(reader, "Zip"));
+    }
+
     /// <summary>
     /// Discovers table schemas for Prescription.Rx and related tables.
     /// Runs once on connect — used to find medication/drug name columns.

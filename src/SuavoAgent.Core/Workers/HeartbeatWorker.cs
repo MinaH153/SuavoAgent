@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
 
@@ -13,18 +14,34 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly AgentOptions _options;
     private readonly SuavoCloudClient? _cloudClient;
     private readonly IServiceProvider _serviceProvider;
+    private readonly AgentStateDb _stateDb;
+    private readonly SignedCommandVerifier? _commandVerifier;
     private int _consecutiveFailures;
     private bool _updateInProgress;
 
     public HeartbeatWorker(
         ILogger<HeartbeatWorker> logger,
         IOptions<AgentOptions> options,
-        IServiceProvider serviceProvider)
+        IServiceProvider serviceProvider,
+        AgentStateDb stateDb)
     {
         _logger = logger;
         _options = options.Value;
         _serviceProvider = serviceProvider;
+        _stateDb = stateDb;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
+
+        // Initialize signed command verifier with the update signing key.
+        // In production, command signing would use a dedicated key — sharing
+        // the update key is a placeholder until key rotation is implemented.
+        var agentId = _options.AgentId ?? "";
+        var fingerprint = _options.MachineFingerprint ?? "";
+        if (!string.IsNullOrEmpty(agentId))
+        {
+            _commandVerifier = new SignedCommandVerifier(
+                new Dictionary<string, string> { ["suavo-cmd-v1"] = SelfUpdater.UpdatePublicKeyDer },
+                agentId, fingerprint);
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -73,6 +90,10 @@ public sealed class HeartbeatWorker : BackgroundService
                 // Check for pending self-update
                 if (response.HasValue && !_updateInProgress)
                     await CheckForUpdateAsync(response.Value, stoppingToken);
+
+                // Process signed commands (fetch_patient, etc.)
+                if (response.HasValue)
+                    await ProcessSignedCommandAsync(response.Value, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -97,6 +118,103 @@ public sealed class HeartbeatWorker : BackgroundService
         }
 
         _logger.LogInformation("Heartbeat worker stopped");
+    }
+
+    private async Task ProcessSignedCommandAsync(JsonElement response, CancellationToken ct)
+    {
+        try
+        {
+            if (!response.TryGetProperty("data", out var data)) return;
+            if (!data.TryGetProperty("signedCommand", out var scEl)) return;
+            if (scEl.ValueKind == JsonValueKind.Null) return;
+
+            if (_commandVerifier is null)
+            {
+                _logger.LogWarning("Signed command received but verifier not configured (no AgentId)");
+                return;
+            }
+
+            var cmd = new SignedCommand(
+                Command: scEl.TryGetProperty("command", out var c) ? c.GetString() ?? "" : "",
+                AgentId: scEl.TryGetProperty("agentId", out var a) ? a.GetString() ?? "" : "",
+                MachineFingerprint: scEl.TryGetProperty("machineFingerprint", out var m) ? m.GetString() ?? "" : "",
+                Timestamp: scEl.TryGetProperty("timestamp", out var t) ? t.GetString() ?? "" : "",
+                Nonce: scEl.TryGetProperty("nonce", out var n) ? n.GetString() ?? "" : "",
+                KeyId: scEl.TryGetProperty("keyId", out var k) ? k.GetString() ?? "" : "",
+                Signature: scEl.TryGetProperty("signature", out var s) ? s.GetString() ?? "" : "");
+
+            // Persistent nonce check (survives restarts)
+            if (!_stateDb.TryRecordNonce(cmd.Nonce))
+            {
+                _logger.LogWarning("Command nonce already used: {Nonce}", cmd.Nonce);
+                return;
+            }
+
+            var result = _commandVerifier.Verify(cmd);
+            if (!result.IsValid)
+            {
+                _logger.LogWarning("Signed command rejected: {Reason}", result.Reason);
+                return;
+            }
+
+            _logger.LogInformation("Verified signed command: {Command} nonce:{Nonce}", cmd.Command, cmd.Nonce);
+
+            if (cmd.Command == "fetch_patient")
+                await HandleFetchPatientAsync(scEl, cmd, ct);
+            else
+                _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Signed command processing failed");
+        }
+    }
+
+    private async Task HandleFetchPatientAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var rxNumber = scEl.TryGetProperty("rxNumber", out var rx) ? rx.GetString() ?? "" : "";
+        var requesterId = scEl.TryGetProperty("requesterId", out var ri) ? ri.GetString() ?? "" : "";
+
+        if (string.IsNullOrEmpty(rxNumber))
+        {
+            _logger.LogWarning("fetch_patient missing rxNumber");
+            return;
+        }
+
+        // Audit PHI access before touching any patient data
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: rxNumber,
+            EventType: "phi_access",
+            FromState: "",
+            ToState: "",
+            Trigger: "fetch_patient",
+            CommandId: cmd.Nonce,
+            RequesterId: requesterId,
+            RxNumber: rxNumber));
+
+        // Get SQL engine from RxDetectionWorker
+        var rxWorker = _serviceProvider.GetService<RxDetectionWorker>();
+        var sqlEngine = rxWorker?.SqlEngine;
+
+        if (sqlEngine is null || !rxWorker!.IsSqlConnected)
+        {
+            _logger.LogWarning("fetch_patient: SQL not connected — cannot query patient for Rx {Rx}", rxNumber);
+            return;
+        }
+
+        var details = await sqlEngine.PullPatientForRxAsync(rxNumber, ct);
+
+        if (details is null)
+        {
+            _logger.LogInformation("fetch_patient: no patient found for Rx {Rx}", rxNumber);
+            return;
+        }
+
+        if (_cloudClient is not null)
+        {
+            await _cloudClient.SendPatientDetailsAsync(rxNumber, details, cmd.Nonce, ct);
+            _logger.LogInformation("fetch_patient: sent patient details for Rx {Rx}", rxNumber);
+        }
     }
 
     /// <summary>

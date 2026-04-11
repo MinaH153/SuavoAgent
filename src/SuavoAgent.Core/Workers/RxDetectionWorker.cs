@@ -23,6 +23,7 @@ public sealed class RxDetectionWorker : BackgroundService
     public int LastDetectedCount { get; private set; }
     public DateTimeOffset? LastDetectionTime { get; private set; }
     public bool IsSqlConnected => _sqlConnected;
+    public PioneerRxSqlEngine? SqlEngine => _sqlEngine;
 
     public RxDetectionWorker(
         ILogger<RxDetectionWorker> logger,

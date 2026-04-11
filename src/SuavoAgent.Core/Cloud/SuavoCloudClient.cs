@@ -31,6 +31,11 @@ public sealed class SuavoCloudClient : IDisposable
         return await PostSignedAsync("/api/agent/sync", payload, ct);
     }
 
+    public async Task SendPatientDetailsAsync(string rxNumber, object details, string commandId, CancellationToken ct)
+    {
+        await PostSignedAsync("/api/agent/patient-details", new { rxNumber, details, commandId }, ct);
+    }
+
     private async Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct)
     {
         var body = JsonSerializer.Serialize(payload);
