@@ -873,6 +873,54 @@ public sealed class AgentStateDb : IDisposable
         return results;
     }
 
+    // ── Discovered Statuses ──
+
+    public void InsertDiscoveredStatus(string sessionId, string schemaTable,
+        string statusColumn, string statusValue, string? inferredMeaning,
+        int transitionOrder, int occurrenceCount, double confidence)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO discovered_statuses
+                (session_id, schema_table, status_column, status_value,
+                 inferred_meaning, transition_order, occurrence_count, confidence, discovered_at)
+            VALUES (@sid, @tbl, @col, @val, @meaning, @order, @count, @conf, @now)
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@tbl", schemaTable);
+        cmd.Parameters.AddWithValue("@col", statusColumn);
+        cmd.Parameters.AddWithValue("@val", statusValue);
+        cmd.Parameters.AddWithValue("@meaning", (object?)inferredMeaning ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@order", transitionOrder);
+        cmd.Parameters.AddWithValue("@count", occurrenceCount);
+        cmd.Parameters.AddWithValue("@conf", confidence);
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<(string StatusValue, string? InferredMeaning, int TransitionOrder, double Confidence)>
+        GetDiscoveredStatuses(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT status_value, inferred_meaning, transition_order, confidence
+            FROM discovered_statuses WHERE session_id = @sid
+            ORDER BY transition_order
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        var results = new List<(string, string?, int, double)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add((
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.GetInt32(2),
+                reader.GetDouble(3)));
+        }
+        return results;
+    }
+
     public void Dispose()
     {
         _conn.Dispose();
