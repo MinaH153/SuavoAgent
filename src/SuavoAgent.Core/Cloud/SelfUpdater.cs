@@ -27,6 +27,17 @@ public static class SelfUpdater
 
         try
         {
+            // 0. Validate URL — only HTTPS from trusted domains
+            if (!Uri.TryCreate(downloadUrl, UriKind.Absolute, out var uri)
+                || uri.Scheme != Uri.UriSchemeHttps
+                || (!uri.Host.EndsWith("github.com", StringComparison.OrdinalIgnoreCase)
+                    && !uri.Host.EndsWith("suavollc.com", StringComparison.OrdinalIgnoreCase)
+                    && !uri.Host.EndsWith("githubusercontent.com", StringComparison.OrdinalIgnoreCase)))
+            {
+                logger.LogWarning("Untrusted update URL rejected: {Url}", downloadUrl);
+                return false;
+            }
+
             // 1. Download
             logger.LogInformation("Downloading update v{Version} from {Url}", version, downloadUrl);
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
@@ -59,7 +70,10 @@ public static class SelfUpdater
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Self-update failed — continuing with current binary");
+            logger.LogWarning(ex, "Self-update failed — attempting rollback");
+            // Restore original binary if swap was partial
+            if (!File.Exists(currentExe) && File.Exists(oldExe))
+                try { File.Move(oldExe, currentExe); logger.LogInformation("Rolled back to previous binary"); } catch { }
             try { if (File.Exists(newExe)) File.Delete(newExe); } catch { }
             return false;
         }

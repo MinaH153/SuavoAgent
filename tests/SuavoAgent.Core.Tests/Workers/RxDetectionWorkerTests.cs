@@ -16,7 +16,9 @@ public class RxDetectionWorkerTests
         var sp = services.BuildServiceProvider();
         var options = Options.Create(new AgentOptions());
         var worker = new RxDetectionWorker(
-            NullLogger<RxDetectionWorker>.Instance, options, sp);
+            NullLogger<RxDetectionWorker>.Instance,
+            NullLoggerFactory.Instance,
+            options, sp);
 
         Assert.False(worker.IsSqlConnected);
         Assert.Equal(0, worker.LastDetectedCount);

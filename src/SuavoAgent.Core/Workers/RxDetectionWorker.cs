@@ -10,6 +10,7 @@ namespace SuavoAgent.Core.Workers;
 public sealed class RxDetectionWorker : BackgroundService
 {
     private readonly ILogger<RxDetectionWorker> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly AgentOptions _options;
     private readonly SuavoCloudClient? _cloudClient;
     private PioneerRxSqlEngine? _sqlEngine;
@@ -22,10 +23,12 @@ public sealed class RxDetectionWorker : BackgroundService
 
     public RxDetectionWorker(
         ILogger<RxDetectionWorker> logger,
+        ILoggerFactory loggerFactory,
         IOptions<AgentOptions> options,
         IServiceProvider serviceProvider)
     {
         _logger = logger;
+        _loggerFactory = loggerFactory;
         _options = options.Value;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
     }
@@ -90,8 +93,7 @@ public sealed class RxDetectionWorker : BackgroundService
         _sqlEngine?.Dispose();
         _sqlEngine = new PioneerRxSqlEngine(
             server, database,
-            Microsoft.Extensions.Logging.LoggerFactory.Create(b => b.AddConsole())
-                .CreateLogger<PioneerRxSqlEngine>(),
+            _loggerFactory.CreateLogger<PioneerRxSqlEngine>(),
             _options.SqlUser, _options.SqlPassword);
 
         _sqlConnected = await _sqlEngine.TryConnectAsync(ct);
