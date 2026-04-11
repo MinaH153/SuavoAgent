@@ -62,6 +62,16 @@ public class PioneerRxSqlEngineTests
     }
 
     [Fact]
+    public void BuildDeliveryQuery_JoinsItemTableForDrugName()
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
+        Assert.Contains("Inventory.Item i", query);
+        Assert.Contains("rt.DispensedItemID = i.ItemID", query);
+        Assert.Contains("i.ItemName", query);
+        Assert.Contains("i.NDC", query);
+    }
+
+    [Fact]
     public void BuildDeliveryQuery_OrdersByDateFilledDesc()
     {
         var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);

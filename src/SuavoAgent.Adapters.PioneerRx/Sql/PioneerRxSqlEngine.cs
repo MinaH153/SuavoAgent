@@ -117,14 +117,38 @@ WHERE Description IN ({statusParams})";
         return FallbackGuids();
     }
 
+    private bool _itemJoinFailed;
+
     public async Task<IReadOnlyList<RxReadyForDelivery>> ReadReadyPrescriptionsAsync(CancellationToken ct)
     {
         if (_connection is null || _connection.State != System.Data.ConnectionState.Open)
             return Array.Empty<RxReadyForDelivery>();
 
         var statusGuids = _deliveryReadyGuids ?? FallbackGuids();
-        var query = BuildDeliveryQuery(statusGuids.Count);
 
+        // Try with Item join for drug names. If Inventory.Item doesn't exist,
+        // fall back to the base query without drug names.
+        if (!_itemJoinFailed)
+        {
+            try
+            {
+                return await ExecuteDeliveryQueryAsync(
+                    BuildDeliveryQuery(statusGuids.Count), statusGuids, ct);
+            }
+            catch (SqlException ex) when (ex.Number == 208) // 208 = invalid object name
+            {
+                _logger.LogWarning("Inventory.Item table not found — falling back to query without drug names");
+                _itemJoinFailed = true;
+            }
+        }
+
+        return await ExecuteDeliveryQueryAsync(
+            BuildDeliveryQueryBase(statusGuids.Count), statusGuids, ct);
+    }
+
+    private async Task<IReadOnlyList<RxReadyForDelivery>> ExecuteDeliveryQueryAsync(
+        string query, IReadOnlyList<Guid> statusGuids, CancellationToken ct)
+    {
         await using var cmd = new SqlCommand(query, _connection);
         cmd.CommandTimeout = 30;
         for (int i = 0; i < statusGuids.Count; i++)
@@ -147,6 +171,34 @@ WHERE Description IN ({statusParams})";
     /// No PHI columns (no Patient join).
     /// </summary>
     public static string BuildDeliveryQuery(int statusCount)
+    {
+        var statusParams = string.Join(", ",
+            Enumerable.Range(0, statusCount).Select(i => $"@status{i}"));
+
+        // Join Inventory.Item via DispensedItemID for drug name + NDC.
+        // LEFT JOIN — not all transactions have a dispensed item yet.
+        return $@"SELECT TOP 50
+    rt.RxTransactionID,
+    rt.DateFilled,
+    rt.RefillNumber,
+    rt.DispensedQuantity,
+    rt.DaysSupply,
+    rt.RxTransactionStatusTypeID,
+    rt.PromiseTime,
+    r.RxNumber,
+    i.ItemName,
+    i.NDC
+FROM Prescription.RxTransaction rt
+JOIN Prescription.Rx r ON rt.RxID = r.RxID
+LEFT JOIN Inventory.Item i ON rt.DispensedItemID = i.ItemID
+WHERE rt.RxTransactionStatusTypeID IN ({statusParams})
+ORDER BY rt.DateFilled DESC";
+    }
+
+    /// <summary>
+    /// Base query without Inventory.Item join — fallback when table doesn't exist.
+    /// </summary>
+    public static string BuildDeliveryQueryBase(int statusCount)
     {
         var statusParams = string.Join(", ",
             Enumerable.Range(0, statusCount).Select(i => $"@status{i}"));
@@ -215,8 +267,8 @@ ORDER BY full_name, ORDINAL_POSITION";
         return new RxReadyForDelivery(
             RxNumber: GetIntOrDefault(reader, "RxNumber").ToString(),
             FillNumber: GetIntOrDefault(reader, "RefillNumber"),
-            DrugName: "", // TODO: join Item/Drug table for medication name
-            Ndc: "",      // TODO: join Item/Drug table for NDC
+            DrugName: GetStringOrDefault(reader, "ItemName"),
+            Ndc: GetStringOrDefault(reader, "NDC"),
             Quantity: GetDecimalOrDefault(reader, "DispensedQuantity"),
             DaysSupply: GetIntOrDefault(reader, "DaysSupply"),
             StatusText: GetGuidOrDefault(reader, "RxTransactionStatusTypeID").ToString(),

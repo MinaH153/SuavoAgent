@@ -58,7 +58,8 @@ try
         }, logger);
     });
 
-    builder.Services.AddHostedService<RxDetectionWorker>();
+    builder.Services.AddSingleton<RxDetectionWorker>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<RxDetectionWorker>());
     builder.Services.AddHostedService<WritebackProcessor>();
 
     builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));

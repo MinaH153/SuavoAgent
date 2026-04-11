@@ -12,6 +12,7 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly ILogger<HeartbeatWorker> _logger;
     private readonly AgentOptions _options;
     private readonly SuavoCloudClient? _cloudClient;
+    private readonly IServiceProvider _serviceProvider;
     private int _consecutiveFailures;
     private bool _updateInProgress;
 
@@ -22,6 +23,7 @@ public sealed class HeartbeatWorker : BackgroundService
     {
         _logger = logger;
         _options = options.Value;
+        _serviceProvider = serviceProvider;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
     }
 
@@ -42,6 +44,11 @@ public sealed class HeartbeatWorker : BackgroundService
         {
             try
             {
+                // Read Rx detection state if available
+                var rxWorker = _serviceProvider.GetService<RxDetectionWorker>();
+                var sqlConnected = rxWorker?.IsSqlConnected ?? false;
+                var rxReadyCount = rxWorker?.LastDetectedCount ?? 0;
+
                 var payload = new
                 {
                     agentId = _options.AgentId,
@@ -49,7 +56,12 @@ public sealed class HeartbeatWorker : BackgroundService
                     pharmacyId = _options.PharmacyId,
                     memoryUsageMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
                     uptime = (long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds,
-                    status = "online"
+                    status = "online",
+                    sqlConnected,
+                    sqlServer = _options.SqlServer,
+                    sqlDatabase = _options.SqlDatabase,
+                    rxReadyCount,
+                    pioneerrxStatus = sqlConnected ? "connected" : "not_connected"
                 };
 
                 var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
