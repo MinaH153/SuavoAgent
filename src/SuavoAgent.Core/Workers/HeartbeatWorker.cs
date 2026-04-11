@@ -168,7 +168,7 @@ public sealed class HeartbeatWorker : BackgroundService
 
             if (string.IsNullOrEmpty(signature))
             {
-                _logger.LogWarning("Pending update has no Ed25519 signature — rejecting");
+                _logger.LogWarning("Pending update has no ECDSA P-256 signature — rejecting");
                 return;
             }
 
