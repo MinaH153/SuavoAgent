@@ -15,6 +15,7 @@ public sealed class RxDetectionWorker : BackgroundService
     private readonly SuavoCloudClient? _cloudClient;
     private PioneerRxSqlEngine? _sqlEngine;
     private bool _sqlConnected;
+    private IReadOnlyList<RxReadyForDelivery>? _unsyncedBatch;
 
     public int DetectionIntervalSeconds { get; set; } = 300;
     public int LastDetectedCount { get; private set; }
@@ -54,6 +55,14 @@ public sealed class RxDetectionWorker : BackgroundService
                     }
                 }
 
+                // Retry unsynced batch from previous cycle first
+                if (_unsyncedBatch is { Count: > 0 })
+                {
+                    _logger.LogInformation("Retrying {Count} unsynced prescriptions from previous cycle", _unsyncedBatch.Count);
+                    if (await TrySyncToCloudAsync(_unsyncedBatch, stoppingToken))
+                        _unsyncedBatch = null;
+                }
+
                 var readyRxs = await _sqlEngine!.ReadReadyPrescriptionsAsync(stoppingToken);
                 LastDetectedCount = readyRxs.Count;
                 LastDetectionTime = DateTimeOffset.UtcNow;
@@ -61,7 +70,8 @@ public sealed class RxDetectionWorker : BackgroundService
                 if (readyRxs.Count > 0)
                 {
                     _logger.LogInformation("Detected {Count} ready prescriptions", readyRxs.Count);
-                    await SyncToCloudAsync(readyRxs, stoppingToken);
+                    if (!await TrySyncToCloudAsync(readyRxs, stoppingToken))
+                        _unsyncedBatch = readyRxs; // persist for retry next cycle
                 }
                 else
                 {
@@ -140,9 +150,9 @@ public sealed class RxDetectionWorker : BackgroundService
         }
     }
 
-    private async Task SyncToCloudAsync(IReadOnlyList<RxReadyForDelivery> rxs, CancellationToken ct)
+    private async Task<bool> TrySyncToCloudAsync(IReadOnlyList<RxReadyForDelivery> rxs, CancellationToken ct)
     {
-        if (_cloudClient is null) return;
+        if (_cloudClient is null) return true; // no cloud = nothing to sync
 
         try
         {
@@ -181,10 +191,12 @@ public sealed class RxDetectionWorker : BackgroundService
 
             var result = await _cloudClient.SyncRxAsync(payload, ct);
             _logger.LogInformation("Synced {Count} prescriptions to cloud", rxs.Count);
+            return true;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Cloud sync failed for {Count} prescriptions", rxs.Count);
+            _logger.LogError(ex, "Cloud sync FAILED for {Count} prescriptions — will retry next cycle", rxs.Count);
+            return false;
         }
     }
 }

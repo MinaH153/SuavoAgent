@@ -37,12 +37,7 @@ public sealed class IpcPipeServer : IDisposable
             NamedPipeServerStream? pipe = null;
             try
             {
-                pipe = new NamedPipeServerStream(
-                    _pipeName,
-                    PipeDirection.InOut,
-                    1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
+                pipe = CreateSecurePipe(_pipeName);
 
                 _logger.LogDebug("Waiting for Helper connection on pipe {Name}...", _pipeName);
                 await pipe.WaitForConnectionAsync(ct);
@@ -120,5 +115,37 @@ public sealed class IpcPipeServer : IDisposable
     {
         _cts?.Cancel();
         _cts?.Dispose();
+    }
+
+    /// <summary>
+    /// Creates a named pipe with ACL restricted to SYSTEM + LocalService.
+    /// Prevents arbitrary local processes from connecting.
+    /// Falls back to default security on non-Windows platforms (build/test).
+    /// </summary>
+    private static NamedPipeServerStream CreateSecurePipe(string pipeName)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var security = new System.IO.Pipes.PipeSecurity();
+            security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
+                new System.Security.Principal.SecurityIdentifier(
+                    System.Security.Principal.WellKnownSidType.LocalSystemSid, null),
+                System.IO.Pipes.PipeAccessRights.FullControl,
+                System.Security.AccessControl.AccessControlType.Allow));
+            security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
+                new System.Security.Principal.SecurityIdentifier(
+                    System.Security.Principal.WellKnownSidType.LocalServiceSid, null),
+                System.IO.Pipes.PipeAccessRights.FullControl,
+                System.Security.AccessControl.AccessControlType.Allow));
+
+            return NamedPipeServerStreamAcl.Create(
+                pipeName, PipeDirection.InOut, 1,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
+                0, 0, security);
+        }
+
+        return new NamedPipeServerStream(
+            pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
     }
 }

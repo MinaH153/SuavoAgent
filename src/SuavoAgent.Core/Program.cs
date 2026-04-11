@@ -41,11 +41,44 @@ try
 
     builder.Services.AddSingleton<AgentStateDb>(sp =>
     {
-        var dbPath = Path.Combine(
+        var dataDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "SuavoAgent", "state.db");
-        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        return new AgentStateDb(dbPath); // TODO: Add SQLCipher encryption with DPAPI key for production
+            "SuavoAgent");
+        Directory.CreateDirectory(dataDir);
+        var dbPath = Path.Combine(dataDir, "state.db");
+
+        // DPAPI-protected encryption key. No-op with bundle_e_sqlite3,
+        // activates when swapped to bundle_e_sqlcipher (no code change needed).
+        string? dbPassword = null;
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var keyPath = Path.Combine(dataDir, "state.key");
+                if (File.Exists(keyPath))
+                {
+                    var enc = File.ReadAllBytes(keyPath);
+                    var dec = System.Security.Cryptography.ProtectedData.Unprotect(
+                        enc, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+                    dbPassword = Convert.ToBase64String(dec);
+                }
+                else
+                {
+                    var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+                    var enc = System.Security.Cryptography.ProtectedData.Protect(
+                        key, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+                    File.WriteAllBytes(keyPath, enc);
+                    dbPassword = Convert.ToBase64String(key);
+                    Log.Information("Generated DPAPI-protected database key");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "DPAPI key generation failed — state DB unencrypted");
+        }
+
+        return new AgentStateDb(dbPath, dbPassword);
     });
 
     builder.Services.AddSingleton<IpcPipeServer>(sp =>
