@@ -46,6 +46,14 @@ public sealed class AgentStateDb : IDisposable
                 timestamp TEXT NOT NULL,
                 prev_hash TEXT
             );
+            CREATE TABLE IF NOT EXISTS unsynced_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                expires_at TEXT NOT NULL
+            );
             """;
         cmd.ExecuteNonQuery();
     }
@@ -114,6 +122,82 @@ public sealed class AgentStateDb : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM audit_entries";
         return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    public void InsertUnsyncedBatch(string payload)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO unsynced_batches (payload, created_at, retry_count, status, expires_at)
+            VALUES (@payload, @now, 0, 'pending', @expires)
+            """;
+        var now = DateTimeOffset.UtcNow;
+        cmd.Parameters.AddWithValue("@payload", payload);
+        cmd.Parameters.AddWithValue("@now", now.ToString("o"));
+        cmd.Parameters.AddWithValue("@expires", now.AddDays(30).ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<(long Id, string Payload, int RetryCount, string Status)> GetPendingBatches()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, payload, retry_count, status FROM unsynced_batches
+            WHERE status = 'pending' ORDER BY created_at ASC
+            """;
+        var results = new List<(long, string, int, string)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            results.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt32(2), reader.GetString(3)));
+        return results;
+    }
+
+    public void DeleteBatch(long id)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM unsynced_batches WHERE id = @id";
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void IncrementBatchRetry(long id)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE unsynced_batches
+            SET retry_count = retry_count + 1,
+                status = CASE WHEN retry_count + 1 >= 10 THEN 'dead_letter' ELSE 'pending' END
+            WHERE id = @id
+            """;
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    public int GetDeadLetterCount()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM unsynced_batches WHERE status = 'dead_letter'";
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    public void BackdateExpiresAt(long id, DateTimeOffset expires)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE unsynced_batches SET expires_at = @expires WHERE id = @id";
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.AddWithValue("@expires", expires.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public void PurgeExpiredDeadLetters()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            DELETE FROM unsynced_batches
+            WHERE status = 'dead_letter' AND expires_at < @now
+            """;
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
     }
 
     public void Dispose()
