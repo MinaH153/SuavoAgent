@@ -283,6 +283,55 @@ ORDER BY rt.DateFilled DESC";
     }
 
     /// <summary>
+    /// PHI-free metadata query — no Person JOIN, no patient data.
+    /// Used for detection polling (HIPAA 164.502(b) minimum necessary).
+    /// </summary>
+    public static string BuildMetadataQuery(IReadOnlyList<string> statusNames)
+    {
+        var statusParams = string.Join(", ", statusNames.Select((_, i) => $"@status{i}"));
+        return $"""
+            SELECT TOP 50
+                r.RxNumber,
+                rt.DateFilled,
+                rt.DispensedQuantity,
+                i.ItemName AS TradeName,
+                i.NDC,
+                rt.RxTransactionStatusTypeID AS StatusGuid
+            FROM Prescription.RxTransaction rt
+            JOIN Prescription.Rx r ON rt.RxID = r.RxID
+            LEFT JOIN Inventory.Item i ON rt.DispensedItemID = i.ItemID
+            LEFT JOIN Prescription.RxTransactionStatusType st ON rt.RxTransactionStatusTypeID = st.RxTransactionStatusTypeID
+            WHERE st.Description IN ({statusParams})
+              AND rt.DateFilled >= @cutoff
+            ORDER BY rt.DateFilled DESC
+            """;
+    }
+
+    /// <summary>
+    /// Targeted patient fetch — PHI returned only for a single approved Rx.
+    /// Called on-demand after delivery approval (HIPAA minimum necessary).
+    /// </summary>
+    public static string BuildPatientQuery()
+    {
+        return """
+            SELECT TOP 1
+                per.FirstName,
+                LEFT(per.LastName, 1) AS LastInitial,
+                per.Phone1 AS Phone,
+                per.Address1,
+                per.Address2,
+                per.City,
+                per.State,
+                per.Zip
+            FROM Prescription.RxTransaction rt
+            JOIN Prescription.Rx r ON rt.RxID = r.RxID
+            LEFT JOIN Person.Patient pat ON r.PatientID = pat.PatientID
+            JOIN Person.Person per ON pat.PersonID = per.PersonID
+            WHERE r.RxNumber = @rxNumber
+            """;
+    }
+
+    /// <summary>
     /// Discovers table schemas for Prescription.Rx and related tables.
     /// Runs once on connect — used to find medication/drug name columns.
     /// </summary>

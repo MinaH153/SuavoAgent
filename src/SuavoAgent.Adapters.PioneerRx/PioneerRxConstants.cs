@@ -28,6 +28,12 @@ public static class PioneerRxConstants
             [StatusToBePutInBin] = Guid.Parse("46c30466-375a-4126-a190-8eaf017179c8"),
         };
 
+    public enum QueryMode
+    {
+        Detection,
+        PatientFetch
+    }
+
     public static readonly IReadOnlySet<string> PhiColumnBlocklist = new HashSet<string>(
         StringComparer.OrdinalIgnoreCase)
     {
