@@ -78,5 +78,20 @@ public sealed class SuavoCloudClient : IDisposable
         catch { return null; }
     }
 
+    public async Task<string?> UploadPomAsync(string pomJson, string digest, CancellationToken ct)
+    {
+        var response = await PostSignedAsync("/api/agent/pom", new { pom = pomJson, digest }, ct);
+        if (response == null) return null;
+
+        try
+        {
+            if (response.Value.TryGetProperty("pomId", out var id))
+                return id.GetString();
+        }
+        catch { /* malformed response */ }
+
+        return null;
+    }
+
     public void Dispose() => _http.Dispose();
 }

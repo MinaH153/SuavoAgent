@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
@@ -17,6 +18,7 @@ public sealed class LearningWorker : BackgroundService
     private readonly IServiceProvider _sp;
     private readonly List<ILearningObserver> _observers = new();
     private string? _sessionId;
+    private bool _patternEngineRan;
 
     public LearningWorker(
         ILogger<LearningWorker> logger,
@@ -101,6 +103,36 @@ public sealed class LearningWorker : BackgroundService
                         _db.UpdateLearningMode(_sessionId, "supervised");
                     }
                 }
+            }
+
+            // Auto-trigger Pattern Engine when entering Model phase
+            if (session.Phase == "model" && !_patternEngineRan)
+            {
+                _logger.LogInformation("Model phase — running Pattern Engine");
+                var inference = new RxQueueInferenceEngine(_db);
+                inference.InferAndPersist(_sessionId);
+                _patternEngineRan = true;
+
+                _db.AppendLearningAudit(_sessionId, "pattern", "rx_inference",
+                    $"candidates:{_db.GetRxQueueCandidates(_sessionId).Count}", phiScrubbed: false);
+
+                // Export and upload POM
+                var pomJson = PomExporter.Export(_db, _sessionId);
+                var digest = PomExporter.ComputeDigest(
+                    _options.PharmacyId ?? "", _sessionId, pomJson);
+
+                var cloudClient = _sp.GetService<SuavoCloudClient>();
+                if (cloudClient != null)
+                {
+                    var pomId = await cloudClient.UploadPomAsync(pomJson, digest, stoppingToken);
+                    if (pomId != null)
+                        _logger.LogInformation("POM uploaded (id={PomId}, digest={Digest})", pomId, digest[..12]);
+                    else
+                        _logger.LogWarning("POM upload failed — operator cannot review until upload succeeds");
+                }
+
+                _db.AppendLearningAudit(_sessionId, "worker", "pom_exported",
+                    $"digest:{digest[..12]}", phiScrubbed: false);
             }
 
             // Phase auto-advance is manual for now — operator triggers via signed command
