@@ -13,6 +13,15 @@ public record RxReadyForDelivery(
     bool PatientIdRequired,
     bool CounselingRequired,
     DateTimeOffset DetectedAt,
-    DetectionSource Source);
+    DetectionSource Source,
+    // Patient delivery info — minimum necessary PHI
+    string PatientFirstName = "",
+    string PatientLastInitial = "",
+    string PatientPhone = "",
+    string DeliveryAddress1 = "",
+    string DeliveryAddress2 = "",
+    string DeliveryCity = "",
+    string DeliveryState = "",
+    string DeliveryZip = "");
 
 public enum DetectionSource { Sql, Uia, Api }

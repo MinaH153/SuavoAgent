@@ -118,6 +118,7 @@ WHERE Description IN ({statusParams})";
     }
 
     private bool _itemJoinFailed;
+    private bool _patientJoinFailed;
 
     public async Task<IReadOnlyList<RxReadyForDelivery>> ReadReadyPrescriptionsAsync(CancellationToken ct)
     {
@@ -126,8 +127,22 @@ WHERE Description IN ({statusParams})";
 
         var statusGuids = _deliveryReadyGuids ?? FallbackGuids();
 
-        // Try with Item join for drug names. If Inventory.Item doesn't exist,
-        // fall back to the base query without drug names.
+        // Tier 1: Full query — Item + Patient (drug names + delivery address)
+        if (!_itemJoinFailed && !_patientJoinFailed)
+        {
+            try
+            {
+                return await ExecuteDeliveryQueryAsync(
+                    BuildFullDeliveryQuery(statusGuids.Count), statusGuids, ct);
+            }
+            catch (SqlException ex) when (ex.Number == 208)
+            {
+                _logger.LogWarning("Full query failed (invalid table) — trying without Patient join");
+                _patientJoinFailed = true;
+            }
+        }
+
+        // Tier 2: Item only (drug names, no patient)
         if (!_itemJoinFailed)
         {
             try
@@ -135,13 +150,14 @@ WHERE Description IN ({statusParams})";
                 return await ExecuteDeliveryQueryAsync(
                     BuildDeliveryQuery(statusGuids.Count), statusGuids, ct);
             }
-            catch (SqlException ex) when (ex.Number == 208) // 208 = invalid object name
+            catch (SqlException ex) when (ex.Number == 208)
             {
-                _logger.LogWarning("Inventory.Item table not found — falling back to query without drug names");
+                _logger.LogWarning("Inventory.Item not found — falling back to base query");
                 _itemJoinFailed = true;
             }
         }
 
+        // Tier 3: Base query (Rx numbers only)
         return await ExecuteDeliveryQueryAsync(
             BuildDeliveryQueryBase(statusGuids.Count), statusGuids, ct);
     }
@@ -170,13 +186,15 @@ WHERE Description IN ({statusParams})";
     /// Status is GUID — parameterized, not string.
     /// No PHI columns (no Patient join).
     /// </summary>
-    public static string BuildDeliveryQuery(int statusCount)
+    /// <summary>
+    /// Full query: Rx + Item (drug name/NDC) + Patient (delivery address).
+    /// Minimum necessary PHI: first name, last name initial, address, phone.
+    /// </summary>
+    public static string BuildFullDeliveryQuery(int statusCount)
     {
         var statusParams = string.Join(", ",
             Enumerable.Range(0, statusCount).Select(i => $"@status{i}"));
 
-        // Join Inventory.Item via DispensedItemID for drug name + NDC.
-        // LEFT JOIN — not all transactions have a dispensed item yet.
         return $@"SELECT TOP 50
     rt.RxTransactionID,
     rt.DateFilled,
@@ -187,7 +205,42 @@ WHERE Description IN ({statusParams})";
     rt.PromiseTime,
     r.RxNumber,
     i.ItemName,
-    i.NDC
+    i.NDC,
+    i.DeaSchedule,
+    per.FirstName,
+    LEFT(per.LastName, 1) AS LastInitial,
+    per.Phone1,
+    per.Address1,
+    per.Address2,
+    per.City,
+    per.State,
+    per.Zip
+FROM Prescription.RxTransaction rt
+JOIN Prescription.Rx r ON rt.RxID = r.RxID
+LEFT JOIN Inventory.Item i ON rt.DispensedItemID = i.ItemID
+LEFT JOIN Person.Patient pat ON r.PatientID = pat.PatientID
+LEFT JOIN Person.Person per ON pat.PersonID = per.PersonID
+WHERE rt.RxTransactionStatusTypeID IN ({statusParams})
+ORDER BY rt.DateFilled DESC";
+    }
+
+    public static string BuildDeliveryQuery(int statusCount)
+    {
+        var statusParams = string.Join(", ",
+            Enumerable.Range(0, statusCount).Select(i => $"@status{i}"));
+
+        return $@"SELECT TOP 50
+    rt.RxTransactionID,
+    rt.DateFilled,
+    rt.RefillNumber,
+    rt.DispensedQuantity,
+    rt.DaysSupply,
+    rt.RxTransactionStatusTypeID,
+    rt.PromiseTime,
+    r.RxNumber,
+    i.ItemName,
+    i.NDC,
+    i.DeaSchedule
 FROM Prescription.RxTransaction rt
 JOIN Prescription.Rx r ON rt.RxID = r.RxID
 LEFT JOIN Inventory.Item i ON rt.DispensedItemID = i.ItemID
@@ -264,6 +317,9 @@ ORDER BY full_name, ORDINAL_POSITION";
 
     private static RxReadyForDelivery MapRxFromReader(SqlDataReader reader)
     {
+        var deaSchedule = GetNullableInt(reader, "DeaSchedule");
+        var isControlled = deaSchedule is >= 2 and <= 5;
+
         return new RxReadyForDelivery(
             RxNumber: GetIntOrDefault(reader, "RxNumber").ToString(),
             FillNumber: GetIntOrDefault(reader, "RefillNumber"),
@@ -272,12 +328,20 @@ ORDER BY full_name, ORDINAL_POSITION";
             Quantity: GetDecimalOrDefault(reader, "DispensedQuantity"),
             DaysSupply: GetIntOrDefault(reader, "DaysSupply"),
             StatusText: GetGuidOrDefault(reader, "RxTransactionStatusTypeID").ToString(),
-            IsControlled: false,
-            DrugSchedule: null,
-            PatientIdRequired: false,
+            IsControlled: isControlled,
+            DrugSchedule: deaSchedule,
+            PatientIdRequired: isControlled && deaSchedule <= 3,
             CounselingRequired: false,
             DetectedAt: DateTimeOffset.UtcNow,
-            Source: DetectionSource.Sql);
+            Source: DetectionSource.Sql,
+            PatientFirstName: GetStringOrDefault(reader, "FirstName"),
+            PatientLastInitial: GetStringOrDefault(reader, "LastInitial"),
+            PatientPhone: GetStringOrDefault(reader, "Phone1"),
+            DeliveryAddress1: GetStringOrDefault(reader, "Address1"),
+            DeliveryAddress2: GetStringOrDefault(reader, "Address2"),
+            DeliveryCity: GetStringOrDefault(reader, "City"),
+            DeliveryState: GetStringOrDefault(reader, "State"),
+            DeliveryZip: GetStringOrDefault(reader, "Zip"));
     }
 
     private static IReadOnlyList<Guid> FallbackGuids() =>
@@ -299,6 +363,12 @@ ORDER BY full_name, ORDINAL_POSITION";
     {
         try { var ord = reader.GetOrdinal(column); return reader.IsDBNull(ord) ? 0m : reader.GetDecimal(ord); }
         catch { return 0m; }
+    }
+
+    private static int? GetNullableInt(SqlDataReader reader, string column)
+    {
+        try { var ord = reader.GetOrdinal(column); return reader.IsDBNull(ord) ? null : reader.GetInt32(ord); }
+        catch { return null; }
     }
 
     private static Guid GetGuidOrDefault(SqlDataReader reader, string column)
