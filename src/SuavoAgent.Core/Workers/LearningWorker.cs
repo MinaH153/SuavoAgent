@@ -1,3 +1,4 @@
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
@@ -19,6 +20,7 @@ public sealed class LearningWorker : BackgroundService
     private readonly List<ILearningObserver> _observers = new();
     private string? _sessionId;
     private bool _patternEngineRan;
+    private bool _adapterActivated;
 
     public LearningWorker(
         ILogger<LearningWorker> logger,
@@ -135,6 +137,30 @@ public sealed class LearningWorker : BackgroundService
                     $"digest:{digest[..12]}", phiScrubbed: false);
             }
 
+            // Activate learned adapter when phase transitions to approved
+            if (session.Phase == "approved" && !_adapterActivated)
+            {
+                var generator = new AdapterGenerator(_db);
+                var adapter = generator.Generate(_sessionId,
+                    connectionString: BuildConnectionString(),
+                    logger: _sp.GetRequiredService<ILogger<LearnedPmsAdapter>>());
+
+                if (adapter != null)
+                {
+                    _logger.LogInformation("Learned adapter activated: {Pms}, query targets {Table}",
+                        adapter.PmsName, adapter.DetectionQuery.Split('\n')[^1].Trim());
+                    _db.UpdateLearningPhase(_sessionId, "active");
+                    _adapterActivated = true;
+
+                    _db.AppendLearningAudit(_sessionId, "worker", "adapter_activated",
+                        adapter.PmsName, phiScrubbed: false);
+                }
+                else
+                {
+                    _logger.LogWarning("Adapter generation failed — no viable Rx queue candidate");
+                }
+            }
+
             // Phase auto-advance is manual for now — operator triggers via signed command
             // Future: auto-advance based on LearningSession.GetNextPhase()
         }
@@ -147,5 +173,26 @@ public sealed class LearningWorker : BackgroundService
         }
 
         _logger.LogInformation("LearningWorker stopped");
+    }
+
+    private string BuildConnectionString()
+    {
+        var csb = new SqlConnectionStringBuilder();
+        if (!string.IsNullOrEmpty(_options.SqlServer)) csb.DataSource = _options.SqlServer;
+        if (!string.IsNullOrEmpty(_options.SqlDatabase)) csb.InitialCatalog = _options.SqlDatabase;
+        csb.ApplicationName = "PioneerPharmacy";
+        csb.MaxPoolSize = 1;
+        csb["Encrypt"] = "true";
+        csb["TrustServerCertificate"] = "true";
+        if (!string.IsNullOrEmpty(_options.SqlUser))
+        {
+            csb.UserID = _options.SqlUser;
+            csb.Password = _options.SqlPassword;
+        }
+        else
+        {
+            csb.IntegratedSecurity = true;
+        }
+        return csb.ConnectionString;
     }
 }

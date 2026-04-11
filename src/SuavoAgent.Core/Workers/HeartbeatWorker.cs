@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
+using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
@@ -223,6 +224,9 @@ public sealed class HeartbeatWorker : BackgroundService
                 case "update":
                     await HandleUpdateAsync(scEl, ct);
                     break;
+                case "approve_pom":
+                    await HandleApprovePomAsync(scEl, ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -436,5 +440,49 @@ public sealed class HeartbeatWorker : BackgroundService
             _logger.LogWarning(ex, "Signed update command failed");
             _updateInProgress = false;
         }
+    }
+
+    private async Task HandleApprovePomAsync(JsonElement scEl, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var sessionId = dataEl.TryGetProperty("sessionId", out var s) ? s.GetString() : null;
+        var digest = dataEl.TryGetProperty("approvedModelDigest", out var dig) ? dig.GetString() : null;
+
+        if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(digest))
+        {
+            _logger.LogWarning("approve_pom: missing sessionId or digest");
+            return;
+        }
+
+        var session = _stateDb.GetLearningSession(sessionId);
+        if (session is null)
+        {
+            _logger.LogWarning("approve_pom: session {Id} not found", sessionId);
+            return;
+        }
+
+        // Verify digest matches local POM (TOCTOU protection — Codex CRITICAL-2)
+        var pomJson = PomExporter.Export(_stateDb, sessionId);
+        var localDigest = PomExporter.ComputeDigest(
+            _options.PharmacyId ?? "", sessionId, pomJson);
+
+        if (!string.Equals(localDigest, digest, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("approve_pom: digest mismatch — local={Local} approved={Approved}. " +
+                "POM may have been mutated after review. Rejecting activation.",
+                localDigest[..12], digest[..12]);
+            return;
+        }
+
+        // Store approved digest and transition phase
+        _stateDb.UpdateLearningPhase(sessionId, "approved");
+        _stateDb.UpdateLearningMode(sessionId, "supervised");
+
+        _stateDb.AppendLearningAudit(sessionId, "worker", "pom_approved",
+            $"digest:{digest[..12]}", phiScrubbed: false);
+
+        _logger.LogInformation("POM approved for session {Session} — transitioning to supervised mode", sessionId);
+
+        await Task.CompletedTask;
     }
 }
