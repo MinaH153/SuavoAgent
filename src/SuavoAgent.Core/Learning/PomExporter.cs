@@ -1,0 +1,88 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using SuavoAgent.Core.State;
+
+namespace SuavoAgent.Core.Learning;
+
+/// <summary>
+/// Exports the Pharmacy Operations Model in a de-identified format for cloud upload.
+/// Strips all ePHI artifacts: HMAC hashes, exact timestamps, file paths, credentials.
+/// The export is suitable for dashboard review and operator approval.
+///
+/// Per Codex CRITICAL-2: ComputeDigest produces the approved_model_digest that
+/// binds the approval to the exact reviewed model.
+/// </summary>
+public static class PomExporter
+{
+    public static string Export(AgentStateDb db, string sessionId)
+    {
+        var session = db.GetLearningSession(sessionId);
+        if (session is null)
+            throw new InvalidOperationException($"Learning session {sessionId} not found");
+
+        var processes = db.GetObservedProcesses(sessionId);
+        var schemas = db.GetDiscoveredSchemas(sessionId);
+        var candidates = db.GetRxQueueCandidates(sessionId);
+
+        var export = new
+        {
+            sessionId,
+            pharmacyId = session.Value.PharmacyId,
+            phase = session.Value.Phase,
+            mode = session.Value.Mode,
+            exportedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd"), // day granularity only
+
+            processes = processes.Select(p => new
+            {
+                processName = p.ProcessName,
+                // exePath STRIPPED — may reveal pharmacy directory structure
+                isPmsCandidate = p.IsPmsCandidate,
+                occurrenceCount = p.OccurrenceCount,
+                // windowTitleHash STRIPPED
+                // windowTitleScrubbed STRIPPED (may contain residual PHI)
+            }).ToArray(),
+
+            schemas = schemas.Select(s => new
+            {
+                // serverHash STRIPPED
+                schemaName = s.SchemaName,
+                tableName = s.TableName,
+                columnName = s.ColumnName,
+                dataType = s.DataType,
+                isPk = s.IsPk,
+                isFk = s.IsFk,
+                inferredPurpose = s.InferredPurpose,
+            }).ToArray(),
+
+            rxQueueCandidates = candidates.Select(c => new
+            {
+                primaryTable = c.PrimaryTable,
+                rxNumberColumn = c.RxNumberColumn,
+                statusColumn = c.StatusColumn,
+                dateColumn = c.DateColumn,
+                patientFkColumn = c.PatientFkColumn,
+                confidence = c.Confidence,
+                evidence = c.EvidenceJson,
+            }).ToArray(),
+        };
+
+        return JsonSerializer.Serialize(export, new JsonSerializerOptions
+        {
+            WriteIndented = false,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        });
+    }
+
+    /// <summary>
+    /// Computes SHA-256 digest over {pharmacyId, sessionId, pomJson}.
+    /// This digest is signed by the cloud during approval and verified by the agent
+    /// before activating the model (TOCTOU protection — Codex CRITICAL-2).
+    /// </summary>
+    public static string ComputeDigest(string pharmacyId, string sessionId, string pomJson)
+    {
+        var input = $"{pharmacyId}|{sessionId}|{pomJson}";
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+}
