@@ -113,16 +113,27 @@ public static class SelfUpdater
     private static bool VerifyManifestSignature(
         string url, string sha256, string version, string? signatureHex, ILogger logger)
     {
-        if (string.IsNullOrEmpty(signatureHex))
-        {
-            logger.LogWarning("Update manifest has no signature — rejecting");
-            return false;
-        }
-
         // Reject fields containing pipe or control characters (prevents injection)
         if (ContainsControlChars(url) || ContainsControlChars(sha256) || ContainsControlChars(version))
         {
             logger.LogWarning("Manifest fields contain control characters — rejecting");
+            return false;
+        }
+
+        var manifestCanonical = $"{url}|{sha256}|{version}";
+        return VerifyManifestSignature(manifestCanonical, signatureHex, logger);
+    }
+
+    /// <summary>
+    /// Verifies ECDSA P-256 signature over a pre-built canonical manifest string.
+    /// Used by both legacy single-binary updates and new package-level updates.
+    /// </summary>
+    internal static bool VerifyManifestSignature(
+        string manifestCanonical, string? signatureHex, ILogger logger)
+    {
+        if (string.IsNullOrEmpty(signatureHex))
+        {
+            logger.LogWarning("Update manifest has no signature — rejecting");
             return false;
         }
 
@@ -131,8 +142,7 @@ public static class SelfUpdater
             using var ecdsa = ECDsa.Create();
             ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(UpdatePublicKeyDer), out _);
 
-            var manifest = $"{url}|{sha256}|{version}";
-            var manifestBytes = Encoding.UTF8.GetBytes(manifest);
+            var manifestBytes = Encoding.UTF8.GetBytes(manifestCanonical);
             var signatureBytes = Convert.FromHexString(signatureHex);
 
             var valid = ecdsa.VerifyData(manifestBytes, signatureBytes, HashAlgorithmName.SHA256);
@@ -173,6 +183,115 @@ public static class SelfUpdater
             {
                 logger.LogDebug(ex, "Could not delete old binary — will retry next startup");
             }
+        }
+    }
+
+    public static bool SwapBinaries(string installDir, ILogger logger)
+    {
+        var binaries = new[] { "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe" };
+        var swapped = new List<string>();
+
+        try
+        {
+            foreach (var bin in binaries)
+            {
+                var current = Path.Combine(installDir, bin);
+                var newFile = current + ".new";
+                var oldFile = current + ".old";
+
+                if (!File.Exists(newFile)) continue;
+
+                if (File.Exists(oldFile)) File.Delete(oldFile);
+                if (File.Exists(current)) File.Move(current, oldFile);
+                File.Move(newFile, current);
+                swapped.Add(bin);
+                logger.LogInformation("Swapped {Binary}", bin);
+            }
+            return swapped.Count > 0;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Binary swap failed after {Count} swaps — rolling back", swapped.Count);
+            foreach (var bin in swapped)
+            {
+                var current = Path.Combine(installDir, bin);
+                var oldFile = current + ".old";
+                try
+                {
+                    if (File.Exists(current)) File.Delete(current);
+                    if (File.Exists(oldFile)) File.Move(oldFile, current);
+                }
+                catch { }
+            }
+            foreach (var bin in binaries)
+            {
+                try { var f = Path.Combine(installDir, bin + ".new"); if (File.Exists(f)) File.Delete(f); } catch { }
+            }
+            return false;
+        }
+    }
+
+    public static bool CheckPendingUpdate(ILogger logger)
+    {
+        var installDir = Path.GetDirectoryName(Environment.ProcessPath);
+        if (string.IsNullOrEmpty(installDir)) return false;
+
+        var sentinel = Path.Combine(installDir, "update-pending.flag");
+        if (!File.Exists(sentinel))
+        {
+            foreach (var f in Directory.GetFiles(installDir, "*.exe.new"))
+                try { File.Delete(f); } catch { }
+            return false;
+        }
+
+        logger.LogInformation("Found update-pending sentinel — applying update");
+        try
+        {
+            var sentinelData = File.ReadAllText(sentinel);
+            var lines = sentinelData.Split('\n', 2);
+            if (lines.Length < 2)
+            {
+                logger.LogWarning("Malformed sentinel — discarding");
+                File.Delete(sentinel);
+                return false;
+            }
+
+            var manifestCanonical = lines[0].Trim();
+            var signatureHex = lines[1].Trim();
+
+            var manifest = UpdateManifest.Parse(manifestCanonical);
+            if (manifest == null)
+            {
+                logger.LogWarning("Cannot parse manifest from sentinel — discarding");
+                File.Delete(sentinel);
+                return false;
+            }
+
+            if (!VerifyManifestSignature(manifest.ToCanonical(), signatureHex, logger))
+            {
+                logger.LogWarning("Sentinel manifest signature invalid — discarding update");
+                File.Delete(sentinel);
+                foreach (var f in Directory.GetFiles(installDir, "*.exe.new"))
+                    try { File.Delete(f); } catch { }
+                return false;
+            }
+
+            if (SwapBinaries(installDir, logger))
+            {
+                File.Delete(sentinel);
+                logger.LogInformation("Bootstrap update applied — v{Version}", manifest.Version);
+                return true;
+            }
+
+            logger.LogWarning("Binary swap failed during bootstrap update");
+            File.Delete(sentinel);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Bootstrap update check failed");
+            try { File.Delete(sentinel); } catch { }
+            return false;
         }
     }
 
