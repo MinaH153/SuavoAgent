@@ -5,7 +5,8 @@ namespace SuavoAgent.Core.Cloud;
 
 public record SignedCommand(
     string Command, string AgentId, string MachineFingerprint,
-    string Timestamp, string Nonce, string KeyId, string Signature);
+    string Timestamp, string Nonce, string KeyId, string Signature,
+    string DataHash = "");
 
 public record VerificationResult(bool IsValid, string? Reason = null);
 
@@ -55,7 +56,8 @@ public class SignedCommandVerifier
                 return new(false, "Nonce replay detected");
         }
 
-        var canonical = $"{cmd.Command}|{cmd.AgentId}|{cmd.MachineFingerprint}|{cmd.Timestamp}|{cmd.Nonce}";
+        var dataHash = string.IsNullOrEmpty(cmd.DataHash) ? "" : cmd.DataHash;
+        var canonical = $"{cmd.Command}|{cmd.AgentId}|{cmd.MachineFingerprint}|{cmd.Timestamp}|{cmd.Nonce}|{dataHash}";
         try
         {
             var valid = key.VerifyData(
@@ -73,5 +75,16 @@ public class SignedCommandVerifier
     public void PruneNonces(TimeSpan maxAge)
     {
         lock (_usedNonces) { _usedNonces.Clear(); }
+    }
+
+    /// <summary>
+    /// Computes SHA-256 hex-lowercase hash of raw JSON data for canonical inclusion.
+    /// Returns the hash of an empty string when <paramref name="dataJson"/> is null or empty.
+    /// </summary>
+    public static string ComputeDataHash(string? dataJson)
+    {
+        var input = string.IsNullOrEmpty(dataJson) ? "" : dataJson;
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 }

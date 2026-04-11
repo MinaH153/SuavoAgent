@@ -188,6 +188,14 @@ public sealed class HeartbeatWorker : BackgroundService
                 return;
             }
 
+            // Compute data hash from the raw JSON data payload for signature verification.
+            // This prevents payload tampering — the hash is included in the signed canonical.
+            var dataHashValue = "";
+            if (scEl.TryGetProperty("data", out var dataEl) && dataEl.ValueKind != JsonValueKind.Null)
+                dataHashValue = SignedCommandVerifier.ComputeDataHash(dataEl.GetRawText());
+            else
+                dataHashValue = SignedCommandVerifier.ComputeDataHash(null);
+
             var cmd = new SignedCommand(
                 Command: scEl.TryGetProperty("command", out var c) ? c.GetString() ?? "" : "",
                 AgentId: scEl.TryGetProperty("agentId", out var a) ? a.GetString() ?? "" : "",
@@ -195,7 +203,8 @@ public sealed class HeartbeatWorker : BackgroundService
                 Timestamp: scEl.TryGetProperty("timestamp", out var t) ? t.GetString() ?? "" : "",
                 Nonce: scEl.TryGetProperty("nonce", out var n) ? n.GetString() ?? "" : "",
                 KeyId: scEl.TryGetProperty("keyId", out var k) ? k.GetString() ?? "" : "",
-                Signature: scEl.TryGetProperty("signature", out var s) ? s.GetString() ?? "" : "");
+                Signature: scEl.TryGetProperty("signature", out var s) ? s.GetString() ?? "" : "",
+                DataHash: dataHashValue);
 
             // Persistent nonce check (survives restarts)
             if (!_stateDb.TryRecordNonce(cmd.Nonce))
@@ -251,16 +260,19 @@ public sealed class HeartbeatWorker : BackgroundService
             return;
         }
 
+        // Hash Rx number before audit/logging — Rx numbers are PHI when linked to patient context
+        var hashedRx = PhiScrubber.HmacHash(rxNumber, _options.AgentId ?? "");
+
         // Audit PHI access before touching any patient data
         _stateDb.AppendChainedAuditEntry(new AuditEntry(
-            TaskId: rxNumber,
+            TaskId: hashedRx,
             EventType: "phi_access",
             FromState: "",
             ToState: "",
             Trigger: "fetch_patient",
             CommandId: cmd.Nonce,
             RequesterId: requesterId,
-            RxNumber: rxNumber));
+            RxNumber: hashedRx));
 
         // Get SQL engine from RxDetectionWorker
         var rxWorker = _serviceProvider.GetService<RxDetectionWorker>();
@@ -268,7 +280,7 @@ public sealed class HeartbeatWorker : BackgroundService
 
         if (sqlEngine is null || !rxWorker!.IsSqlConnected)
         {
-            _logger.LogWarning("fetch_patient: SQL not connected — cannot query patient for Rx {Rx}", rxNumber);
+            _logger.LogWarning("fetch_patient: SQL not connected — cannot query patient for Rx {RxHash}", hashedRx[..12]);
             return;
         }
 
@@ -276,14 +288,14 @@ public sealed class HeartbeatWorker : BackgroundService
 
         if (details is null)
         {
-            _logger.LogInformation("fetch_patient: no patient found for Rx {Rx}", rxNumber);
+            _logger.LogInformation("fetch_patient: no patient found for Rx {RxHash}", hashedRx[..12]);
             return;
         }
 
         if (_cloudClient is not null)
         {
             await _cloudClient.SendPatientDetailsAsync(rxNumber, details, cmd.Nonce, ct);
-            _logger.LogInformation("fetch_patient: sent patient details for Rx {Rx}", rxNumber);
+            _logger.LogInformation("fetch_patient: sent details for Rx {RxHash}", hashedRx[..12]);
         }
     }
 

@@ -41,7 +41,8 @@ public class CriticalPathTests : IDisposable
             "decommission", "agent-1", "fp-1",
             DateTimeOffset.UtcNow.ToString("o"),
             Guid.NewGuid().ToString(), "k1",
-            Convert.ToBase64String(new byte[64]));
+            Convert.ToBase64String(new byte[64]),
+            SignedCommandVerifier.ComputeDataHash(null));
 
         var result = verifier.Verify(cmd);
         Assert.False(result.IsValid);
@@ -61,12 +62,13 @@ public class CriticalPathTests : IDisposable
 
         var ts = DateTimeOffset.UtcNow.ToString("o");
         var nonce = Guid.NewGuid().ToString();
-        var canonical = $"update|agent-1|fp-1|{ts}|{nonce}";
+        var dataHash = SignedCommandVerifier.ComputeDataHash(null);
+        var canonical = $"update|agent-1|fp-1|{ts}|{nonce}|{dataHash}";
         // Sign with attacker's key
         var sig = Convert.ToBase64String(
             attackerKey.SignData(Encoding.UTF8.GetBytes(canonical), HashAlgorithmName.SHA256));
 
-        var cmd = new SignedCommand("update", "agent-1", "fp-1", ts, nonce, "k1", sig);
+        var cmd = new SignedCommand("update", "agent-1", "fp-1", ts, nonce, "k1", sig, dataHash);
         Assert.False(verifier.Verify(cmd).IsValid);
     }
 
