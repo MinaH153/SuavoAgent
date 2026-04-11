@@ -19,8 +19,20 @@ public sealed class LearningWorker : BackgroundService
     private readonly IServiceProvider _sp;
     private readonly List<ILearningObserver> _observers = new();
     private string? _sessionId;
-    private bool _patternEngineRan;
+    private bool _inferenceRan;
+    private bool _pomUploaded;
+    private int _uploadRetryCount;
+    private DateTimeOffset _nextUploadRetryAt;
+    private string? _pendingPomJson;
+    private string? _pendingPomDigest;
     private bool _adapterActivated;
+
+    private static readonly TimeSpan[] UploadBackoff =
+    {
+        TimeSpan.FromMinutes(1),
+        TimeSpan.FromMinutes(5),
+        TimeSpan.FromMinutes(15), // cap
+    };
 
     public LearningWorker(
         ILogger<LearningWorker> logger,
@@ -42,14 +54,19 @@ public sealed class LearningWorker : BackgroundService
             return;
         }
 
-        _sessionId = $"learn-{_options.AgentId}-{DateTimeOffset.UtcNow:yyyyMMdd}";
         var pharmacyId = _options.PharmacyId ?? "unknown";
         var pharmacySalt = _options.AgentId ?? "default-salt";
 
-        // Create or resume learning session
-        var existing = _db.GetLearningSession(_sessionId);
-        if (existing is null)
+        // CRITICAL-7: Resume existing non-terminal session instead of creating date-derived ID
+        _sessionId = _db.GetActiveSessionId(pharmacyId);
+        if (_sessionId != null)
         {
+            _logger.LogInformation("Resuming existing learning session {Id} for pharmacy {Pharmacy}",
+                _sessionId, pharmacyId);
+        }
+        else
+        {
+            _sessionId = $"learn-{_options.AgentId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
             _db.CreateLearningSession(_sessionId, pharmacyId);
             _logger.LogInformation("Created learning session {Id} for pharmacy {Pharmacy}",
                 _sessionId, pharmacyId);
@@ -108,56 +125,151 @@ public sealed class LearningWorker : BackgroundService
             }
 
             // Auto-trigger Pattern Engine when entering Model phase
-            if (session.Phase == "model" && !_patternEngineRan)
+            if (session.Phase == "model" && !_inferenceRan)
             {
-                _logger.LogInformation("Model phase — running Pattern Engine");
+                _logger.LogInformation("Model phase — running schema discovery + pattern engine");
+
+                // CRITICAL-4a: Run SqlSchemaObserver.DiscoverSchemaAsync with a real SqlConnection
+                var schemaObs = _observers.OfType<SqlSchemaObserver>().FirstOrDefault();
+                if (schemaObs != null)
+                {
+                    try
+                    {
+                        await using var schemaConn = new SqlConnection(BuildConnectionString());
+                        await schemaConn.OpenAsync(stoppingToken);
+                        await schemaObs.DiscoverSchemaAsync(_sessionId, schemaConn, stoppingToken);
+                        _logger.LogInformation("Schema discovery completed via SqlSchemaObserver");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Schema discovery failed — inference will use existing data");
+                    }
+                }
+
+                // Run Rx queue inference
                 var inference = new RxQueueInferenceEngine(_db);
                 inference.InferAndPersist(_sessionId);
-                _patternEngineRan = true;
+                _inferenceRan = true;
 
+                var candidates = _db.GetRxQueueCandidates(_sessionId);
                 _db.AppendLearningAudit(_sessionId, "pattern", "rx_inference",
-                    $"candidates:{_db.GetRxQueueCandidates(_sessionId).Count}", phiScrubbed: false);
+                    $"candidates:{candidates.Count}", phiScrubbed: false);
 
-                // Export and upload POM
-                var pomJson = PomExporter.Export(_db, _sessionId);
-                var digest = PomExporter.ComputeDigest(
-                    _options.PharmacyId ?? "", _sessionId, pomJson);
+                // CRITICAL-4b: Run StatusOrderingEngine for the top candidate's status column
+                var topCandidate = candidates.FirstOrDefault();
+                if (topCandidate.PrimaryTable != null && topCandidate.StatusColumn != null)
+                {
+                    try
+                    {
+                        await using var statusConn = new SqlConnection(BuildConnectionString());
+                        await statusConn.OpenAsync(stoppingToken);
+                        var statusValues = await QueryDistinctStatusValuesAsync(
+                            statusConn, topCandidate.PrimaryTable, topCandidate.StatusColumn, stoppingToken);
+
+                        if (statusValues.Count > 0)
+                        {
+                            var statusEngine = new StatusOrderingEngine(_db);
+                            statusEngine.InferAndPersist(_sessionId, topCandidate.PrimaryTable,
+                                topCandidate.StatusColumn, statusValues);
+                            _logger.LogInformation("Status ordering: {Count} values inferred for {Table}.{Col}",
+                                statusValues.Count, topCandidate.PrimaryTable, topCandidate.StatusColumn);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Status ordering failed for {Table}.{Col}",
+                            topCandidate.PrimaryTable, topCandidate.StatusColumn);
+                    }
+                }
+
+                // Prepare POM for upload
+                _pendingPomJson = PomExporter.Export(_db, _sessionId);
+                _pendingPomDigest = PomExporter.ComputeDigest(
+                    _options.PharmacyId ?? "", _sessionId, _pendingPomJson);
+
+                _db.AppendLearningAudit(_sessionId, "worker", "pom_exported",
+                    $"digest:{_pendingPomDigest[..12]}", phiScrubbed: false);
+            }
+
+            // Upload POM (with retry + backoff on subsequent iterations)
+            if (session.Phase == "model" && _inferenceRan && !_pomUploaded
+                && _pendingPomJson != null && _pendingPomDigest != null)
+            {
+                if (DateTimeOffset.UtcNow < _nextUploadRetryAt)
+                    continue; // Backoff not elapsed yet
 
                 var cloudClient = _sp.GetService<SuavoCloudClient>();
                 if (cloudClient != null)
                 {
-                    var pomId = await cloudClient.UploadPomAsync(pomJson, digest, stoppingToken);
+                    var pomId = await cloudClient.UploadPomAsync(_pendingPomJson, _pendingPomDigest, stoppingToken);
                     if (pomId != null)
-                        _logger.LogInformation("POM uploaded (id={PomId}, digest={Digest})", pomId, digest[..12]);
-                    else
-                        _logger.LogWarning("POM upload failed — operator cannot review until upload succeeds");
-                }
+                    {
+                        _pomUploaded = true;
+                        _logger.LogInformation("POM uploaded (id={PomId}, digest={Digest}, attempt={Attempt})",
+                            pomId, _pendingPomDigest[..12], _uploadRetryCount + 1);
 
-                _db.AppendLearningAudit(_sessionId, "worker", "pom_exported",
-                    $"digest:{digest[..12]}", phiScrubbed: false);
+                        // CRITICAL-6: Freeze POM — stop observers so no mutations after upload
+                        foreach (var obs in _observers)
+                            await obs.StopAsync();
+                        _logger.LogInformation("Observers stopped — POM frozen for review");
+
+                        // Store frozen snapshot for approval verification
+                        _db.StorePomSnapshot(_sessionId, _pendingPomJson);
+                    }
+                    else
+                    {
+                        _uploadRetryCount++;
+                        var backoffIdx = Math.Min(_uploadRetryCount - 1, UploadBackoff.Length - 1);
+                        _nextUploadRetryAt = DateTimeOffset.UtcNow + UploadBackoff[backoffIdx];
+                        _logger.LogWarning("POM upload failed (attempt {Attempt}) — retrying after {Backoff}",
+                            _uploadRetryCount, UploadBackoff[backoffIdx]);
+                    }
+                }
             }
 
             // Activate learned adapter when phase transitions to approved
             if (session.Phase == "approved" && !_adapterActivated)
             {
-                var generator = new AdapterGenerator(_db);
-                var adapter = generator.Generate(_sessionId,
-                    connectionString: BuildConnectionString(),
-                    logger: _sp.GetRequiredService<ILogger<LearnedPmsAdapter>>());
-
-                if (adapter != null)
+                // CRITICAL-5: Recompute digest and verify against stored approved_model_digest
+                var storedDigest = session.ApprovedModelDigest;
+                var pomSnapshot = _db.GetPomSnapshot(_sessionId);
+                if (string.IsNullOrEmpty(storedDigest) || string.IsNullOrEmpty(pomSnapshot))
                 {
-                    _logger.LogInformation("Learned adapter activated: {Pms}, query targets {Table}",
-                        adapter.PmsName, adapter.DetectionQuery.Split('\n')[^1].Trim());
-                    _db.UpdateLearningPhase(_sessionId, "active");
-                    _adapterActivated = true;
-
-                    _db.AppendLearningAudit(_sessionId, "worker", "adapter_activated",
-                        adapter.PmsName, phiScrubbed: false);
+                    _logger.LogWarning("Activation blocked — missing approval digest or POM snapshot for session {Id}", _sessionId);
                 }
                 else
                 {
-                    _logger.LogWarning("Adapter generation failed — no viable Rx queue candidate");
+                    var recomputedDigest = PomExporter.ComputeDigest(
+                        _options.PharmacyId ?? "", _sessionId, pomSnapshot);
+
+                    if (!string.Equals(recomputedDigest, storedDigest, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogWarning("Activation REFUSED — digest mismatch: stored={Stored} recomputed={Recomputed}. " +
+                            "POM may have been tampered. Requires re-approval.",
+                            storedDigest[..12], recomputedDigest[..12]);
+                    }
+                    else
+                    {
+                        var generator = new AdapterGenerator(_db);
+                        var adapter = generator.Generate(_sessionId,
+                            connectionString: BuildConnectionString(),
+                            logger: _sp.GetRequiredService<ILogger<LearnedPmsAdapter>>());
+
+                        if (adapter != null)
+                        {
+                            _logger.LogInformation("Learned adapter activated: {Pms}, query targets {Table}",
+                                adapter.PmsName, adapter.DetectionQuery.Split('\n')[^1].Trim());
+                            _db.UpdateLearningPhase(_sessionId, "active");
+                            _adapterActivated = true;
+
+                            _db.AppendLearningAudit(_sessionId, "worker", "adapter_activated",
+                                adapter.PmsName, phiScrubbed: false);
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Adapter generation failed — no viable Rx queue candidate");
+                        }
+                    }
                 }
             }
 
@@ -173,6 +285,36 @@ public sealed class LearningWorker : BackgroundService
         }
 
         _logger.LogInformation("LearningWorker stopped");
+    }
+
+    /// <summary>
+    /// Queries distinct status values from the PMS database for a given table and column.
+    /// Uses bracket-escaped identifiers and validated table names to prevent SQL injection.
+    /// </summary>
+    private static async Task<IReadOnlyList<(string Value, string DisplayName)>> QueryDistinctStatusValuesAsync(
+        SqlConnection conn, string table, string statusColumn, CancellationToken ct)
+    {
+        // Validate table name: must be schema.table with only word characters
+        if (!System.Text.RegularExpressions.Regex.IsMatch(table, @"^[\w]+\.[\w]+$"))
+            return Array.Empty<(string, string)>();
+
+        var parts = table.Split('.');
+        var safeTable = $"[{parts[0].Replace("]", "]]")}].[{parts[1].Replace("]", "]]")}]";
+        var safeColumn = $"[{statusColumn.Replace("]", "]]")}]";
+
+        await using var cmd = new SqlCommand(
+            $"SELECT DISTINCT {safeColumn} FROM {safeTable} WHERE {safeColumn} IS NOT NULL", conn);
+        cmd.CommandTimeout = 15;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+
+        var results = new List<(string, string)>();
+        while (await reader.ReadAsync(ct))
+        {
+            var val = reader[0]?.ToString() ?? "";
+            if (!string.IsNullOrWhiteSpace(val))
+                results.Add((val, val));
+        }
+        return results;
     }
 
     private string BuildConnectionString()

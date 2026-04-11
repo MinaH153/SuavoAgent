@@ -80,6 +80,54 @@ public class LearningIntegrationTests : IDisposable
         Assert.True(LearningSession.IsValidModeTransition("supervised", "observer"));
     }
 
+    [Fact]
+    public void UpdateLearningPhase_InvalidTransition_Throws()
+    {
+        _db.CreateLearningSession("sess-phase", "pharm-1");
+        // discovery -> model is not valid (must go discovery -> pattern first)
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => _db.UpdateLearningPhase("sess-phase", "model"));
+        Assert.Contains("Invalid phase transition", ex.Message);
+        Assert.Contains("discovery", ex.Message);
+        Assert.Contains("model", ex.Message);
+    }
+
+    [Fact]
+    public void UpdateLearningPhase_ValidTransition_Succeeds()
+    {
+        _db.CreateLearningSession("sess-phase2", "pharm-1");
+        _db.UpdateLearningPhase("sess-phase2", "pattern"); // discovery -> pattern is valid
+        var session = _db.GetLearningSession("sess-phase2");
+        Assert.Equal("pattern", session!.Value.Phase);
+    }
+
+    [Fact]
+    public void UpdateLearningMode_InvalidTransition_Throws()
+    {
+        _db.CreateLearningSession("sess-mode", "pharm-1");
+        // observer -> autonomous is not valid (must go observer -> supervised first)
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => _db.UpdateLearningMode("sess-mode", "autonomous"));
+        Assert.Contains("Invalid mode transition", ex.Message);
+    }
+
+    [Fact]
+    public void UpdateLearningMode_ValidTransition_Succeeds()
+    {
+        _db.CreateLearningSession("sess-mode2", "pharm-1");
+        _db.UpdateLearningMode("sess-mode2", "supervised"); // observer -> supervised is valid
+        var session = _db.GetLearningSession("sess-mode2");
+        Assert.Equal("supervised", session!.Value.Mode);
+    }
+
+    [Fact]
+    public void UpdateLearningPhase_NonexistentSession_Throws()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => _db.UpdateLearningPhase("nonexistent", "pattern"));
+        Assert.Contains("not found", ex.Message);
+    }
+
     public void Dispose()
     {
         _db.Dispose();

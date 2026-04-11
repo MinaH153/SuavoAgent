@@ -11,14 +11,16 @@ namespace SuavoAgent.Core.Learning;
 /// Queries the Rx table using learned column names and delivery-ready status values.
 /// Read-only -- writebacks deferred to Plan 4 (needs writeback column discovery).
 /// </summary>
-public sealed class LearnedPmsAdapter : ILocalPmsAdapter
+public sealed class LearnedPmsAdapter : ILocalPmsAdapter, IDisposable
 {
     private readonly string _connectionString;
     private readonly ILogger _logger;
+    private readonly SemaphoreSlim _connLock = new(1, 1);
     private SqlConnection? _conn;
 
     public string PmsName { get; }
     public string DetectionQuery { get; }
+    public IReadOnlyDictionary<string, string> StatusParameters { get; }
     public string RxNumberColumn { get; }
     public string StatusColumn { get; }
     public IReadOnlyList<string> DeliveryReadyStatuses { get; }
@@ -27,6 +29,7 @@ public sealed class LearnedPmsAdapter : ILocalPmsAdapter
         string pmsName,
         string connectionString,
         string detectionQuery,
+        IReadOnlyDictionary<string, string> statusParameters,
         string rxNumberColumn,
         string statusColumn,
         IReadOnlyList<string> deliveryReadyStatuses,
@@ -35,6 +38,7 @@ public sealed class LearnedPmsAdapter : ILocalPmsAdapter
         PmsName = pmsName;
         _connectionString = connectionString;
         DetectionQuery = detectionQuery;
+        StatusParameters = statusParameters;
         RxNumberColumn = rxNumberColumn;
         StatusColumn = statusColumn;
         DeliveryReadyStatuses = deliveryReadyStatuses;
@@ -55,19 +59,36 @@ public sealed class LearnedPmsAdapter : ILocalPmsAdapter
             DiscoveredScreens: Array.Empty<string>()));
     }
 
+    // Transient SQL error classes: connection, timeout, transport
+    private static readonly HashSet<int> TransientErrorNumbers = new()
+    {
+        -2, 20, 64, 233, 10053, 10054, 10060, 40143, 40197, 40501, 40613, 49918, 49919, 49920,
+    };
+
+    private static bool IsTransient(SqlException ex) =>
+        ex.Errors.Cast<SqlError>().Any(e => TransientErrorNumbers.Contains(e.Number));
+
     public async Task<IReadOnlyList<RxReadyForDelivery>> PullReadyAsync(string? cursor, CancellationToken ct)
     {
         var results = new List<RxReadyForDelivery>();
         try
         {
-            if (_conn is null || _conn.State != System.Data.ConnectionState.Open)
+            await _connLock.WaitAsync(ct);
+            try
             {
-                _conn = new SqlConnection(_connectionString);
-                await _conn.OpenAsync(ct);
+                if (_conn is null || _conn.State != System.Data.ConnectionState.Open)
+                {
+                    _conn?.Dispose();
+                    _conn = new SqlConnection(_connectionString);
+                    await _conn.OpenAsync(ct);
+                }
             }
+            finally { _connLock.Release(); }
 
             await using var cmd = new SqlCommand(DetectionQuery, _conn);
             cmd.CommandTimeout = 30;
+            foreach (var (name, value) in StatusParameters)
+                cmd.Parameters.AddWithValue(name, value);
             await using var reader = await cmd.ExecuteReaderAsync(ct);
 
             while (await reader.ReadAsync(ct))
@@ -91,9 +112,16 @@ public sealed class LearnedPmsAdapter : ILocalPmsAdapter
 
             _logger.LogInformation("Learned adapter detected {Count} delivery-ready Rxs", results.Count);
         }
+        catch (SqlException ex) when (IsTransient(ex))
+        {
+            _logger.LogWarning(ex, "Transient SQL error in learned adapter — will retry next cycle");
+            _conn?.Dispose();
+            _conn = null;
+            throw; // Bubble up so caller knows this cycle failed
+        }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Learned adapter detection failed");
+            _logger.LogWarning(ex, "Non-transient learned adapter detection error");
         }
 
         return results;
@@ -126,5 +154,12 @@ public sealed class LearnedPmsAdapter : ILocalPmsAdapter
             ApiStatus: null,
             CheckedAt: DateTimeOffset.UtcNow,
             Details: null));
+    }
+
+    public void Dispose()
+    {
+        _conn?.Dispose();
+        _conn = null;
+        _connLock.Dispose();
     }
 }

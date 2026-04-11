@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
+using SuavoAgent.Core.Learning;
 
 namespace SuavoAgent.Core.State;
 
@@ -73,6 +74,9 @@ public sealed class AgentStateDb : IDisposable
         // Migrate: add next_retry_at for exponential backoff
         TryAlter("ALTER TABLE writeback_states ADD COLUMN next_retry_at TEXT");
 
+        // Migrate: add pom_snapshot for frozen POM review (CRITICAL-6)
+        TryAlter("ALTER TABLE learning_session ADD COLUMN pom_snapshot TEXT");
+
         // POM tables for Learning Agent
         using var pomCmd = _conn.CreateCommand();
         pomCmd.CommandText = """
@@ -86,6 +90,7 @@ public sealed class AgentStateDb : IDisposable
                 approved_at TEXT,
                 approved_by TEXT,
                 approved_model_digest TEXT,
+                pom_snapshot TEXT,
                 schema_fingerprint TEXT,
                 schema_epoch INTEGER DEFAULT 1,
                 promoted_to_supervised_at TEXT,
@@ -642,6 +647,14 @@ public sealed class AgentStateDb : IDisposable
 
     public void UpdateLearningPhase(string sessionId, string phase)
     {
+        var session = GetLearningSession(sessionId);
+        if (session is null)
+            throw new InvalidOperationException($"Learning session '{sessionId}' not found");
+
+        if (!LearningSession.IsValidPhaseTransition(session.Value.Phase, phase))
+            throw new InvalidOperationException(
+                $"Invalid phase transition: '{session.Value.Phase}' → '{phase}'");
+
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             UPDATE learning_session SET phase = @phase, phase_changed_at = @now WHERE id = @id
@@ -654,6 +667,14 @@ public sealed class AgentStateDb : IDisposable
 
     public void UpdateLearningMode(string sessionId, string mode)
     {
+        var session = GetLearningSession(sessionId);
+        if (session is null)
+            throw new InvalidOperationException($"Learning session '{sessionId}' not found");
+
+        if (!LearningSession.IsValidModeTransition(session.Value.Mode, mode))
+            throw new InvalidOperationException(
+                $"Invalid mode transition: '{session.Value.Mode}' → '{mode}'");
+
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             UPDATE learning_session SET mode = @mode WHERE id = @id
@@ -919,6 +940,82 @@ public sealed class AgentStateDb : IDisposable
                 reader.GetDouble(3)));
         }
         return results;
+    }
+
+    public IReadOnlyList<(string StatusValue, string? InferredMeaning, int TransitionOrder, double Confidence)>
+        GetDiscoveredStatusesForTable(string sessionId, string schemaTable)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT status_value, inferred_meaning, transition_order, confidence
+            FROM discovered_statuses WHERE session_id = @sid AND schema_table = @tbl
+            ORDER BY transition_order
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@tbl", schemaTable);
+        var results = new List<(string, string?, int, double)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add((
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.GetInt32(2),
+                reader.GetDouble(3)));
+        }
+        return results;
+    }
+
+    // ── Approval Digest & POM Snapshot (CRITICAL-5, CRITICAL-6) ──
+
+    public void SetApprovalDigest(string sessionId, string digest, string approvedBy)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE learning_session
+            SET approved_model_digest = @digest,
+                approved_at = @now,
+                approved_by = @approvedBy
+            WHERE id = @id
+            """;
+        cmd.Parameters.AddWithValue("@digest", digest);
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        cmd.Parameters.AddWithValue("@approvedBy", approvedBy);
+        cmd.Parameters.AddWithValue("@id", sessionId);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void StorePomSnapshot(string sessionId, string pomJson)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE learning_session SET pom_snapshot = @pom WHERE id = @id";
+        cmd.Parameters.AddWithValue("@pom", pomJson);
+        cmd.Parameters.AddWithValue("@id", sessionId);
+        cmd.ExecuteNonQuery();
+    }
+
+    public string? GetPomSnapshot(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT pom_snapshot FROM learning_session WHERE id = @id";
+        cmd.Parameters.AddWithValue("@id", sessionId);
+        var result = cmd.ExecuteScalar();
+        return result is DBNull or null ? null : (string)result;
+    }
+
+    // ── Active Session Lookup (CRITICAL-7) ──
+
+    public string? GetActiveSessionId(string pharmacyId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id FROM learning_session
+            WHERE pharmacy_id = @pid AND phase NOT IN ('active')
+            ORDER BY started_at DESC LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        var result = cmd.ExecuteScalar();
+        return result is DBNull or null ? null : (string)result;
     }
 
     public void Dispose()

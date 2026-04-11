@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using SuavoAgent.Core.State;
 
@@ -14,6 +15,9 @@ public sealed class AdapterGenerator
     private readonly AgentStateDb _db;
     private const double MinConfidence = 0.6;
 
+    // Only word characters (letters, digits, underscore) with exactly one dot separator
+    private static readonly Regex SafeTableNamePattern = new(@"^[\w]+\.[\w]+$", RegexOptions.Compiled);
+
     public AdapterGenerator(AgentStateDb db) => _db = db;
 
     public LearnedPmsAdapter? Generate(string sessionId, string? connectionString = null,
@@ -28,37 +32,74 @@ public sealed class AdapterGenerator
         if (string.IsNullOrEmpty(best.RxNumberColumn) || string.IsNullOrEmpty(best.StatusColumn))
             return null;
 
-        var statuses = _db.GetDiscoveredStatuses(sessionId);
+        var statuses = _db.GetDiscoveredStatusesForTable(sessionId, best.PrimaryTable);
         var deliveryReady = StatusOrderingEngine.GetDeliveryReadyValues(statuses);
 
         if (deliveryReady.Count == 0)
             return null;
 
-        var query = BuildDetectionQuery(best.PrimaryTable, best.RxNumberColumn,
+        var result = BuildDetectionQuery(best.PrimaryTable, best.RxNumberColumn,
             best.StatusColumn, best.DateColumn, deliveryReady);
+
+        if (result is null)
+            return null;
 
         return new LearnedPmsAdapter(
             pmsName: $"Learned-{best.PrimaryTable}",
             connectionString: connectionString ?? "",
-            detectionQuery: query,
+            detectionQuery: result.Value.Query,
+            statusParameters: result.Value.Parameters,
             rxNumberColumn: best.RxNumberColumn,
             statusColumn: best.StatusColumn,
             deliveryReadyStatuses: deliveryReady,
             logger: logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
     }
 
-    internal static string BuildDetectionQuery(string table, string rxNumberColumn,
+    /// <summary>
+    /// Result of building a parameterized detection query.
+    /// Query contains @s0, @s1, ... placeholders; Parameters maps names to values.
+    /// </summary>
+    public readonly record struct ParameterizedQuery(
+        string Query,
+        IReadOnlyDictionary<string, string> Parameters);
+
+    /// <summary>
+    /// Bracket-escapes a SQL identifier by replacing ] with ]] and wrapping in [].
+    /// </summary>
+    internal static string BracketEscape(string identifier)
+        => $"[{identifier.Replace("]", "]]")}]";
+
+    internal static ParameterizedQuery? BuildDetectionQuery(string table, string rxNumberColumn,
         string statusColumn, string? dateColumn, IReadOnlyList<string> statusValues)
     {
+        // Validate table name: must be schema.table with only word characters
+        if (!SafeTableNamePattern.IsMatch(table))
+            return null;
+
+        var parts = table.Split('.');
+        var safeTable = $"{BracketEscape(parts[0])}.{BracketEscape(parts[1])}";
+
         var sb = new StringBuilder();
         sb.AppendLine("SELECT TOP 50");
-        sb.AppendLine($"    [{rxNumberColumn}], [{statusColumn}]");
+        sb.AppendLine($"    {BracketEscape(rxNumberColumn)}, {BracketEscape(statusColumn)}");
         if (dateColumn != null)
-            sb.AppendLine($"    , [{dateColumn}]");
-        sb.AppendLine($"FROM {table}");
-        sb.Append($"WHERE [{statusColumn}] IN (");
-        sb.AppendJoin(", ", statusValues.Select(v => $"'{v}'"));
+            sb.AppendLine($"    , {BracketEscape(dateColumn)}");
+        sb.AppendLine($"FROM {safeTable}");
+
+        // Generate parameter placeholders instead of inline values
+        var parameters = new Dictionary<string, string>(statusValues.Count);
+        var placeholders = new string[statusValues.Count];
+        for (var i = 0; i < statusValues.Count; i++)
+        {
+            var paramName = $"@s{i}";
+            placeholders[i] = paramName;
+            parameters[paramName] = statusValues[i];
+        }
+
+        sb.Append($"WHERE {BracketEscape(statusColumn)} IN (");
+        sb.AppendJoin(", ", placeholders);
         sb.Append(')');
-        return sb.ToString();
+
+        return new ParameterizedQuery(sb.ToString(), parameters);
     }
 }

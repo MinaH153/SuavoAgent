@@ -15,7 +15,7 @@ public sealed class SqlSchemaObserver : ILearningObserver
     private readonly AgentStateDb _db;
     private readonly string _pharmacySalt;
     private readonly ILogger _logger;
-    private bool _running;
+    private volatile bool _running;
     private int _eventsCollected;
     private DateTimeOffset _lastActivity;
     private bool _hasDmvAccess;

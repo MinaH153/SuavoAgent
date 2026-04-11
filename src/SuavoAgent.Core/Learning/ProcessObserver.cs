@@ -31,7 +31,7 @@ public sealed class ProcessObserver : ILearningObserver
     private readonly AgentStateDb _db;
     private readonly string _pharmacySalt;
     private readonly ILogger _logger;
-    private bool _running;
+    private volatile bool _running;
     private int _eventsCollected;
     private int _phiScrubCount;
     private DateTimeOffset _lastActivity;

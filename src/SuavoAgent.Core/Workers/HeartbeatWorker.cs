@@ -447,6 +447,7 @@ public sealed class HeartbeatWorker : BackgroundService
         var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
         var sessionId = dataEl.TryGetProperty("sessionId", out var s) ? s.GetString() : null;
         var digest = dataEl.TryGetProperty("approvedModelDigest", out var dig) ? dig.GetString() : null;
+        var approvedBy = dataEl.TryGetProperty("approvedBy", out var ab) ? ab.GetString() ?? "unknown" : "unknown";
 
         if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(digest))
         {
@@ -461,8 +462,14 @@ public sealed class HeartbeatWorker : BackgroundService
             return;
         }
 
-        // Verify digest matches local POM (TOCTOU protection — Codex CRITICAL-2)
-        var pomJson = PomExporter.Export(_stateDb, sessionId);
+        // Verify digest against FROZEN snapshot (CRITICAL-6), not live data
+        var pomJson = _stateDb.GetPomSnapshot(sessionId);
+        if (string.IsNullOrEmpty(pomJson))
+        {
+            _logger.LogWarning("approve_pom: no frozen POM snapshot for session {Id} — cannot verify", sessionId);
+            return;
+        }
+
         var localDigest = PomExporter.ComputeDigest(
             _options.PharmacyId ?? "", sessionId, pomJson);
 
@@ -474,12 +481,15 @@ public sealed class HeartbeatWorker : BackgroundService
             return;
         }
 
+        // Persist approval digest (CRITICAL-5)
+        _stateDb.SetApprovalDigest(sessionId, digest, approvedBy);
+
         // Store approved digest and transition phase
         _stateDb.UpdateLearningPhase(sessionId, "approved");
         _stateDb.UpdateLearningMode(sessionId, "supervised");
 
         _stateDb.AppendLearningAudit(sessionId, "worker", "pom_approved",
-            $"digest:{digest[..12]}", phiScrubbed: false);
+            $"digest:{digest[..12]},by:{approvedBy}", phiScrubbed: false);
 
         _logger.LogInformation("POM approved for session {Session} — transitioning to supervised mode", sessionId);
 
