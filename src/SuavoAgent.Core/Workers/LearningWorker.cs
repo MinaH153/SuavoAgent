@@ -55,7 +55,6 @@ public sealed class LearningWorker : BackgroundService
         }
 
         var pharmacyId = _options.PharmacyId ?? "unknown";
-        var pharmacySalt = _options.AgentId ?? "default-salt";
 
         // CRITICAL-7: Resume existing non-terminal session instead of creating date-derived ID
         _sessionId = _db.GetActiveSessionId(pharmacyId);
@@ -71,6 +70,9 @@ public sealed class LearningWorker : BackgroundService
             _logger.LogInformation("Created learning session {Id} for pharmacy {Pharmacy}",
                 _sessionId, pharmacyId);
         }
+
+        // Use secret per-session salt for PHI hashing (not AgentId, which is sent in heartbeats)
+        var pharmacySalt = _db.GetOrCreateHmacSalt(_sessionId);
 
         // Initialize observers
         var processObs = new ProcessObserver(_db, pharmacySalt,

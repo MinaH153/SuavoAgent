@@ -115,7 +115,9 @@ try
             }
             catch (Exception ex)
             {
-                Log.Warning(ex, "Failed to set ACL on data directory — may require elevated privileges");
+                if (OperatingSystem.IsWindows())
+                    throw; // ACL lockdown is mandatory on Windows — HIPAA 164.312(a)(2)(iv)
+                Log.Warning(ex, "ACL not available on this platform");
             }
         }
 
@@ -149,7 +151,9 @@ try
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "DPAPI key generation failed — state DB unencrypted");
+            if (OperatingSystem.IsWindows())
+                throw; // DPAPI encryption is mandatory on Windows — unencrypted DB is HIPAA violation
+            Log.Warning(ex, "DPAPI not available on this platform — state DB unencrypted");
         }
 
         // Migrate existing unencrypted DB to encrypted if key is available

@@ -347,6 +347,15 @@ Get-Content $checksumPath | ForEach-Object {
 }
 
 $binaries = @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe")
+
+# Verify ALL expected binaries have checksum entries before downloading anything
+foreach ($bin in $binaries) {
+    if (-not $expectedHashes.ContainsKey($bin)) {
+        Write-Error "CRITICAL: Checksum missing for $bin — aborting install"
+        exit 1
+    }
+}
+
 foreach ($bin in $binaries) {
     $url = "$base/$bin"
     $dst = Join-Path $installDir $bin

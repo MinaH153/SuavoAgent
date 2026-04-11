@@ -77,6 +77,9 @@ public sealed class AgentStateDb : IDisposable
         // Migrate: add pom_snapshot for frozen POM review (CRITICAL-6)
         TryAlter("ALTER TABLE learning_session ADD COLUMN pom_snapshot TEXT");
 
+        // Migrate: add hmac_salt — secret per-session salt for PHI hashing (replaces non-secret AgentId)
+        TryAlter("ALTER TABLE learning_session ADD COLUMN hmac_salt TEXT");
+
         // POM tables for Learning Agent
         using var pomCmd = _conn.CreateCommand();
         pomCmd.CommandText = """
@@ -1001,6 +1004,30 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@id", sessionId);
         var result = cmd.ExecuteScalar();
         return result is DBNull or null ? null : (string)result;
+    }
+
+    // ── HMAC Salt (secret, per-session) ──
+
+    /// <summary>
+    /// Returns the per-session HMAC salt, generating a random 32-byte one on first call.
+    /// This replaces AgentId (non-secret, sent in heartbeats) as the HMAC key for PHI hashing.
+    /// </summary>
+    public string GetOrCreateHmacSalt(string sessionId)
+    {
+        using var readCmd = _conn.CreateCommand();
+        readCmd.CommandText = "SELECT hmac_salt FROM learning_session WHERE id = @id";
+        readCmd.Parameters.AddWithValue("@id", sessionId);
+        var existing = readCmd.ExecuteScalar();
+        if (existing is not null and not DBNull)
+            return (string)existing;
+
+        var salt = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        using var writeCmd = _conn.CreateCommand();
+        writeCmd.CommandText = "UPDATE learning_session SET hmac_salt = @salt WHERE id = @id";
+        writeCmd.Parameters.AddWithValue("@salt", salt);
+        writeCmd.Parameters.AddWithValue("@id", sessionId);
+        writeCmd.ExecuteNonQuery();
+        return salt;
     }
 
     // ── Active Session Lookup (CRITICAL-7) ──
