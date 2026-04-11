@@ -816,6 +816,63 @@ public sealed class AgentStateDb : IDisposable
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
+    // ── Rx Queue Candidates ──
+
+    public void InsertRxQueueCandidate(string sessionId, string primaryTable,
+        string? rxNumberColumn, string? statusColumn, string? dateColumn,
+        string? patientFkColumn, double confidence, string evidenceJson,
+        string? negativeEvidenceJson = null)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO rx_queue_candidates
+                (session_id, primary_table, rx_number_column, status_column,
+                 date_column, patient_fk_column, confidence, evidence_json,
+                 negative_evidence_json, stability_days, discovered_at)
+            VALUES (@sid, @tbl, @rxCol, @statusCol, @dateCol, @patientCol,
+                    @conf, @evidence, @negEvidence, 0, @now)
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@tbl", primaryTable);
+        cmd.Parameters.AddWithValue("@rxCol", (object?)rxNumberColumn ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@statusCol", (object?)statusColumn ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@dateCol", (object?)dateColumn ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@patientCol", (object?)patientFkColumn ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@conf", confidence);
+        cmd.Parameters.AddWithValue("@evidence", evidenceJson);
+        cmd.Parameters.AddWithValue("@negEvidence", (object?)negativeEvidenceJson ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<(string PrimaryTable, string? RxNumberColumn, string? StatusColumn,
+        string? DateColumn, string? PatientFkColumn, double Confidence, string EvidenceJson)>
+        GetRxQueueCandidates(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT primary_table, rx_number_column, status_column, date_column,
+                   patient_fk_column, confidence, evidence_json
+            FROM rx_queue_candidates WHERE session_id = @sid
+            ORDER BY confidence DESC
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        var results = new List<(string, string?, string?, string?, string?, double, string)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add((
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.GetDouble(5),
+                reader.GetString(6)));
+        }
+        return results;
+    }
+
     public void Dispose()
     {
         _conn.Dispose();
