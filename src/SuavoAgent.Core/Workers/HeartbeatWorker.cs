@@ -144,15 +144,8 @@ public sealed class HeartbeatWorker : BackgroundService
                     _decommissionPendingSince = null;
                 }
 
-                // Check for remote decommission (two-phase)
-                if (response.HasValue)
-                    await CheckForDecommissionAsync(response.Value, stoppingToken);
-
-                // Check for pending self-update
-                if (response.HasValue && !_updateInProgress)
-                    await CheckForUpdateAsync(response.Value, stoppingToken);
-
-                // Process signed commands (fetch_patient, etc.)
+                // Process signed commands (fetch_patient, decommission, update)
+                // All destructive actions require ECDSA-signed command envelope.
                 if (response.HasValue)
                     await ProcessSignedCommandAsync(response.Value, stoppingToken);
             }
@@ -220,10 +213,21 @@ public sealed class HeartbeatWorker : BackgroundService
 
             _logger.LogInformation("Verified signed command: {Command} nonce:{Nonce}", cmd.Command, cmd.Nonce);
 
-            if (cmd.Command == "fetch_patient")
-                await HandleFetchPatientAsync(scEl, cmd, ct);
-            else
-                _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
+            switch (cmd.Command)
+            {
+                case "fetch_patient":
+                    await HandleFetchPatientAsync(scEl, cmd, ct);
+                    break;
+                case "decommission":
+                    await HandleDecommissionAsync(ct);
+                    break;
+                case "update":
+                    await HandleUpdateAsync(scEl, ct);
+                    break;
+                default:
+                    _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
+                    break;
+            }
         }
         catch (Exception ex)
         {
@@ -283,15 +287,12 @@ public sealed class HeartbeatWorker : BackgroundService
     /// Phase 1: enter pending state, audit logged, wait 5+ minutes.
     /// Phase 2: archive audit chain to cloud, verify ACK digest, then cleanup.
     /// Blocks if archive upload fails. 1h timeout auto-cancels in main loop.
+    /// Only reachable via ECDSA-signed command envelope.
     /// </summary>
-    private async Task CheckForDecommissionAsync(JsonElement response, CancellationToken ct)
+    private async Task HandleDecommissionAsync(CancellationToken ct)
     {
         try
         {
-            if (!response.TryGetProperty("data", out var data)) return;
-            if (!data.TryGetProperty("decommission", out var decom)) return;
-            if (decom.ValueKind != JsonValueKind.True) return;
-
             var agentId = _options.AgentId ?? "";
 
             // Phase 1: first decommission command — enter pending state
@@ -370,32 +371,29 @@ public sealed class HeartbeatWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Decommission check failed");
+            _logger.LogWarning(ex, "Decommission handling failed");
         }
     }
 
-    private async Task CheckForUpdateAsync(JsonElement response, CancellationToken ct)
+    /// <summary>
+    /// Self-update via signed command envelope. Extracts url/sha256/version
+    /// from the signed command's data fields and delegates to SelfUpdater.
+    /// Only reachable via ECDSA-signed command envelope.
+    /// </summary>
+    private async Task HandleUpdateAsync(JsonElement scEl, CancellationToken ct)
     {
+        if (_updateInProgress) return;
+
         try
         {
-            if (!response.TryGetProperty("data", out var data)) return;
-            if (!data.TryGetProperty("pendingUpdate", out var update)) return;
-            if (update.ValueKind == JsonValueKind.Null) return;
-
-            var url = update.TryGetProperty("url", out var u) ? u.GetString() : null;
-            var sha256 = update.TryGetProperty("sha256", out var s) ? s.GetString() : null;
-            var version = update.TryGetProperty("version", out var v) ? v.GetString() : null;
-            var signature = update.TryGetProperty("signature", out var sig) ? sig.GetString() : null;
+            var url = scEl.TryGetProperty("url", out var u) ? u.GetString() : null;
+            var sha256 = scEl.TryGetProperty("sha256", out var s) ? s.GetString() : null;
+            var version = scEl.TryGetProperty("version", out var v) ? v.GetString() : null;
+            var signature = scEl.TryGetProperty("binarySignature", out var sig) ? sig.GetString() : null;
 
             if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha256))
             {
-                _logger.LogDebug("Pending update missing url or sha256 — skipping");
-                return;
-            }
-
-            if (string.IsNullOrEmpty(signature))
-            {
-                _logger.LogWarning("Pending update has no ECDSA P-256 signature — rejecting");
+                _logger.LogWarning("Signed update command missing url or sha256 — rejecting");
                 return;
             }
 
@@ -407,7 +405,7 @@ public sealed class HeartbeatWorker : BackgroundService
             }
 
             _updateInProgress = true;
-            _logger.LogInformation("Pending update detected: v{Version} sha:{Sha}", version, sha256);
+            _logger.LogInformation("Signed update command: v{Version} sha:{Sha}", version, sha256);
 
             await SelfUpdater.TryApplyUpdateAsync(url, sha256, version ?? "unknown", signature, _logger, ct);
             // If we get here, update failed (TryApplyUpdateAsync exits on success)
@@ -415,7 +413,7 @@ public sealed class HeartbeatWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Update check failed");
+            _logger.LogWarning(ex, "Signed update command failed");
             _updateInProgress = false;
         }
     }
