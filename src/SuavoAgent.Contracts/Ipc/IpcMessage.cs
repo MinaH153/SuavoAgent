@@ -17,6 +17,7 @@ public static class IpcCommands
     public const string Drain = "drain";
     public const string HelperStatus = "helper_status";
     public const string HelperError = "helper_error";
+    public const string GetHealth = "get_health";
 }
 
 public static class IpcStatus

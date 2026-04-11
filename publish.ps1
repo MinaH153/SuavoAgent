@@ -2,7 +2,9 @@
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [string]$OutputDir = ".\publish"
+    [string]$OutputDir = ".\publish",
+    [string]$CertThumbprint = "",
+    [string]$TimestampServer = "http://timestamp.digicert.com"
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,7 +56,45 @@ Get-ChildItem $OutputDir -Recurse -Filter "*.exe" | ForEach-Object {
     Write-Host "  $($_.Directory.Name)\$($_.Name) - $sizeMb MB"
 }
 
-# ── Generate checksums ──
+# ── Authenticode signing (if certificate thumbprint provided) ──
+if ($CertThumbprint) {
+    Write-Host "`n--- Authenticode Signing ---" -ForegroundColor Yellow
+    $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | Select-Object -First 1
+    if (-not $signtool) {
+        $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    }
+    if ($signtool) {
+        foreach ($bin in @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe")) {
+            $subdir = $bin -replace "^SuavoAgent\.(.+)\.exe$", '$1'
+            $path = Join-Path $OutputDir (Join-Path $subdir $bin)
+            if (Test-Path $path) {
+                Write-Host "  Signing $bin..." -ForegroundColor Gray
+                & $signtool.FullName sign /sha1 $CertThumbprint /fd sha256 /tr $TimestampServer /td sha256 /v $path
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Error "Authenticode signing FAILED for $bin"
+                    exit 1
+                }
+                # Verify signature
+                & $signtool.FullName verify /pa /v $path | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  $bin signed and verified" -ForegroundColor Green
+                } else {
+                    Write-Error "Authenticode verification FAILED for $bin"
+                    exit 1
+                }
+            }
+        }
+    } else {
+        Write-Error "signtool.exe not found — install Windows SDK or add to PATH"
+        exit 1
+    }
+} else {
+    Write-Host "`n--- Authenticode Signing: SKIPPED (no -CertThumbprint) ---" -ForegroundColor Yellow
+    Write-Host "  To sign: .\publish.ps1 -CertThumbprint <SHA1>" -ForegroundColor Gray
+}
+
+# ── Generate checksums (AFTER signing — hash the signed binaries) ──
 Write-Host "`n--- Generating checksums ---" -ForegroundColor Yellow
 $checksumFile = Join-Path $OutputDir "checksums.sha256"
 $checksums = @()

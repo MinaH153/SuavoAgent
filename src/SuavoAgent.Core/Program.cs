@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Serilog;
+using SuavoAgent.Core;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
@@ -166,6 +168,17 @@ try
         return new IpcPipeServer("SuavoAgent", msg =>
         {
             logger.LogDebug("IPC: {Command}", msg.Command);
+
+            if (msg.Command == SuavoAgent.Contracts.Ipc.IpcCommands.GetHealth)
+            {
+                var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+                var db = sp.GetRequiredService<AgentStateDb>();
+                var snapshot = new HealthSnapshot(opts, db, sp, DateTimeOffset.UtcNow);
+                var data = snapshot.Take();
+                return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                    msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, data, null));
+            }
+
             return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
                 msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
         }, logger);

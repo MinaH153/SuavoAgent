@@ -63,6 +63,32 @@ public sealed class IpcPipeClient : IDisposable
             new IpcRequest(Guid.NewGuid().ToString("N"), IpcCommands.Ping, 1, null), ct);
     }
 
+    /// <summary>
+    /// Best-effort send — auto-connects if needed, swallows failures.
+    /// Used for non-critical status reporting (attachment events).
+    /// </summary>
+    public async Task TrySendAsync(string command, string? payload, CancellationToken ct)
+    {
+        try
+        {
+            if (!IsConnected)
+                await ConnectAsync(TimeSpan.FromSeconds(3), ct);
+
+            if (!IsConnected) return;
+
+            JsonElement? data = payload != null
+                ? JsonDocument.Parse(payload).RootElement.Clone()
+                : null;
+
+            await SendAsync(
+                new IpcRequest(Guid.NewGuid().ToString("N"), command, 1, data), ct);
+        }
+        catch
+        {
+            // Non-critical — Core may not be listening yet
+        }
+    }
+
     public void Dispose()
     {
         _pipe?.Dispose();

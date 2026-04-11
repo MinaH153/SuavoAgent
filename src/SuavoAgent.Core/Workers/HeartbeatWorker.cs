@@ -411,6 +411,18 @@ public sealed class HeartbeatWorker : BackgroundService
                 return;
             }
 
+            // Canary channel validation: only apply updates matching our assigned channel.
+            // Cloud assigns channel (stable/canary/beta) via heartbeat response.
+            var targetChannel = dataEl.TryGetProperty("channel", out var ch) ? ch.GetString() : "stable";
+            var myChannel = _lastUpdateChannel ?? _options.UpdateChannel;
+            if (!string.Equals(targetChannel, myChannel, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(targetChannel, "stable", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug("Update channel mismatch: target={Target}, mine={Mine} — skipping",
+                    targetChannel, myChannel);
+                return;
+            }
+
             _updateInProgress = true;
             _logger.LogInformation("Signed package update: v{Version} ({Count} binaries)",
                 manifest.Version, 3);

@@ -75,24 +75,35 @@ public sealed class SessionWatcher : BackgroundService
 
         try
         {
-            // For now, launch Helper as a regular process in the current session.
-            // Full CreateProcessAsUser implementation requires SYSTEM privileges
-            // which only work when actually installed as a Windows service.
-            var psi = new ProcessStartInfo
-            {
-                FileName = helperPath,
-                Arguments = $"--session {sessionId}",
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
+            int? pid = null;
+            var args = $"--session {sessionId}";
 
-            var proc = Process.Start(psi);
-            if (proc != null)
+            // Prefer CreateProcessAsUser on Windows — launches Helper in the user's
+            // interactive session with their environment and desktop access.
+            if (OperatingSystem.IsWindows())
             {
-                _helpers[sessionId] = new HelperInfo(proc.Id, sessionId, DateTimeOffset.UtcNow);
-                _logger.LogInformation("Launched Helper PID {Pid} for session {Session}",
-                    proc.Id, sessionId);
+                pid = NativeProcess.LaunchInSession(sessionId, helperPath, args, _logger);
             }
+
+            // Fallback: launch in current session (works for dev/testing)
+            if (pid == null)
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = helperPath,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                var proc = Process.Start(psi);
+                pid = proc?.Id;
+                if (pid != null)
+                    _logger.LogInformation("Launched Helper PID {Pid} for session {Session} (fallback)",
+                        pid, sessionId);
+            }
+
+            if (pid != null)
+                _helpers[sessionId] = new HelperInfo(pid.Value, sessionId, DateTimeOffset.UtcNow);
         }
         catch (Exception ex)
         {

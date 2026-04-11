@@ -21,6 +21,7 @@ public sealed class PioneerRxSqlEngine : IDisposable
         var csb = new SqlConnectionStringBuilder();
         csb.DataSource = server;
         csb.InitialCatalog = database;
+        csb.ApplicationName = "PioneerPharmacy";
         csb.ConnectTimeout = 30;
         csb.MaxPoolSize = 1;
         csb.MinPoolSize = 0;
@@ -403,7 +404,9 @@ ORDER BY rt.DateFilled DESC";
 SELECT TABLE_SCHEMA + '.' + TABLE_NAME AS full_name, COLUMN_NAME
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE (TABLE_SCHEMA = 'Prescription' AND TABLE_NAME IN ('Rx', 'RxTransaction'))
-   OR (TABLE_NAME LIKE '%Medication%' OR TABLE_NAME LIKE '%Drug%' OR TABLE_NAME LIKE '%Item%')
+   OR (TABLE_SCHEMA = 'Inventory' AND TABLE_NAME IN ('Item', 'ItemMaster'))
+   OR (TABLE_SCHEMA = 'Person' AND TABLE_NAME IN ('Person', 'Address', 'Phone'))
+   OR (TABLE_NAME LIKE '%Medication%' OR TABLE_NAME LIKE '%Drug%')
 ORDER BY full_name, ORDINAL_POSITION";
 
             await using var cmd = new SqlCommand(query, _connection);

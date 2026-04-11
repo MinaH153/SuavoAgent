@@ -1,0 +1,72 @@
+using System.Diagnostics;
+using System.Text.Json;
+using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Ipc;
+using SuavoAgent.Core.State;
+using SuavoAgent.Core.Workers;
+
+namespace SuavoAgent.Core;
+
+/// <summary>
+/// Produces a point-in-time health snapshot for the agent.
+/// Consumed by the heartbeat payload and the get_health IPC command.
+/// </summary>
+public sealed class HealthSnapshot
+{
+    private readonly AgentOptions _options;
+    private readonly AgentStateDb _stateDb;
+    private readonly IServiceProvider _sp;
+    private readonly DateTimeOffset _startTime;
+
+    public HealthSnapshot(AgentOptions options, AgentStateDb stateDb,
+        IServiceProvider sp, DateTimeOffset startTime)
+    {
+        _options = options;
+        _stateDb = stateDb;
+        _sp = sp;
+        _startTime = startTime;
+    }
+
+    public JsonElement Take()
+    {
+        var rxWorker = _sp.GetService(typeof(RxDetectionWorker)) as RxDetectionWorker;
+        var ipcServer = _sp.GetService(typeof(IpcPipeServer)) as IpcPipeServer;
+
+        var snapshot = new
+        {
+            agentId = _options.AgentId,
+            version = _options.Version,
+            pharmacyId = _options.PharmacyId,
+            uptimeSeconds = (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
+            memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
+            sql = new
+            {
+                connected = rxWorker?.IsSqlConnected ?? false,
+                lastRxCount = rxWorker?.LastDetectedCount ?? 0,
+                lastDetectionTime = rxWorker?.LastDetectionTime?.ToString("o")
+            },
+            helper = new
+            {
+                attached = ipcServer?.IsConnected ?? false
+            },
+            writeback = new
+            {
+                pending = _stateDb.GetPendingWritebacks().Count,
+            },
+            audit = new
+            {
+                chainValid = _stateDb.VerifyAuditChain(),
+                entryCount = _stateDb.GetAuditEntryCount()
+            },
+            sync = new
+            {
+                unsyncedBatches = _stateDb.GetPendingBatches().Count,
+                deadLetterCount = _stateDb.GetDeadLetterCount()
+            },
+            timestamp = DateTimeOffset.UtcNow.ToString("o")
+        };
+
+        var json = JsonSerializer.Serialize(snapshot);
+        return JsonDocument.Parse(json).RootElement.Clone();
+    }
+}

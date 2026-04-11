@@ -35,8 +35,10 @@ public class WritebackStateMachine
     private readonly string _taskId;
     private readonly Action<string, WritebackState, WritebackState, WritebackTrigger> _onStateChanged;
     private int _retryCount;
+    private int _verifyAttempts;
 
     public const int MaxRetries = 3;
+    public const int MaxVerifyAttempts = 3;
     public WritebackState CurrentState => _machine.State;
     public string TaskId => _taskId;
     public int RetryCount => _retryCount;
@@ -64,6 +66,7 @@ public class WritebackStateMachine
         _machine.Configure(WritebackState.Claimed)
             .Permit(WritebackTrigger.StartUia, WritebackState.InProgress)
             .Permit(WritebackTrigger.SystemError, WritebackState.Queued)
+            .Permit(WritebackTrigger.BusinessError, WritebackState.ManualReview)
             .Permit(WritebackTrigger.HelperDisconnected, WritebackState.BlockedInteractive);
 
         _machine.Configure(WritebackState.InProgress)
@@ -75,7 +78,8 @@ public class WritebackStateMachine
         _machine.Configure(WritebackState.VerifyPending)
             .Permit(WritebackTrigger.VerifyMatch, WritebackState.Verified)
             .Permit(WritebackTrigger.VerifyMismatch, WritebackState.InProgress)
-            .Permit(WritebackTrigger.SystemError, WritebackState.Queued);
+            .Permit(WritebackTrigger.SystemError, WritebackState.Queued)
+            .Permit(WritebackTrigger.BusinessError, WritebackState.ManualReview);
 
         _machine.Configure(WritebackState.Verified)
             .Permit(WritebackTrigger.SyncComplete, WritebackState.Done);
@@ -86,6 +90,8 @@ public class WritebackStateMachine
         {
             if (t.Trigger == WritebackTrigger.SystemError)
                 _retryCount++;
+            if (t.Trigger == WritebackTrigger.VerifyMismatch)
+                _verifyAttempts++;
 
             _onStateChanged(_taskId, t.Source, t.Destination, t.Trigger);
         });
@@ -95,12 +101,20 @@ public class WritebackStateMachine
 
     public void Fire(WritebackTrigger trigger)
     {
+        // Guard: max retries → ManualReview (from any state that permits BusinessError)
         if (_retryCount >= MaxRetries && trigger == WritebackTrigger.SystemError)
         {
-            // Force to ManualReview instead of retry
             _machine.Fire(WritebackTrigger.BusinessError);
             return;
         }
+
+        // Guard: verify mismatch loop → ManualReview after MaxVerifyAttempts
+        if (_verifyAttempts >= MaxVerifyAttempts && trigger == WritebackTrigger.VerifyMismatch)
+        {
+            _machine.Fire(WritebackTrigger.BusinessError);
+            return;
+        }
+
         _machine.Fire(trigger);
     }
 
