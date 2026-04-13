@@ -1,5 +1,6 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using SuavoAgent.Contracts.Canary;
 using SuavoAgent.Contracts.Models;
 
 namespace SuavoAgent.Adapters.PioneerRx.Sql;
@@ -12,6 +13,9 @@ public sealed class PioneerRxSqlEngine : IDisposable
     private IReadOnlyList<Guid>? _deliveryReadyGuids;
 
     public bool IsConnected => _connection?.State == System.Data.ConnectionState.Open;
+
+    /// Returns the physical connection identity for canary connection guard.
+    public Guid? ConnectionId => _connection?.ClientConnectionId;
 
     public PioneerRxSqlEngine(string server, string database, ILogger<PioneerRxSqlEngine> logger,
         string? sqlUser = null, string? sqlPassword = null)
@@ -430,6 +434,94 @@ ORDER BY full_name, ORDINAL_POSITION";
         }
 
         return result;
+    }
+
+    public async Task<IReadOnlyList<ObservedObject>> QueryContractMetadataAsync(
+        IReadOnlyList<(string Schema, string Table, string Column, bool IsRequired)> contractedObjects,
+        CancellationToken ct)
+    {
+        if (_connection is null || _connection.State != System.Data.ConnectionState.Open)
+            return Array.Empty<ObservedObject>();
+
+        var conditions = new List<string>();
+        for (int i = 0; i < contractedObjects.Count; i++)
+            conditions.Add($"(s.name = @schema{i} AND o.name = @table{i} AND c.name = @col{i})");
+
+        var query = $"""
+            SELECT s.name AS schema_name, o.name AS table_name, c.name AS column_name,
+                   t.name AS type_name, c.max_length, c.is_nullable
+            FROM sys.columns c
+            JOIN sys.objects o ON c.object_id = o.object_id
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            JOIN sys.types t ON c.user_type_id = t.user_type_id
+            WHERE ({string.Join(" OR ", conditions)})
+            ORDER BY s.name, o.name, c.name
+            """;
+
+        await using var cmd = new SqlCommand(query, _connection);
+        cmd.CommandTimeout = 10;
+        for (int i = 0; i < contractedObjects.Count; i++)
+        {
+            cmd.Parameters.AddWithValue($"@schema{i}", contractedObjects[i].Schema);
+            cmd.Parameters.AddWithValue($"@table{i}", contractedObjects[i].Table);
+            cmd.Parameters.AddWithValue($"@col{i}", contractedObjects[i].Column);
+        }
+
+        var results = new List<ObservedObject>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var schemaName = reader.GetString(0);
+            var tableName = reader.GetString(1);
+            var columnName = reader.GetString(2);
+            var typeName = reader.GetString(3);
+            var maxLen = reader.IsDBNull(4) ? (int?)null : (int)reader.GetInt16(4);
+            var nullable = reader.GetBoolean(5);
+
+            var isRequired = contractedObjects.Any(co =>
+                co.Schema.Equals(schemaName, StringComparison.OrdinalIgnoreCase) &&
+                co.Table.Equals(tableName, StringComparison.OrdinalIgnoreCase) &&
+                co.Column.Equals(columnName, StringComparison.OrdinalIgnoreCase) &&
+                co.IsRequired);
+
+            results.Add(new ObservedObject(schemaName, tableName, columnName,
+                typeName, maxLen, nullable, isRequired));
+        }
+
+        return results;
+    }
+
+    public async Task<IReadOnlyList<ObservedStatus>> QueryStatusMapAsync(
+        IReadOnlyList<string> statusDescriptions, CancellationToken ct)
+    {
+        if (_connection is null || _connection.State != System.Data.ConnectionState.Open)
+            return Array.Empty<ObservedStatus>();
+
+        var statusParams = string.Join(", ",
+            Enumerable.Range(0, statusDescriptions.Count).Select(i => $"@s{i}"));
+
+        var query = $"""
+            SELECT Description, RxTransactionStatusTypeID
+            FROM Prescription.RxTransactionStatusType
+            WHERE Description IN ({statusParams})
+            ORDER BY Description, RxTransactionStatusTypeID
+            """;
+
+        await using var cmd = new SqlCommand(query, _connection);
+        cmd.CommandTimeout = 10;
+        for (int i = 0; i < statusDescriptions.Count; i++)
+            cmd.Parameters.AddWithValue($"@s{i}", statusDescriptions[i]);
+
+        var results = new List<ObservedStatus>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new ObservedStatus(
+                reader.GetString(0),
+                reader.GetGuid(1).ToString()));
+        }
+
+        return results;
     }
 
     public static bool IsPhiColumn(string columnName) =>
