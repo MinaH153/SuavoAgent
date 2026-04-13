@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
+using SuavoAgent.Contracts.Canary;
 using SuavoAgent.Core.Learning;
 
 namespace SuavoAgent.Core.State;
@@ -207,6 +208,67 @@ public sealed class AgentStateDb : IDisposable
             );
             """;
         pomCmd.ExecuteNonQuery();
+
+        // Canary tables
+        using var canaryCmd = _conn.CreateCommand();
+        canaryCmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS schema_canary_baselines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pharmacy_id TEXT NOT NULL,
+                adapter_type TEXT NOT NULL,
+                object_fingerprint TEXT NOT NULL,
+                status_map_fingerprint TEXT NOT NULL,
+                query_fingerprint TEXT NOT NULL,
+                result_shape_fingerprint TEXT NOT NULL,
+                contract_fingerprint TEXT NOT NULL,
+                contract_json TEXT NOT NULL,
+                schema_epoch INTEGER NOT NULL DEFAULT 1,
+                contract_version INTEGER NOT NULL DEFAULT 1,
+                approved_at TEXT,
+                approved_by TEXT,
+                approved_command_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(pharmacy_id, adapter_type)
+            );
+            CREATE TABLE IF NOT EXISTS schema_canary_incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pharmacy_id TEXT NOT NULL,
+                adapter_type TEXT NOT NULL,
+                severity TEXT NOT NULL CHECK (severity IN ('warning','critical')),
+                drifted_components TEXT NOT NULL,
+                baseline_contract_fingerprint TEXT NOT NULL,
+                observed_contract_fingerprint TEXT NOT NULL,
+                drift_details TEXT,
+                dropped_batch_row_count INTEGER,
+                blocked_cycle_count INTEGER DEFAULT 1,
+                opened_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                resolved_at TEXT,
+                resolved_by TEXT,
+                resolution TEXT CHECK (resolution IN ('auto_cleared','operator_acknowledged','relearned')),
+                ack_command_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS schema_canary_hold (
+                pharmacy_id TEXT NOT NULL,
+                adapter_type TEXT NOT NULL,
+                severity TEXT NOT NULL CHECK (severity IN ('warning','critical')),
+                drift_hold_since TEXT NOT NULL,
+                blocked_cycle_count INTEGER NOT NULL DEFAULT 0,
+                last_seen_at TEXT NOT NULL,
+                baseline_contract_fingerprint TEXT NOT NULL,
+                acknowledged_at TEXT,
+                acknowledged_by TEXT,
+                ack_command_id TEXT,
+                PRIMARY KEY (pharmacy_id, adapter_type)
+            );
+            """;
+        canaryCmd.ExecuteNonQuery();
+
+        // Canary migrations
+        TryAlter("ALTER TABLE unsynced_batches ADD COLUMN baseline_contract_fingerprint TEXT");
+        TryAlter("ALTER TABLE unsynced_batches ADD COLUMN row_count INTEGER");
+        TryAlter("ALTER TABLE learning_session ADD COLUMN approved_contract_fingerprint TEXT");
     }
 
     private void TryAlter(string sql)
@@ -1043,6 +1105,188 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@pid", pharmacyId);
         var result = cmd.ExecuteScalar();
         return result is DBNull or null ? null : (string)result;
+    }
+
+    // ── Canary Baselines ──
+
+    public void UpsertCanaryBaseline(string pharmacyId, ContractBaseline baseline)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO schema_canary_baselines
+                (pharmacy_id, adapter_type, object_fingerprint, status_map_fingerprint,
+                 query_fingerprint, result_shape_fingerprint, contract_fingerprint,
+                 contract_json, schema_epoch, contract_version, created_at, updated_at)
+            VALUES
+                (@pid, @adapter, @obj, @stat, @qry, @shape, @contract,
+                 @json, @epoch, @version, @now, @now)
+            ON CONFLICT(pharmacy_id, adapter_type) DO UPDATE SET
+                object_fingerprint = @obj,
+                status_map_fingerprint = @stat,
+                query_fingerprint = @qry,
+                result_shape_fingerprint = @shape,
+                contract_fingerprint = @contract,
+                contract_json = @json,
+                schema_epoch = @epoch,
+                contract_version = @version,
+                updated_at = @now
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        cmd.Parameters.AddWithValue("@adapter", baseline.AdapterType);
+        cmd.Parameters.AddWithValue("@obj", baseline.ObjectFingerprint);
+        cmd.Parameters.AddWithValue("@stat", baseline.StatusMapFingerprint);
+        cmd.Parameters.AddWithValue("@qry", baseline.QueryFingerprint);
+        cmd.Parameters.AddWithValue("@shape", baseline.ResultShapeFingerprint);
+        cmd.Parameters.AddWithValue("@contract", baseline.ContractFingerprint);
+        cmd.Parameters.AddWithValue("@json", baseline.ContractJson);
+        cmd.Parameters.AddWithValue("@epoch", baseline.SchemaEpoch);
+        cmd.Parameters.AddWithValue("@version", baseline.ContractVersion);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.ExecuteNonQuery();
+    }
+
+    public ContractBaseline? GetCanaryBaseline(string pharmacyId, string adapterType)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT adapter_type, object_fingerprint, status_map_fingerprint,
+                   query_fingerprint, result_shape_fingerprint, contract_fingerprint,
+                   contract_json, schema_epoch, contract_version
+            FROM schema_canary_baselines
+            WHERE pharmacy_id = @pid AND adapter_type = @adapter
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        cmd.Parameters.AddWithValue("@adapter", adapterType);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return new ContractBaseline(
+            AdapterType: reader.GetString(0),
+            ObjectFingerprint: reader.GetString(1),
+            StatusMapFingerprint: reader.GetString(2),
+            QueryFingerprint: reader.GetString(3),
+            ResultShapeFingerprint: reader.GetString(4),
+            ContractFingerprint: reader.GetString(5),
+            ContractJson: reader.GetString(6),
+            SchemaEpoch: reader.GetInt32(7),
+            ContractVersion: reader.GetInt32(8));
+    }
+
+    // ── Canary Incidents ──
+
+    public void InsertCanaryIncident(string pharmacyId, string adapterType, string severity,
+        string driftedComponents, string baselineFingerprint, string observedFingerprint,
+        string? details, int? droppedRowCount)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO schema_canary_incidents
+                (pharmacy_id, adapter_type, severity, drifted_components,
+                 baseline_contract_fingerprint, observed_contract_fingerprint,
+                 drift_details, dropped_batch_row_count, opened_at, last_seen_at)
+            VALUES
+                (@pid, @adapter, @severity, @drifted,
+                 @baseline, @observed, @details, @dropped, @now, @now)
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        cmd.Parameters.AddWithValue("@adapter", adapterType);
+        cmd.Parameters.AddWithValue("@severity", severity);
+        cmd.Parameters.AddWithValue("@drifted", driftedComponents);
+        cmd.Parameters.AddWithValue("@baseline", baselineFingerprint);
+        cmd.Parameters.AddWithValue("@observed", observedFingerprint);
+        cmd.Parameters.AddWithValue("@details", (object?)details ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@dropped", (object?)droppedRowCount ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<(string Severity, int? DroppedBatchRowCount, string OpenedAt)>
+        GetOpenCanaryIncidents(string pharmacyId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT severity, dropped_batch_row_count, opened_at
+            FROM schema_canary_incidents
+            WHERE pharmacy_id = @pid AND resolved_at IS NULL
+            ORDER BY opened_at ASC
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        var results = new List<(string, int?, string)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            int? dropped = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+            results.Add((reader.GetString(0), dropped, reader.GetString(2)));
+        }
+        return results;
+    }
+
+    // ── Canary Hold ──
+
+    public void UpsertCanaryHold(string pharmacyId, string adapterType, string severity, string baselineFingerprint)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO schema_canary_hold
+                (pharmacy_id, adapter_type, severity, drift_hold_since,
+                 blocked_cycle_count, last_seen_at, baseline_contract_fingerprint)
+            VALUES (@pid, @adapter, @severity, @now, 0, @now, @baseline)
+            ON CONFLICT(pharmacy_id, adapter_type) DO UPDATE SET
+                severity = @severity,
+                last_seen_at = @now,
+                baseline_contract_fingerprint = @baseline
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        cmd.Parameters.AddWithValue("@adapter", adapterType);
+        cmd.Parameters.AddWithValue("@severity", severity);
+        cmd.Parameters.AddWithValue("@baseline", baselineFingerprint);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void IncrementCanaryHoldCycles(string pharmacyId, string adapterType)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE schema_canary_hold
+            SET blocked_cycle_count = blocked_cycle_count + 1,
+                last_seen_at = @now
+            WHERE pharmacy_id = @pid AND adapter_type = @adapter
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        cmd.Parameters.AddWithValue("@adapter", adapterType);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.ExecuteNonQuery();
+    }
+
+    public (string Severity, int BlockedCycles, string DriftHoldSince)? GetCanaryHold(string pharmacyId, string adapterType)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT severity, blocked_cycle_count, drift_hold_since
+            FROM schema_canary_hold
+            WHERE pharmacy_id = @pid AND adapter_type = @adapter
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        cmd.Parameters.AddWithValue("@adapter", adapterType);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return (reader.GetString(0), reader.GetInt32(1), reader.GetString(2));
+    }
+
+    public void ClearCanaryHold(string pharmacyId, string adapterType)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            DELETE FROM schema_canary_hold
+            WHERE pharmacy_id = @pid AND adapter_type = @adapter
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        cmd.Parameters.AddWithValue("@adapter", adapterType);
+        cmd.ExecuteNonQuery();
     }
 
     public void Dispose()
