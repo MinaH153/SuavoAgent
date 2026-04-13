@@ -72,6 +72,9 @@ public sealed class HeartbeatWorker : BackgroundService
         {
             _stateDb.PruneOldNonces(TimeSpan.FromMinutes(10));
 
+            // Hoist canaryHold so the delay block can read it even if the try throws
+            (string Severity, int BlockedCycles, string DriftHoldSince)? canaryHold = null;
+
             try
             {
                 // Read Rx detection state if available
@@ -82,6 +85,8 @@ public sealed class HeartbeatWorker : BackgroundService
 
                 // Read Helper IPC state
                 var ipcServer = _serviceProvider.GetService<IpcPipeServer>();
+
+                canaryHold = _stateDb.GetCanaryHold(_options.PharmacyId ?? "", "pioneerrx");
 
                 var payload = new
                 {
@@ -119,6 +124,14 @@ public sealed class HeartbeatWorker : BackgroundService
                         unsyncedBatches = _stateDb.GetPendingBatches().Count,
                         deadLetterCount = _stateDb.GetDeadLetterCount(),
                         lastSyncAt = _lastSyncAt?.ToString("o")
+                    },
+                    canary = new
+                    {
+                        status = canaryHold != null ? "drift_hold" : "clean",
+                        severity = canaryHold?.Severity ?? "none",
+                        blockedCycles = canaryHold?.BlockedCycles ?? 0,
+                        driftHoldSince = canaryHold?.DriftHoldSince,
+                        lastVerifiedAt = DateTimeOffset.UtcNow.ToString("o"),
                     }
                 };
 
@@ -166,6 +179,12 @@ public sealed class HeartbeatWorker : BackgroundService
             {
                 var backoff = Math.Min(_consecutiveFailures * _options.HeartbeatIntervalSeconds, 300);
                 delay = TimeSpan.FromSeconds(backoff) + TimeSpan.FromMilliseconds(jitter);
+            }
+
+            if (canaryHold != null)
+            {
+                // Errata E11: 15s during drift_hold for faster operator feedback
+                delay = TimeSpan.FromSeconds(15) + TimeSpan.FromMilliseconds(jitter);
             }
 
             await Task.Delay(delay, stoppingToken);
@@ -235,6 +254,9 @@ public sealed class HeartbeatWorker : BackgroundService
                     break;
                 case "approve_pom":
                     await HandleApprovePomAsync(scEl, ct);
+                    break;
+                case "acknowledge_drift":
+                    await HandleAcknowledgeDriftAsync(scEl, ct);
                     break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
@@ -504,6 +526,43 @@ public sealed class HeartbeatWorker : BackgroundService
             $"digest:{digest[..12]},by:{approvedBy}", phiScrubbed: false);
 
         _logger.LogInformation("POM approved for session {Session} — transitioning to supervised mode", sessionId);
+
+        await Task.CompletedTask;
+    }
+
+    private async Task HandleAcknowledgeDriftAsync(JsonElement scEl, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var action = dataEl.TryGetProperty("action", out var a) ? a.GetString() : null;
+        var incidentId = dataEl.TryGetProperty("incidentId", out var iid) ? iid.GetString() : null;
+        var pharmacyId = _options.PharmacyId ?? "";
+
+        if (string.IsNullOrEmpty(action))
+        {
+            _logger.LogWarning("acknowledge_drift: missing action");
+            return;
+        }
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            pharmacyId, "canary_ack", "drift_hold", action,
+            $"acknowledge_drift:{action}",
+            CommandId: incidentId));
+
+        if (action == "resume_supervised")
+        {
+            _stateDb.ClearCanaryHold(pharmacyId, "pioneerrx");
+            _logger.LogInformation("Drift acknowledged — resuming in supervised mode");
+        }
+        else if (action == "approve_new_baseline")
+        {
+            var targetEpoch = dataEl.TryGetProperty("targetSchemaEpoch", out var te) ? te.GetInt32() : 0;
+            _stateDb.ClearCanaryHold(pharmacyId, "pioneerrx");
+            _logger.LogInformation("Drift acknowledged — new baseline approved, epoch {Epoch}", targetEpoch);
+        }
+        else
+        {
+            _logger.LogWarning("acknowledge_drift: unknown action '{Action}'", action);
+        }
 
         await Task.CompletedTask;
     }

@@ -31,6 +31,7 @@ public sealed class HealthSnapshot
     {
         var rxWorker = _sp.GetService(typeof(RxDetectionWorker)) as RxDetectionWorker;
         var ipcServer = _sp.GetService(typeof(IpcPipeServer)) as IpcPipeServer;
+        var canaryHold = _stateDb.GetCanaryHold(_options.PharmacyId ?? "", "pioneerrx");
 
         var snapshot = new
         {
@@ -62,6 +63,11 @@ public sealed class HealthSnapshot
             {
                 unsyncedBatches = _stateDb.GetPendingBatches().Count,
                 deadLetterCount = _stateDb.GetDeadLetterCount()
+            },
+            canary = new
+            {
+                status = canaryHold != null ? "drift_hold" : "clean",
+                blockedCycles = canaryHold?.BlockedCycles ?? 0,
             },
             timestamp = DateTimeOffset.UtcNow.ToString("o")
         };
