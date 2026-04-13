@@ -1,7 +1,6 @@
 using System.Text.Json;
-using SuavoAgent.Contracts.Canary;
 
-namespace SuavoAgent.Core.Canary;
+namespace SuavoAgent.Contracts.Canary;
 
 /// Pure severity classifier for schema drift detection.
 /// Compares a ContractBaseline (approved hashes + serialized objects) against

@@ -1,8 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
-using SuavoAgent.Contracts.Canary;
 
-namespace SuavoAgent.Core.Canary;
+namespace SuavoAgent.Contracts.Canary;
 
 /// Deterministic SHA-256 hashing of contract components.
 /// All inputs are sorted before hashing to ensure order-independence.

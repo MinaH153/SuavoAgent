@@ -1,5 +1,4 @@
 using SuavoAgent.Contracts.Canary;
-using SuavoAgent.Core.Canary;
 using Xunit;
 
 namespace SuavoAgent.Core.Tests.Canary;
