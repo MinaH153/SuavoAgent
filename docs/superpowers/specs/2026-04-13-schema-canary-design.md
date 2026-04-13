@@ -5,7 +5,7 @@
 **Repo:** github.com/MinaH153/SuavoAgent
 **Branch:** main
 **Status:** Approved design, pending implementation
-**Review:** 23 findings from Codex incorporated across 4 review rounds. All CRITICAL issues resolved.
+**Review:** 28 findings from final Codex review + 4 from Claude self-review. All CRITICAL and HIGH issues resolved in Errata section.
 
 ---
 
@@ -585,3 +585,109 @@ Run when `SUAVO_TEST_SQL_SERVER` env var is set:
 - Workflow recording (Pillar 4 — separate spec)
 - Collective intelligence database (Pillar 2 — separate spec, but canary baselines feed into it)
 - Universal adapter acceleration (Pillar 6 — depends on collective intelligence)
+
+---
+
+## Review Errata (Final Gate — Codex + Claude)
+
+28 findings from Codex final review + 4 from Claude self-review. Resolutions below override the main spec sections where they conflict.
+
+### CRITICAL Fixes
+
+**E1. Baseline establishment deadlock (Codex #2).**
+Spec says "first run, no baseline → fails closed" AND "baseline set during adapter activation." These contradict — agent can never start.
+**Resolution:** On first detection cycle with no baseline, the canary runs preflight in **establishment mode**: executes all preflight queries, captures the result as the initial baseline, persists it, and logs a `baseline_established` audit entry. The first cycle's batch is synced normally (the baseline IS the current schema — no drift possible). Subsequent cycles verify against this baseline. No signed command needed for initial establishment. Establishment mode is a one-time transition, never re-entered unless the baseline is explicitly deleted.
+
+**E2. ICanaryDetectionSource DI wiring (Codex #1).**
+Spec introduces the interface but doesn't describe how `RxDetectionWorker` gets it.
+**Resolution:** `RxDetectionWorker` receives `ICanaryDetectionSource?` via constructor injection (nullable — backward compatible). In `Program.cs`, if `LearningMode=false`, register `PioneerRxCanarySource` as `ICanaryDetectionSource`. If `LearningMode=true` AND phase is `active`, register `LearnedCanarySource`. If learning is still in progress (phase < active), don't register — canary is not active during learning. Worker checks `_canarySource != null` before running canary gates; if null, falls back to current behavior (no canary).
+
+**E3. ReadReadyMetadataAsync LEFT JOIN vs. required contract (Codex #3).**
+`BuildMetadataQuery` uses `LEFT JOIN Inventory.Item`. If Item table is missing, the query still returns rows with NULL TradeName/NDC — not a SQL error. But the canary contract marks Item as required, so preflight would fire Critical for pharmacies where Item doesn't exist.
+**Resolution:** Split the contract into `required_objects` and `optional_objects`. `Inventory.Item` is optional. Preflight: missing required object → Critical. Missing optional object → Warning (logged, batch still proceeds but operator notified that drug names will be missing). Postflight: if Item is optional and missing, result shape is allowed to omit TradeName/NDC columns. Update the result shape baseline to have a "with-Item" and "without-Item" variant, or hash only required columns in the result shape.
+
+**E4. Hold table PK (Codex #4).**
+`schema_canary_hold` uses `pharmacy_id TEXT PRIMARY KEY` but baselines are keyed `(pharmacy_id, adapter_type)`.
+**Resolution:** Change PK to `PRIMARY KEY (pharmacy_id, adapter_type)`. Drop the single-column PK.
+
+**E5. Signed command delivery mechanism (Codex #5).**
+The spec identifies the broken `approve_pom` delivery but the existing `HandleApprovePomAsync` in HeartbeatWorker IS processing commands (it works). Investigation: the heartbeat route in the `Suavo/src` checkout (not `web/web`) DOES deliver signed commands via `data.signedCommand`. The `web/web` checkout may be a stale/incomplete copy. 
+**Resolution:** Verify which checkout is deployed. If `Suavo/src` is canonical, the delivery mechanism works and `agent_pending_commands` is an improvement but not a prerequisite. If `web/web` is canonical, implement `agent_pending_commands` as specified. Either way, `acknowledge_drift` uses the same delivery path as `approve_pom`.
+
+### HIGH Fixes
+
+**E6. LearnedPmsAdapter error handling (Codex #6).**
+Spec says "Return ContractVerification instead of swallowing errors" on `LearnedPmsAdapter.cs`. Ambiguous whether this changes `PullReadyAsync` (which would break `ILocalPmsAdapter`).
+**Resolution:** `LearnedPmsAdapter.PullReadyAsync` remains unchanged — it still implements `ILocalPmsAdapter`. The `LearnedCanarySource` wrapper catches the swallowed errors by detecting empty results + checking adapter health, and converts to `ContractVerification`. The wrapper also adds pre-query preflight and post-query postflight. `LearnedPmsAdapter` itself is modified only to expose its connection state and last error (new internal properties), not to change its interface.
+
+**E7. Status GUID cache replacement (Codex #7).**
+Spec says re-query per cycle but doesn't address the existing `_deliveryReadyGuids` cache.
+**Resolution:** `PioneerRxSqlEngine._deliveryReadyGuids` cache is kept for `ReadReadyPrescriptionsAsync` (the full query path, used for on-demand patient fetch). The canary preflight queries status independently every cycle and stores the result in the canary verification, NOT in `_deliveryReadyGuids`. Two separate concerns: detection canary (per-cycle fresh query) vs. operational cache (per-connection, used by non-canary paths).
+
+**E8. schema_epoch read in GetLearningSession (Codex #8).**
+`schema_epoch` IS read at line 638 even though never written.
+**Resolution:** Keep the column. Don't deprecate. Wire up `IncrementSchemaEpoch()` in the canary (already planned). Remove only `schema_fingerprint` which is truly never read or written.
+
+**E9. Connection guard mechanism (Codex #9).**
+"If SqlConnection.State changes" is underspecified.
+**Resolution:** Snapshot `_connection.ClientConnectionId` (a Guid unique per physical connection) before preflight. After preflight completes, compare again before executing detection query. If different → new physical connection → abort cycle. This is more reliable than checking `State` (which can be `Open` on a different connection after reconnect). Fallback for providers that don't support `ClientConnectionId`: wrap preflight + query + postflight in a try-catch; any `SqlException` with a connection-class error number aborts the cycle.
+
+**E10. "Resume supervised" manual approval mechanism (Codex #10).**
+"All batches require manual approval" in supervised mode has no implementation path for detection batches.
+**Resolution:** "Resume supervised" means: detection continues, batches sync to cloud, but every batch is tagged `requires_verification: true` in the sync payload. The fleet operator dashboard shows these batches with an amber indicator and must click "Verify" before dispatching drivers. This is a cloud-side/dashboard change — the agent just tags the payload. No per-batch signed command needed.
+
+**E11. Heartbeat rate limit during drift_hold (Codex #11).**
+10s heartbeat could hit cloud rate limits.
+**Resolution:** Increase to 15s during drift_hold (not 10s). Cloud heartbeat endpoint rate limit is per-agent, currently generous (no explicit limit in code). Add a note to verify cloud-side rate limits during implementation. If rate-limited, agent falls back to 30s with a log warning.
+
+### MEDIUM Fixes (selected)
+
+**E12. Advisory tier unreachable (Codex #28).**
+Preflight only queries contracted objects — can never see non-contracted changes.
+**Resolution:** Remove Advisory tier entirely. It was aspirational and adds complexity with zero value if the preflight scope is contracted-only. Two tiers: Warning and Critical. Simplify `CanarySeverity` to `{ None, Warning, Critical }`.
+
+**E13. Canary diff artifact format (Codex #14).**
+Spec doesn't define payload format for `POST /api/agent/canary-diff`.
+**Resolution:** JSON payload: `{ incidentId, pharmacyId, adapterType, schemaEpoch, baseline: { objectFingerprint, statusMap: [{description, guid}], resultShape: [{name, type}] }, observed: { same structure }, driftedComponents: ["status_map"], details: "human-readable summary" }`. Authenticated via HMAC (`verifyAgentRequest`). Max 500KB.
+
+**E14. NULL baseline_contract_fingerprint on existing batches (Codex #15).**
+Existing `unsynced_batches` rows have NULL for new columns.
+**Resolution:** NULL fingerprint = pre-canary batch. During drift_hold, pre-canary batches are still retried (they were created before canary existed, likely valid). Only batches with a non-NULL fingerprint that doesn't match current baseline are skipped.
+
+**E15. Contract versioning (Claude #D).**
+No version field on contracts — future contract changes break old baselines.
+**Resolution:** Add `contract_version INTEGER NOT NULL DEFAULT 1` to `schema_canary_baselines`. If agent upgrades and contract version changes, the baseline is invalidated and re-established (same as E1 first-run flow).
+
+**E16. LearnedCanarySource type conversion (Claude #B).**
+`LearnedPmsAdapter.PullReadyAsync` returns `RxReadyForDelivery`, not `RxMetadata`. `DetectionResult` uses `RxMetadata`.
+**Resolution:** `LearnedCanarySource.DetectWithCanaryAsync` converts `RxReadyForDelivery` → `RxMetadata` (drop patient fields, keep RxNumber/DrugName/NDC/DateFilled/Quantity/StatusGuid/DetectedAt). This is a safe narrowing — `RxMetadata` is the PHI-free subset.
+
+**E17. Learning mode canary scope (Claude #C).**
+Spec doesn't address canary during learning phase.
+**Resolution:** Canary is NOT active during learning (phases discovery/pattern/model). Learning is inherently exploratory — it's discovering the schema, not relying on a known one. Canary activates only when an adapter is activated (phase = active or PioneerRx hand-built mode). Explicitly stated in E2.
+
+**E18. PioneerRxCanarySource assembly location (Codex #17).**
+`PioneerRxCanarySource` in Core creates upward dependency on Adapters.PioneerRx.
+**Resolution:** Move `PioneerRxCanarySource` to `SuavoAgent.Adapters.PioneerRx` assembly. Register it in `Program.cs` via DI. Core depends on `ICanaryDetectionSource` (in Contracts), not on the concrete implementation.
+
+**E19. query_fingerprint instability for PioneerRx (Codex #24).**
+`BuildMetadataQuery` generates SQL dynamically based on status count. If status count changes, query text changes, query_fingerprint changes → false Critical.
+**Resolution:** For the PioneerRx hand-built adapter, `query_fingerprint` hashes the query TEMPLATE (with `{statusParams}` placeholder), not the fully-expanded SQL. The status values are covered by `status_map_fingerprint`. This separates "query structure changed" from "status list changed."
+
+**E20. Warning tier — should it block detection? (Codex #18).**
+Two clean probes = 10 minutes blocked for a potentially transient issue.
+**Resolution:** Warning does NOT block detection. Batches proceed normally. Warning only: logs the anomaly, increments a warning counter in heartbeat telemetry, and triggers a reprobe next cycle. If the warning persists for 3 consecutive cycles, escalate to Critical (which does block). This prevents 10-minute false-positive blocks for transient DDL operations.
+
+### Tests Added/Modified
+
+- Add test: first-run establishment mode creates baseline from current schema (E1)
+- Add test: `ICanaryDetectionSource` is null → worker runs without canary (E2)
+- Add test: optional object missing → Warning not Critical (E3)
+- Modify test 22: remove Advisory tier, update severity tests (E12)
+- Add test: NULL-fingerprint batch retried during hold (E14)
+- Add test: contract version mismatch → re-establishment (E15)
+- Add test: Warning does not block detection (E20)
+- Add test: 3 consecutive Warnings → escalate to Critical (E20)
+- Add test: `ClientConnectionId` change → cycle aborted (E9)
+
+Updated total: **61 tests** (52 original + 9 errata additions)
