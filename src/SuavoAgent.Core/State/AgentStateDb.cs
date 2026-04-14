@@ -1372,6 +1372,22 @@ public sealed class AgentStateDb : IDisposable
             ContractVersion: reader.GetInt32(8));
     }
 
+    /// <summary>
+    /// Returns the most recent contract fingerprint for a pharmacy from the canary baselines.
+    /// </summary>
+    public string? GetLatestContractFingerprint(string pharmacyId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT contract_fingerprint FROM schema_canary_baselines
+            WHERE pharmacy_id = @pid
+            ORDER BY updated_at DESC LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        var result = cmd.ExecuteScalar();
+        return result is DBNull or null ? null : (string)result;
+    }
+
     // ── Canary Incidents ──
 
     public void InsertCanaryIncident(string pharmacyId, string adapterType, string severity,
@@ -1952,7 +1968,10 @@ public sealed class AgentStateDb : IDisposable
     public int PruneBehavioralEvents(string sessionId, int olderThanDays)
     {
         var cutoff = DateTimeOffset.UtcNow.AddDays(-olderThanDays).ToString("o");
+        // D9: Use transaction + single-command changes() to avoid race with other threads
+        using var txn = _conn.BeginTransaction();
         using var cmd = _conn.CreateCommand();
+        cmd.Transaction = txn;
         cmd.CommandText = """
             DELETE FROM behavioral_events
             WHERE session_id = @sid
@@ -1961,16 +1980,14 @@ public sealed class AgentStateDb : IDisposable
                   SELECT DISTINCT je.value
                   FROM learned_routines lr, json_each(lr.path_json) je
                   WHERE lr.session_id = @sid AND lr.frequency >= 5
-              )
+              );
+            SELECT changes();
             """;
         cmd.Parameters.AddWithValue("@sid", sessionId);
         cmd.Parameters.AddWithValue("@cutoff", cutoff);
-        cmd.ExecuteNonQuery();
-
-        // Return affected row count via changes()
-        using var countCmd = _conn.CreateCommand();
-        countCmd.CommandText = "SELECT changes()";
-        return Convert.ToInt32(countCmd.ExecuteScalar());
+        var result = cmd.ExecuteScalar();
+        txn.Commit();
+        return Convert.ToInt32(result);
     }
 
     // ── Feedback Events CRUD ──
@@ -2325,15 +2342,19 @@ public sealed class AgentStateDb : IDisposable
         var hash = lookupCmd.ExecuteScalar();
         if (hash is null or DBNull) return;
 
-        // Clear has_writeback_candidate on routines referencing this query shape
+        // D12: Use json_each for exact match instead of LIKE '%hash%' (substring collision risk)
+        // correlated_write_queries is a JSON array of shape hashes
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             UPDATE learned_routines SET has_writeback_candidate = 0
             WHERE session_id = @sid
-              AND correlated_write_queries LIKE @pattern
+              AND EXISTS (
+                  SELECT 1 FROM json_each(correlated_write_queries)
+                  WHERE value = @hash
+              )
             """;
         cmd.Parameters.AddWithValue("@sid", sessionId);
-        cmd.Parameters.AddWithValue("@pattern", $"%{(string)hash}%");
+        cmd.Parameters.AddWithValue("@hash", (string)hash);
         cmd.ExecuteNonQuery();
     }
 

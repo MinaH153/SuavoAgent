@@ -150,6 +150,28 @@ public sealed class LearningWorker : BackgroundService
                 _phaseStartedAt = _db.GetPhaseChangedAt(_sessionId);
                 _activeSeedDigest = null; // reset for new phase
 
+                var oldPhase = LearningSession.PhaseToObserverPhase(_previousPhase ?? "discovery");
+                var newPhase = LearningSession.PhaseToObserverPhase(session.Phase);
+
+                // Stop observers not active in the new phase
+                foreach (var obs in _observers.Where(o => o.ActivePhases.HasFlag(oldPhase)
+                    && !o.ActivePhases.HasFlag(newPhase)))
+                {
+                    await obs.StopAsync();
+                    _logger.LogInformation("Stopped observer {Name} (not active in {Phase})", obs.Name, session.Phase);
+                }
+
+                // Start observers active in the new phase that weren't in the old phase
+                foreach (var obs in _observers.Where(o => o.ActivePhases.HasFlag(newPhase)
+                    && !o.ActivePhases.HasFlag(oldPhase)))
+                {
+                    _ = obs.StartAsync(_sessionId, stoppingToken);
+                    _logger.LogInformation("Started observer {Name} for {Phase}", obs.Name, session.Phase);
+                }
+
+                // W-9: Update currentPhase so observer health checks use the correct phase
+                currentPhase = newPhase;
+
                 if (session.Phase == "pattern")
                     await PullSeedsAsync("pattern", stoppingToken);
                 else if (session.Phase == "model")
@@ -334,7 +356,9 @@ public sealed class LearningWorker : BackgroundService
                 }
 
                 // Prepare POM for upload
-                _pendingPomJson = PomExporter.Export(_db, _sessionId);
+                var droppedCount = _behavioralReceiver?.TotalDroppedEvents ?? 0;
+                _pendingPomJson = PomExporter.Export(_db, _sessionId,
+                    droppedEventCount: droppedCount);
                 _pendingPomDigest = PomExporter.ComputeDigest(
                     _options.PharmacyId ?? "", _sessionId, _pendingPomJson);
 
@@ -452,11 +476,16 @@ public sealed class LearningWorker : BackgroundService
                 ? _db.GetDistinctTreeHashes(_sessionId!)
                 : (IReadOnlyList<string>)Array.Empty<string>();
 
+            var contractFingerprint = _db.GetLatestContractFingerprint(
+                _options.PharmacyId ?? "unknown") ?? "";
+            // PmsVersionHash: not yet computed — populated after PMS executable discovery
+            var pmsVersionHash = "";
+
             var seedReq = new SeedRequest(
                 "PioneerRx",
                 phase,
-                "", // contract fingerprint — populated by cloud from baseline
-                "", // pms version hash — populated by cloud from heartbeat
+                contractFingerprint,
+                pmsVersionHash,
                 treeHashes,
                 _lastSeedDigest);
 

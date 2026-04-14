@@ -36,7 +36,9 @@ using SuavoAgent.Core.Workers;
 }
 
 Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Debug()
+    .MinimumLevel.Is(Environment.GetEnvironmentVariable("SUAVO_DEBUG") == "1"
+        ? Serilog.Events.LogEventLevel.Debug
+        : Serilog.Events.LogEventLevel.Information)
     .WriteTo.Console()
     .WriteTo.File(
         Path.Combine(
@@ -192,6 +194,17 @@ try
                     var data = snapshot.Take();
                     return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
                         msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, data, null));
+                }
+
+                case SuavoAgent.Contracts.Ipc.IpcCommands.GetPharmacySalt:
+                {
+                    var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+                    var db = sp.GetRequiredService<AgentStateDb>();
+                    var sessionId = db.GetActiveSessionId(opts.PharmacyId ?? "");
+                    var salt = sessionId != null ? db.GetOrCreateHmacSalt(sessionId) : "";
+                    var saltJson = System.Text.Json.JsonSerializer.SerializeToElement(salt);
+                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, saltJson, null));
                 }
 
                 case SuavoAgent.Contracts.Ipc.IpcCommands.BehavioralEvents:

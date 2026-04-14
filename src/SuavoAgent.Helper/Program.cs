@@ -6,7 +6,9 @@ using SuavoAgent.Helper;
 using SuavoAgent.Helper.Behavioral;
 
 Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Debug()
+    .MinimumLevel.Is(Environment.GetEnvironmentVariable("SUAVO_DEBUG") == "1"
+        ? Serilog.Events.LogEventLevel.Debug
+        : Serilog.Events.LogEventLevel.Information)
     .WriteTo.Console()
     .WriteTo.File(
         Path.Combine(
@@ -36,12 +38,31 @@ try
     UiaInteractionObserver? interactionObserver = null;
     KeyboardCategoryHook? keyboardHook = null;
     CancellationTokenSource? treeObserverCts = null;
+    string pharmacySalt = ""; // fetched from Core via IPC handshake
+
+    async Task<string> FetchPharmacySaltAsync()
+    {
+        try
+        {
+            if (!ipcClient.IsConnected)
+                await ipcClient.ConnectAsync(TimeSpan.FromSeconds(5), cts.Token);
+            var response = await ipcClient.SendAsync(
+                new IpcRequest(Guid.NewGuid().ToString("N"), IpcCommands.GetPharmacySalt, 1, null), cts.Token);
+            if (response is { Status: 200, Data: not null })
+                return response.Data.Value.GetString() ?? "";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to fetch pharmacySalt from Core — using empty salt");
+        }
+        return "";
+    }
 
     void StartBehavioralObservers()
     {
         StopBehavioralObservers();
 
-        var pharmacySalt = ""; // Core will deliver via IPC handshake (S2, separate fix)
+        var salt = pharmacySalt;
 
         eventBuffer = new BehavioralEventBuffer(
             capacity: 500,
@@ -52,11 +73,11 @@ try
                 await ipcClient.TrySendAsync(IpcCommands.BehavioralEvents, json, cts.Token);
             });
 
-        treeObserver = new UiaTreeObserver(pharmacySalt, eventBuffer, Log.Logger);
+        treeObserver = new UiaTreeObserver(salt, eventBuffer, Log.Logger);
 
         interactionObserver = new UiaInteractionObserver(
             new UIA2Automation(),
-            pharmacySalt, eventBuffer, Log.Logger,
+            salt, eventBuffer, Log.Logger,
             triggerTreeResnapshot: () =>
             {
                 // Fire a manual tree walk on structure change
@@ -108,6 +129,9 @@ try
 
             // Report success to Core via IPC
             await ipcClient.TrySendAsync("pioneer_attached", null, cts.Token);
+
+            // Fetch pharmacy salt from Core before starting observers
+            pharmacySalt = await FetchPharmacySaltAsync();
 
             // Wire behavioral observers
             StartBehavioralObservers();
@@ -163,6 +187,9 @@ try
                     attached = true;
                     Log.Information("Re-attached to PioneerRx: {Title}", pioneer.WindowTitle);
                     await ipcClient.TrySendAsync("pioneer_reattached", null, cts.Token);
+
+                    // Re-fetch salt in case session rotated
+                    pharmacySalt = await FetchPharmacySaltAsync();
 
                     // Re-wire behavioral observers for new window
                     StartBehavioralObservers();

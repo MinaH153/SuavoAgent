@@ -17,6 +17,13 @@ public sealed class BehavioralEventReceiver
     private readonly Action<string, string, string?, DateTimeOffset>? _onInteraction;
     private readonly Dictionary<string, DateTimeOffset> _recentTreeHashes = new();
     private long _nextSeq = 1;
+    private long _totalDroppedEvents;
+
+    /// <summary>
+    /// Running total of events dropped by the Helper process, accumulated from
+    /// droppedSinceLast in each ProcessBatch call. Used by PomExporter for droppedEventRate.
+    /// </summary>
+    public long TotalDroppedEvents => _totalDroppedEvents;
 
     public record BatchResult(bool Accepted, int EventsStored, int EventsRejected);
 
@@ -42,6 +49,7 @@ public sealed class BehavioralEventReceiver
     /// <param name="droppedSinceLast">Number of events dropped by the Helper since last batch.</param>
     public BatchResult ProcessBatch(IReadOnlyList<BehavioralEvent> events, long droppedSinceLast)
     {
+        Interlocked.Add(ref _totalDroppedEvents, droppedSinceLast);
         int stored = 0;
         int rejected = 0;
         var now = DateTimeOffset.UtcNow;
