@@ -7,6 +7,10 @@ public record WritebackResult(
     string? Details,
     bool IsReplay = false)
 {
+    public string? CorrelationKey { get; init; }
+    public string? UiEventTimestamp { get; init; }
+    public string? SqlExecutionTimestamp { get; init; }
+
     public static WritebackResult Succeeded(Guid txId, string transition)
         => new(true, "success", txId, transition);
 

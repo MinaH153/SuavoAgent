@@ -190,4 +190,38 @@ public class ActionCorrelatorTests : IDisposable
         // elem-close is 0.3s from SQL; elem-far is 1.8s — closest wins
         Assert.Equal("tree-close:elem-close:qshape-1", actions[0].CorrelationKey);
     }
+
+    [Fact]
+    public void WindowOverride_UsesPerKeyWindow()
+    {
+        // 0.5s override — SQL 1s after UI should NOT correlate (outside override window)
+        var uiTime = DateTimeOffset.UtcNow;
+        _db.UpsertWindowOverride(_sessionId, "tree-over", "elem-over", 0.5, 1);
+
+        var correlator = MakeCorrelator(windowSeconds: 2.0);
+        correlator.RecordUiEvent("tree-over", "elem-over", "Button", uiTime);
+
+        var sqlTime = uiTime.AddSeconds(1);
+        correlator.TryCorrelateWithSql("qshape-over", sqlTime.ToString("o"), isWrite: false, tablesReferenced: null);
+
+        var actions = _db.GetCorrelatedActions(_sessionId);
+        Assert.Empty(actions);
+    }
+
+    [Fact]
+    public void WindowOverride_FallsBackToGlobalWhenNoOverride()
+    {
+        // No override — 2s global window, SQL 1s after UI should correlate
+        var uiTime = DateTimeOffset.UtcNow;
+
+        var correlator = MakeCorrelator(windowSeconds: 2.0);
+        correlator.RecordUiEvent("tree-noover", "elem-noover", "Button", uiTime);
+
+        var sqlTime = uiTime.AddSeconds(1);
+        correlator.TryCorrelateWithSql("qshape-noover", sqlTime.ToString("o"), isWrite: true, tablesReferenced: "Rx");
+
+        var actions = _db.GetCorrelatedActions(_sessionId);
+        Assert.Single(actions);
+        Assert.Equal("tree-noover:elem-noover:qshape-noover", actions[0].CorrelationKey);
+    }
 }

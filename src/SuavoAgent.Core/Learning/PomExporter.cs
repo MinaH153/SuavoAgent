@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Learning;
@@ -91,13 +92,36 @@ public static class PomExporter
                     elementId = c.ElementId,
                     controlType = c.ControlType,
                     queryShape = c.QueryShape,
-                    tablesReferenced = c.TablesReferenced is not null
-                        ? JsonSerializer.Deserialize<JsonElement>(c.TablesReferenced) : (JsonElement?)null,
+                    tablesReferenced = TryDeserializeJson(c.TablesReferenced),
                     occurrences = c.OccurrenceCount,
                     confidence = c.Confidence,
                 }).ToArray(),
                 dmvAccess = db.GetDmvQueryObservations(sessionId, 1).Count > 0,
                 totalInteractions = db.GetBehavioralEventCount(sessionId, "interaction"),
+            },
+
+            feedback = new
+            {
+                totalFeedbackEvents = db.GetFeedbackEventCount(sessionId),
+                confidenceTrajectory = db.GetCorrelatedActions(sessionId)
+                    .Where(a => a.IsWrite)
+                    .Select(a =>
+                    {
+                        var ext = db.GetCorrelatedActionExtended(sessionId, a.CorrelationKey);
+                        var writebackEvents = db.GetFeedbackEventsForTarget(sessionId, a.CorrelationKey, "writeback");
+                        var successes = writebackEvents.Count(e => e.PayloadJson?.Contains("\"outcome\":\"success\"") == true);
+                        return new
+                        {
+                            correlationKey = a.CorrelationKey,
+                            currentConfidence = a.Confidence,
+                            writebackAttempts = writebackEvents.Count,
+                            successRate = writebackEvents.Count > 0 ? Math.Round((double)successes / writebackEvents.Count, 2) : 0.0,
+                            operatorApproved = ext?.OperatorApproved ?? false,
+                            promotionSuspended = ext?.PromotionSuspended ?? false,
+                        };
+                    }).ToArray(),
+                windowOverrides = db.GetWindowOverrideCount(sessionId),
+                staleCorrelations = db.GetExpiredStaleCorrelations(sessionId, 0).Count,
             },
         };
 
@@ -106,6 +130,13 @@ public static class PomExporter
             WriteIndented = false,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         });
+    }
+
+    private static JsonElement? TryDeserializeJson(string? json)
+    {
+        if (json is null) return null;
+        try { return JsonSerializer.Deserialize<JsonElement>(json); }
+        catch { return null; }
     }
 
     private static double ComputeObservationDays(AgentStateDb db, string sessionId)
