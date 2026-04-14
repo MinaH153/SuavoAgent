@@ -4,6 +4,7 @@ using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Helper;
 using SuavoAgent.Helper.Behavioral;
+using SuavoAgent.Helper.SystemObservers;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(Environment.GetEnvironmentVariable("SUAVO_DEBUG") == "1"
@@ -135,6 +136,31 @@ try
         eventBuffer = null;
     }
 
+    // ── System observers — always running, no PMS dependency ──
+    pharmacySalt = await FetchPharmacySaltAsync();
+
+    var systemBuffer = new BehavioralEventBuffer(
+        capacity: 200,
+        batchSize: 20,
+        flushAction: async events =>
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(events);
+            await ipcClient.TrySendAsync(IpcCommands.SystemEvents, json, cts.Token);
+        });
+
+    var foregroundTracker = new ForegroundTracker(systemBuffer, pharmacySalt, Log.Logger);
+    var stationProfiler = new StationProfiler(systemBuffer, pharmacySalt, Log.Logger);
+    var sessionObserver = new UserSessionObserver(systemBuffer, pharmacySalt, Log.Logger);
+
+    // Station profile — one-shot on startup
+    stationProfiler.CaptureProfile();
+
+    // Foreground tracker — runs as async loop
+    var fgTrackerCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+    _ = Task.Run(() => foregroundTracker.RunAsync(fgTrackerCts.Token), fgTrackerCts.Token);
+
+    Log.Information("System observers started (foreground tracker, station profiler, session observer)");
+
     // Retry attachment — PioneerRx may not be running when Helper starts
     while (!cts.Token.IsCancellationRequested && !attached)
     {
@@ -229,6 +255,12 @@ try
             health.WindowFound, health.MenuBarFound);
         await Task.Delay(TimeSpan.FromSeconds(10), cts.Token);
     }
+
+    // Cleanup system observers
+    fgTrackerCts?.Cancel();
+    foregroundTracker?.Dispose();
+    sessionObserver?.Dispose();
+    systemBuffer?.Dispose();
 
     // Final cleanup
     StopBehavioralObservers();

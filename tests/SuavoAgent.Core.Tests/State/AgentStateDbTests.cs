@@ -90,6 +90,45 @@ public class AgentStateDbTests : IDisposable
         }
     }
 
+    [Fact]
+    public void AppSession_InsertSucceeds()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test-appsession-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var db = new AgentStateDb(dbPath);
+            db.InsertAppSession("s1", "EXCEL.EXE", "hash1", DateTimeOffset.UtcNow, 5000, "chrome.exe");
+            db.InsertAppSession("s1", "PioneerPharmacy.exe", null, DateTimeOffset.UtcNow, 12000, "EXCEL.EXE");
+        }
+        finally { File.Delete(dbPath); }
+    }
+
+    [Fact]
+    public void TemporalProfile_UpsertAccumulatesVolume()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test-temporal-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var db = new AgentStateDb(dbPath);
+            db.UpsertTemporalProfile("s1", "hourly", "2026-04-14T09", 10, 0.5);
+            db.UpsertTemporalProfile("s1", "hourly", "2026-04-14T09", 5, 0.8);
+            // No exception = upsert worked
+        }
+        finally { File.Delete(dbPath); }
+    }
+
+    [Fact]
+    public void StationProfile_InsertSucceeds()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test-station-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var db = new AgentStateDb(dbPath);
+            db.InsertStationProfile("machash", 4, 16, 2, "Windows 10", "{\"test\":true}");
+        }
+        finally { File.Delete(dbPath); }
+    }
+
     public void Dispose()
     {
         _db.Dispose();

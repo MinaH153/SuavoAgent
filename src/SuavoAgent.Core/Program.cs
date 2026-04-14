@@ -238,6 +238,23 @@ try
                         msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
                 }
 
+                case SuavoAgent.Contracts.Ipc.IpcCommands.SystemEvents:
+                {
+                    var events = msg.Data.HasValue
+                        ? System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Behavioral.BehavioralEvent>>(
+                            msg.Data.Value.GetRawText())
+                        : null;
+                    if (events != null && events.Count > 200)
+                        events = events.Take(200).ToList();
+                    if (events is { Count: > 0 })
+                    {
+                        var receiver = sp.GetRequiredService<BehavioralEventReceiver>();
+                        receiver.ProcessBatch(events, 0);
+                    }
+                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, default, null));
+                }
+
                 default:
                     return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
                         msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));

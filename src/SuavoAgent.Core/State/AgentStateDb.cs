@@ -462,6 +462,61 @@ public sealed class AgentStateDb : IDisposable
                 )";
             itemCmd.ExecuteNonQuery();
         }
+
+        // Universal Observation tables
+        using (var appSessionCmd = _conn.CreateCommand())
+        {
+            appSessionCmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS app_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    app_name TEXT NOT NULL,
+                    window_title_hash TEXT,
+                    start_ts TEXT NOT NULL,
+                    end_ts TEXT,
+                    focus_ms INTEGER DEFAULT 0,
+                    preceding_app TEXT,
+                    following_app TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """;
+            appSessionCmd.ExecuteNonQuery();
+        }
+
+        using (var temporalCmd = _conn.CreateCommand())
+        {
+            temporalCmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS temporal_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    period_type TEXT NOT NULL,
+                    period_key TEXT NOT NULL,
+                    app_distribution TEXT,
+                    action_volume INTEGER DEFAULT 0,
+                    peak_load_score REAL DEFAULT 0,
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(session_id, period_type, period_key)
+                )
+            """;
+            temporalCmd.ExecuteNonQuery();
+        }
+
+        using (var stationCmd = _conn.CreateCommand())
+        {
+            stationCmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS station_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    machine_hash TEXT NOT NULL,
+                    processor_count INTEGER,
+                    ram_bucket_gb INTEGER,
+                    monitor_count INTEGER,
+                    os_version TEXT,
+                    profile_json TEXT,
+                    captured_at TEXT DEFAULT (datetime('now'))
+                )
+            """;
+            stationCmd.ExecuteNonQuery();
+        }
     }
 
     private void TryAlter(string sql)
@@ -2543,6 +2598,62 @@ public sealed class AgentStateDb : IDisposable
     public void CommitTransaction(IDisposable txn)
     {
         if (txn is SqliteTransaction t) t.Commit();
+    }
+
+    // ── Universal Observation ──
+
+    public void InsertAppSession(string sessionId, string appName, string? windowTitleHash,
+        DateTimeOffset startTs, long focusMs, string? precedingApp)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO app_sessions (session_id, app_name, window_title_hash, start_ts, focus_ms, preceding_app)
+            VALUES (@sid, @app, @title, @start, @focus, @prev)
+        """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@app", appName);
+        cmd.Parameters.AddWithValue("@title", (object?)windowTitleHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@start", startTs.ToString("o"));
+        cmd.Parameters.AddWithValue("@focus", focusMs);
+        cmd.Parameters.AddWithValue("@prev", (object?)precedingApp ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void UpsertTemporalProfile(string sessionId, string periodType, string periodKey,
+        int actionVolume, double peakLoadScore)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO temporal_profiles (session_id, period_type, period_key, action_volume, peak_load_score, updated_at)
+            VALUES (@sid, @type, @key, @vol, @peak, datetime('now'))
+            ON CONFLICT(session_id, period_type, period_key) DO UPDATE SET
+                action_volume = action_volume + @vol,
+                peak_load_score = MAX(peak_load_score, @peak),
+                updated_at = datetime('now')
+        """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@type", periodType);
+        cmd.Parameters.AddWithValue("@key", periodKey);
+        cmd.Parameters.AddWithValue("@vol", actionVolume);
+        cmd.Parameters.AddWithValue("@peak", peakLoadScore);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void InsertStationProfile(string machineHash, int processorCount, int ramBucketGb,
+        int monitorCount, string osVersion, string profileJson)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO station_profiles (machine_hash, processor_count, ram_bucket_gb, monitor_count, os_version, profile_json)
+            VALUES (@hash, @cpu, @ram, @mon, @os, @json)
+        """;
+        cmd.Parameters.AddWithValue("@hash", machineHash);
+        cmd.Parameters.AddWithValue("@cpu", processorCount);
+        cmd.Parameters.AddWithValue("@ram", ramBucketGb);
+        cmd.Parameters.AddWithValue("@mon", monitorCount);
+        cmd.Parameters.AddWithValue("@os", osVersion);
+        cmd.Parameters.AddWithValue("@json", profileJson);
+        cmd.ExecuteNonQuery();
     }
 
     public void Dispose()

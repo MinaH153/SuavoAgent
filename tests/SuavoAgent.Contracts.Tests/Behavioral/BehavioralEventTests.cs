@@ -98,4 +98,31 @@ public class BehavioralEventTests
             Assert.NotNull(prop);
         }
     }
+
+    [Fact]
+    public void AppFocusChange_CreatesCorrectEvent()
+    {
+        var evt = BehavioralEvent.AppFocusChange("EXCEL.EXE", "PioneerPharmacy.exe", "hash123", 5000);
+        Assert.Equal(BehavioralEventType.AppFocusChange, evt.Type);
+        Assert.Equal("PioneerPharmacy.exe", evt.ElementId);
+        Assert.Equal("EXCEL.EXE", evt.ClassName);
+        Assert.Equal(5000, evt.KeystrokeCount);
+    }
+
+    [Fact]
+    public void SessionChange_CreatesCorrectEvent()
+    {
+        var evt = BehavioralEvent.SessionChange("logon", "sidhash123");
+        Assert.Equal(BehavioralEventType.SessionChange, evt.Type);
+        Assert.Equal("logon", evt.Subtype);
+        Assert.Equal("sidhash123", evt.NameHash);
+    }
+
+    [Fact]
+    public void StationProfile_StoresJson()
+    {
+        var evt = BehavioralEvent.StationProfileEvent("{\"cores\":4}");
+        Assert.Equal(BehavioralEventType.StationProfile, evt.Type);
+        Assert.Equal("{\"cores\":4}", evt.TreeHash);
+    }
 }
