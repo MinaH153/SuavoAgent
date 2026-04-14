@@ -100,7 +100,7 @@ public sealed class WritebackProcessor : BackgroundService
         var machine = new WritebackStateMachine(taskId, WritebackState.Queued, OnStateChanged);
         _machines[taskId] = machine;
         _stateDb.UpsertWritebackState(taskId, rxNumber, WritebackState.Queued, 0, null);
-        _logger.LogInformation("Enqueued writeback {TaskId} for Rx {RxHash}", taskId, PhiScrubber.HmacHash(rxNumber, _options.AgentId ?? ""));
+        _logger.LogInformation("Enqueued writeback {TaskId} for Rx {RxHash}", taskId, PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? ""));
     }
 
     private async Task ProcessPendingWritebacksAsync(CancellationToken ct)
@@ -142,7 +142,7 @@ public sealed class WritebackProcessor : BackgroundService
 
             if (!int.TryParse(state.RxNumber, out var rxNumber))
             {
-                _logger.LogWarning("Writeback {TaskId} — invalid RxNumber '{RxHash}'", taskId, PhiScrubber.HmacHash(state.RxNumber, _options.AgentId ?? ""));
+                _logger.LogWarning("Writeback {TaskId} — invalid RxNumber '{RxHash}'", taskId, PhiScrubber.HmacHash(state.RxNumber, _options.HmacSalt ?? ""));
                 if (machine.CanFire(WritebackTrigger.BusinessError))
                     machine.Fire(WritebackTrigger.BusinessError);
                 continue;

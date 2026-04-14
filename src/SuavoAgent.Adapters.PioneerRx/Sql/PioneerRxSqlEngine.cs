@@ -21,20 +21,22 @@ public sealed class PioneerRxSqlEngine : IDisposable
     public Guid? ConnectionId => _connection?.ClientConnectionId;
 
     public PioneerRxSqlEngine(string server, string database, ILogger<PioneerRxSqlEngine> logger,
-        string? sqlUser = null, string? sqlPassword = null)
+        string? sqlUser = null, string? sqlPassword = null, bool trustServerCertificate = true)
     {
         _logger = logger;
 
         var csb = new SqlConnectionStringBuilder();
         csb.DataSource = server;
         csb.InitialCatalog = database;
-        csb.ApplicationName = "PioneerPharmacy";
+        csb.ApplicationName = "SuavoAgent";
         csb.ConnectTimeout = 30;
         csb.MaxPoolSize = 1;
         csb.MinPoolSize = 0;
         // Use indexer for Encrypt/TrustServerCertificate (cross-compile safe)
         csb["Encrypt"] = "true";
-        csb["TrustServerCertificate"] = "true";
+        csb["TrustServerCertificate"] = trustServerCertificate.ToString();
+        if (trustServerCertificate)
+            _logger.LogWarning("SQL TrustServerCertificate=true — MITM risk on untrusted networks (HIPAA 164.312(e)(1))");
 
         if (!string.IsNullOrEmpty(sqlUser) && !string.IsNullOrEmpty(sqlPassword))
         {
@@ -74,13 +76,16 @@ public sealed class PioneerRxSqlEngine : IDisposable
 
     /// <summary>
     /// Discovers delivery-ready status GUIDs from the lookup table.
-    /// Falls back to Care Pharmacy known GUIDs if discovery fails.
+    /// Fails explicitly if discovery fails — no fallback to hardcoded GUIDs.
     /// Called once on connect — never re-queries.
     /// </summary>
     public async Task<IReadOnlyList<Guid>> DiscoverStatusGuidsAsync(CancellationToken ct)
     {
         if (_connection is null)
-            return FallbackGuids();
+        {
+            _logger.LogError("Cannot discover status GUIDs — no SQL connection");
+            return Array.Empty<Guid>();
+        }
 
         try
         {
@@ -112,13 +117,15 @@ WHERE Description IN ({statusParams})";
                 _logger.LogInformation("Discovered {Count} delivery-ready status GUIDs from lookup table", guids.Count);
                 return guids;
             }
+
+            _logger.LogError("No delivery-ready status GUIDs found in lookup table — detection will be disabled until GUIDs are discoverable");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Status GUID discovery failed, using fallback GUIDs");
+            _logger.LogError(ex, "Status GUID discovery failed — detection disabled until SQL is reachable and status table is queryable");
         }
 
-        return FallbackGuids();
+        return Array.Empty<Guid>();
     }
 
     /// <summary>
@@ -178,7 +185,12 @@ ORDER BY Description";
         if (_connection is null || _connection.State != System.Data.ConnectionState.Open)
             return Array.Empty<RxReadyForDelivery>();
 
-        var statusGuids = _deliveryReadyGuids ?? FallbackGuids();
+        if (_deliveryReadyGuids is null || _deliveryReadyGuids.Count == 0)
+        {
+            _logger.LogDebug("No delivery-ready GUIDs discovered — skipping detection cycle");
+            return Array.Empty<RxReadyForDelivery>();
+        }
+        var statusGuids = _deliveryReadyGuids;
 
         // Auto-recover: periodically retry higher tiers in case failure was transient
         _queryCount++;
@@ -607,8 +619,7 @@ ORDER BY full_name, ORDINAL_POSITION";
             DeliveryZip: GetStringOrDefault(reader, "Zip"));
     }
 
-    private static IReadOnlyList<Guid> FallbackGuids() =>
-        PioneerRxConstants.FallbackStatusGuids.Values.ToList();
+    // No fallback GUIDs — discovery must succeed or detection stays disabled
 
     private static string GetStringOrDefault(SqlDataReader reader, string column)
     {

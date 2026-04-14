@@ -414,7 +414,7 @@ foreach ($bin in $binaries) {
 Write-Step "Phase 4: Writing configuration"
 
 $agentId = "agent-" + ([guid]::NewGuid().ToString("N").Substring(0, 12))
-$fingerprint = (Get-WmiObject Win32_ComputerSystemProduct).UUID
+$fingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
 
 $config = @{
     Agent = @{
@@ -474,9 +474,9 @@ sc.exe failure SuavoAgent.Core reset= 3600 actions= restart/5000/restart/30000/r
 sc.exe failureflag SuavoAgent.Core 1 | Out-Null
 Write-Ok "SuavoAgent.Core service registered"
 
-# Install Broker (runs as LocalSystem -- needs SeTcbPrivilege for WTSQueryUserToken + CreateProcessAsUser)
+# Install Broker (runs as NetworkService -- needs SeTcbPrivilege for WTSQueryUserToken + CreateProcessAsUser)
 $brokerPath = Join-Path $installDir "SuavoAgent.Broker.exe"
-sc.exe create SuavoAgent.Broker binPath= "`"$brokerPath`"" start= delayed-auto obj= "LocalSystem" | Out-Null
+sc.exe create SuavoAgent.Broker binPath= "`"$brokerPath`"" start= delayed-auto obj= "NT AUTHORITY\NetworkService" | Out-Null
 sc.exe description SuavoAgent.Broker "Suavo pharmacy agent - session broker" | Out-Null
 sc.exe failure SuavoAgent.Broker reset= 3600 actions= restart/5000/restart/30000/restart/60000 | Out-Null
 sc.exe failureflag SuavoAgent.Broker 1 | Out-Null

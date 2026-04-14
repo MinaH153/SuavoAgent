@@ -30,14 +30,8 @@ public static class PioneerRxConstants
         StatusCompleted
     };
 
-    // Fallback GUIDs from Care Pharmacy — used when lookup table discovery fails
-    public static readonly IReadOnlyDictionary<string, Guid> FallbackStatusGuids =
-        new Dictionary<string, Guid>
-        {
-            [StatusWaitingForPickup] = Guid.Parse("53ce4c47-dff2-46ac-a310-719e792239ef"),
-            [StatusWaitingForDelivery] = Guid.Parse("c3adbbcc-76e3-4b06-a0dc-4e8b8ce0a2de"),
-            [StatusToBePutInBin] = Guid.Parse("46c30466-375a-4126-a190-8eaf017179c8"),
-        };
+    // No fallback GUIDs — status GUIDs are pharmacy-specific and must be discovered
+    // from the live database. Using hardcoded GUIDs would silently produce wrong results.
 
     public enum QueryMode
     {

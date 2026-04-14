@@ -17,6 +17,19 @@ public sealed class AgentOptions
     public string? SqlPassword { get; set; }
 
     /// <summary>
+    /// When true, SQL connections accept any server certificate (default for pharmacy LAN compatibility).
+    /// HIPAA warning logged when enabled. Set to false when SQL Server has a trusted certificate.
+    /// </summary>
+    public bool SqlTrustServerCertificate { get; set; } = true;
+
+    /// <summary>
+    /// Per-agent HMAC salt for hashing PHI (Rx numbers, etc.) in audit logs and cloud sync.
+    /// Auto-generated on first use, persisted in state.db. NOT the AgentId (which is public).
+    /// Set by Program.cs after DB initialization — do not set in appsettings.json.
+    /// </summary>
+    public string? HmacSalt { get; set; }
+
+    /// <summary>
     /// When true, agent runs in learning mode (30-day observation).
     /// When false, uses the existing PioneerRx adapter directly.
     /// </summary>

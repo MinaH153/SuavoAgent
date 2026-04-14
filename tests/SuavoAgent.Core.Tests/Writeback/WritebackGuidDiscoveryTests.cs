@@ -23,10 +23,12 @@ public class WritebackGuidDiscoveryTests
     }
 
     [Fact]
-    public void FallbackStatusGuids_StillContains3_NoWriteTargetFallbacks()
+    public void NoHardcodedFallbackGuids()
     {
-        Assert.Equal(3, PioneerRxConstants.FallbackStatusGuids.Count);
-        Assert.DoesNotContain("Out for Delivery", PioneerRxConstants.FallbackStatusGuids.Keys);
-        Assert.DoesNotContain("Completed", PioneerRxConstants.FallbackStatusGuids.Keys);
+        // Fallback GUIDs were removed — status GUIDs must be discovered from live DB.
+        // This test verifies the constants class no longer contains pharmacy-specific GUIDs.
+        var fields = typeof(PioneerRxConstants).GetFields(
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Assert.DoesNotContain(fields, f => f.Name == "FallbackStatusGuids");
     }
 }

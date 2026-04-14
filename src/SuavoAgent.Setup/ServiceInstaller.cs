@@ -47,8 +47,9 @@ internal static class ServiceInstaller
         RunSc($"failureflag {CoreServiceName} 1");
         ConsoleUI.WriteOk($"{CoreServiceName} service registered");
 
-        // Broker — runs as LocalSystem (needs SeTcbPrivilege for WTSQueryUserToken + CreateProcessAsUser)
-        RunSc($"create {BrokerServiceName} binPath= \"\\\"{brokerPath}\\\"\" start= delayed-auto obj= \"LocalSystem\"");
+        // Broker — runs as NetworkService (needs SeTcbPrivilege for WTSQueryUserToken + CreateProcessAsUser)
+        // NetworkService has SeTcbPrivilege when configured as a service. LocalSystem was excessive.
+        RunSc($"create {BrokerServiceName} binPath= \"\\\"{brokerPath}\\\"\" start= delayed-auto obj= \"NT AUTHORITY\\NetworkService\"");
         RunSc($"description {BrokerServiceName} \"Suavo pharmacy agent - session broker\"");
         RunSc($"failure {BrokerServiceName} reset= 3600 actions= restart/5000/restart/30000/restart/60000");
         RunSc($"failureflag {BrokerServiceName} 1");

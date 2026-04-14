@@ -171,7 +171,13 @@ try
             AgentStateDb.MigrateToEncrypted(dbPath, dbPassword, dbLogger);
         }
 
-        return new AgentStateDb(dbPath, dbPassword);
+        var db = new AgentStateDb(dbPath, dbPassword);
+
+        // Initialize per-agent HMAC salt (private, persisted, NOT the public AgentId)
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        opts.HmacSalt = db.GetOrCreateHmacSalt("agent-audit");
+
+        return db;
     });
 
     builder.Services.AddSingleton<BehavioralEventReceiver>(sp =>

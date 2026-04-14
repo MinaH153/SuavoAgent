@@ -281,7 +281,7 @@ public sealed class RxDetectionWorker : BackgroundService
                     writebackCsb.ApplicationName = "SuavoWriteback";
                     writebackCsb.MaxPoolSize = 1;
                     writebackCsb["Encrypt"] = "true";
-                    writebackCsb["TrustServerCertificate"] = "true";
+                    writebackCsb["TrustServerCertificate"] = _options.SqlTrustServerCertificate.ToString();
                     if (!string.IsNullOrEmpty(_options.SqlUser))
                     {
                         writebackCsb.UserID = _options.SqlUser;

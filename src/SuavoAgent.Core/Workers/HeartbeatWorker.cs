@@ -306,7 +306,7 @@ public sealed class HeartbeatWorker : BackgroundService
         }
 
         // Hash Rx number before audit/logging — Rx numbers are PHI when linked to patient context
-        var hashedRx = PhiScrubber.HmacHash(rxNumber, _options.AgentId ?? "");
+        var hashedRx = PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "");
 
         // Audit PHI access before touching any patient data
         _stateDb.AppendChainedAuditEntry(new AuditEntry(
@@ -568,7 +568,7 @@ public sealed class HeartbeatWorker : BackgroundService
             return;
         }
 
-        var hashedRx = PhiScrubber.HmacHash(rxNumberStr, _options.AgentId ?? "");
+        var hashedRx = PhiScrubber.HmacHash(rxNumberStr, _options.HmacSalt ?? "");
 
         _stateDb.AppendChainedAuditEntry(new AuditEntry(
             TaskId: hashedRx,

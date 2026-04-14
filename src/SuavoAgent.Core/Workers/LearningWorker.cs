@@ -478,11 +478,21 @@ public sealed class LearningWorker : BackgroundService
 
             var contractFingerprint = _db.GetLatestContractFingerprint(
                 _options.PharmacyId ?? "unknown") ?? "";
-            // PmsVersionHash: not yet computed — populated after PMS executable discovery
+            // Discover PMS type from observed processes instead of hardcoding
+            var pmsType = "Unknown";
+            var processes = _db.GetObservedProcesses(_sessionId!);
+            foreach (var (procName, _, _, _, isPms) in processes)
+            {
+                if (isPms && ProcessObserver.KnownPmsSignatures.TryGetValue(procName, out var name))
+                {
+                    pmsType = name;
+                    break;
+                }
+            }
             var pmsVersionHash = "";
 
             var seedReq = new SeedRequest(
-                "PioneerRx",
+                pmsType,
                 phase,
                 contractFingerprint,
                 pmsVersionHash,
@@ -571,10 +581,10 @@ public sealed class LearningWorker : BackgroundService
         var csb = new SqlConnectionStringBuilder();
         if (!string.IsNullOrEmpty(_options.SqlServer)) csb.DataSource = _options.SqlServer;
         if (!string.IsNullOrEmpty(_options.SqlDatabase)) csb.InitialCatalog = _options.SqlDatabase;
-        csb.ApplicationName = "PioneerPharmacy";
+        csb.ApplicationName = "SuavoAgent";
         csb.MaxPoolSize = 1;
         csb["Encrypt"] = "true";
-        csb["TrustServerCertificate"] = "true";
+        csb["TrustServerCertificate"] = _options.SqlTrustServerCertificate.ToString();
         if (!string.IsNullOrEmpty(_options.SqlUser))
         {
             csb.UserID = _options.SqlUser;

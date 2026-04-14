@@ -96,10 +96,10 @@ sc.exe description $serviceCore "Suavo pharmacy agent - core service (SQL, cloud
 sc.exe failure $serviceCore reset= 3600 actions= restart/5000/restart/30000/restart/60000
 sc.exe failureflag $serviceCore 1
 
-# Register Broker service (SYSTEM for session detection)
+# Register Broker service (NetworkService for session detection)
 $brokerPath = Join-Path $InstallDir "SuavoAgent.Broker.exe"
 Write-Host "Registering $serviceBroker service..." -ForegroundColor Yellow
-sc.exe create $serviceBroker binPath= "`"$brokerPath`"" start= delayed-auto obj= "LocalSystem"
+sc.exe create $serviceBroker binPath= "`"$brokerPath`"" start= delayed-auto obj= "NT AUTHORITY\NetworkService"
 sc.exe description $serviceBroker "Suavo pharmacy agent - session broker (launches UI helper)"
 sc.exe failure $serviceBroker reset= 3600 actions= restart/5000/restart/30000/restart/60000
 sc.exe failureflag $serviceBroker 1
