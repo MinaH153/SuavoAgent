@@ -66,4 +66,50 @@ public class PhiScrubberTests
         Assert.True(PhiScrubber.ContainsPhi("Born 1990-01-15"));
         Assert.False(PhiScrubber.ContainsPhi("Version 2.0.0"));
     }
+
+    // -----------------------------------------------------------------------
+    // Contextual name pattern tests
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void ScrubText_InlineName_RxContext_Scrubbed()
+    {
+        // "Rx: John Smith" — Rx is not covered by NameContextPattern, so ContextualNamePattern catches it
+        var result = PhiScrubber.ScrubText("Rx: John Smith | Status: Ready");
+        Assert.DoesNotContain("John Smith", result);
+        Assert.Contains("[NAME]", result);
+    }
+
+    [Fact]
+    public void ScrubText_InlineName_AddressContext_Scrubbed()
+    {
+        // Address is not in NameContextPattern's keyword list
+        var result = PhiScrubber.ScrubText("Address: John Williams");
+        Assert.DoesNotContain("John Williams", result);
+        Assert.Contains("[NAME]", result);
+    }
+
+    [Fact]
+    public void ScrubText_NoContext_NamePreserved()
+    {
+        var result = PhiScrubber.ScrubText("Point Sale — Status Type");
+        Assert.DoesNotContain("[NAME]", result);
+    }
+
+    [Fact]
+    public void ScrubText_PioneerRx_NotFalsePositive()
+    {
+        // "PioneerRx" should NOT trigger contextual pattern — Rx is inside a compound word
+        var result = PhiScrubber.ScrubText("PioneerRx - Pharmacy Management");
+        Assert.Equal("PioneerRx - Pharmacy Management", result);
+    }
+
+    [Theory]
+    [InlineData("Rx: Jane Doe | ID: 999")]
+    [InlineData("Phone: 555-1234 Address: John Williams")]
+    public void ScrubText_ContextualNames_AllScrubbed(string input)
+    {
+        var result = PhiScrubber.ScrubText(input);
+        Assert.Contains("[NAME]", result);
+    }
 }

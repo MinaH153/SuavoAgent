@@ -250,4 +250,33 @@ public class SqlTokenizerHardeningTests
     {
         Assert.Null(SqlTokenizer.TryNormalize("EXEC sp_GetPatient @id = 123"));
     }
+
+    // -----------------------------------------------------------------------
+    // Numeric literal threshold (5+ digits)
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void FourDigitNumber_Preserved()
+    {
+        // 4-digit constants (status IDs, row limits) should pass through
+        var result = SqlTokenizer.TryNormalize("SELECT * FROM Prescription.Rx WHERE StatusID = @p1 AND RowLimit = @p2");
+        Assert.NotNull(result);
+    }
+
+    [Fact]
+    public void FourDigitBareNumber_NotDiscarded()
+    {
+        // 1234 is only 4 digits — should NOT trigger numeric literal discard
+        var result = SqlTokenizer.TryNormalize("SELECT * FROM Prescription.Rx WHERE TypeCode = 1234");
+        Assert.NotNull(result);
+        Assert.Contains("1234", result!.NormalizedShape);
+    }
+
+    [Fact]
+    public void FiveDigitBareNumber_Discarded()
+    {
+        // 12345 is 5 digits — could be Rx number/MRN, must discard
+        var result = SqlTokenizer.TryNormalize("SELECT * FROM Prescription.Rx WHERE RxNumber = 12345");
+        Assert.Null(result);
+    }
 }

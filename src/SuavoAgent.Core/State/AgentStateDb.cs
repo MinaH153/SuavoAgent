@@ -709,7 +709,7 @@ public sealed class AgentStateDb : IDisposable
         var now = DateTimeOffset.UtcNow;
         cmd.Parameters.AddWithValue("@payload", payload);
         cmd.Parameters.AddWithValue("@now", now.ToString("o"));
-        cmd.Parameters.AddWithValue("@expires", now.AddDays(30).ToString("o"));
+        cmd.Parameters.AddWithValue("@expires", now.AddDays(7).ToString("o"));
         cmd.ExecuteNonQuery();
     }
 
