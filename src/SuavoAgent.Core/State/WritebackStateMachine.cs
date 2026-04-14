@@ -26,7 +26,8 @@ public enum WritebackTrigger
     SystemError,
     BusinessError,
     SyncComplete,
-    HelperDisconnected
+    HelperDisconnected,
+    AlreadyAtTarget  // idempotent success — status was already at target (crash recovery)
 }
 
 public class WritebackStateMachine
@@ -58,7 +59,8 @@ public class WritebackStateMachine
         _machine.Configure(WritebackState.Queued)
             .Permit(WritebackTrigger.Claim, WritebackState.Claimed)
             .Permit(WritebackTrigger.HelperDisconnected, WritebackState.BlockedInteractive)
-            .Permit(WritebackTrigger.UserActive, WritebackState.BlockedInteractive);
+            .Permit(WritebackTrigger.UserActive, WritebackState.BlockedInteractive)
+            .Permit(WritebackTrigger.AlreadyAtTarget, WritebackState.Done);
 
         _machine.Configure(WritebackState.BlockedInteractive)
             .Permit(WritebackTrigger.UserIdle, WritebackState.Queued);
@@ -67,13 +69,15 @@ public class WritebackStateMachine
             .Permit(WritebackTrigger.StartUia, WritebackState.InProgress)
             .Permit(WritebackTrigger.SystemError, WritebackState.Queued)
             .Permit(WritebackTrigger.BusinessError, WritebackState.ManualReview)
-            .Permit(WritebackTrigger.HelperDisconnected, WritebackState.BlockedInteractive);
+            .Permit(WritebackTrigger.HelperDisconnected, WritebackState.BlockedInteractive)
+            .Permit(WritebackTrigger.AlreadyAtTarget, WritebackState.Done);
 
         _machine.Configure(WritebackState.InProgress)
             .Permit(WritebackTrigger.WriteComplete, WritebackState.VerifyPending)
             .Permit(WritebackTrigger.SystemError, WritebackState.Queued)
             .Permit(WritebackTrigger.BusinessError, WritebackState.ManualReview)
-            .Permit(WritebackTrigger.HelperDisconnected, WritebackState.BlockedInteractive);
+            .Permit(WritebackTrigger.HelperDisconnected, WritebackState.BlockedInteractive)
+            .Permit(WritebackTrigger.AlreadyAtTarget, WritebackState.Done);
 
         _machine.Configure(WritebackState.VerifyPending)
             .Permit(WritebackTrigger.VerifyMatch, WritebackState.Verified)
