@@ -48,6 +48,18 @@ public class IpcPipeTests
     }
 
     [Fact]
+    public void Server_Can_Be_Constructed()
+    {
+        var logger = NullLogger<IpcPipeServer>.Instance;
+        using var server = new IpcPipeServer("SuavoTest_Smoke", msg =>
+            Task.FromResult(new IpcResponse(msg.Id, IpcStatus.Ok, msg.Command, null, null)), logger);
+
+        Assert.NotNull(server);
+        Assert.Equal("SuavoTest_Smoke", server.PipeName);
+        Assert.False(server.IsConnected);
+    }
+
+    [Fact]
     public async Task Server_Reports_Connected_Status()
     {
         var pipeName = $"SuavoTest_{Guid.NewGuid():N}";
