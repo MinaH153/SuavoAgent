@@ -173,6 +173,20 @@ public sealed class LearningWorker : BackgroundService
                 }
             }
 
+            // Feedback processing (batch) — decay, operator directives, stale escalation
+            if (session.Phase is "pattern" or "model" or "approved" or "active")
+            {
+                try
+                {
+                    var feedbackProcessor = new FeedbackProcessor(_db, _sessionId);
+                    feedbackProcessor.ProcessPendingFeedback();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "FeedbackProcessor batch tick failed");
+                }
+            }
+
             // Auto-trigger Pattern Engine when entering Model phase
             if (session.Phase == "model" && !_inferenceRan)
             {
