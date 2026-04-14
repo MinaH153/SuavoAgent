@@ -77,8 +77,16 @@ internal static class SqlCredentialDiscovery
         try
         {
             var configText = File.ReadAllText(configPath);
-            var doc = new XmlDocument();
-            doc.LoadXml(configText);
+
+            // H-1: XXE prevention — disable external entities and DTD processing
+            var settings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null,
+            };
+            var doc = new XmlDocument { XmlResolver = null };
+            using var reader = XmlReader.Create(new System.IO.StringReader(configText), settings);
+            doc.Load(reader);
 
             // Try newTechDataConfiguration element
             var ntdc = doc.SelectSingleNode("//newTechDataConfiguration");

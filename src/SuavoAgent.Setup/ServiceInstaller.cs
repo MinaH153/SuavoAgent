@@ -55,9 +55,8 @@ internal static class ServiceInstaller
         RunSc($"config {BrokerServiceName} depend= {CoreServiceName}");
         ConsoleUI.WriteOk($"{BrokerServiceName} service registered");
 
-        // Step 4: Lock down install directory ACL
-        LockdownAcl(installDir);
-        LockdownAcl(dataDir);
+        // Step 4: Lock down data directory ACL (install dir already locked in Phase 4)
+        LockdownDirectoryAcl(dataDir);
 
         // Step 5: Start services
         ConsoleUI.WriteInfo("Starting services...");
@@ -112,8 +111,9 @@ internal static class ServiceInstaller
     /// <summary>
     /// Lock down directory with ACL: Admin + SYSTEM full, LocalService modify.
     /// Uses icacls.exe instead of .NET ACL API for simpler cross-compile compatibility.
+    /// Public so Program.cs can call it before writing config (C-4: ACL-first).
     /// </summary>
-    private static void LockdownAcl(string path)
+    public static void LockdownDirectoryAcl(string path)
     {
         try
         {

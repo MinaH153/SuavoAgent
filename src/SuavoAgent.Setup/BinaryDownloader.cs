@@ -8,6 +8,10 @@ namespace SuavoAgent.Setup;
 /// </summary>
 internal static class BinaryDownloader
 {
+    // Hardcoded repo coordinates — never read from config (C-1 security fix)
+    internal const string RepoOwner = "MinaH153";
+    internal const string RepoName = "SuavoAgent";
+
     // ECDSA P-256 public key for checksum signature verification (DER/SubjectPublicKeyInfo, Base64)
     // Matches the private key at ~/.suavo/update-signing-p256.pem
     private const string PublicKeyBase64 =
@@ -20,13 +24,15 @@ internal static class BinaryDownloader
         "SuavoAgent.Helper.exe",
     ];
 
+    /// Maximum download size per binary (200 MB). Aborts if Content-Length exceeds this (H-4).
+    private const long MaxDownloadBytes = 200 * 1024 * 1024;
+
     /// <summary>
     /// Downloads, verifies, and installs all agent binaries. Returns true on success.
     /// </summary>
-    public static async Task<bool> DownloadAndVerifyAsync(
-        string repoOwner, string repoName, string releaseTag, string installDir)
+    public static async Task<bool> DownloadAndVerifyAsync(string releaseTag, string installDir)
     {
-        var baseUrl = $"https://github.com/{repoOwner}/{repoName}/releases/download/{releaseTag}";
+        var baseUrl = $"https://github.com/{RepoOwner}/{RepoName}/releases/download/{releaseTag}";
 
         Directory.CreateDirectory(installDir);
 
@@ -145,6 +151,13 @@ internal static class BinaryDownloader
             response.EnsureSuccessStatusCode();
 
             var totalBytes = response.Content.Headers.ContentLength ?? -1;
+
+            // H-4: Abort if declared size exceeds 200 MB
+            if (totalBytes > MaxDownloadBytes)
+            {
+                ConsoleUI.WriteFail($"{label} too large ({totalBytes / (1024 * 1024)} MB > 200 MB limit) — aborting");
+                return false;
+            }
 
             await using var stream = await response.Content.ReadAsStreamAsync();
             await using var fileStream = File.Create(destPath);

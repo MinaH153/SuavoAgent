@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json;
 using SuavoAgent.Setup;
 
@@ -25,7 +24,7 @@ try
     }
 
     // Validate release tag format
-    if (!System.Text.RegularExpressions.Regex.IsMatch(config.ReleaseTag, @"^v\d+\.\d+\.\d+"))
+    if (!System.Text.RegularExpressions.Regex.IsMatch(config.ReleaseTag, @"^v\d+\.\d+\.\d+(-[a-zA-Z0-9]+)?$"))
     {
         ConsoleUI.WriteFail($"Invalid release tag format: {config.ReleaseTag}");
         ConsoleUI.WaitForExit();
@@ -78,7 +77,7 @@ try
     ConsoleUI.WriteStep("Phase 3: Downloading SuavoAgent binaries");
 
     var downloadSuccess = await BinaryDownloader.DownloadAndVerifyAsync(
-        config.RepoOwner, config.RepoName, config.ReleaseTag, InstallDir);
+        config.ReleaseTag, InstallDir);
 
     if (!downloadSuccess)
     {
@@ -127,10 +126,12 @@ try
         WriteIndented = true,
     });
 
+    // C-4: Create dir -> lockdown ACL -> THEN write config (credentials never on disk unprotected)
     var configPath = Path.Combine(InstallDir, "appsettings.json");
     Directory.CreateDirectory(InstallDir);
+    ServiceInstaller.LockdownDirectoryAcl(InstallDir);
     File.WriteAllText(configPath, configJson);
-    ConsoleUI.WriteOk($"appsettings.json written to {InstallDir}");
+    ConsoleUI.WriteOk($"appsettings.json written to {InstallDir} (ACL applied first)");
 
     // ════════════════════════════════════════════
     // PHASE 5: Install Windows Services
@@ -153,6 +154,21 @@ try
         InstallDir, DataDir, agentId,
         sqlCreds.Server, sqlCreds.Database, sqlCreds.User);
 
+    // L-1: Delete setup.json after successful install (contains ApiKey)
+    var setupJsonPath = Path.Combine(AppContext.BaseDirectory, "setup.json");
+    if (File.Exists(setupJsonPath))
+    {
+        try
+        {
+            File.Delete(setupJsonPath);
+            ConsoleUI.WriteOk("setup.json deleted (credentials no longer on disk)");
+        }
+        catch (Exception ex)
+        {
+            ConsoleUI.WriteWarn($"Could not delete setup.json: {ex.Message}");
+        }
+    }
+
     // List installed files
     var exeFiles = Directory.GetFiles(InstallDir, "*.exe");
     foreach (var file in exeFiles)
@@ -171,44 +187,22 @@ catch (Exception ex)
 }
 
 /// <summary>
-/// Gets a stable machine fingerprint via wmic (Win32_ComputerSystemProduct UUID).
-/// Falls back to machine name if wmic is unavailable.
-/// No WMI NuGet dependency — shells out to wmic.exe which ships with Windows.
+/// Gets a stable machine fingerprint via registry MachineGuid (M-4: replaces deprecated wmic).
+/// Falls back to machine name if registry read fails.
 /// </summary>
 static string GetMachineFingerprint()
 {
     try
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "wmic",
-            Arguments = "csproduct get UUID /value",
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var proc = Process.Start(psi);
-        if (proc != null)
-        {
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(5000);
-
-            // Parse "UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            foreach (var line in output.Split('\n'))
-            {
-                var trimmed = line.Trim();
-                if (trimmed.StartsWith("UUID=", StringComparison.OrdinalIgnoreCase))
-                {
-                    var uuid = trimmed[5..].Trim();
-                    if (!string.IsNullOrEmpty(uuid) && uuid != "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")
-                        return uuid;
-                }
-            }
-        }
+        using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+            @"SOFTWARE\Microsoft\Cryptography", writable: false);
+        var guid = key?.GetValue("MachineGuid") as string;
+        if (!string.IsNullOrEmpty(guid))
+            return guid;
     }
     catch
     {
-        // wmic unavailable — fall back
+        // Registry unavailable — fall back
     }
     return Environment.MachineName;
 }

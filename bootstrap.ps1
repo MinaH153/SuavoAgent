@@ -57,7 +57,7 @@ if (-not $PSBoundParameters.ContainsKey('LearningMode')) {
 
 Write-Host ""
 Write-Host "  ╔═══════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║   SuavoAgent v2 — Zero-Config Setup   ║" -ForegroundColor Cyan
+Write-Host "  ║   SuavoAgent v3 — Zero-Config Setup   ║" -ForegroundColor Cyan
 Write-Host "  ╚═══════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
@@ -405,7 +405,7 @@ $config = @{
         AgentId = $agentId
         PharmacyId = $PharmacyId
         MachineFingerprint = $fingerprint
-        Version = "2.0.0"
+        Version = "3.0.0"
         SqlServer = $sqlServer
         SqlDatabase = $sqlDatabase
         LearningMode = [bool]$LearningMode
@@ -498,7 +498,7 @@ foreach ($svc in @("SuavoAgent.Core", "SuavoAgent.Broker")) {
 
 Write-Host ""
 Write-Host "  ╔═══════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "  ║   SuavoAgent v2 — Installation Complete   ║" -ForegroundColor Green
+Write-Host "  ║   SuavoAgent v3 — Installation Complete   ║" -ForegroundColor Green
 Write-Host "  ╚═══════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Install:  $installDir" -ForegroundColor White
