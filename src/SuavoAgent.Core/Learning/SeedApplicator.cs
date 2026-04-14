@@ -80,7 +80,8 @@ public sealed class SeedApplicator
             _db.UpsertCorrelatedAction(sessionId, c.CorrelationKey, c.TreeHash, c.ElementId,
                 c.ControlType, c.QueryShapeHash, true, null);
             _db.SetCorrelatedActionSource(sessionId, c.CorrelationKey, "seed", response.SeedDigest, now);
-            _db.UpdateCorrelationConfidence(sessionId, c.CorrelationKey, c.SeededConfidence);
+            var clampedConfidence = Math.Clamp(c.SeededConfidence, 0.0, 0.6);
+            _db.UpdateCorrelationConfidence(sessionId, c.CorrelationKey, clampedConfidence);
             applied++;
         }
 
