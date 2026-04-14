@@ -17,12 +17,22 @@ public sealed class ActionCorrelator
     private readonly string _sessionId;
     private double _correlationWindowSeconds;
     private readonly List<UiEvent> _window = new();
+    private readonly HashSet<string> _seededShapes = new();
 
     public ActionCorrelator(AgentStateDb db, string sessionId, double correlationWindowSeconds = 2.0, bool clockCalibrated = true)
     {
         _db = db;
         _sessionId = sessionId;
         _correlationWindowSeconds = clockCalibrated ? correlationWindowSeconds : 5.0;
+    }
+
+    /// <summary>
+    /// Registers query shape hashes that came from collective intelligence seeds.
+    /// Seeded shapes reach 0.6 confidence at 2 co-occurrences instead of 3.
+    /// </summary>
+    public void RegisterSeededShapes(IEnumerable<string> shapeHashes)
+    {
+        foreach (var h in shapeHashes) _seededShapes.Add(h);
     }
 
     /// <summary>
@@ -92,7 +102,8 @@ public sealed class ActionCorrelator
             controlType: closest.ControlType,
             queryShapeHash: queryShapeHash,
             isWrite: isWrite,
-            tablesReferenced: tablesReferenced);
+            tablesReferenced: tablesReferenced,
+            seededShape: _seededShapes.Contains(queryShapeHash));
     }
 
     private void PruneExpired(DateTimeOffset referenceTime)

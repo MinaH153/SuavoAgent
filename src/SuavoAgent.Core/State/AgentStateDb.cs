@@ -1636,7 +1636,8 @@ public sealed class AgentStateDb : IDisposable
     // ── Correlated Actions ──
 
     public void UpsertCorrelatedAction(string sessionId, string correlationKey, string treeHash,
-        string elementId, string? controlType, string? queryShapeHash, bool isWrite, string? tablesReferenced)
+        string elementId, string? controlType, string? queryShapeHash, bool isWrite, string? tablesReferenced,
+        bool seededShape = false)
     {
         var now = DateTimeOffset.UtcNow.ToString("o");
         using var cmd = _conn.CreateCommand();
@@ -1653,7 +1654,7 @@ public sealed class AgentStateDb : IDisposable
                 occurrence_count = occurrence_count + 1,
                 confidence = CASE
                     WHEN occurrence_count + 1 >= 10 THEN 0.9
-                    WHEN occurrence_count + 1 >= 3 THEN 0.6
+                    WHEN occurrence_count + 1 >= @threshold THEN 0.6
                     ELSE 0.3
                 END,
                 last_seen = @now
@@ -1667,6 +1668,7 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@isWrite", isWrite ? 1 : 0);
         cmd.Parameters.AddWithValue("@tables", (object?)tablesReferenced ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@now", now);
+        cmd.Parameters.AddWithValue("@threshold", seededShape ? 2 : 3);
         cmd.ExecuteNonQuery();
     }
 

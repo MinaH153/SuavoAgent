@@ -224,4 +224,52 @@ public class ActionCorrelatorTests : IDisposable
         Assert.Single(actions);
         Assert.Equal("tree-noover:elem-noover:qshape-noover", actions[0].CorrelationKey);
     }
+
+    [Fact]
+    public void TryCorrelateWithSql_SeededShape_ReachesHighConfidenceAt2Occurrences()
+    {
+        var correlator = MakeCorrelator();
+        correlator.RegisterSeededShapes(new[] { "seeded-shape-hash" });
+
+        var baseTime = DateTimeOffset.UtcNow;
+
+        // First occurrence
+        correlator.RecordUiEvent("tree1", "btn1", "Button", baseTime);
+        correlator.TryCorrelateWithSql("seeded-shape-hash", baseTime.AddSeconds(0.5).ToString("o"),
+            isWrite: true, tablesReferenced: "Tbl");
+
+        // Second occurrence — should reach 0.6 (threshold reduced from 3 to 2)
+        var c2 = MakeCorrelator();
+        c2.RegisterSeededShapes(new[] { "seeded-shape-hash" });
+        c2.RecordUiEvent("tree1", "btn1", "Button", baseTime.AddMinutes(1));
+        c2.TryCorrelateWithSql("seeded-shape-hash", baseTime.AddMinutes(1).AddSeconds(0.5).ToString("o"),
+            isWrite: true, tablesReferenced: "Tbl");
+
+        var actions = _db.GetCorrelatedActions(_sessionId);
+        var match = actions.First(a => a.QueryShapeHash == "seeded-shape-hash");
+        Assert.Equal(2, match.OccurrenceCount);
+        Assert.True(match.Confidence >= 0.6);
+    }
+
+    [Fact]
+    public void TryCorrelateWithSql_NonSeededShape_Requires3ForHighConfidence()
+    {
+        var baseTime = DateTimeOffset.UtcNow;
+
+        // Two occurrences — should still be 0.3 (needs 3 for 0.6)
+        var c1 = MakeCorrelator();
+        c1.RecordUiEvent("tree1", "btn1", "Button", baseTime);
+        c1.TryCorrelateWithSql("normal-shape", baseTime.AddSeconds(0.5).ToString("o"),
+            isWrite: false, tablesReferenced: "Tbl");
+
+        var c2 = MakeCorrelator();
+        c2.RecordUiEvent("tree1", "btn1", "Button", baseTime.AddMinutes(1));
+        c2.TryCorrelateWithSql("normal-shape", baseTime.AddMinutes(1).AddSeconds(0.5).ToString("o"),
+            isWrite: false, tablesReferenced: "Tbl");
+
+        var actions = _db.GetCorrelatedActions(_sessionId);
+        var match = actions.First(a => a.QueryShapeHash == "normal-shape");
+        Assert.Equal(2, match.OccurrenceCount);
+        Assert.True(match.Confidence < 0.6);
+    }
 }
