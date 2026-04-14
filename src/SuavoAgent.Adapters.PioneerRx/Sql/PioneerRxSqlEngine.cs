@@ -118,6 +118,28 @@ WHERE Description IN ({statusParams})";
                 return guids;
             }
 
+            // Exact match returned nothing — try pattern-based discovery
+            _logger.LogInformation("Exact status name match returned 0 results — trying pattern-based discovery");
+            var patternQuery = "SELECT RxTransactionStatusTypeID, Description FROM Prescription.RxTransactionStatusType";
+            await using var patCmd = new SqlCommand(patternQuery, _connection);
+            patCmd.CommandTimeout = 10;
+            await using var patReader = await patCmd.ExecuteReaderAsync(ct);
+            while (await patReader.ReadAsync(ct))
+            {
+                var desc = patReader.GetString(patReader.GetOrdinal("Description"));
+                if (PioneerRxConstants.MatchesDeliveryReadyPattern(desc))
+                {
+                    var guid = patReader.GetGuid(patReader.GetOrdinal("RxTransactionStatusTypeID"));
+                    guids.Add(guid);
+                    _logger.LogInformation("Pattern-matched status: {Description} = {Guid}", desc, guid);
+                }
+            }
+            if (guids.Count > 0)
+            {
+                _logger.LogInformation("Pattern-discovered {Count} delivery-ready status GUIDs", guids.Count);
+                return guids;
+            }
+
             _logger.LogError("No delivery-ready status GUIDs found in lookup table — detection will be disabled until GUIDs are discoverable");
         }
         catch (Exception ex)

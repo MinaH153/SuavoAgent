@@ -91,4 +91,34 @@ public class PioneerRxSqlEngineTests
     [InlineData("MedicationDescription")]
     [InlineData("DispensedNDC")]
     public void IsPhiColumn_AllowsOperational(string col) => Assert.False(PioneerRxSqlEngine.IsPhiColumn(col));
+
+    [Theory]
+    [InlineData("Waiting for Pick up")]
+    [InlineData("Waiting for Pickup")]
+    [InlineData("WAITING FOR PICK UP")]
+    [InlineData("waiting for pick up")]
+    public void StatusPattern_MatchesPickupVariants(string statusDesc)
+    {
+        Assert.True(PioneerRxConstants.MatchesDeliveryReadyPattern(statusDesc));
+    }
+
+    [Theory]
+    [InlineData("Waiting for Delivery")]
+    [InlineData("Out For Delivery")]
+    [InlineData("out for delivery")]
+    [InlineData("Completed")]
+    public void StatusPattern_MatchesDeliveryVariants(string statusDesc)
+    {
+        Assert.True(PioneerRxConstants.MatchesDeliveryStatusPattern(statusDesc));
+    }
+
+    [Theory]
+    [InlineData("Data Entry")]
+    [InlineData("Suspended")]
+    [InlineData("Voided")]
+    public void StatusPattern_RejectsNonDeliveryStatuses(string statusDesc)
+    {
+        Assert.False(PioneerRxConstants.MatchesDeliveryReadyPattern(statusDesc));
+        Assert.False(PioneerRxConstants.MatchesDeliveryStatusPattern(statusDesc));
+    }
 }
