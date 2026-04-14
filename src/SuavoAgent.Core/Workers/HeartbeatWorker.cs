@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
@@ -261,6 +262,24 @@ public sealed class HeartbeatWorker : BackgroundService
                     break;
                 case "delivery_writeback":
                     await HandleDeliveryWritebackAsync(scEl, cmd, ct);
+                    break;
+                case "approve_candidate":
+                    HandleFeedbackCommand(scEl, cmd, DirectiveType.Promote);
+                    break;
+                case "reject_candidate":
+                    HandleFeedbackCommand(scEl, cmd, DirectiveType.Demote);
+                    break;
+                case "reapprove_candidate":
+                    HandleFeedbackCommand(scEl, cmd, DirectiveType.Promote);
+                    break;
+                case "force_relearn":
+                    HandleFeedbackCommand(scEl, cmd, DirectiveType.ReLearn);
+                    break;
+                case "adjust_window":
+                    HandleFeedbackCommand(scEl, cmd, DirectiveType.Recalibrate);
+                    break;
+                case "acknowledge_stale":
+                    HandleFeedbackCommand(scEl, cmd, DirectiveType.Prune);
                     break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
@@ -583,6 +602,49 @@ public sealed class HeartbeatWorker : BackgroundService
             _logger.LogInformation("Controlled substance delivery — POS entry required for Rx {RxHash}", hashedRx[..12]);
 
         await Task.CompletedTask;
+    }
+
+    private void HandleFeedbackCommand(JsonElement scEl, SignedCommand cmd, DirectiveType directiveType)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var correlationKey = dataEl.TryGetProperty("correlationKey", out var ck) ? ck.GetString() ?? "" : "";
+        var sessionId = _stateDb.GetActiveSessionId(_options.PharmacyId ?? "");
+
+        if (string.IsNullOrEmpty(correlationKey) || string.IsNullOrEmpty(sessionId))
+        {
+            _logger.LogWarning("{Command}: missing correlationKey or no active session", cmd.Command);
+            return;
+        }
+
+        var payloadJson = dataEl.ValueKind != JsonValueKind.Undefined
+            ? dataEl.GetRawText()
+            : null;
+
+        var evt = new FeedbackEvent(
+            SessionId: sessionId,
+            EventType: "operator_command",
+            Source: "operator",
+            SourceId: cmd.Nonce,
+            TargetType: "correlation_key",
+            TargetId: correlationKey,
+            PayloadJson: payloadJson,
+            DirectiveType: directiveType,
+            DirectiveJson: payloadJson,
+            CausalChainJson: null);
+
+        _stateDb.InsertFeedbackEvent(evt);
+
+        _logger.LogInformation("Feedback command {Command} for {Key} queued as directive {Directive}",
+            cmd.Command, correlationKey, directiveType);
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: correlationKey,
+            EventType: "feedback_command",
+            FromState: "",
+            ToState: directiveType.ToString(),
+            Trigger: cmd.Command,
+            CommandId: cmd.Nonce,
+            RequesterId: "operator"));
     }
 
     private async Task HandleAcknowledgeDriftAsync(JsonElement scEl, CancellationToken ct)
