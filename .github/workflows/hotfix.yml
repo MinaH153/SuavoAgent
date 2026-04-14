@@ -52,9 +52,7 @@ jobs:
         run: |
           cd release
           sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe > checksums.sha256
-          echo "$SIGNING_KEY" > /tmp/key.pem
-          openssl dgst -sha256 -sign /tmp/key.pem -out checksums.sha256.sig checksums.sha256
-          rm /tmp/key.pem
+          openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") -out checksums.sha256.sig checksums.sha256
 
       - name: Create tag
         env:
