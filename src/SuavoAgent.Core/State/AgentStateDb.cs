@@ -2443,6 +2443,23 @@ public sealed class AgentStateDb : IDisposable
         cmd.ExecuteNonQuery();
     }
 
+    public DateTimeOffset GetPhaseChangedAt(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT phase_changed_at FROM learning_session WHERE id = @id";
+        cmd.Parameters.AddWithValue("@id", sessionId);
+        var result = cmd.ExecuteScalar();
+        return result is string s ? DateTimeOffset.Parse(s) : DateTimeOffset.UtcNow;
+    }
+
+    public int GetUnseededCorrelationCount(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM correlated_actions WHERE session_id = @sid AND source = 'local'";
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
     public double GetSeedConfirmationRatio(string seedDigest)
     {
         using var cmd = _conn.CreateCommand();
