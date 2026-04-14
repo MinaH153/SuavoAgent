@@ -1,3 +1,4 @@
+using System.Text.Json;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.State;
 using Xunit;
@@ -294,7 +295,174 @@ public class FeedbackCollectorTests : IDisposable
         Assert.Equal(0, _db.GetCorrelatedActionCount(SessionId));
     }
 
-    // ── Helper ──
+    // ── FeedbackCollector.RecordWritebackOutcome ──
+
+    [Fact]
+    public void RecordWritebackOutcome_Success_IncreasesConfidence()
+    {
+        SeedCorrelation("rwo-success", 0.60);
+        var result = FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "task-1", "rwo-success", "success",
+            "2026-04-13T10:00:00Z", "2026-04-13T10:00:01Z");
+        Assert.Equal(0.65, result, precision: 2);
+    }
+
+    [Fact]
+    public void RecordWritebackOutcome_Failure_DecreasesConfidence()
+    {
+        SeedCorrelation("rwo-fail", 0.60);
+        var result = FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "task-2", "rwo-fail", "status_conflict",
+            "2026-04-13T10:00:00Z", "2026-04-13T10:00:01Z");
+        Assert.Equal(0.45, result, precision: 2);
+    }
+
+    [Fact]
+    public void RecordWritebackOutcome_CeilingCapsAt0Point95()
+    {
+        SeedCorrelation("rwo-ceiling", 0.93);
+        var result = FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "task-3", "rwo-ceiling", "success",
+            "2026-04-13T10:00:00Z", "2026-04-13T10:00:01Z");
+        Assert.Equal(0.95, result, precision: 2);
+    }
+
+    [Fact]
+    public void RecordWritebackOutcome_BelowFloor_EmitsPrune()
+    {
+        SeedCorrelation("rwo-prune", 0.11);
+        FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "task-4", "rwo-prune", "status_conflict",
+            "2026-04-13T10:00:00Z", "2026-04-13T10:00:01Z");
+
+        var events = _db.GetFeedbackEventsForTarget(SessionId, "rwo-prune");
+        Assert.True(events.Count >= 2, $"Expected >= 2 events, got {events.Count}");
+        Assert.Contains(events, e => e.DirectiveType == DirectiveType.ConfidenceAdjust);
+        Assert.Contains(events, e => e.DirectiveType == DirectiveType.Prune);
+    }
+
+    [Fact]
+    public void RecordWritebackOutcome_PromotedWith5Failures_SuspendsPromotion()
+    {
+        SeedCorrelation("rwo-suspend", 0.30);
+        _db.UpdateCorrelationFlags(SessionId, "rwo-suspend", operatorApproved: true);
+
+        for (int i = 0; i < 5; i++)
+        {
+            FeedbackCollector.RecordWritebackOutcome(
+                _db, SessionId, $"task-s{i}", "rwo-suspend", "sql_error",
+                "2026-04-13T10:00:00Z", "2026-04-13T10:00:01Z");
+        }
+
+        var ext = _db.GetCorrelatedActionExtended(SessionId, "rwo-suspend");
+        Assert.NotNull(ext);
+        Assert.True(ext!.Value.PromotionSuspended);
+        var events = _db.GetFeedbackEventsForTarget(SessionId, "rwo-suspend");
+        Assert.Contains(events, e => e.DirectiveType == DirectiveType.SuspendPromotion);
+    }
+
+    [Fact]
+    public void RecordWritebackOutcome_Success_ResetsConsecutiveFailures()
+    {
+        SeedCorrelation("rwo-reset", 0.60);
+
+        // Two failures
+        FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "t1", "rwo-reset", "sql_error",
+            "2026-04-13T10:00:00Z", "2026-04-13T10:00:01Z");
+        FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "t2", "rwo-reset", "sql_error",
+            "2026-04-13T10:00:02Z", "2026-04-13T10:00:03Z");
+
+        var mid = _db.GetCorrelatedActionExtended(SessionId, "rwo-reset");
+        Assert.Equal(2, mid!.Value.ConsecutiveFailures);
+
+        // One success resets
+        FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "t3", "rwo-reset", "success",
+            "2026-04-13T10:00:04Z", "2026-04-13T10:00:05Z");
+
+        var after = _db.GetCorrelatedActionExtended(SessionId, "rwo-reset");
+        Assert.Equal(0, after!.Value.ConsecutiveFailures);
+    }
+
+    [Fact]
+    public void RecordWritebackOutcome_ConnectionReset_ZeroDelta()
+    {
+        SeedCorrelation("rwo-connreset", 0.60);
+        var result = FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "task-cr", "rwo-connreset", "connection_reset",
+            "2026-04-13T10:00:00Z", "2026-04-13T10:00:01Z");
+        Assert.Equal(0.60, result, precision: 2);
+    }
+
+    // ── FeedbackCollector.ApplyDirective ──
+
+    [Fact]
+    public void ApplyDirective_IsIdempotent()
+    {
+        SeedCorrelation("rwo-idempotent", 0.50);
+
+        var evt = new FeedbackEvent(
+            SessionId: SessionId,
+            EventType: "writeback_outcome",
+            Source: "inline",
+            SourceId: null,
+            TargetType: "correlation",
+            TargetId: "rwo-idempotent",
+            PayloadJson: null,
+            DirectiveType: DirectiveType.ConfidenceAdjust,
+            DirectiveJson: JsonSerializer.Serialize(new { newConfidence = 0.99 }),
+            CausalChainJson: null)
+        {
+            AppliedAt = "2026-04-13T10:00:00Z",
+            AppliedBy = "inline"
+        };
+        int id = _db.InsertFeedbackEvent(evt);
+
+        var loaded = _db.GetFeedbackEvent(id)!;
+        FeedbackCollector.ApplyDirective(_db, SessionId, loaded);
+        FeedbackCollector.ApplyDirective(_db, SessionId, loaded);
+
+        // Confidence should NOT have changed because event was already applied
+        var actions = _db.GetCorrelatedActions(SessionId);
+        var match = actions.First(a => a.CorrelationKey == "rwo-idempotent");
+        Assert.Equal(0.50, match.Confidence, precision: 2);
+    }
+
+    [Fact]
+    public void CausalChain_ForwardOnly_OldEventsUnmodified()
+    {
+        SeedCorrelation("rwo-causal", 0.60);
+
+        // Event A
+        FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "t-a", "rwo-causal", "sql_error",
+            "2026-04-13T10:00:00Z", "2026-04-13T10:00:01Z");
+
+        var eventsAfterA = _db.GetFeedbackEventsForTarget(SessionId, "rwo-causal");
+        var eventA = eventsAfterA.First(e => e.DirectiveType == DirectiveType.ConfidenceAdjust);
+        var eventAPayload = eventA.PayloadJson;
+        var eventACausal = eventA.CausalChainJson;
+
+        // Event B
+        FeedbackCollector.RecordWritebackOutcome(
+            _db, SessionId, "t-b", "rwo-causal", "sql_error",
+            "2026-04-13T10:00:02Z", "2026-04-13T10:00:03Z");
+
+        // Re-read A — should be unchanged
+        var reloadedA = _db.GetFeedbackEvent(eventA.Id!.Value)!;
+        Assert.Equal(eventAPayload, reloadedA.PayloadJson);
+        Assert.Equal(eventACausal, reloadedA.CausalChainJson);
+    }
+
+    // ── Helpers ──
+
+    private void SeedCorrelation(string key, double initialConfidence)
+    {
+        _db.UpsertCorrelatedAction(SessionId, key, "th1", "e1", "Button", "qh1", false, "Rx");
+        _db.UpdateCorrelationConfidence(SessionId, key, initialConfidence);
+    }
 
     private FeedbackEvent MakeEvent(DirectiveType directive, string targetId = "target-001")
         => new(
