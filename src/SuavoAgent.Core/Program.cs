@@ -45,7 +45,9 @@ Log.Logger = new LoggerConfiguration()
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "logs", "core-.log"),
         rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 30)
+        retainedFileCountLimit: 30,
+        fileSizeLimitBytes: 50_000_000,
+        rollOnFileSizeLimit: true)
     .Enrich.FromLogContext()
     .CreateLogger();
 

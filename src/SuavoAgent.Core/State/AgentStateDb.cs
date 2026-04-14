@@ -43,6 +43,12 @@ public sealed class AgentStateDb : IDisposable
             fkCmd.CommandText = "PRAGMA foreign_keys=ON";
             fkCmd.ExecuteNonQuery();
         }
+        // Prevent SQLITE_BUSY errors under concurrent worker access
+        using (var btCmd = _conn.CreateCommand())
+        {
+            btCmd.CommandText = "PRAGMA busy_timeout=5000";
+            btCmd.ExecuteNonQuery();
+        }
         using (var syncCmd = _conn.CreateCommand())
         {
             syncCmd.CommandText = "PRAGMA synchronous=NORMAL";
