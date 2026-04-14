@@ -57,7 +57,16 @@ public sealed class ActionCorrelator
         if (_window.Count == 0)
             return;
 
-        var window = TimeSpan.FromSeconds(_correlationWindowSeconds);
+        // Check per-key window overrides from recalibration
+        double effectiveWindowSeconds = _correlationWindowSeconds;
+        if (_window.Count > 0)
+        {
+            var closestUi = _window[^1]; // most recent UI event
+            var overrideWindow = _db.GetWindowOverride(_sessionId, closestUi.TreeHash, closestUi.ElementId);
+            if (overrideWindow.HasValue)
+                effectiveWindowSeconds = overrideWindow.Value;
+        }
+        var window = TimeSpan.FromSeconds(effectiveWindowSeconds);
         UiEvent? closest = null;
         TimeSpan closestDelta = TimeSpan.MaxValue;
 
