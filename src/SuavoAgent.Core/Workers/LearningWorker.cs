@@ -462,6 +462,7 @@ public sealed class LearningWorker : BackgroundService
                     _lastSeedDigest = seedResp.SeedDigest;
                     _actionCorrelator?.RegisterSeededShapes(
                         _applicator.GetSeededShapeHashes(seedResp.SeedDigest));
+                    _actionCorrelator?.SetActiveSeedDigest(seedResp.SeedDigest);
                     _logger.LogInformation("Applied {Count} pattern seeds from digest {Digest}",
                         result.ItemsApplied, seedResp.SeedDigest);
                 }

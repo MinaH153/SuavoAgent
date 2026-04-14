@@ -18,6 +18,7 @@ public sealed class ActionCorrelator
     private double _correlationWindowSeconds;
     private readonly List<UiEvent> _window = new();
     private readonly HashSet<string> _seededShapes = new();
+    private string? _activeSeedDigest;
 
     public ActionCorrelator(AgentStateDb db, string sessionId, double correlationWindowSeconds = 2.0, bool clockCalibrated = true)
     {
@@ -25,6 +26,11 @@ public sealed class ActionCorrelator
         _sessionId = sessionId;
         _correlationWindowSeconds = clockCalibrated ? correlationWindowSeconds : 5.0;
     }
+
+    /// <summary>
+    /// Sets the active seed digest for confirming seed items on independent observation.
+    /// </summary>
+    public void SetActiveSeedDigest(string? digest) => _activeSeedDigest = digest;
 
     /// <summary>
     /// Registers query shape hashes that came from collective intelligence seeds.
@@ -104,6 +110,14 @@ public sealed class ActionCorrelator
             isWrite: isWrite,
             tablesReferenced: tablesReferenced,
             seededShape: _seededShapes.Contains(queryShapeHash));
+
+        // Confirm seeded items when independently observed (Spec D)
+        if (_activeSeedDigest is not null && _seededShapes.Contains(queryShapeHash))
+        {
+            var now = DateTimeOffset.UtcNow.ToString("o");
+            _db.ConfirmSeedItem(_activeSeedDigest, "query_shape", queryShapeHash, now);
+            _db.ConfirmSeedItem(_activeSeedDigest, "correlation", correlationKey, now);
+        }
     }
 
     private void PruneExpired(DateTimeOffset referenceTime)
