@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <PackageReference Include="FlaUI.UIA2" Version="5.0.0" />
+    <PackageReference Include="Microsoft.Win32.SystemEvents" Version="10.0.6" />
     <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
