@@ -31,11 +31,11 @@ public class PhiMinimizationTests
     }
 
     [Fact]
-    public void BuildMetadataQuery_HasTop50Limit()
+    public void BuildMetadataQuery_HasTop100DefaultLimit()
     {
         var query = PioneerRxSqlEngine.BuildMetadataQuery(
             PioneerRxConstants.DeliveryReadyStatusNames);
-        Assert.Contains("TOP 50", query);
+        Assert.Contains("TOP 100", query);
     }
 
     [Fact]

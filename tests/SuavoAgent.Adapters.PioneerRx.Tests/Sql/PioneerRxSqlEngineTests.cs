@@ -28,10 +28,10 @@ public class PioneerRxSqlEngineTests
     }
 
     [Fact]
-    public void BuildDeliveryQuery_LimitsTo50()
+    public void BuildDeliveryQuery_DefaultsTo100()
     {
         var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
-        Assert.Contains("TOP 50", query);
+        Assert.Contains("TOP 100", query);
     }
 
     [Fact]
@@ -76,6 +76,54 @@ public class PioneerRxSqlEngineTests
     {
         var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
         Assert.Contains("ORDER BY rt.DateFilled DESC", query);
+    }
+
+    [Theory]
+    [InlineData(50)]
+    [InlineData(100)]
+    [InlineData(500)]
+    public void BuildDeliveryQueryBase_UsesConfigurableBatchSize(int batchSize)
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQueryBase(3, batchSize);
+        Assert.Contains($"TOP {batchSize}", query);
+    }
+
+    [Fact]
+    public void BuildDeliveryQueryBase_DefaultsTo100()
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQueryBase(3);
+        Assert.Contains("TOP 100", query);
+    }
+
+    [Theory]
+    [InlineData(50)]
+    [InlineData(100)]
+    [InlineData(500)]
+    public void BuildFullDeliveryQuery_UsesConfigurableBatchSize(int batchSize)
+    {
+        var query = PioneerRxSqlEngine.BuildFullDeliveryQuery(3, batchSize);
+        Assert.Contains($"TOP {batchSize}", query);
+    }
+
+    [Theory]
+    [InlineData(50)]
+    [InlineData(100)]
+    [InlineData(500)]
+    public void BuildDeliveryQuery_UsesConfigurableBatchSize(int batchSize)
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(3, batchSize);
+        Assert.Contains($"TOP {batchSize}", query);
+    }
+
+    [Theory]
+    [InlineData(50)]
+    [InlineData(100)]
+    [InlineData(500)]
+    public void BuildMetadataQuery_UsesConfigurableBatchSize(int batchSize)
+    {
+        var names = new List<string> { "Waiting for Pick up", "Waiting for Delivery" };
+        var query = PioneerRxSqlEngine.BuildMetadataQuery(names, batchSize);
+        Assert.Contains($"TOP {batchSize}", query);
     }
 
     [Theory]
