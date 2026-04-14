@@ -21,7 +21,8 @@ param(
     [string]$ReleaseTag = "v3.0.0",
     [string]$RepoOwner = "MinaH153",
     [string]$RepoName = "SuavoAgent",
-    [switch]$LearningMode
+    [switch]$LearningMode,
+    [switch]$TestMode
 )
 
 if ($ReleaseTag -notmatch '^v\d+\.\d+\.\d+') {
@@ -48,7 +49,10 @@ if (-not $isAdmin) {
 }
 
 # ── Learning mode prompt (if not explicitly set via flag) ──
-if (-not $PSBoundParameters.ContainsKey('LearningMode')) {
+if ($TestMode) {
+    $LearningMode = [switch]::new($true)
+    Write-Host "  TestMode: Learning mode auto-enabled" -ForegroundColor Gray
+} elseif (-not $PSBoundParameters.ContainsKey('LearningMode')) {
     $lmResponse = Read-Host "Enable learning mode? (30-day observation before automation) [y/N]"
     if ($lmResponse -eq 'y' -or $lmResponse -eq 'Y') {
         $LearningMode = [switch]::new($true)
@@ -113,18 +117,33 @@ if (-not $pioneerDir) {
 }
 
 if (-not $pioneerDir) {
-    Write-Fail "PioneerRx not found. Check install path."
-    exit 1
+    if ($TestMode) {
+        Write-Warn "PioneerRx not found — TestMode: skipping PMS discovery"
+        Write-Warn "Agent will install without SQL connectivity (Core + Broker only)"
+    } else {
+        Write-Fail "PioneerRx not found. Check install path."
+        Write-Fail "For testing without PioneerRx, use: -TestMode"
+        exit 1
+    }
+} else {
+    Write-Ok "PioneerRx at: $pioneerDir"
 }
-
-Write-Ok "PioneerRx at: $pioneerDir"
 
 # ════════════════════════════════════════════
 # PHASE 2: Extract SQL credentials
 # ════════════════════════════════════════════
-Write-Step "Phase 2: Discovering SQL Server credentials"
+if ($TestMode -and -not $pioneerDir) {
+    Write-Step "Phase 2: Skipping SQL discovery (TestMode)"
+    $sqlServer = "localhost"
+    $sqlDatabase = "PioneerPharmacySystem"
+    $sqlUser = $null
+    $sqlPassword = $null
+    Write-Warn "SQL: localhost (placeholder — no PMS on test machine)"
+} else {
+    Write-Step "Phase 2: Discovering SQL Server credentials"
+}
 
-$sqlServer = $null
+$sqlServer = if ($TestMode -and -not $pioneerDir) { "localhost" } else { $null }
 $sqlDatabase = "PioneerPharmacySystem"
 $sqlUser = $null
 $sqlPassword = $null
@@ -295,12 +314,12 @@ if (-not $sqlServer) {
     }
 }
 
-# Step 2f: If we still have no credentials, prompt
-if (-not $sqlServer) {
+# Step 2f: If we still have no credentials, prompt (skip in TestMode)
+if (-not $sqlServer -and -not ($TestMode -and -not $pioneerDir)) {
     Write-Warn "Auto-discovery failed. Manual entry required."
     $sqlServer = Read-Host "  SQL Server (e.g. 192.168.1.78,49202)"
 }
-if (-not $sqlUser -and -not $discoveredConnStr) {
+if (-not $sqlUser -and -not $discoveredConnStr -and -not ($TestMode -and -not $pioneerDir)) {
     Write-Warn "No SQL credentials discovered."
     $needAuth = Read-Host "  Use SQL Auth? (y/n)"
     if ($needAuth -eq 'y') {
