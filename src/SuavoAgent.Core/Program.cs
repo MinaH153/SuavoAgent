@@ -7,6 +7,7 @@ using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
+using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Workers;
 
 // Bootstrap self-update — runs before any DI/config
@@ -171,6 +172,9 @@ try
         return new AgentStateDb(dbPath, dbPassword);
     });
 
+    builder.Services.AddSingleton<BehavioralEventReceiver>(sp =>
+        new BehavioralEventReceiver(sp.GetRequiredService<AgentStateDb>(), sessionId: "ipc"));
+
     builder.Services.AddSingleton<IpcPipeServer>(sp =>
     {
         var logger = sp.GetRequiredService<ILogger<IpcPipeServer>>();
@@ -178,18 +182,37 @@ try
         {
             logger.LogDebug("IPC: {Command}", msg.Command);
 
-            if (msg.Command == SuavoAgent.Contracts.Ipc.IpcCommands.GetHealth)
+            switch (msg.Command)
             {
-                var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
-                var db = sp.GetRequiredService<AgentStateDb>();
-                var snapshot = new HealthSnapshot(opts, db, sp, DateTimeOffset.UtcNow);
-                var data = snapshot.Take();
-                return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
-                    msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, data, null));
-            }
+                case SuavoAgent.Contracts.Ipc.IpcCommands.GetHealth:
+                {
+                    var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+                    var db = sp.GetRequiredService<AgentStateDb>();
+                    var snapshot = new HealthSnapshot(opts, db, sp, DateTimeOffset.UtcNow);
+                    var data = snapshot.Take();
+                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, data, null));
+                }
 
-            return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
-                msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
+                case SuavoAgent.Contracts.Ipc.IpcCommands.BehavioralEvents:
+                {
+                    var events = msg.Data.HasValue
+                        ? System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Behavioral.BehavioralEvent>>(
+                            msg.Data.Value.GetRawText())
+                        : null;
+                    if (events is { Count: > 0 })
+                    {
+                        var receiver = sp.GetRequiredService<BehavioralEventReceiver>();
+                        receiver.ProcessBatch(events, 0);
+                    }
+                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
+                }
+
+                default:
+                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
+            }
         }, logger);
     });
 
@@ -207,6 +230,10 @@ try
     builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));
 
     var host = builder.Build();
+
+    var pipeServer = host.Services.GetRequiredService<IpcPipeServer>();
+    pipeServer.Start(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+
     host.Run();
 }
 catch (Exception ex)
