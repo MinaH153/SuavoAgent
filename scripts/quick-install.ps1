@@ -33,6 +33,10 @@ $id = "agent-" + [guid]::NewGuid().ToString("N").Substring(0,12)
 $cfg = @{Agent=@{CloudUrl="https://suavollc.com";AgentId=$id;PharmacyId="TEST-001";Version="3.0.0";LearningMode=$true}} | ConvertTo-Json -Depth 5
 Set-Content "$dir\appsettings.json" $cfg -Encoding ASCII
 
+# Grant LocalService access to install + data dirs
+icacls $dir /grant "NT AUTHORITY\LocalService:(OI)(CI)M" /T /Q
+icacls $data /grant "NT AUTHORITY\LocalService:(OI)(CI)F" /T /Q
+
 sc.exe create SuavoAgent.Core binPath= "`"$dir\SuavoAgent.Core.exe`"" start= delayed-auto obj= "NT AUTHORITY\LocalService" | Out-Null
 sc.exe failure SuavoAgent.Core reset= 3600 actions= restart/5000/restart/30000/restart/60000 | Out-Null
 sc.exe create SuavoAgent.Broker binPath= "`"$dir\SuavoAgent.Broker.exe`"" start= delayed-auto obj= LocalSystem | Out-Null
