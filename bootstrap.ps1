@@ -1,4 +1,4 @@
-# SuavoAgent v2 — Zero-Config One-Paste Installer
+# SuavoAgent v3 "Phantom" — Zero-Config One-Paste Installer
 # Paste into Admin PowerShell at any PioneerRx pharmacy. That's it.
 #
 # What it does:
@@ -18,7 +18,7 @@ param(
     [string]$CloudUrl = "https://suavollc.com",
     [string]$ApiKey = "",
     [string]$PharmacyId = "",
-    [string]$ReleaseTag = "v2.0.0-alpha",
+    [string]$ReleaseTag = "v3.0.0",
     [string]$RepoOwner = "MinaH153",
     [string]$RepoName = "SuavoAgent",
     [switch]$LearningMode
