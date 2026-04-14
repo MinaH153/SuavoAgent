@@ -4,7 +4,12 @@ using SuavoAgent.Core.Config;
 
 namespace SuavoAgent.Core.Cloud;
 
-public sealed class SuavoCloudClient : IDisposable
+public interface IPostSigner
+{
+    Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct);
+}
+
+public sealed class SuavoCloudClient : IPostSigner, IDisposable
 {
     private readonly HttpClient _http;
     private readonly HmacSigner _signer;
@@ -41,7 +46,7 @@ public sealed class SuavoCloudClient : IDisposable
         await PostSignedAsync("/api/agent/patient-details", new { rxNumber, details, commandId }, ct);
     }
 
-    private async Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct)
+    public async Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct)
     {
         var body = JsonSerializer.Serialize(payload);
         var timestamp = DateTimeOffset.UtcNow.ToString("o");

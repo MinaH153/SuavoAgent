@@ -5,6 +5,7 @@ using SuavoAgent.Core;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
+using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Workers;
 
@@ -58,12 +59,16 @@ try
     var agentOpts = builder.Configuration.GetSection("Agent").Get<AgentOptions>() ?? new AgentOptions();
     if (!string.IsNullOrWhiteSpace(agentOpts.ApiKey))
     {
-        builder.Services.AddSingleton(new SuavoCloudClient(agentOpts));
+        var cloudClient = new SuavoCloudClient(agentOpts);
+        builder.Services.AddSingleton(cloudClient);
+        builder.Services.AddSingleton<IPostSigner>(cloudClient);
+        builder.Services.AddSingleton<SeedClient>();
     }
     else
     {
         Log.Warning("No ApiKey configured — cloud sync disabled. Set Agent:ApiKey in appsettings.json");
     }
+    builder.Services.AddSingleton(sp => new SeedApplicator(sp.GetRequiredService<AgentStateDb>()));
 
     builder.Services.AddHostedService<HeartbeatWorker>();
 

@@ -1,6 +1,7 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Behavioral;
+using SuavoAgent.Core.Canary;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Learning;
@@ -18,6 +19,8 @@ public sealed class LearningWorker : BackgroundService
     private readonly AgentOptions _options;
     private readonly AgentStateDb _db;
     private readonly IServiceProvider _sp;
+    private readonly SeedClient? _seedClient;
+    private readonly SeedApplicator _applicator;
     private readonly List<ILearningObserver> _observers = new();
     private string? _sessionId;
     private bool _inferenceRan;
@@ -30,6 +33,10 @@ public sealed class LearningWorker : BackgroundService
     private string? _pendingPomDigest;
     private bool _adapterActivated;
     private DateTimeOffset _lastPruneAt = DateTimeOffset.MinValue;
+    private string? _lastSeedDigest;
+    private string? _activeSeedDigest;
+    private DateTimeOffset _phaseStartedAt;
+    private string? _previousPhase;
 
     private static readonly TimeSpan[] UploadBackoff =
     {
@@ -42,12 +49,16 @@ public sealed class LearningWorker : BackgroundService
         ILogger<LearningWorker> logger,
         IOptions<AgentOptions> options,
         AgentStateDb db,
-        IServiceProvider sp)
+        IServiceProvider sp,
+        SeedApplicator applicator,
+        SeedClient? seedClient = null)
     {
         _logger = logger;
         _options = options.Value;
         _db = db;
         _sp = sp;
+        _applicator = applicator;
+        _seedClient = seedClient;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -107,6 +118,8 @@ public sealed class LearningWorker : BackgroundService
         // Start observers for current phase
         var session = _db.GetLearningSession(_sessionId)!.Value;
         var currentPhase = LearningSession.PhaseToObserverPhase(session.Phase);
+        _previousPhase = session.Phase;
+        _phaseStartedAt = _db.GetPhaseChangedAt(_sessionId);
 
         foreach (var obs in _observers)
         {
@@ -123,6 +136,56 @@ public sealed class LearningWorker : BackgroundService
             await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
 
             session = _db.GetLearningSession(_sessionId)!.Value;
+
+            // Detect phase transitions and pull seeds at entry points
+            if (session.Phase != _previousPhase)
+            {
+                _phaseStartedAt = _db.GetPhaseChangedAt(_sessionId);
+                _activeSeedDigest = null; // reset for new phase
+
+                if (session.Phase == "pattern")
+                    await PullSeedsAsync("pattern", stoppingToken);
+                else if (session.Phase == "model")
+                    await PullSeedsAsync("model", stoppingToken);
+
+                _previousPhase = session.Phase;
+            }
+
+            // PhaseGate evaluation — check if seed-accelerated phase can advance
+            if (_activeSeedDigest is not null && session.Phase is "pattern" or "model")
+            {
+                var canaryClean = !IsCanaryInHold();
+                var unseededCount = _db.GetUnseededCorrelationCount(_sessionId);
+                var gate = new PhaseGate(_db, _sessionId, session.Phase, _activeSeedDigest,
+                    _phaseStartedAt, canaryClean, unseededCount);
+                var eval = gate.Evaluate();
+
+                if (eval.AbortAcceleration)
+                {
+                    _logger.LogWarning("Seed acceleration aborted — reverting to time-based phase duration");
+                    _activeSeedDigest = null;
+                }
+                else if (eval.Ready)
+                {
+                    _logger.LogInformation("PhaseGate passed — advancing from {Phase}", session.Phase);
+                    try
+                    {
+                        if (_seedClient is not null)
+                            await _seedClient.ConfirmAsync(new SeedConfirmRequest(
+                                _activeSeedDigest,
+                                DateTimeOffset.UtcNow.ToString("o"),
+                                0, 0), stoppingToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Seed confirm failed");
+                    }
+                    // Phase advance is still operator-triggered via signed command;
+                    // PhaseGate readiness is logged for dashboard visibility
+                    _db.AppendLearningAudit(_sessionId, "seed", "phase_gate_ready",
+                        $"phase:{session.Phase},digest:{_activeSeedDigest[..12]}", phiScrubbed: false);
+                }
+            }
 
             // Check observer health — hard stop if any fails
             foreach (var obs in _observers)
@@ -170,6 +233,20 @@ public sealed class LearningWorker : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Behavioral event prune failed");
+                }
+            }
+
+            // Feedback processing (batch) — decay, operator directives, stale escalation
+            if (session.Phase is "pattern" or "model" or "approved" or "active")
+            {
+                try
+                {
+                    var feedbackProcessor = new FeedbackProcessor(_db, _sessionId);
+                    feedbackProcessor.ProcessPendingFeedback();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "FeedbackProcessor batch tick failed");
                 }
             }
 
@@ -346,6 +423,74 @@ public sealed class LearningWorker : BackgroundService
         }
 
         _logger.LogInformation("LearningWorker stopped");
+    }
+
+    /// <summary>
+    /// Pulls seeds from the cloud at phase entry and applies them locally.
+    /// Falls back gracefully — seed failure never blocks learning.
+    /// </summary>
+    private async Task PullSeedsAsync(string phase, CancellationToken ct)
+    {
+        if (_seedClient is null) return;
+
+        try
+        {
+            var treeHashes = phase == "model"
+                ? _db.GetDistinctTreeHashes(_sessionId!)
+                : (IReadOnlyList<string>)Array.Empty<string>();
+
+            var seedReq = new SeedRequest(
+                "PioneerRx",
+                phase,
+                "", // contract fingerprint — populated by cloud from baseline
+                "", // pms version hash — populated by cloud from heartbeat
+                treeHashes,
+                _lastSeedDigest);
+
+            var seedResp = await _seedClient.PullAsync(seedReq, ct);
+            if (seedResp is null) return;
+
+            if (phase == "pattern")
+            {
+                var result = _applicator.ApplyPatternSeeds(_sessionId!, seedResp);
+                if (!result.AlreadyApplied)
+                {
+                    _activeSeedDigest = seedResp.SeedDigest;
+                    _lastSeedDigest = seedResp.SeedDigest;
+                    _actionCorrelator?.RegisterSeededShapes(
+                        _applicator.GetSeededShapeHashes(seedResp.SeedDigest));
+                    _logger.LogInformation("Applied {Count} pattern seeds from digest {Digest}",
+                        result.ItemsApplied, seedResp.SeedDigest);
+                }
+            }
+            else // model
+            {
+                var result = _applicator.ApplyModelSeeds(_sessionId!, seedResp);
+                if (!result.AlreadyApplied)
+                {
+                    _activeSeedDigest = seedResp.SeedDigest;
+                    _lastSeedDigest = seedResp.SeedDigest;
+                    _logger.LogInformation(
+                        "Applied {Applied} model seeds, skipped {Skipped} from digest {Digest}",
+                        result.CorrelationsApplied, result.CorrelationsSkipped, seedResp.SeedDigest);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Seed pull failed at {Phase} entry — continuing without seeds", phase);
+        }
+    }
+
+    /// <summary>
+    /// Checks whether the schema canary is in hold state for this pharmacy.
+    /// Returns true if hold is active (i.e. canary is NOT clean).
+    /// </summary>
+    private bool IsCanaryInHold()
+    {
+        var pharmacyId = _options.PharmacyId ?? "unknown";
+        var hold = _db.GetCanaryHold(pharmacyId, "PioneerRx");
+        return hold is not null;
     }
 
     /// <summary>
