@@ -451,7 +451,8 @@ public sealed class AgentStateDb : IDisposable
                     confirmed_at TEXT,
                     local_match_count INTEGER NOT NULL DEFAULT 0,
                     rejected_at TEXT,
-                    UNIQUE(seed_digest, item_type, item_key)
+                    UNIQUE(seed_digest, item_type, item_key),
+                    CHECK (confirmed_at IS NULL OR rejected_at IS NULL)
                 )";
             itemCmd.ExecuteNonQuery();
         }
@@ -2390,6 +2391,9 @@ public sealed class AgentStateDb : IDisposable
 
     public void SetCorrelatedActionSource(string sessionId, string correlationKey, string source, string? seedDigest, string? seededAt)
     {
+        if (source == "seed" && seedDigest is null)
+            throw new ArgumentException("seed_digest must not be null when source is 'seed'");
+
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "UPDATE correlated_actions SET source = @src, seed_digest = @dig, seeded_at = @at WHERE session_id = @sid AND correlation_key = @key";
         cmd.Parameters.AddWithValue("@src", source);
@@ -2502,6 +2506,16 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@d", seedDigest);
         var result = cmd.ExecuteScalar();
         return result is double d ? d : 0.0;
+    }
+
+    public IDisposable BeginTransaction()
+    {
+        return _conn.BeginTransaction();
+    }
+
+    public void CommitTransaction(IDisposable txn)
+    {
+        if (txn is SqliteTransaction t) t.Commit();
     }
 
     public void Dispose()
