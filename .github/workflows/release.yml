@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Restore + Build
+        run: dotnet build SuavoAgent.sln -c Release -r win-x64 --no-self-contained
+
+      - name: Test
+        run: dotnet test SuavoAgent.sln -c Release --no-build -v normal
+
+      - name: Publish Core
+        run: dotnet publish src/SuavoAgent.Core -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+
+      - name: Publish Broker
+        run: dotnet publish src/SuavoAgent.Broker -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+
+      - name: Publish Helper
+        run: dotnet publish src/SuavoAgent.Helper -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+
+      - name: Publish Setup
+        run: dotnet publish src/SuavoAgent.Setup -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe > checksums.sha256
+          cat checksums.sha256
+
+      - name: Sign checksums (ECDSA P-256)
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY_PEM }}
+        run: |
+          echo "$SIGNING_KEY" > /tmp/signing-key.pem
+          openssl dgst -sha256 -sign /tmp/signing-key.pem -out release/checksums.sha256.sig release/checksums.sha256
+          rm /tmp/signing-key.pem
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ steps.version.outputs.VERSION }} — Phantom"
+          body: |
+            ## SuavoAgent ${{ steps.version.outputs.VERSION }}
+
+            Automated release from CI/CD pipeline.
+
+            **Tests:** All passing
+            **Checksums:** ECDSA P-256 signed
+
+            ### How to update existing agents
+            Push the update command from the fleet dashboard. Agents auto-update on next heartbeat (30s).
+
+            ### Fresh install
+            ```powershell
+            irm https://raw.githubusercontent.com/MinaH153/SuavoAgent/main/bootstrap.ps1 | iex
+            ```
+          files: |
+            release/SuavoAgent.Core.exe
+            release/SuavoAgent.Broker.exe
+            release/SuavoAgent.Helper.exe
+            release/SuavoSetup.exe
+            release/checksums.sha256
+            release/checksums.sha256.sig
+          draft: false
+          prerelease: false

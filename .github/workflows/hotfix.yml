@@ -1,0 +1,82 @@
+name: Hotfix
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v3.0.1)'
+        required: true
+        type: string
+      description:
+        description: 'What this hotfix fixes'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  hotfix-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Validate version format
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$INPUT_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version format: $INPUT_VERSION"
+            exit 1
+          fi
+
+      - name: Build + Test
+        run: |
+          dotnet build SuavoAgent.sln -c Release -r win-x64 --no-self-contained
+          dotnet test SuavoAgent.sln -c Release --no-build -v normal
+
+      - name: Publish all binaries
+        run: |
+          for proj in Core Broker Helper Setup; do
+            dotnet publish src/SuavoAgent.$proj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+          done
+
+      - name: Generate + sign checksums
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY_PEM }}
+        run: |
+          cd release
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe > checksums.sha256
+          echo "$SIGNING_KEY" > /tmp/key.pem
+          openssl dgst -sha256 -sign /tmp/key.pem -out checksums.sha256.sig checksums.sha256
+          rm /tmp/key.pem
+
+      - name: Create tag
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          git tag "$INPUT_VERSION"
+          git push origin "$INPUT_VERSION"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: "${{ inputs.version }} — Hotfix"
+          body: |
+            ## Hotfix: ${{ inputs.description }}
+
+            Emergency release from hotfix pipeline.
+            **Tests:** All passing before release.
+          files: |
+            release/SuavoAgent.Core.exe
+            release/SuavoAgent.Broker.exe
+            release/SuavoAgent.Helper.exe
+            release/SuavoSetup.exe
+            release/checksums.sha256
+            release/checksums.sha256.sig
