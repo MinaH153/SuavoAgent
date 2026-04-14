@@ -161,6 +161,21 @@ try
 
     Log.Information("System observers started (foreground tracker, station profiler, session observer)");
 
+    // ── App intelligence observers ──
+    var adapterDir = Path.Combine(AppContext.BaseDirectory, "adapters");
+    var industryAdapter = SuavoAgent.Core.Config.IndustryAdapter.LoadForIndustry("pharmacy", adapterDir);
+
+    var browserObserver = new SuavoAgent.Helper.SystemObservers.BrowserDomainObserver(
+        systemBuffer, pharmacySalt, industryAdapter.ClassifyDomain, Log.Logger);
+
+    var printObserver = new SuavoAgent.Helper.SystemObservers.PrintEventObserver(
+        systemBuffer, pharmacySalt, Log.Logger);
+
+    var printObsCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+    _ = Task.Run(() => printObserver.RunAsync(printObsCts.Token), printObsCts.Token);
+
+    Log.Information("App intelligence observers started (browser domains, print events)");
+
     // Retry attachment — PioneerRx may not be running when Helper starts
     while (!cts.Token.IsCancellationRequested && !attached)
     {
@@ -260,6 +275,8 @@ try
     fgTrackerCts?.Cancel();
     foregroundTracker?.Dispose();
     sessionObserver?.Dispose();
+    printObsCts?.Cancel();
+    printObserver?.Dispose();
     systemBuffer?.Dispose();
 
     // Final cleanup

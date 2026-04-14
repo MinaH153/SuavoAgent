@@ -129,6 +129,32 @@ public class AgentStateDbTests : IDisposable
         finally { File.Delete(dbPath); }
     }
 
+    [Fact]
+    public void DocumentProfile_UpsertIncrementsTouchCount()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test-doc-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var db = new AgentStateDb(dbPath);
+            db.UpsertDocumentProfile("s1", "doc-hash-1", "xlsx", "schema-fp", 12, "50-100", "inventory");
+            db.UpsertDocumentProfile("s1", "doc-hash-1", "xlsx", "schema-fp", 12, "50-100", "inventory");
+        }
+        finally { File.Delete(dbPath); }
+    }
+
+    [Fact]
+    public void BusinessMeta_UpsertUpdatesIndustry()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test-biz-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var db = new AgentStateDb(dbPath);
+            db.UpsertBusinessMeta("biz-1", "unknown", null, null, "3.3.0", "discovery");
+            db.UpsertBusinessMeta("biz-1", "pharmacy", "[\"PioneerPharmacy.exe\"]", "dispensing", "3.3.0", "pattern");
+        }
+        finally { File.Delete(dbPath); }
+    }
+
     public void Dispose()
     {
         _db.Dispose();
