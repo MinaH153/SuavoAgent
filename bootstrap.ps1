@@ -21,8 +21,7 @@ param(
     [string]$ReleaseTag = "v3.0.0",
     [string]$RepoOwner = "MinaH153",
     [string]$RepoName = "SuavoAgent",
-    [switch]$LearningMode,
-    [switch]$TestMode
+    [switch]$LearningMode
 )
 
 if ($ReleaseTag -notmatch '^v\d+\.\d+\.\d+') {
@@ -49,10 +48,7 @@ if (-not $isAdmin) {
 }
 
 # ── Learning mode prompt (if not explicitly set via flag) ──
-if ($TestMode) {
-    $LearningMode = [switch]::new($true)
-    Write-Host "  TestMode: Learning mode auto-enabled" -ForegroundColor Gray
-} elseif (-not $PSBoundParameters.ContainsKey('LearningMode')) {
+if (-not $PSBoundParameters.ContainsKey('LearningMode')) {
     $lmResponse = Read-Host "Enable learning mode? (30-day observation before automation) [y/N]"
     if ($lmResponse -eq 'y' -or $lmResponse -eq 'Y') {
         $LearningMode = [switch]::new($true)
@@ -66,18 +62,22 @@ Write-Host "  ╚═════════════════════
 Write-Host ""
 
 # ════════════════════════════════════════════
-# PHASE 1: Find PioneerRx
+# PHASE 1: Detect Pharmacy Management System
 # ════════════════════════════════════════════
-Write-Step "Phase 1: Finding PioneerRx installation"
+Write-Step "Phase 1: Detecting pharmacy management system"
 
+$pmsType = $null
+$pioneerDir = $null
+$pioneerExe = $null
+$pioneerConfig = $null
+
+# --- PioneerRx detection ---
 $pioneerPaths = @(
     "C:\Program Files (x86)\New Tech Computer Systems\PioneerRx",
     "C:\Program Files\New Tech Computer Systems\PioneerRx",
     "D:\Program Files (x86)\New Tech Computer Systems\PioneerRx",
     "D:\Program Files\New Tech Computer Systems\PioneerRx"
 )
-
-# Also check registry for install path
 try {
     $regPaths = @(
         "HKLM:\SOFTWARE\WOW6432Node\New Tech Computer Systems",
@@ -90,60 +90,53 @@ try {
         }
     }
 } catch {}
-
-$pioneerDir = $null
-$pioneerExe = $null
-$pioneerConfig = $null
-
 foreach ($p in $pioneerPaths) {
     $exe = Join-Path $p "PioneerPharmacy.exe"
     $cfg = Join-Path $p "PioneerPharmacy.exe.config"
     if ((Test-Path $exe) -and (Test-Path $cfg)) {
-        $pioneerDir = $p
-        $pioneerExe = $exe
-        $pioneerConfig = $cfg
+        $pioneerDir = $p; $pioneerExe = $exe; $pioneerConfig = $cfg; $pmsType = "PioneerRx"
         break
     }
 }
-
-if (-not $pioneerDir) {
-    # Last resort: find running process
+if (-not $pmsType) {
     $proc = Get-Process -Name "PioneerPharmacy" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($proc) {
-        $pioneerExe = $proc.Path
-        $pioneerDir = Split-Path $pioneerExe -Parent
-        $pioneerConfig = "$pioneerExe.config"
+        $pioneerExe = $proc.Path; $pioneerDir = Split-Path $pioneerExe -Parent
+        $pioneerConfig = "$pioneerExe.config"; $pmsType = "PioneerRx"
     }
 }
 
-if (-not $pioneerDir) {
-    if ($TestMode) {
-        Write-Warn "PioneerRx not found — TestMode: skipping PMS discovery"
-        Write-Warn "Agent will install without SQL connectivity (Core + Broker only)"
-    } else {
-        Write-Fail "PioneerRx not found. Check install path."
-        Write-Fail "For testing without PioneerRx, use: -TestMode"
-        exit 1
-    }
+# --- Future PMS detections go here ---
+# QS/1: Check for "QS1.exe" or registry
+# Liberty: Check for "Liberty.exe" or known paths
+# McKesson: Check for "EnterpriseRx" paths
+# Each sets $pmsType and relevant config vars
+
+# --- Result ---
+if ($pmsType) {
+    Write-Ok "Detected: $pmsType at $pioneerDir"
 } else {
-    Write-Ok "PioneerRx at: $pioneerDir"
+    Write-Warn "No pharmacy management system detected on this machine"
+    Write-Host "  The agent will install and auto-discover the PMS during its learning phase." -ForegroundColor Gray
+    Write-Host "  Supported: PioneerRx (more adapters coming)" -ForegroundColor Gray
+    Write-Host ""
 }
 
 # ════════════════════════════════════════════
 # PHASE 2: Extract SQL credentials
 # ════════════════════════════════════════════
-if ($TestMode -and -not $pioneerDir) {
-    Write-Step "Phase 2: Skipping SQL discovery (TestMode)"
-    $sqlServer = "localhost"
-    $sqlDatabase = "PioneerPharmacySystem"
+if (-not $pmsType) {
+    Write-Step "Phase 2: Skipping SQL discovery (no PMS detected)"
+    $sqlServer = ""
+    $sqlDatabase = ""
     $sqlUser = $null
     $sqlPassword = $null
-    Write-Warn "SQL: localhost (placeholder — no PMS on test machine)"
+    Write-Host "  Agent will discover SQL during learning phase" -ForegroundColor Gray
 } else {
     Write-Step "Phase 2: Discovering SQL Server credentials"
 }
 
-$sqlServer = if ($TestMode -and -not $pioneerDir) { "localhost" } else { $null }
+$sqlServer = if (-not $pmsType) { "" } else { $null }
 $sqlDatabase = "PioneerPharmacySystem"
 $sqlUser = $null
 $sqlPassword = $null
@@ -314,12 +307,12 @@ if (-not $sqlServer) {
     }
 }
 
-# Step 2f: If we still have no credentials, prompt (skip in TestMode)
-if (-not $sqlServer -and -not ($TestMode -and -not $pioneerDir)) {
+# Step 2f: If we still have no credentials, prompt (skip if no PMS)
+if (-not $sqlServer -and $pmsType) {
     Write-Warn "Auto-discovery failed. Manual entry required."
     $sqlServer = Read-Host "  SQL Server (e.g. 192.168.1.78,49202)"
 }
-if (-not $sqlUser -and -not $discoveredConnStr -and -not ($TestMode -and -not $pioneerDir)) {
+if (-not $sqlUser -and -not $discoveredConnStr -and $pmsType) {
     Write-Warn "No SQL credentials discovered."
     $needAuth = Read-Host "  Use SQL Auth? (y/n)"
     if ($needAuth -eq 'y') {
