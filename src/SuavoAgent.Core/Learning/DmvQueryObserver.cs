@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Learning;
@@ -33,6 +34,12 @@ public sealed class DmvQueryObserver : ILearningObserver
     public ObserverPhase ActivePhases => ObserverPhase.Pattern | ObserverPhase.Model;
     public bool HasDmvAccess { get; private set; }
     public int ClockOffsetMs { get; private set; }
+
+    /// <summary>
+    /// Optional correlator for bridging DMV observations to UI↔SQL correlation.
+    /// Set by LearningWorker after construction.
+    /// </summary>
+    public ActionCorrelator? Correlator { get; set; }
 
     /// <summary>
     /// Raised when clock calibration state changes (first successful calibration or after failure recovery).
@@ -143,7 +150,7 @@ public sealed class DmvQueryObserver : ILearningObserver
                 var lastExecTime = reader.GetDateTime(1).ToString("o");
                 var rawSql = reader.IsDBNull(2) ? null : reader.GetString(2);
 
-                ProcessAndStore(_db, sessionId, rawSql, execCount, lastExecTime, ClockOffsetMs);
+                ProcessAndStore(_db, sessionId, rawSql, execCount, lastExecTime, ClockOffsetMs, Correlator);
                 _eventsCollected++;
             }
 
@@ -215,7 +222,8 @@ public sealed class DmvQueryObserver : ILearningObserver
     /// and persists the observation. No SQL Server connection required — fully testable.
     /// </summary>
     public static void ProcessAndStore(AgentStateDb db, string sessionId,
-        string? rawSql, int executionCount, string lastExecutionTime, int clockOffsetMs)
+        string? rawSql, int executionCount, string lastExecutionTime, int clockOffsetMs,
+        ActionCorrelator? correlator = null)
     {
         if (string.IsNullOrWhiteSpace(rawSql)) return;
 
@@ -234,6 +242,17 @@ public sealed class DmvQueryObserver : ILearningObserver
             executionCount:   executionCount,
             lastExecutionTime: lastExecutionTime,
             clockOffsetMs:    clockOffsetMs);
+
+        if (correlator is not null)
+        {
+            correlator.TryCorrelateWithSql(
+                shapeHash,
+                lastExecutionTime,
+                normalized.IsWrite,
+                normalized.TablesReferenced.Count > 0
+                    ? string.Join(",", normalized.TablesReferenced)
+                    : null);
+        }
     }
 
     // ── Helpers ──

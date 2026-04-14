@@ -109,6 +109,9 @@ public sealed class LearningWorker : BackgroundService
             onInteraction: (treeHash, elementId, controlType, timestamp) =>
                 _actionCorrelator.RecordUiEvent(treeHash, elementId, controlType, timestamp));
 
+        // Bridge DMV observations → ActionCorrelator for UI↔SQL correlation
+        dmvObs.Correlator = _actionCorrelator;
+
         // Wire DMV clock calibration state to correlator
         dmvObs.ClockCalibratedChanged += calibrated => _actionCorrelator.SetClockCalibrated(calibrated);
 
