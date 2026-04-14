@@ -15,7 +15,7 @@ internal static class BinaryDownloader
     // ECDSA P-256 public key for checksum signature verification (DER/SubjectPublicKeyInfo, Base64)
     // Matches the private key at ~/.suavo/update-signing-p256.pem
     private const string PublicKeyBase64 =
-        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJJO30pUIre7wuMN5I1FQmlEDpTIM0dmhPjaGtlG7gm+47G7lKHuJV4lQ3eWhZNqe1eviOZkt+9VnWnQUSJGvsg==";
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA==";
 
     private static readonly string[] Binaries =
     [

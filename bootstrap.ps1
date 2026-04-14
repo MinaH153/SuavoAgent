@@ -353,7 +353,7 @@ Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath -UseBasicParsing
 Invoke-WebRequest -Uri $checksumSigUrl -OutFile $checksumSigPath -UseBasicParsing
 
 # Verify ECDSA signature of checksums
-$publicKeyDer = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJJO30pUIre7wuMN5I1FQmlEDpTIM0dmhPjaGtlG7gm+47G7lKHuJV4lQ3eWhZNqe1eviOZkt+9VnWnQUSJGvsg=="
+$publicKeyDer = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA=="
 $ecdsa = [System.Security.Cryptography.ECDsa]::Create()
 $ecdsa.ImportSubjectPublicKeyInfo([System.Convert]::FromBase64String($publicKeyDer), [ref]$null)
 $checksumBytes = [System.IO.File]::ReadAllBytes($checksumPath)

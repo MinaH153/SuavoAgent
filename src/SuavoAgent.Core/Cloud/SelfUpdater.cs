@@ -19,7 +19,7 @@ public static class SelfUpdater
     // ECDSA P-256 public key for update manifest verification.
     // Private key: ~/.suavo/signing-key.pem (Joshua's Mac).
     internal const string UpdatePublicKeyDer =
-        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJJO30pUIre7wuMN5I1FQmlEDpTIM0dmhPjaGtlG7gm+47G7lKHuJV4lQ3eWhZNqe1eviOZkt+9VnWnQUSJGvsg==";
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA==";
 
     // ECDSA P-256 public key for signed control-plane commands (fetch_patient, decommission, update).
     // Separate from update key — compromise of one doesn't grant the other.
