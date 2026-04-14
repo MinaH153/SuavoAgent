@@ -4,11 +4,61 @@ param(
     [string]$Runtime = "win-x64",
     [string]$OutputDir = ".\publish",
     [string]$CertThumbprint = "",
-    [string]$TimestampServer = "http://timestamp.digicert.com"
+    [string]$TimestampServer = "http://timestamp.digicert.com",
+    [switch]$GenerateKeys
 )
 
 $ErrorActionPreference = "Stop"
 $env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
+
+# ── Auto-generate ECDSA signing keys if missing ──
+$suavoKeyDir = Join-Path $env:HOME ".suavo"
+$signingKey = Join-Path $suavoKeyDir "signing-key.pem"
+$signingPub = Join-Path $suavoKeyDir "signing-key.pub.pem"
+$cmdKey = Join-Path $suavoKeyDir "cmd-signing-key.pem"
+$cmdPub = Join-Path $suavoKeyDir "cmd-signing-key.pub.pem"
+
+$needKeys = $GenerateKeys -or (-not (Test-Path $signingKey)) -or (-not (Test-Path $cmdKey))
+if ($needKeys) {
+    Write-Host "=== Generating ECDSA P-256 signing keys ===" -ForegroundColor Yellow
+    New-Item -Path $suavoKeyDir -ItemType Directory -Force | Out-Null
+
+    if (Get-Command openssl -ErrorAction SilentlyContinue) {
+        # Primary path: openssl
+        if ($GenerateKeys -or (-not (Test-Path $signingKey))) {
+            openssl ecparam -name prime256v1 -genkey -noout -out $signingKey
+            openssl ec -in $signingKey -pubout -out $signingPub 2>$null
+            Write-Host "  signing-key.pem + .pub.pem generated (openssl)" -ForegroundColor Green
+        }
+        if ($GenerateKeys -or (-not (Test-Path $cmdKey))) {
+            openssl ecparam -name prime256v1 -genkey -noout -out $cmdKey
+            openssl ec -in $cmdKey -pubout -out $cmdPub 2>$null
+            Write-Host "  cmd-signing-key.pem + .pub.pem generated (openssl)" -ForegroundColor Green
+        }
+    } else {
+        # Fallback: .NET ECDsa (works on any machine with .NET runtime)
+        Write-Host "  openssl not found — using .NET ECDsa key generation" -ForegroundColor Yellow
+        function Export-ECDsaKeyPair([string]$privPath, [string]$pubPath) {
+            $ecdsa = [System.Security.Cryptography.ECDsa]::Create(
+                [System.Security.Cryptography.ECCurve]::NamedCurves.nistP256)
+            $privPem = $ecdsa.ExportECPrivateKeyPem()
+            $pubPem = $ecdsa.ExportSubjectPublicKeyInfoPem()
+            Set-Content -Path $privPath -Value $privPem -Encoding UTF8 -NoNewline
+            Set-Content -Path $pubPath -Value $pubPem -Encoding UTF8 -NoNewline
+            $ecdsa.Dispose()
+        }
+        if ($GenerateKeys -or (-not (Test-Path $signingKey))) {
+            Export-ECDsaKeyPair $signingKey $signingPub
+            Write-Host "  signing-key.pem + .pub.pem generated (.NET)" -ForegroundColor Green
+        }
+        if ($GenerateKeys -or (-not (Test-Path $cmdKey))) {
+            Export-ECDsaKeyPair $cmdKey $cmdPub
+            Write-Host "  cmd-signing-key.pem + .pub.pem generated (.NET)" -ForegroundColor Green
+        }
+    }
+    Write-Host "  Keys at: $suavoKeyDir" -ForegroundColor Cyan
+    Write-Host ""
+}
 
 Write-Host "=== Publishing SuavoAgent v2 ===" -ForegroundColor Cyan
 Write-Host "Config: $Configuration | Runtime: $Runtime" -ForegroundColor Gray
