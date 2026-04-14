@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
@@ -119,6 +120,28 @@ public sealed class HealthSnapshot
                     clockOffsetMs = 0,
                     clockCalibrated = false,
                     hasDmvAccess = false,
+                },
+            feedback = learningSessionId is not null
+                ? (object)new
+                {
+                    totalEvents = _stateDb.GetFeedbackEventCount(learningSessionId),
+                    pendingDirectives = _stateDb.GetPendingFeedbackEvents(learningSessionId).Count,
+                    appliedInline = _stateDb.GetFeedbackEventCountByApplier(learningSessionId, "inline"),
+                    appliedBatch = _stateDb.GetFeedbackEventCountByApplier(learningSessionId, "batch"),
+                    suspendedPromotions = _stateDb.GetSuspendedPromotions(learningSessionId),
+                    staleEscalations = _stateDb.GetExpiredStaleCorrelations(learningSessionId, FeedbackEvent.StaleTtlDays)
+                        .Select(s => s.CorrelationKey).ToArray(),
+                    activeOverrides = _stateDb.GetWindowOverrideCount(learningSessionId),
+                }
+                : (object)new
+                {
+                    totalEvents = 0,
+                    pendingDirectives = 0,
+                    appliedInline = 0,
+                    appliedBatch = 0,
+                    suspendedPromotions = Array.Empty<string>(),
+                    staleEscalations = Array.Empty<string>(),
+                    activeOverrides = 0,
                 },
             timestamp = DateTimeOffset.UtcNow.ToString("o")
         };
