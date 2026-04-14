@@ -3,7 +3,7 @@
 
 $dir = "C:\Program Files\Suavo\Agent"
 $data = "$env:ProgramData\SuavoAgent"
-$tag = "v3.0.1"
+$tag = "v3.0.2"
 $base = "https://github.com/MinaH153/SuavoAgent/releases/download/$tag"
 
 # --- Phase 0: Kill everything from previous installs ---
@@ -62,6 +62,10 @@ $cfg = @{
 } | ConvertTo-Json -Depth 5
 Set-Content "$dir\appsettings.json" $cfg -Encoding ASCII
 Write-Host "  Config written (Agent: $id, Pharmacy: $pharmacyId)" -ForegroundColor Gray
+
+# Clean stale state from previous installs (DPAPI keys are account-bound)
+Remove-Item "$data\state.key" -Force -ErrorAction SilentlyContinue
+Remove-Item "$data\state.db" -Force -ErrorAction SilentlyContinue
 
 # --- Phase 4: Set permissions (CRITICAL -- LocalService needs access) ---
 Write-Host "Setting permissions..." -ForegroundColor Yellow

@@ -143,14 +143,14 @@ try
                 {
                     var enc = File.ReadAllBytes(keyPath);
                     var dec = System.Security.Cryptography.ProtectedData.Unprotect(
-                        enc, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                        enc, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
                     dbPassword = Convert.ToBase64String(dec);
                 }
                 else
                 {
                     var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
                     var enc = System.Security.Cryptography.ProtectedData.Protect(
-                        key, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                        key, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
                     File.WriteAllBytes(keyPath, enc);
                     dbPassword = Convert.ToBase64String(key);
                     Log.Information("Generated DPAPI-protected database key");
