@@ -1,4 +1,4 @@
-
+﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
@@ -18,6 +18,10 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SuavoAgent.Broker", "src\SuavoAgent.Broker\SuavoAgent.Broker.csproj", "{A1B2C3D4-7777-7777-7777-000000000007}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SuavoAgent.Helper", "src\SuavoAgent.Helper\SuavoAgent.Helper.csproj", "{A1B2C3D4-8888-8888-8888-000000000008}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{6DAB3597-E396-48AA-865A-6F01D958D91B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SuavoAgent.Setup", "src\SuavoAgent.Setup\SuavoAgent.Setup.csproj", "{3F4F7656-F20E-4E50-BDE4-1C3EE8AB5A18}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -57,5 +61,12 @@ Global
 		{A1B2C3D4-8888-8888-8888-000000000008}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A1B2C3D4-8888-8888-8888-000000000008}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A1B2C3D4-8888-8888-8888-000000000008}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3F4F7656-F20E-4E50-BDE4-1C3EE8AB5A18}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3F4F7656-F20E-4E50-BDE4-1C3EE8AB5A18}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3F4F7656-F20E-4E50-BDE4-1C3EE8AB5A18}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3F4F7656-F20E-4E50-BDE4-1C3EE8AB5A18}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{3F4F7656-F20E-4E50-BDE4-1C3EE8AB5A18} = {6DAB3597-E396-48AA-865A-6F01D958D91B}
 	EndGlobalSection
 EndGlobal
