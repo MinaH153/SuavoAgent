@@ -32,6 +32,23 @@ public sealed class AgentStateDb : IDisposable
 
     private void InitSchema()
     {
+        // SQLite hardening PRAGMAs (journal_mode returns a result row, so use ExecuteScalar)
+        using (var walCmd = _conn.CreateCommand())
+        {
+            walCmd.CommandText = "PRAGMA journal_mode=WAL";
+            walCmd.ExecuteScalar();
+        }
+        using (var fkCmd = _conn.CreateCommand())
+        {
+            fkCmd.CommandText = "PRAGMA foreign_keys=ON";
+            fkCmd.ExecuteNonQuery();
+        }
+        using (var syncCmd = _conn.CreateCommand())
+        {
+            syncCmd.CommandText = "PRAGMA synchronous=NORMAL";
+            syncCmd.ExecuteNonQuery();
+        }
+
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS writeback_states (
@@ -76,12 +93,6 @@ public sealed class AgentStateDb : IDisposable
         // Migrate: add next_retry_at for exponential backoff
         TryAlter("ALTER TABLE writeback_states ADD COLUMN next_retry_at TEXT");
 
-        // Migrate: add pom_snapshot for frozen POM review (CRITICAL-6)
-        TryAlter("ALTER TABLE learning_session ADD COLUMN pom_snapshot TEXT");
-
-        // Migrate: add hmac_salt — secret per-session salt for PHI hashing (replaces non-secret AgentId)
-        TryAlter("ALTER TABLE learning_session ADD COLUMN hmac_salt TEXT");
-
         // POM tables for Learning Agent
         using var pomCmd = _conn.CreateCommand();
         pomCmd.CommandText = """
@@ -96,6 +107,7 @@ public sealed class AgentStateDb : IDisposable
                 approved_by TEXT,
                 approved_model_digest TEXT,
                 pom_snapshot TEXT,
+                hmac_salt TEXT,
                 schema_fingerprint TEXT,
                 schema_epoch INTEGER DEFAULT 1,
                 promoted_to_supervised_at TEXT,
@@ -209,6 +221,12 @@ public sealed class AgentStateDb : IDisposable
             );
             """;
         pomCmd.ExecuteNonQuery();
+
+        // Migrate: add pom_snapshot for frozen POM review (CRITICAL-6) — now in CREATE TABLE but needed for existing DBs
+        TryAlter("ALTER TABLE learning_session ADD COLUMN pom_snapshot TEXT");
+
+        // Migrate: add hmac_salt — secret per-session salt for PHI hashing (replaces non-secret AgentId)
+        TryAlter("ALTER TABLE learning_session ADD COLUMN hmac_salt TEXT");
 
         // Canary tables
         using var canaryCmd = _conn.CreateCommand();
@@ -447,7 +465,10 @@ public sealed class AgentStateDb : IDisposable
             cmd.CommandText = sql;
             cmd.ExecuteNonQuery();
         }
-        catch { /* Column already exists */ }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // SQLITE_ERROR (1) includes "duplicate column name" — expected during migration
+        }
     }
 
     public void UpsertWritebackState(string taskId, string rxNumber, WritebackState state, int retryCount, string? error)
@@ -1254,20 +1275,20 @@ public sealed class AgentStateDb : IDisposable
     /// </summary>
     public string GetOrCreateHmacSalt(string sessionId)
     {
-        using var readCmd = _conn.CreateCommand();
-        readCmd.CommandText = "SELECT hmac_salt FROM learning_session WHERE id = @id";
-        readCmd.Parameters.AddWithValue("@id", sessionId);
-        var existing = readCmd.ExecuteScalar();
-        if (existing is not null and not DBNull)
-            return (string)existing;
-
         var salt = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+
+        // Atomic: only sets salt if currently NULL
         using var writeCmd = _conn.CreateCommand();
-        writeCmd.CommandText = "UPDATE learning_session SET hmac_salt = @salt WHERE id = @id";
+        writeCmd.CommandText = "UPDATE learning_session SET hmac_salt = COALESCE(hmac_salt, @salt) WHERE id = @id";
         writeCmd.Parameters.AddWithValue("@salt", salt);
         writeCmd.Parameters.AddWithValue("@id", sessionId);
         writeCmd.ExecuteNonQuery();
-        return salt;
+
+        // Read back the winner
+        using var readCmd = _conn.CreateCommand();
+        readCmd.CommandText = "SELECT hmac_salt FROM learning_session WHERE id = @id";
+        readCmd.Parameters.AddWithValue("@id", sessionId);
+        return (string)readCmd.ExecuteScalar()!;
     }
 
     // ── Active Session Lookup (CRITICAL-7) ──
@@ -1277,7 +1298,7 @@ public sealed class AgentStateDb : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             SELECT id FROM learning_session
-            WHERE pharmacy_id = @pid AND phase NOT IN ('active')
+            WHERE pharmacy_id = @pid AND phase NOT IN ('decommissioned', 'terminated', 'failed')
             ORDER BY started_at DESC LIMIT 1
             """;
         cmd.Parameters.AddWithValue("@pid", pharmacyId);
