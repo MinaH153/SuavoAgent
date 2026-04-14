@@ -129,4 +129,71 @@ public class RoutineDetectorTests : IDisposable
             Assert.DoesNotContain("elemC", r.PathJson);
         }
     }
+
+    [Fact]
+    public void DetectAndPersist_CyclicSequence_DoesNotInfiniteLoop()
+    {
+        // Cycle: A→B→C→A repeated 8 times (edges A→B, B→C, C→A each appear 8 times, exceeding MinFrequency=5)
+        // RoutineDetector should complete without infinite looping and produce a bounded routine.
+        var baseTime = DateTimeOffset.UtcNow;
+        int seq = 1;
+
+        for (int rep = 0; rep < 8; rep++)
+        {
+            var t0 = baseTime.AddMinutes(rep * 2);
+            InsertInteraction(seq++, "treeA", "elemA", "Button", t0);
+            InsertInteraction(seq++, "treeB", "elemB", "Edit", t0.AddSeconds(5));
+            InsertInteraction(seq++, "treeC", "elemC", "Button", t0.AddSeconds(10));
+        }
+
+        var detector = new RoutineDetector(_db, _sessionId);
+
+        // Must complete within 5 seconds — infinite loop would hang
+        var task = Task.Run(() => detector.DetectAndPersist());
+        bool completed = task.Wait(TimeSpan.FromSeconds(5));
+
+        Assert.True(completed, "DetectAndPersist did not complete within timeout — possible infinite loop on cyclic DFG");
+
+        var routines = _db.GetLearnedRoutines(_sessionId);
+        Assert.NotEmpty(routines);
+
+        // Path length must be bounded — cycle should be truncated, not unrolled
+        foreach (var r in routines)
+        {
+            Assert.True(r.PathLength <= 3,
+                $"Cyclic routine path_length={r.PathLength} exceeded expected bound of 3 for A→B→C cycle");
+        }
+    }
+
+    [Fact]
+    public void DetectAndPersist_LongSequence_CappedAtMaxPathLength()
+    {
+        // 25 unique nodes forming a linear chain: N0→N1→N2→...→N24
+        // Each edge repeated 6 times (exceeds MinFrequency=5)
+        // Resulting routine must be capped at MaxPathLength=20
+        var baseTime = DateTimeOffset.UtcNow;
+        int seq = 1;
+
+        for (int rep = 0; rep < 6; rep++)
+        {
+            var t0 = baseTime.AddMinutes(rep * 10);
+            for (int step = 0; step < 25; step++)
+            {
+                InsertInteraction(seq++, $"tree{step}", $"elem{step}", "Button",
+                    t0.AddSeconds(step * 5));
+            }
+        }
+
+        var detector = new RoutineDetector(_db, _sessionId);
+        detector.DetectAndPersist();
+
+        var routines = _db.GetLearnedRoutines(_sessionId);
+        Assert.NotEmpty(routines);
+
+        foreach (var r in routines)
+        {
+            Assert.True(r.PathLength <= 20,
+                $"Routine path_length={r.PathLength} exceeded MaxPathLength=20");
+        }
+    }
 }

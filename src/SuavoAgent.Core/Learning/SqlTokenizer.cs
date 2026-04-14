@@ -59,8 +59,8 @@ public static partial class SqlTokenizer
     [GeneratedRegex(@"\b0x[0-9a-fA-F]+\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
     private static partial Regex HexLiteralPattern();
 
-    // Numeric literal not preceded by @: bare numbers that could be MRNs/Rx numbers
-    [GeneratedRegex(@"(?<!@)\b(\d{3,})\b", RegexOptions.Compiled)]
+    // Numeric literal not preceded by @: bare numbers that could be MRNs/Rx numbers (5+ digits)
+    [GeneratedRegex(@"(?<!@)\b(\d{5,})\b", RegexOptions.Compiled)]
     private static partial Regex NumericLiteralPattern();
 
     // Remote function check — anywhere in text

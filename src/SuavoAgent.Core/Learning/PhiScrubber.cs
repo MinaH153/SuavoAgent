@@ -37,6 +37,11 @@ public static partial class PhiScrubber
     [GeneratedRegex(@"^[A-Z][a-z]+\s+[A-Z][a-z]+(?=\s+-)", RegexOptions.Compiled)]
     private static partial Regex LeadingNamePattern();
 
+    // Contextual name: 2-word capitalized name near a PHI keyword (Patient, Name, Rx, DOB, SSN, Phone, Address)
+    // Word boundary prevents matching inside compound words like "PioneerRx"
+    [GeneratedRegex(@"\b(?:Patient|Name|Rx|DOB|SSN|Phone|Address)\s*[:=\-|]\s*([A-Z][a-z]+\s+[A-Z][a-z]+)", RegexOptions.Compiled)]
+    private static partial Regex ContextualNamePattern();
+
     private static readonly Regex[] PhiPatterns = new[]
     {
         SsnPattern(), PhonePattern(), DatePattern(), MrnPattern(),
@@ -50,6 +55,10 @@ public static partial class PhiScrubber
         var result = text;
         foreach (var pattern in PhiPatterns)
             result = pattern.Replace(result, Redacted);
+
+        // Apply contextual name pattern last — replaces capture group 1 (the name) with [NAME]
+        result = ContextualNamePattern().Replace(result, m =>
+            m.Value.Replace(m.Groups[1].Value, "[NAME]"));
         return result;
     }
 

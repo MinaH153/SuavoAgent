@@ -272,4 +272,18 @@ public class ActionCorrelatorTests : IDisposable
         Assert.Equal(2, match.OccurrenceCount);
         Assert.True(match.Confidence < 0.6);
     }
+
+    [Fact]
+    public void TryCorrelateWithSql_InvalidTimestamp_NoCorrelation_NoCrash()
+    {
+        var correlator = MakeCorrelator();
+        var uiTime = DateTimeOffset.UtcNow;
+        correlator.RecordUiEvent("tree1", "btn1", "Button", uiTime);
+
+        // Pass unparseable timestamp — should not crash, should not create correlation
+        correlator.TryCorrelateWithSql("shape-1", "not-a-timestamp", isWrite: true, tablesReferenced: "Tbl");
+
+        var actions = _db.GetCorrelatedActions(_sessionId);
+        Assert.Empty(actions);
+    }
 }
