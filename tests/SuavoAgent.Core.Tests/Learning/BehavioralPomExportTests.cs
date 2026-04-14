@@ -1,4 +1,5 @@
 using System.Text.Json;
+using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 using Xunit;
@@ -67,6 +68,38 @@ public class BehavioralPomExportTests : IDisposable
         Assert.Equal(0, behavioral.GetProperty("writebackCandidates").GetArrayLength());
         Assert.Equal(0, behavioral.GetProperty("uniqueScreens").GetInt32());
         Assert.Equal(0, behavioral.GetProperty("totalInteractions").GetInt32());
+    }
+
+    [Fact]
+    public void Export_IncludesFeedbackSection()
+    {
+        var db = new AgentStateDb(":memory:");
+        db.CreateLearningSession("sess-pom-fb", "pharm-test");
+
+        // Seed a write correlation
+        db.UpsertCorrelatedAction("sess-pom-fb", "tree:elem:qshape", "tree", "elem",
+            "Button", "qshape", true, "Prescription");
+
+        // Seed a feedback event
+        var evt = new FeedbackEvent("sess-pom-fb", "writeback_outcome", "writeback", "wb-001",
+            "correlation_key", "tree:elem:qshape", null,
+            DirectiveType.ConfidenceAdjust, """{"newConfidence":0.87}""", null)
+        { AppliedAt = DateTimeOffset.UtcNow.ToString("o"), AppliedBy = "inline" };
+        db.InsertFeedbackEvent(evt);
+
+        var json = PomExporter.Export(db, "sess-pom-fb");
+        var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.True(root.TryGetProperty("feedback", out var fb));
+        Assert.True(fb.TryGetProperty("totalFeedbackEvents", out var total));
+        Assert.Equal(1, total.GetInt32());
+        Assert.True(fb.TryGetProperty("confidenceTrajectory", out var ct));
+        Assert.Equal(1, ct.GetArrayLength());
+        Assert.True(fb.TryGetProperty("windowOverrides", out _));
+        Assert.True(fb.TryGetProperty("staleCorrelations", out _));
+
+        db.Dispose();
     }
 
     public void Dispose()
