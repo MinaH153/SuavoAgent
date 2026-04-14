@@ -556,9 +556,20 @@ public sealed class AgentStateDb : IDisposable
     public string? GetLastAuditHash()
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT prev_hash FROM audit_entries ORDER BY id DESC LIMIT 1";
-        var result = cmd.ExecuteScalar();
-        return result is DBNull or null ? null : (string)result;
+        cmd.CommandText = """
+            SELECT prev_hash, task_id, event_type, from_state, to_state, trigger, timestamp
+            FROM audit_entries ORDER BY id DESC LIMIT 1
+            """;
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        var prevHash = reader.IsDBNull(0) ? AuditChainSeed : reader.GetString(0);
+        var taskId = reader.GetString(1);
+        var eventType = reader.IsDBNull(2) ? "writeback_transition" : reader.GetString(2);
+        var from = reader.GetString(3);
+        var to = reader.GetString(4);
+        var trigger = reader.GetString(5);
+        var timestamp = reader.GetString(6);
+        return ComputeAuditHash(prevHash, taskId, eventType, from, to, trigger, timestamp);
     }
 
     public static string ComputeAuditHash(string prevHash, string taskId, string eventType,
@@ -590,7 +601,7 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@to", entry.ToState);
         cmd.Parameters.AddWithValue("@trigger", entry.Trigger);
         cmd.Parameters.AddWithValue("@timestamp", timestamp);
-        cmd.Parameters.AddWithValue("@prevHash", newHash);
+        cmd.Parameters.AddWithValue("@prevHash", prevHash);
         cmd.Parameters.AddWithValue("@eventType", entry.EventType);
         cmd.Parameters.AddWithValue("@commandId", (object?)entry.CommandId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@requesterId", (object?)entry.RequesterId ?? DBNull.Value);
@@ -618,9 +629,8 @@ public sealed class AgentStateDb : IDisposable
             var timestamp = reader.GetString(5);
             var storedHash = reader.IsDBNull(6) ? null : reader.GetString(6);
 
-            var computed = ComputeAuditHash(expectedPrev, taskId, eventType, from, to, trigger, timestamp);
-            if (storedHash != computed) return false;
-            expectedPrev = computed;
+            if (storedHash != expectedPrev) return false;
+            expectedPrev = ComputeAuditHash(expectedPrev, taskId, eventType, from, to, trigger, timestamp);
         }
         return true;
     }
