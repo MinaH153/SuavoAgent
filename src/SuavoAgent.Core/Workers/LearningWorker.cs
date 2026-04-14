@@ -86,6 +86,10 @@ public sealed class LearningWorker : BackgroundService
                 _sessionId, pharmacyId);
         }
 
+        // W6: Wire session ID to WritebackProcessor so inline feedback records writeback outcomes
+        var writebackProcessor = _sp.GetService<WritebackProcessor>();
+        writebackProcessor?.SetSessionId(_sessionId);
+
         // Use secret per-session salt for PHI hashing (not AgentId, which is sent in heartbeats)
         var pharmacySalt = _db.GetOrCreateHmacSalt(_sessionId);
 
@@ -246,6 +250,12 @@ public sealed class LearningWorker : BackgroundService
                 {
                     var feedbackProcessor = new FeedbackProcessor(_db, _sessionId);
                     feedbackProcessor.ProcessPendingFeedback();
+
+                    // W7: Run correlation window recalibration during active phase
+                    if (session.Phase == "active")
+                    {
+                        feedbackProcessor.ProcessRecalibration();
+                    }
                 }
                 catch (Exception ex)
                 {
