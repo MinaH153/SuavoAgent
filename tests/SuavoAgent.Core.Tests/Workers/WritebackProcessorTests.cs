@@ -1,4 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Workers;
@@ -22,7 +24,8 @@ public class WritebackProcessorTests : IDisposable
             Task.FromResult(new IpcResponse(msg.Id, IpcStatus.Ok, msg.Command, null, null)),
             NullLogger<IpcPipeServer>.Instance);
         _processor = new WritebackProcessor(
-            NullLogger<WritebackProcessor>.Instance, _db, _pipe);
+            NullLogger<WritebackProcessor>.Instance, _db, _pipe,
+            Options.Create(new AgentOptions { AgentId = "test-agent" }));
     }
 
     [Fact]

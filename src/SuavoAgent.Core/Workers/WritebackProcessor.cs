@@ -1,7 +1,10 @@
+using Microsoft.Extensions.Options;
 using SuavoAgent.Adapters.PioneerRx.Sql;
 using SuavoAgent.Contracts.Writeback;
 using SuavoAgent.Core.Behavioral;
+using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
+using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
@@ -11,6 +14,7 @@ public sealed class WritebackProcessor : BackgroundService
     private readonly ILogger<WritebackProcessor> _logger;
     private readonly AgentStateDb _stateDb;
     private readonly IpcPipeServer _pipeServer;
+    private readonly AgentOptions _options;
     private readonly Dictionary<string, WritebackStateMachine> _machines = new();
 
     private PioneerRxWritebackEngine? _writebackEngine;
@@ -22,11 +26,13 @@ public sealed class WritebackProcessor : BackgroundService
     public WritebackProcessor(
         ILogger<WritebackProcessor> logger,
         AgentStateDb stateDb,
-        IpcPipeServer pipeServer)
+        IpcPipeServer pipeServer,
+        IOptions<AgentOptions> options)
     {
         _logger = logger;
         _stateDb = stateDb;
         _pipeServer = pipeServer;
+        _options = options.Value;
     }
 
     public void SetWritebackEngine(PioneerRxWritebackEngine engine)
@@ -94,7 +100,7 @@ public sealed class WritebackProcessor : BackgroundService
         var machine = new WritebackStateMachine(taskId, WritebackState.Queued, OnStateChanged);
         _machines[taskId] = machine;
         _stateDb.UpsertWritebackState(taskId, rxNumber, WritebackState.Queued, 0, null);
-        _logger.LogInformation("Enqueued writeback {TaskId} for Rx {RxNumber}", taskId, rxNumber);
+        _logger.LogInformation("Enqueued writeback {TaskId} for Rx {RxHash}", taskId, PhiScrubber.HmacHash(rxNumber, _options.AgentId ?? ""));
     }
 
     private async Task ProcessPendingWritebacksAsync(CancellationToken ct)
@@ -136,7 +142,7 @@ public sealed class WritebackProcessor : BackgroundService
 
             if (!int.TryParse(state.RxNumber, out var rxNumber))
             {
-                _logger.LogWarning("Writeback {TaskId} — invalid RxNumber '{Rx}'", taskId, state.RxNumber);
+                _logger.LogWarning("Writeback {TaskId} — invalid RxNumber '{RxHash}'", taskId, PhiScrubber.HmacHash(state.RxNumber, _options.AgentId ?? ""));
                 if (machine.CanFire(WritebackTrigger.BusinessError))
                     machine.Fire(WritebackTrigger.BusinessError);
                 continue;
