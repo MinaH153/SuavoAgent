@@ -14,6 +14,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <SupportedOSPlatformVersion>10.0</SupportedOSPlatformVersion>
     <NoWarn>CA1416</NoWarn>
+      <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
 </Project>
