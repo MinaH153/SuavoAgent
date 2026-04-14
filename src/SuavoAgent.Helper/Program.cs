@@ -38,6 +38,8 @@ try
     UiaInteractionObserver? interactionObserver = null;
     KeyboardCategoryHook? keyboardHook = null;
     CancellationTokenSource? treeObserverCts = null;
+    CancellationTokenSource? keyboardPumpCts = null;
+    Thread? keyboardPumpThread = null;
     string pharmacySalt = ""; // fetched from Core via IPC handshake
 
     async Task<string> FetchPharmacySaltAsync()
@@ -96,13 +98,28 @@ try
         if (pioneer.MainWindow is { } window)
             interactionObserver.Subscribe(window);
 
-        keyboardHook.Install();
+        // WH_KEYBOARD_LL requires a message pump on the installing thread.
+        // Install hook + pump on a dedicated STA thread so callbacks actually fire.
+        keyboardPumpCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+        var pumpCt = keyboardPumpCts.Token;
+        var hook = keyboardHook; // capture for thread closure
+        keyboardPumpThread = new Thread(() => NativeMessagePump.RunHookPump(hook, pumpCt));
+        keyboardPumpThread.IsBackground = true;
+        keyboardPumpThread.SetApartmentState(ApartmentState.STA);
+        keyboardPumpThread.Start();
 
         Log.Information("Behavioral observers started (PID {Pid})", pioneer.ProcessId);
     }
 
     void StopBehavioralObservers()
     {
+        // Stop message pump thread first — this calls Uninstall() in its finally block
+        keyboardPumpCts?.Cancel();
+        keyboardPumpThread?.Join(TimeSpan.FromSeconds(2));
+        keyboardPumpCts?.Dispose();
+        keyboardPumpCts = null;
+        keyboardPumpThread = null;
+
         keyboardHook?.Dispose();
         keyboardHook = null;
 

@@ -456,10 +456,9 @@ sc.exe failure SuavoAgent.Core reset= 3600 actions= restart/5000/restart/30000/r
 sc.exe failureflag SuavoAgent.Core 1 | Out-Null
 Write-Ok "SuavoAgent.Core service registered"
 
-# Install Broker (runs as NetworkService — sufficient for WTSGetActiveConsoleSessionId + Process.Start)
-# NOTE: If CreateProcessAsUser is added later, upgrade to a dedicated account with SeAssignPrimaryTokenPrivilege
+# Install Broker (runs as LocalSystem — needs SeTcbPrivilege for WTSQueryUserToken + CreateProcessAsUser)
 $brokerPath = Join-Path $installDir "SuavoAgent.Broker.exe"
-sc.exe create SuavoAgent.Broker binPath= "`"$brokerPath`"" start= delayed-auto obj= "NT AUTHORITY\NetworkService" | Out-Null
+sc.exe create SuavoAgent.Broker binPath= "`"$brokerPath`"" start= delayed-auto obj= "LocalSystem" | Out-Null
 sc.exe description SuavoAgent.Broker "Suavo pharmacy agent - session broker" | Out-Null
 sc.exe failure SuavoAgent.Broker reset= 3600 actions= restart/5000/restart/30000/restart/60000 | Out-Null
 sc.exe failureflag SuavoAgent.Broker 1 | Out-Null

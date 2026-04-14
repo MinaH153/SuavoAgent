@@ -51,7 +51,7 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    Log.Information("SuavoAgent.Core starting v2.0.0");
+    Log.Information("SuavoAgent.Core starting v3.0.0");
 
     var builder = Host.CreateApplicationBuilder(args);
     builder.Services.AddWindowsService(options => options.ServiceName = "SuavoAgent.Core");

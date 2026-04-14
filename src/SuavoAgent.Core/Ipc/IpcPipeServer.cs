@@ -133,6 +133,13 @@ public sealed class IpcPipeServer : IDisposable
                     System.Security.Principal.WellKnownSidType.LocalServiceSid, null),
                 System.IO.Pipes.PipeAccessRights.FullControl,
                 System.Security.AccessControl.AccessControlType.Allow));
+            // Helper runs as interactive user (launched by Broker via CreateProcessAsUser).
+            // Without this rule, Helper gets Access Denied on pipe connect.
+            security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
+                new System.Security.Principal.SecurityIdentifier(
+                    System.Security.Principal.WellKnownSidType.AuthenticatedUserSid, null),
+                System.IO.Pipes.PipeAccessRights.ReadWrite,
+                System.Security.AccessControl.AccessControlType.Allow));
 
             return NamedPipeServerStreamAcl.Create(
                 pipeName, PipeDirection.InOut, 1,
