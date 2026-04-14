@@ -150,6 +150,28 @@ public sealed class LearningWorker : BackgroundService
                 _phaseStartedAt = _db.GetPhaseChangedAt(_sessionId);
                 _activeSeedDigest = null; // reset for new phase
 
+                var oldPhase = LearningSession.PhaseToObserverPhase(_previousPhase ?? "discovery");
+                var newPhase = LearningSession.PhaseToObserverPhase(session.Phase);
+
+                // Stop observers not active in the new phase
+                foreach (var obs in _observers.Where(o => o.ActivePhases.HasFlag(oldPhase)
+                    && !o.ActivePhases.HasFlag(newPhase)))
+                {
+                    await obs.StopAsync();
+                    _logger.LogInformation("Stopped observer {Name} (not active in {Phase})", obs.Name, session.Phase);
+                }
+
+                // Start observers active in the new phase that weren't in the old phase
+                foreach (var obs in _observers.Where(o => o.ActivePhases.HasFlag(newPhase)
+                    && !o.ActivePhases.HasFlag(oldPhase)))
+                {
+                    _ = obs.StartAsync(_sessionId, stoppingToken);
+                    _logger.LogInformation("Started observer {Name} for {Phase}", obs.Name, session.Phase);
+                }
+
+                // W-9: Update currentPhase so observer health checks use the correct phase
+                currentPhase = newPhase;
+
                 if (session.Phase == "pattern")
                     await PullSeedsAsync("pattern", stoppingToken);
                 else if (session.Phase == "model")
