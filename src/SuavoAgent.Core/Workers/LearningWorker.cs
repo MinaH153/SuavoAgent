@@ -356,7 +356,9 @@ public sealed class LearningWorker : BackgroundService
                 }
 
                 // Prepare POM for upload
-                _pendingPomJson = PomExporter.Export(_db, _sessionId);
+                var droppedCount = _behavioralReceiver?.TotalDroppedEvents ?? 0;
+                _pendingPomJson = PomExporter.Export(_db, _sessionId,
+                    droppedEventCount: droppedCount);
                 _pendingPomDigest = PomExporter.ComputeDigest(
                     _options.PharmacyId ?? "", _sessionId, _pendingPomJson);
 

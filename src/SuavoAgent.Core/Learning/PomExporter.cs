@@ -20,13 +20,16 @@ public class PomExporter
     private readonly string _sessionId;
     private readonly string _pharmacyId;
     private readonly string? _pmsVersionHash;
+    private readonly long _droppedEventCount;
 
-    public PomExporter(AgentStateDb db, string sessionId, string pharmacyId, string? pmsVersionHash = null)
+    public PomExporter(AgentStateDb db, string sessionId, string pharmacyId,
+        string? pmsVersionHash = null, long droppedEventCount = 0)
     {
         _db = db;
         _sessionId = sessionId;
         _pharmacyId = pharmacyId;
         _pmsVersionHash = pmsVersionHash;
+        _droppedEventCount = droppedEventCount;
     }
 
     /// <summary>
@@ -34,7 +37,7 @@ public class PomExporter
     /// </summary>
     public (string Json, string Digest) Export()
     {
-        var json = ExportCore(_db, _sessionId, _pmsVersionHash);
+        var json = ExportCore(_db, _sessionId, _pmsVersionHash, _droppedEventCount);
         var digest = ComputeDigest(_pharmacyId, _sessionId, json);
         return (json, digest);
     }
@@ -42,12 +45,14 @@ public class PomExporter
     /// <summary>
     /// Static overload for backward compatibility — existing callers pass no pmsVersionHash.
     /// </summary>
-    public static string Export(AgentStateDb db, string sessionId, string? pmsVersionHash = null)
+    public static string Export(AgentStateDb db, string sessionId,
+        string? pmsVersionHash = null, long droppedEventCount = 0)
     {
-        return ExportCore(db, sessionId, pmsVersionHash);
+        return ExportCore(db, sessionId, pmsVersionHash, droppedEventCount);
     }
 
-    private static string ExportCore(AgentStateDb db, string sessionId, string? pmsVersionHash)
+    private static string ExportCore(AgentStateDb db, string sessionId,
+        string? pmsVersionHash, long droppedEventCount = 0)
     {
         var session = db.GetLearningSession(sessionId);
         if (session is null)
@@ -103,9 +108,7 @@ public class PomExporter
                 pmsVersionHash,
                 uniqueScreens = db.GetUniqueScreenCount(sessionId),
                 observationDays = ComputeObservationDays(db, sessionId),
-                // TODO: droppedEventRate comes from heartbeat telemetry (BehavioralEventBuffer.DroppedEventCount
-                // in the Helper process). Not available in Core at export time. Wire via IPC heartbeat in future.
-                droppedEventRate = 0.0,
+                droppedEventCount,
                 screenFingerprints = db.GetDistinctTreeHashes(sessionId),
                 routines = db.GetLearnedRoutines(sessionId).Select(r => new
                 {
