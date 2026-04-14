@@ -542,7 +542,7 @@ public sealed class LearningWorker : BackgroundService
     private bool IsCanaryInHold()
     {
         var pharmacyId = _options.PharmacyId ?? "unknown";
-        var hold = _db.GetCanaryHold(pharmacyId, "PioneerRx");
+        var hold = _db.GetCanaryHold(pharmacyId, "pioneerrx");
         return hold is not null;
     }
 

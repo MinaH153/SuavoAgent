@@ -55,4 +55,27 @@ public class PhiMinimizationTests
         Assert.Contains("Person.Person", query);
         Assert.Contains("FirstName", query);
     }
+
+    [Theory]
+    [InlineData("PatientMobileNumber")]
+    [InlineData("EmergencyContactPhone")]
+    [InlineData("patient_email_address")]
+    [InlineData("PersonAddress2")]
+    [InlineData("SSNLast4")]
+    [InlineData("DateOfBirthFormatted")]
+    public void IsPhiColumn_CatchesNovelPhiColumns(string columnName)
+    {
+        Assert.True(PioneerRxConstants.IsPhiColumn(columnName));
+    }
+
+    [Theory]
+    [InlineData("RxNumber")]
+    [InlineData("ItemName")]
+    [InlineData("StatusTypeID")]
+    [InlineData("DateFilled")]
+    [InlineData("DispensedQuantity")]
+    public void IsPhiColumn_AllowsNonPhiColumns(string columnName)
+    {
+        Assert.False(PioneerRxConstants.IsPhiColumn(columnName));
+    }
 }

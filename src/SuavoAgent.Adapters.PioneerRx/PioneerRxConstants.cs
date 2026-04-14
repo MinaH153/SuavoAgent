@@ -72,4 +72,25 @@ public static class PioneerRxConstants
         "ClinicalNotes", "PatientNotes",
         "PatientID", "PersonID"
     };
+
+    private static readonly string[] PhiColumnPatterns =
+    {
+        "patient", "ssn", "dob", "birth", "phone", "address",
+        "email", "person", "contact", "emergency", "guardian",
+        "social", "security", "mobile", "fax"
+    };
+
+    public static bool IsPhiColumn(string columnName)
+    {
+        if (PhiColumnBlocklist.Contains(columnName))
+            return true;
+
+        var lower = columnName.ToLowerInvariant();
+        foreach (var pattern in PhiColumnPatterns)
+        {
+            if (lower.Contains(pattern))
+                return true;
+        }
+        return false;
+    }
 }

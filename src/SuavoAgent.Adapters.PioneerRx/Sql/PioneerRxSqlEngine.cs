@@ -610,7 +610,7 @@ ORDER BY full_name, ORDINAL_POSITION";
     }
 
     public static bool IsPhiColumn(string columnName) =>
-        PioneerRxConstants.PhiColumnBlocklist.Contains(columnName);
+        PioneerRxConstants.IsPhiColumn(columnName);
 
     private static RxReadyForDelivery MapRxFromReader(SqlDataReader reader)
     {
