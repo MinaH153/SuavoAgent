@@ -16,6 +16,8 @@ public sealed class PioneerRxUiaEngine : IDisposable
     private Window? _mainWindow;
 
     public string? WindowTitle => _mainWindow?.Title;
+    public Window? MainWindow => _mainWindow;
+    public int ProcessId => _app?.ProcessId ?? -1;
 
     public PioneerRxUiaEngine(ILogger logger)
     {

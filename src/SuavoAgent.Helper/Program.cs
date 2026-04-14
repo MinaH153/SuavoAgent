@@ -1,5 +1,9 @@
+using FlaUI.UIA2;
 using Serilog;
+using SuavoAgent.Contracts.Behavioral;
+using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Helper;
+using SuavoAgent.Helper.Behavioral;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Debug()
@@ -26,6 +30,73 @@ try
     int attachFailures = 0;
     bool attached = false;
 
+    // Behavioral observer state — created on attach, torn down on detach
+    BehavioralEventBuffer? eventBuffer = null;
+    UiaTreeObserver? treeObserver = null;
+    UiaInteractionObserver? interactionObserver = null;
+    KeyboardCategoryHook? keyboardHook = null;
+    CancellationTokenSource? treeObserverCts = null;
+
+    void StartBehavioralObservers()
+    {
+        StopBehavioralObservers();
+
+        var pharmacySalt = ""; // Core will deliver via IPC handshake (S2, separate fix)
+
+        eventBuffer = new BehavioralEventBuffer(
+            capacity: 500,
+            batchSize: 50,
+            flushAction: async events =>
+            {
+                var json = System.Text.Json.JsonSerializer.Serialize(events);
+                await ipcClient.TrySendAsync(IpcCommands.BehavioralEvents, json, cts.Token);
+            });
+
+        treeObserver = new UiaTreeObserver(pharmacySalt, eventBuffer, Log.Logger);
+
+        interactionObserver = new UiaInteractionObserver(
+            new UIA2Automation(),
+            pharmacySalt, eventBuffer, Log.Logger,
+            triggerTreeResnapshot: () =>
+            {
+                // Fire a manual tree walk on structure change
+                if (pioneer.MainWindow is { } win)
+                    treeObserver.WalkTree(win);
+            });
+
+        keyboardHook = new KeyboardCategoryHook(eventBuffer, Log.Logger, pioneer.ProcessId);
+
+        // UiaTreeObserver runs as an async loop — give it a linked token
+        treeObserverCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+        _ = Task.Run(() => treeObserver.RunAsync(
+            () => pioneer.MainWindow, treeObserverCts.Token), treeObserverCts.Token);
+
+        // Subscribe interaction observer to the current PMS window
+        if (pioneer.MainWindow is { } window)
+            interactionObserver.Subscribe(window);
+
+        keyboardHook.Install();
+
+        Log.Information("Behavioral observers started (PID {Pid})", pioneer.ProcessId);
+    }
+
+    void StopBehavioralObservers()
+    {
+        keyboardHook?.Dispose();
+        keyboardHook = null;
+
+        interactionObserver?.Dispose();
+        interactionObserver = null;
+
+        treeObserverCts?.Cancel();
+        treeObserverCts?.Dispose();
+        treeObserverCts = null;
+        treeObserver = null;
+
+        eventBuffer?.Dispose();
+        eventBuffer = null;
+    }
+
     // Retry attachment — PioneerRx may not be running when Helper starts
     while (!cts.Token.IsCancellationRequested && !attached)
     {
@@ -37,6 +108,9 @@ try
 
             // Report success to Core via IPC
             await ipcClient.TrySendAsync("pioneer_attached", null, cts.Token);
+
+            // Wire behavioral observers
+            StartBehavioralObservers();
         }
         else
         {
@@ -76,7 +150,8 @@ try
         var health = pioneer.CheckHealth();
         if (!health.WindowFound)
         {
-            Log.Warning("PioneerRx window lost — attempting re-attach");
+            Log.Warning("PioneerRx window lost — stopping observers, attempting re-attach");
+            StopBehavioralObservers();
             attached = false;
             attachFailures = 0;
 
@@ -88,6 +163,9 @@ try
                     attached = true;
                     Log.Information("Re-attached to PioneerRx: {Title}", pioneer.WindowTitle);
                     await ipcClient.TrySendAsync("pioneer_reattached", null, cts.Token);
+
+                    // Re-wire behavioral observers for new window
+                    StartBehavioralObservers();
                 }
                 else
                 {
@@ -107,6 +185,9 @@ try
             health.WindowFound, health.MenuBarFound);
         await Task.Delay(TimeSpan.FromSeconds(10), cts.Token);
     }
+
+    // Final cleanup
+    StopBehavioralObservers();
 }
 catch (OperationCanceledException) { }
 catch (Exception ex)
