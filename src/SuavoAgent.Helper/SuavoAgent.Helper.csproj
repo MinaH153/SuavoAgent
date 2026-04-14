@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
+    <ProjectReference Include="..\SuavoAgent.Core\SuavoAgent.Core.csproj" />
   </ItemGroup>
 
 </Project>
