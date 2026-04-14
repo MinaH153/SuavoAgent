@@ -29,6 +29,10 @@ if ($ReleaseTag -notmatch '^v\d+\.\d+\.\d+') {
     exit 1
 }
 
+# Auto-log everything — transcript saved to desktop for debugging
+$transcriptPath = "$env:USERPROFILE\Desktop\suavo-install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+Start-Transcript -Path $transcriptPath -Force | Out-Null
+
 $ErrorActionPreference = "Stop"
 $installDir = "C:\Program Files\Suavo\Agent"
 $dataDir = "$env:ProgramData\SuavoAgent"
@@ -530,3 +534,7 @@ Get-ChildItem "$installDir\*.exe" | ForEach-Object {
 Write-Host ""
 Write-Host "  Agent will query for delivery-ready Rxs every 5 minutes." -ForegroundColor Cyan
 Write-Host "  Check logs: Get-Content $dataDir\logs\core-*.log -Tail 50" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Install log: $transcriptPath" -ForegroundColor Gray
+
+Stop-Transcript | Out-Null
