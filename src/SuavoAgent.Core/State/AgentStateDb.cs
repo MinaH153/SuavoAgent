@@ -2433,7 +2433,7 @@ public sealed class AgentStateDb : IDisposable
     public void RejectSeedItem(string seedDigest, string itemType, string itemKey, string rejectedAt)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "UPDATE seed_items SET rejected_at = @r WHERE seed_digest = @d AND item_type = @t AND item_key = @k";
+        cmd.CommandText = "UPDATE seed_items SET rejected_at = @r WHERE seed_digest = @d AND item_type = @t AND item_key = @k AND confirmed_at IS NULL";
         cmd.Parameters.AddWithValue("@r", rejectedAt);
         cmd.Parameters.AddWithValue("@d", seedDigest);
         cmd.Parameters.AddWithValue("@t", itemType);
