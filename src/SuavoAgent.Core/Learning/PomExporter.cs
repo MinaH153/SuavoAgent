@@ -65,6 +65,40 @@ public static class PomExporter
                 confidence = c.Confidence,
                 evidence = c.EvidenceJson,
             }).ToArray(),
+
+            behavioral = new
+            {
+                uniqueScreens = db.GetUniqueScreenCount(sessionId),
+                observationDays = ComputeObservationDays(db, sessionId),
+                // TODO: droppedEventRate comes from heartbeat telemetry (BehavioralEventBuffer.DroppedEventCount
+                // in the Helper process). Not available in Core at export time. Wire via IPC heartbeat in future.
+                droppedEventRate = 0.0,
+                screenFingerprints = db.GetDistinctTreeHashes(sessionId),
+                routines = db.GetLearnedRoutines(sessionId).Select(r => new
+                {
+                    routineHash = r.RoutineHash,
+                    path = JsonSerializer.Deserialize<JsonElement>(r.PathJson),
+                    pathLength = r.PathLength,
+                    frequency = r.Frequency,
+                    confidence = r.Confidence,
+                    hasWritebackCandidate = r.HasWritebackCandidate,
+                    correlatedWriteQueries = r.CorrelatedWriteQueries is not null
+                        ? JsonSerializer.Deserialize<JsonElement>(r.CorrelatedWriteQueries) : (JsonElement?)null,
+                }).ToArray(),
+                writebackCandidates = db.GetWritebackCandidates(sessionId).Select(c => new
+                {
+                    correlationKey = c.CorrelationKey,
+                    elementId = c.ElementId,
+                    controlType = c.ControlType,
+                    queryShape = c.QueryShape,
+                    tablesReferenced = c.TablesReferenced is not null
+                        ? JsonSerializer.Deserialize<JsonElement>(c.TablesReferenced) : (JsonElement?)null,
+                    occurrences = c.OccurrenceCount,
+                    confidence = c.Confidence,
+                }).ToArray(),
+                dmvAccess = db.GetDmvQueryObservations(sessionId, 1).Count > 0,
+                totalInteractions = db.GetBehavioralEventCount(sessionId, "interaction"),
+            },
         };
 
         return JsonSerializer.Serialize(export, new JsonSerializerOptions
@@ -72,6 +106,16 @@ public static class PomExporter
             WriteIndented = false,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         });
+    }
+
+    private static double ComputeObservationDays(AgentStateDb db, string sessionId)
+    {
+        var firstTimestamp = db.GetFirstBehavioralEventTimestamp(sessionId);
+        if (firstTimestamp is null) return 0.0;
+        if (!DateTimeOffset.TryParse(firstTimestamp, null,
+            System.Globalization.DateTimeStyles.RoundtripKind, out var firstSeen))
+            return 0.0;
+        return Math.Round((DateTimeOffset.UtcNow - firstSeen).TotalDays, 2);
     }
 
     /// <summary>
