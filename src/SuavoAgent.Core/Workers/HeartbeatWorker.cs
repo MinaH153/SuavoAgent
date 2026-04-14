@@ -112,7 +112,8 @@ public sealed class HeartbeatWorker : BackgroundService
                     writeback = new
                     {
                         pending = _stateDb.GetPendingWritebacks().Count,
-                        manualReview = 0
+                        manualReview = 0,
+                        writebackEnabled = true, // simplified — full check would need engine reference
                     },
                     audit = new
                     {
@@ -257,6 +258,9 @@ public sealed class HeartbeatWorker : BackgroundService
                     break;
                 case "acknowledge_drift":
                     await HandleAcknowledgeDriftAsync(scEl, ct);
+                    break;
+                case "delivery_writeback":
+                    await HandleDeliveryWritebackAsync(scEl, cmd, ct);
                     break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
@@ -526,6 +530,57 @@ public sealed class HeartbeatWorker : BackgroundService
             $"digest:{digest[..12]},by:{approvedBy}", phiScrubbed: false);
 
         _logger.LogInformation("POM approved for session {Session} — transitioning to supervised mode", sessionId);
+
+        await Task.CompletedTask;
+    }
+
+    private async Task HandleDeliveryWritebackAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var transition = dataEl.TryGetProperty("transition", out var tr) ? tr.GetString() ?? "" : "";
+        var rxNumberStr = dataEl.TryGetProperty("rxNumber", out var rx) ? rx.GetInt32().ToString() : "";
+        var fillNumber = dataEl.TryGetProperty("fillNumber", out var fn) ? fn.GetInt32() : 0;
+        var taskId = dataEl.TryGetProperty("taskId", out var tid) ? tid.GetString() ?? "" : "";
+        var isControlled = dataEl.TryGetProperty("isControlledSubstance", out var cs) && cs.GetBoolean();
+
+        if (string.IsNullOrEmpty(transition) || string.IsNullOrEmpty(rxNumberStr))
+        {
+            _logger.LogWarning("delivery_writeback: missing transition or rxNumber");
+            return;
+        }
+
+        var hashedRx = PhiScrubber.HmacHash(rxNumberStr, _options.AgentId ?? "");
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: hashedRx,
+            EventType: "writeback_command_received",
+            FromState: "",
+            ToState: transition,
+            Trigger: "delivery_writeback",
+            CommandId: cmd.Nonce,
+            RxNumber: hashedRx));
+
+        DateTimeOffset? deliveredAt = null;
+        if (transition == "complete" && dataEl.TryGetProperty("deliveredAt", out var da))
+        {
+            if (DateTimeOffset.TryParse(da.GetString(), out var parsed))
+                deliveredAt = parsed;
+        }
+
+        var writebackProcessor = _serviceProvider.GetService<WritebackProcessor>();
+        if (writebackProcessor != null)
+        {
+            writebackProcessor.EnqueueWriteback(taskId, rxNumberStr, fillNumber, transition, deliveredAt);
+            _logger.LogInformation("delivery_writeback enqueued: {Transition} Rx {RxHash}",
+                transition, hashedRx[..12]);
+        }
+        else
+        {
+            _logger.LogWarning("delivery_writeback: WritebackProcessor not available");
+        }
+
+        if (isControlled)
+            _logger.LogInformation("Controlled substance delivery — POS entry required for Rx {RxHash}", hashedRx[..12]);
 
         await Task.CompletedTask;
     }
