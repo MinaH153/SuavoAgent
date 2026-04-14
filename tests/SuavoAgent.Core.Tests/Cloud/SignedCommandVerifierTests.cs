@@ -147,6 +147,33 @@ public class SignedCommandVerifierTests
     }
 
     [Fact]
+    public void Verify_AcceptsSignatureFromEitherKeyInRotationPair()
+    {
+        using var key1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var key2 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var pub1 = Convert.ToBase64String(key1.ExportSubjectPublicKeyInfo());
+        var pub2 = Convert.ToBase64String(key2.ExportSubjectPublicKeyInfo());
+
+        var registry = new Dictionary<string, string>
+        {
+            ["cmd-v1"] = pub1,
+            ["cmd-v2"] = pub2
+        };
+        var verifier = new SignedCommandVerifier(registry, "agent-1", "fp-1");
+
+        // Sign with key2 using keyId "cmd-v2"
+        var nonce = Guid.NewGuid().ToString("N");
+        var ts = DateTimeOffset.UtcNow.ToString("o");
+        var canonical = $"test|agent-1|fp-1|{ts}|{nonce}|";
+        var sig = Convert.ToBase64String(key2.SignData(
+            Encoding.UTF8.GetBytes(canonical), HashAlgorithmName.SHA256));
+
+        var cmd = new SignedCommand("test", "agent-1", "fp-1", ts, nonce, "cmd-v2", sig);
+        var result = verifier.Verify(cmd);
+        Assert.True(result.IsValid, result.Reason);
+    }
+
+    [Fact]
     public void PruneNonces_PreservesRecentNonces()
     {
         var cmd = CreateSignedCommand("force_sync");

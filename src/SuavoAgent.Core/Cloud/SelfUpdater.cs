@@ -16,6 +16,16 @@ namespace SuavoAgent.Core.Cloud;
 /// </summary>
 public static class SelfUpdater
 {
+    // ── Key Rotation Procedure ──
+    // The agent accepts signatures from ANY key in the registry.
+    // To rotate a signing key:
+    //   1. Generate new keypair
+    //   2. Add new public key to registry as "update-v2" (or "cmd-v2")
+    //   3. Release update signed with OLD key — agents accept it and get the new key
+    //   4. Switch CI/CD to sign with NEW key
+    //   5. Remove old key from registry in next release
+    // During the transition window, agents accept BOTH keys.
+
     // ECDSA P-256 public key for update manifest verification.
     // Private key: ~/.suavo/signing-key.pem (Joshua's Mac).
     internal const string UpdatePublicKeyDer =
