@@ -1,5 +1,6 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Learning;
@@ -26,6 +27,7 @@ public sealed class LearningWorker : BackgroundService
     private string? _pendingPomJson;
     private string? _pendingPomDigest;
     private bool _adapterActivated;
+    private DateTimeOffset _lastPruneAt = DateTimeOffset.MinValue;
 
     private static readonly TimeSpan[] UploadBackoff =
     {
@@ -79,9 +81,18 @@ public sealed class LearningWorker : BackgroundService
             _sp.GetRequiredService<ILogger<ProcessObserver>>());
         var sqlObs = new SqlSchemaObserver(_db, pharmacySalt,
             _sp.GetRequiredService<ILogger<SqlSchemaObserver>>());
+        var dmvObs = new DmvQueryObserver(_db,
+            () => new SqlConnection(BuildConnectionString()),
+            _sp.GetRequiredService<ILogger<DmvQueryObserver>>());
 
         _observers.Add(processObs);
         _observers.Add(sqlObs);
+        _observers.Add(dmvObs);
+
+        // Behavioral correlation and learning instances
+        var actionCorrelator = new ActionCorrelator(_db, _sessionId,
+            clockCalibrated: false);
+        _ = new BehavioralEventReceiver(_db, _sessionId);
 
         _db.AppendLearningAudit(_sessionId, "worker", "start",
             $"observers:{_observers.Count}", phiScrubbed: false);
@@ -126,6 +137,35 @@ public sealed class LearningWorker : BackgroundService
                 }
             }
 
+            // Run RoutineDetector in pattern phase (periodic, not one-shot)
+            if (session.Phase == "pattern")
+            {
+                try
+                {
+                    var routineDetector = new RoutineDetector(_db, _sessionId);
+                    routineDetector.DetectAndPersist();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "RoutineDetector (pattern phase) failed");
+                }
+            }
+
+            // Daily behavioral event prune
+            if (DateTimeOffset.UtcNow - _lastPruneAt >= TimeSpan.FromDays(1))
+            {
+                try
+                {
+                    _db.PruneBehavioralEvents(_sessionId, olderThanDays: 7);
+                    _lastPruneAt = DateTimeOffset.UtcNow;
+                    _logger.LogInformation("Pruned behavioral events older than 7 days for session {Session}", _sessionId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Behavioral event prune failed");
+                }
+            }
+
             // Auto-trigger Pattern Engine when entering Model phase
             if (session.Phase == "model" && !_inferenceRan)
             {
@@ -146,6 +186,18 @@ public sealed class LearningWorker : BackgroundService
                     {
                         _logger.LogWarning(ex, "Schema discovery failed — inference will use existing data");
                     }
+                }
+
+                // Run routine detection for behavioral learning
+                try
+                {
+                    var routineDetector = new RoutineDetector(_db, _sessionId);
+                    routineDetector.DetectAndPersist();
+                    _logger.LogInformation("RoutineDetector completed for session {Session}", _sessionId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "RoutineDetector failed — continuing without behavioral routines");
                 }
 
                 // Run Rx queue inference
