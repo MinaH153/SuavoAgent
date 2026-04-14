@@ -118,6 +118,28 @@ WHERE Description IN ({statusParams})";
                 return guids;
             }
 
+            // Exact match returned nothing — try pattern-based discovery
+            _logger.LogInformation("Exact status name match returned 0 results — trying pattern-based discovery");
+            var patternQuery = "SELECT RxTransactionStatusTypeID, Description FROM Prescription.RxTransactionStatusType";
+            await using var patCmd = new SqlCommand(patternQuery, _connection);
+            patCmd.CommandTimeout = 10;
+            await using var patReader = await patCmd.ExecuteReaderAsync(ct);
+            while (await patReader.ReadAsync(ct))
+            {
+                var desc = patReader.GetString(patReader.GetOrdinal("Description"));
+                if (PioneerRxConstants.MatchesDeliveryReadyPattern(desc))
+                {
+                    var guid = patReader.GetGuid(patReader.GetOrdinal("RxTransactionStatusTypeID"));
+                    guids.Add(guid);
+                    _logger.LogInformation("Pattern-matched status: {Description} = {Guid}", desc, guid);
+                }
+            }
+            if (guids.Count > 0)
+            {
+                _logger.LogInformation("Pattern-discovered {Count} delivery-ready status GUIDs", guids.Count);
+                return guids;
+            }
+
             _logger.LogError("No delivery-ready status GUIDs found in lookup table — detection will be disabled until GUIDs are discoverable");
         }
         catch (Exception ex)
@@ -264,12 +286,12 @@ ORDER BY Description";
     /// Full query: Rx + Item (drug name/NDC) + Patient (delivery address).
     /// Minimum necessary PHI: first name, last name initial, address, phone.
     /// </summary>
-    public static string BuildFullDeliveryQuery(int statusCount)
+    public static string BuildFullDeliveryQuery(int statusCount, int batchSize = 100)
     {
         var statusParams = string.Join(", ",
             Enumerable.Range(0, statusCount).Select(i => $"@status{i}"));
 
-        return $@"SELECT TOP 50
+        return $@"SELECT TOP {batchSize}
     rt.RxTransactionID,
     rt.DateFilled,
     rt.RefillNumber,
@@ -298,12 +320,12 @@ WHERE rt.RxTransactionStatusTypeID IN ({statusParams})
 ORDER BY rt.DateFilled DESC";
     }
 
-    public static string BuildDeliveryQuery(int statusCount)
+    public static string BuildDeliveryQuery(int statusCount, int batchSize = 100)
     {
         var statusParams = string.Join(", ",
             Enumerable.Range(0, statusCount).Select(i => $"@status{i}"));
 
-        return $@"SELECT TOP 50
+        return $@"SELECT TOP {batchSize}
     rt.RxTransactionID,
     rt.DateFilled,
     rt.RefillNumber,
@@ -325,12 +347,12 @@ ORDER BY rt.DateFilled DESC";
     /// <summary>
     /// Base query without Inventory.Item join — fallback when table doesn't exist.
     /// </summary>
-    public static string BuildDeliveryQueryBase(int statusCount)
+    public static string BuildDeliveryQueryBase(int statusCount, int batchSize = 100)
     {
         var statusParams = string.Join(", ",
             Enumerable.Range(0, statusCount).Select(i => $"@status{i}"));
 
-        return $@"SELECT TOP 50
+        return $@"SELECT TOP {batchSize}
     rt.RxTransactionID,
     rt.DateFilled,
     rt.RefillNumber,
@@ -349,11 +371,11 @@ ORDER BY rt.DateFilled DESC";
     /// PHI-free metadata query — no Person JOIN, no patient data.
     /// Used for detection polling (HIPAA 164.502(b) minimum necessary).
     /// </summary>
-    public static string BuildMetadataQuery(IReadOnlyList<string> statusNames)
+    public static string BuildMetadataQuery(IReadOnlyList<string> statusNames, int batchSize = 100)
     {
         var statusParams = string.Join(", ", statusNames.Select((_, i) => $"@status{i}"));
         return $"""
-            SELECT TOP 50
+            SELECT TOP {batchSize}
                 r.RxNumber,
                 rt.DateFilled,
                 rt.DispensedQuantity,
@@ -588,7 +610,7 @@ ORDER BY full_name, ORDINAL_POSITION";
     }
 
     public static bool IsPhiColumn(string columnName) =>
-        PioneerRxConstants.PhiColumnBlocklist.Contains(columnName);
+        PioneerRxConstants.IsPhiColumn(columnName);
 
     private static RxReadyForDelivery MapRxFromReader(SqlDataReader reader)
     {

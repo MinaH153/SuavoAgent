@@ -407,27 +407,32 @@ public sealed class HeartbeatWorker : BackgroundService
             // Proceed with cleanup
             if (OperatingSystem.IsWindows())
             {
-                var script = @"
-                    Start-Sleep 3
-                    Stop-Service SuavoAgent.Core -Force -ErrorAction SilentlyContinue
-                    Stop-Service SuavoAgent.Broker -Force -ErrorAction SilentlyContinue
-                    Start-Sleep 2
-                    sc.exe delete SuavoAgent.Core 2>$null
-                    sc.exe delete SuavoAgent.Broker 2>$null
-                    Remove-Item 'C:\Program Files\Suavo' -Recurse -Force -ErrorAction SilentlyContinue
-                    Remove-Item ""$env:ProgramData\SuavoAgent"" -Recurse -Force -ErrorAction SilentlyContinue
-                ";
-
-                var psi = new System.Diagnostics.ProcessStartInfo
+                // Stop services via sc.exe — direct, no PowerShell
+                foreach (var svc in new[] { "SuavoAgent.Broker", "SuavoAgent.Core" })
                 {
-                    FileName = @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"{script.Replace("\"", "\\\"")}\"",
-                    CreateNoWindow = true,
-                    UseShellExecute = false
-                };
+                    try
+                    {
+                        var stopPsi = new System.Diagnostics.ProcessStartInfo("sc.exe", $"stop {svc}")
+                            { CreateNoWindow = true, UseShellExecute = false };
+                        System.Diagnostics.Process.Start(stopPsi)?.WaitForExit(10000);
+                    }
+                    catch { /* service may already be stopped */ }
+                }
+
+                // Derive paths from runtime location — never hardcode drive letters
+                var installDir = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
+                    ?? AppContext.BaseDirectory;
+                var dataDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    "SuavoAgent");
+
+                // Use cmd.exe with delayed cleanup — avoids PowerShell entirely
+                var cleanupCmd = $"/C timeout /t 5 /nobreak >nul & sc delete SuavoAgent.Core & sc delete SuavoAgent.Broker & rmdir /s /q \"{installDir}\" & rmdir /s /q \"{dataDir}\"";
+                var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", cleanupCmd)
+                    { CreateNoWindow = true, UseShellExecute = false };
                 System.Diagnostics.Process.Start(psi);
 
-                _logger.LogWarning("Decommission script launched — agent will terminate in ~5 seconds");
+                _logger.LogWarning("Decommission cleanup launched — agent will terminate in ~5 seconds");
                 Environment.Exit(0);
             }
         }

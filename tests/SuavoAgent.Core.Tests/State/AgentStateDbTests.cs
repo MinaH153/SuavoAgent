@@ -68,6 +68,28 @@ public class AgentStateDbTests : IDisposable
         Assert.Single(pending);
     }
 
+    [Fact]
+    public void InitSchema_SetsBusyTimeout()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test-busy-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var db = new AgentStateDb(dbPath);
+            var field = typeof(AgentStateDb).GetField("_conn",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var conn = (Microsoft.Data.Sqlite.SqliteConnection)field!.GetValue(db)!;
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA busy_timeout";
+            var result = cmd.ExecuteScalar();
+            Assert.NotNull(result);
+            Assert.True((long)result! >= 5000, $"busy_timeout should be >= 5000, was {result}");
+        }
+        finally
+        {
+            File.Delete(dbPath);
+        }
+    }
+
     public void Dispose()
     {
         _db.Dispose();

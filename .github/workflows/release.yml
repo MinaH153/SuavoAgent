@@ -51,9 +51,7 @@ jobs:
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY_PEM }}
         run: |
-          echo "$SIGNING_KEY" > /tmp/signing-key.pem
-          openssl dgst -sha256 -sign /tmp/signing-key.pem -out release/checksums.sha256.sig release/checksums.sha256
-          rm /tmp/signing-key.pem
+          openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") -out release/checksums.sha256.sig release/checksums.sha256
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

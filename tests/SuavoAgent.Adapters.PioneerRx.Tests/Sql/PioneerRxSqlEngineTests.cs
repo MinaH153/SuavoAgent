@@ -28,10 +28,10 @@ public class PioneerRxSqlEngineTests
     }
 
     [Fact]
-    public void BuildDeliveryQuery_LimitsTo50()
+    public void BuildDeliveryQuery_DefaultsTo100()
     {
         var query = PioneerRxSqlEngine.BuildDeliveryQuery(1);
-        Assert.Contains("TOP 50", query);
+        Assert.Contains("TOP 100", query);
     }
 
     [Fact]
@@ -79,6 +79,54 @@ public class PioneerRxSqlEngineTests
     }
 
     [Theory]
+    [InlineData(50)]
+    [InlineData(100)]
+    [InlineData(500)]
+    public void BuildDeliveryQueryBase_UsesConfigurableBatchSize(int batchSize)
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQueryBase(3, batchSize);
+        Assert.Contains($"TOP {batchSize}", query);
+    }
+
+    [Fact]
+    public void BuildDeliveryQueryBase_DefaultsTo100()
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQueryBase(3);
+        Assert.Contains("TOP 100", query);
+    }
+
+    [Theory]
+    [InlineData(50)]
+    [InlineData(100)]
+    [InlineData(500)]
+    public void BuildFullDeliveryQuery_UsesConfigurableBatchSize(int batchSize)
+    {
+        var query = PioneerRxSqlEngine.BuildFullDeliveryQuery(3, batchSize);
+        Assert.Contains($"TOP {batchSize}", query);
+    }
+
+    [Theory]
+    [InlineData(50)]
+    [InlineData(100)]
+    [InlineData(500)]
+    public void BuildDeliveryQuery_UsesConfigurableBatchSize(int batchSize)
+    {
+        var query = PioneerRxSqlEngine.BuildDeliveryQuery(3, batchSize);
+        Assert.Contains($"TOP {batchSize}", query);
+    }
+
+    [Theory]
+    [InlineData(50)]
+    [InlineData(100)]
+    [InlineData(500)]
+    public void BuildMetadataQuery_UsesConfigurableBatchSize(int batchSize)
+    {
+        var names = new List<string> { "Waiting for Pick up", "Waiting for Delivery" };
+        var query = PioneerRxSqlEngine.BuildMetadataQuery(names, batchSize);
+        Assert.Contains($"TOP {batchSize}", query);
+    }
+
+    [Theory]
     [InlineData("PatientName")]
     [InlineData("PatientSSN")]
     [InlineData("DiagnosisCode")]
@@ -91,4 +139,34 @@ public class PioneerRxSqlEngineTests
     [InlineData("MedicationDescription")]
     [InlineData("DispensedNDC")]
     public void IsPhiColumn_AllowsOperational(string col) => Assert.False(PioneerRxSqlEngine.IsPhiColumn(col));
+
+    [Theory]
+    [InlineData("Waiting for Pick up")]
+    [InlineData("Waiting for Pickup")]
+    [InlineData("WAITING FOR PICK UP")]
+    [InlineData("waiting for pick up")]
+    public void StatusPattern_MatchesPickupVariants(string statusDesc)
+    {
+        Assert.True(PioneerRxConstants.MatchesDeliveryReadyPattern(statusDesc));
+    }
+
+    [Theory]
+    [InlineData("Waiting for Delivery")]
+    [InlineData("Out For Delivery")]
+    [InlineData("out for delivery")]
+    [InlineData("Completed")]
+    public void StatusPattern_MatchesDeliveryVariants(string statusDesc)
+    {
+        Assert.True(PioneerRxConstants.MatchesDeliveryStatusPattern(statusDesc));
+    }
+
+    [Theory]
+    [InlineData("Data Entry")]
+    [InlineData("Suspended")]
+    [InlineData("Voided")]
+    public void StatusPattern_RejectsNonDeliveryStatuses(string statusDesc)
+    {
+        Assert.False(PioneerRxConstants.MatchesDeliveryReadyPattern(statusDesc));
+        Assert.False(PioneerRxConstants.MatchesDeliveryStatusPattern(statusDesc));
+    }
 }

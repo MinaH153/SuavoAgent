@@ -33,6 +33,25 @@ public static class PioneerRxConstants
     // No fallback GUIDs — status GUIDs are pharmacy-specific and must be discovered
     // from the live database. Using hardcoded GUIDs would silently produce wrong results.
 
+    /// Pattern-matches status descriptions for delivery-ready states.
+    /// More resilient than exact string match — survives vendor text changes.
+    public static bool MatchesDeliveryReadyPattern(string description)
+    {
+        var lower = description.ToLowerInvariant();
+        return (lower.Contains("pick") && lower.Contains("up"))
+            || (lower.Contains("delivery") && lower.Contains("waiting"))
+            || (lower.Contains("bin") && (lower.Contains("put") || lower.Contains("place")));
+    }
+
+    /// Pattern-matches any delivery-related status (ready + in-progress + completed).
+    public static bool MatchesDeliveryStatusPattern(string description)
+    {
+        var lower = description.ToLowerInvariant();
+        return MatchesDeliveryReadyPattern(description)
+            || (lower.Contains("out") && lower.Contains("delivery"))
+            || lower.Contains("complet");
+    }
+
     public enum QueryMode
     {
         Detection,
@@ -53,4 +72,25 @@ public static class PioneerRxConstants
         "ClinicalNotes", "PatientNotes",
         "PatientID", "PersonID"
     };
+
+    private static readonly string[] PhiColumnPatterns =
+    {
+        "patient", "ssn", "dob", "birth", "phone", "address",
+        "email", "person", "contact", "emergency", "guardian",
+        "social", "security", "mobile", "fax"
+    };
+
+    public static bool IsPhiColumn(string columnName)
+    {
+        if (PhiColumnBlocklist.Contains(columnName))
+            return true;
+
+        var lower = columnName.ToLowerInvariant();
+        foreach (var pattern in PhiColumnPatterns)
+        {
+            if (lower.Contains(pattern))
+                return true;
+        }
+        return false;
+    }
 }

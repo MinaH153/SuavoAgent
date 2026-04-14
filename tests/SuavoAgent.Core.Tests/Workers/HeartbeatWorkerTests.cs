@@ -790,4 +790,19 @@ public class HeartbeatWorkerTests : IDisposable
         Assert.Throws<InvalidOperationException>(() =>
             _db.UpdateLearningPhase(sid, "model"));
     }
+
+    // ── Decommission Path Security ──
+
+    [Fact]
+    public void DecommissionPath_UsesAppContext_NotHardcodedPath()
+    {
+        var source = File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
+
+        Assert.DoesNotContain(@"C:\Program Files\Suavo", source);
+        Assert.DoesNotContain(@"C:\\Program Files\\Suavo", source);
+        Assert.DoesNotContain("ExecutionPolicy Bypass", source);
+        Assert.DoesNotContain("powershell.exe", source);
+    }
 }

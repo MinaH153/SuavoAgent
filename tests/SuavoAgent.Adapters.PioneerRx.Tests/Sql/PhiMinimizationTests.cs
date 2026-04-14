@@ -31,11 +31,11 @@ public class PhiMinimizationTests
     }
 
     [Fact]
-    public void BuildMetadataQuery_HasTop50Limit()
+    public void BuildMetadataQuery_HasTop100DefaultLimit()
     {
         var query = PioneerRxSqlEngine.BuildMetadataQuery(
             PioneerRxConstants.DeliveryReadyStatusNames);
-        Assert.Contains("TOP 50", query);
+        Assert.Contains("TOP 100", query);
     }
 
     [Fact]
@@ -54,5 +54,28 @@ public class PhiMinimizationTests
         var query = PioneerRxSqlEngine.BuildFullDeliveryQuery(3);
         Assert.Contains("Person.Person", query);
         Assert.Contains("FirstName", query);
+    }
+
+    [Theory]
+    [InlineData("PatientMobileNumber")]
+    [InlineData("EmergencyContactPhone")]
+    [InlineData("patient_email_address")]
+    [InlineData("PersonAddress2")]
+    [InlineData("SSNLast4")]
+    [InlineData("DateOfBirthFormatted")]
+    public void IsPhiColumn_CatchesNovelPhiColumns(string columnName)
+    {
+        Assert.True(PioneerRxConstants.IsPhiColumn(columnName));
+    }
+
+    [Theory]
+    [InlineData("RxNumber")]
+    [InlineData("ItemName")]
+    [InlineData("StatusTypeID")]
+    [InlineData("DateFilled")]
+    [InlineData("DispensedQuantity")]
+    public void IsPhiColumn_AllowsNonPhiColumns(string columnName)
+    {
+        Assert.False(PioneerRxConstants.IsPhiColumn(columnName));
     }
 }

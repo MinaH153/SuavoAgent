@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using SuavoAgent.Contracts.Ipc;
 
@@ -40,6 +41,33 @@ public sealed class IpcPipeServer : IDisposable
 
                 _logger.LogDebug("Waiting for Helper connection on pipe {Name}...", _pipeName);
                 await pipe.WaitForConnectionAsync(ct);
+
+                // Verify connecting process is a known SuavoAgent binary
+                if (OperatingSystem.IsWindows())
+                {
+                    try
+                    {
+                        if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var clientPid))
+                            throw new InvalidOperationException("GetNamedPipeClientProcessId failed");
+
+                        var clientProc = System.Diagnostics.Process.GetProcessById((int)clientPid);
+                        var clientName = clientProc.ProcessName;
+                        if (clientName != "SuavoAgent.Helper" && clientName != "SuavoAgent.Broker")
+                        {
+                            _logger.LogWarning("IPC: Rejected connection from unauthorized process {Name} (PID {Pid})",
+                                clientName, clientPid);
+                            pipe.Disconnect();
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "IPC: Could not verify client process — rejecting");
+                        pipe.Disconnect();
+                        continue;
+                    }
+                }
+
                 _isConnected = true;
                 _logger.LogInformation("Helper connected on pipe {Name}", _pipeName);
 
@@ -133,6 +161,12 @@ public sealed class IpcPipeServer : IDisposable
                     System.Security.Principal.WellKnownSidType.LocalServiceSid, null),
                 System.IO.Pipes.PipeAccessRights.FullControl,
                 System.Security.AccessControl.AccessControlType.Allow));
+            // Broker runs as NetworkService — needs full pipe access.
+            security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
+                new System.Security.Principal.SecurityIdentifier(
+                    System.Security.Principal.WellKnownSidType.NetworkServiceSid, null),
+                System.IO.Pipes.PipeAccessRights.FullControl,
+                System.Security.AccessControl.AccessControlType.Allow));
             // Helper runs as interactive user (launched by Broker via CreateProcessAsUser).
             // Without this rule, Helper gets Access Denied on pipe connect.
             security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
@@ -151,4 +185,9 @@ public sealed class IpcPipeServer : IDisposable
             pipeName, PipeDirection.InOut, 1,
             PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
     }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static extern bool GetNamedPipeClientProcessId(
+        Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint clientProcessId);
 }

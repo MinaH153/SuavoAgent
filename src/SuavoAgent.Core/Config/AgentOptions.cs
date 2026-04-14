@@ -30,6 +30,11 @@ public sealed class AgentOptions
     public string? HmacSalt { get; set; }
 
     /// <summary>
+    /// Maximum prescriptions per detection query. Default 100. Increase for high-volume pharmacies.
+    /// </summary>
+    public int MaxDetectionBatchSize { get; set; } = 100;
+
+    /// <summary>
     /// When true, agent runs in learning mode (30-day observation).
     /// When false, uses the existing PioneerRx adapter directly.
     /// </summary>

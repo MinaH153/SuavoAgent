@@ -45,7 +45,9 @@ Log.Logger = new LoggerConfiguration()
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "logs", "core-.log"),
         rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 30)
+        retainedFileCountLimit: 30,
+        fileSizeLimitBytes: 50_000_000,
+        rollOnFileSizeLimit: true)
     .Enrich.FromLogContext()
     .CreateLogger();
 
@@ -219,6 +221,14 @@ try
                         ? System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Behavioral.BehavioralEvent>>(
                             msg.Data.Value.GetRawText())
                         : null;
+                    // Cap batch size at 200 to prevent memory/disk abuse (H-6)
+                    if (events != null && events.Count > 200)
+                    {
+                        var originalCount = events.Count;
+                        events = events.Take(200).ToList();
+                        logger.LogWarning("IPC: Capped behavioral batch from {Original} to 200 ({Dropped} dropped)",
+                            originalCount, originalCount - 200);
+                    }
                     if (events is { Count: > 0 })
                     {
                         var receiver = sp.GetRequiredService<BehavioralEventReceiver>();
