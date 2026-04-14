@@ -19,6 +19,8 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly AgentStateDb _stateDb;
     private readonly SignedCommandVerifier? _commandVerifier;
+    private readonly Intelligence.ContextAssembler? _contextAssembler;
+    private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
     private bool _updateInProgress;
     private long? _decommissionPendingSince;
@@ -40,6 +42,7 @@ public sealed class HeartbeatWorker : BackgroundService
         _serviceProvider = serviceProvider;
         _stateDb = stateDb;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
+        _contextAssembler = new Intelligence.ContextAssembler(stateDb);
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -89,6 +92,23 @@ public sealed class HeartbeatWorker : BackgroundService
 
                 canaryHold = _stateDb.GetCanaryHold(_options.PharmacyId ?? "", "pioneerrx");
 
+                // Include intelligence context every 5 minutes (not every heartbeat)
+                string? intelligenceContext = null;
+                if (_contextAssembler != null && DateTimeOffset.UtcNow - _lastContextSync > TimeSpan.FromMinutes(5))
+                {
+                    try
+                    {
+                        var ctx = _contextAssembler.AssembleContext(_options.PharmacyId ?? "unknown");
+                        intelligenceContext = _contextAssembler.SerializeAndValidate(ctx);
+                        if (intelligenceContext != null)
+                            _lastContextSync = DateTimeOffset.UtcNow;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Intelligence context assembly failed — non-critical");
+                    }
+                }
+
                 var payload = new
                 {
                     agentId = _options.AgentId,
@@ -134,7 +154,8 @@ public sealed class HeartbeatWorker : BackgroundService
                         blockedCycles = canaryHold?.BlockedCycles ?? 0,
                         driftHoldSince = canaryHold?.DriftHoldSince,
                         lastVerifiedAt = DateTimeOffset.UtcNow.ToString("o"),
-                    }
+                    },
+                    intelligenceContext = intelligenceContext
                 };
 
                 var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
