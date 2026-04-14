@@ -29,4 +29,10 @@
     <ProjectReference Include="..\SuavoAgent.Adapters.PioneerRx\SuavoAgent.Adapters.PioneerRx.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Config\adapters\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

@@ -1,0 +1,21 @@
+{
+  "industry": "pharmacy",
+  "primary_apps": [
+    "PioneerPharmacy.exe", "QS1NexGen.exe", "NexGen.exe",
+    "LibertyRx.exe", "ComputerRx.exe", "BestRx.exe",
+    "Rx30.exe", "Pharmaserv.exe", "FrameworkLTC.exe", "ScriptPro.exe"
+  ],
+  "compliance": ["HIPAA"],
+  "known_domains": {
+    "insurance": ["express-scripts.com", "optumrx.com", "covermymeds.com", "caremark.com", "humana.com", "cigna.com", "aetna.com", "uhc.com", "anthem.com", "bcbs.com", "medicaid.gov"],
+    "regulatory": ["deadiversion.usdoj.gov", "nabp.pharmacy", "fda.gov"],
+    "supplier": ["mckesson.com", "cardinalhealth.com", "amerisourcebergen.com", "cencora.com"],
+    "clinical": ["drugs.com", "medscape.com", "uptodate.com", "epocrates.com", "lexicomp.com"]
+  },
+  "document_categories": {
+    "controlled_substance_log": { "column_patterns": ["drug|medication|substance", "schedule|class", "count|quantity|balance"] },
+    "inventory": { "column_patterns": ["ndc|sku|upc", "quantity|stock|count", "expir|lot"] },
+    "staff_schedule": { "column_patterns": ["name|employee|staff", "shift|hours|schedule", "date|day|week"] }
+  },
+  "phi_column_patterns": ["patient", "ssn", "dob", "birth", "phone", "address", "email", "person", "contact", "emergency"]
+}
