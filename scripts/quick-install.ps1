@@ -3,7 +3,7 @@
 
 $dir = "C:\Program Files\Suavo\Agent"
 $data = "$env:ProgramData\SuavoAgent"
-$tag = "v3.0.0"
+$tag = "v3.0.1"
 $base = "https://github.com/MinaH153/SuavoAgent/releases/download/$tag"
 
 # --- Phase 0: Kill everything from previous installs ---
