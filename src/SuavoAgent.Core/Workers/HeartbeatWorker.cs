@@ -20,7 +20,9 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly AgentStateDb _stateDb;
     private readonly SignedCommandVerifier? _commandVerifier;
     private readonly Intelligence.ContextAssembler? _contextAssembler;
+    private readonly Intelligence.EfficiencyCalculator? _efficiencyCalc;
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
     private bool _updateInProgress;
     private long? _decommissionPendingSince;
@@ -43,6 +45,7 @@ public sealed class HeartbeatWorker : BackgroundService
         _stateDb = stateDb;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
         _contextAssembler = new Intelligence.ContextAssembler(stateDb);
+        _efficiencyCalc = new Intelligence.EfficiencyCalculator(stateDb);
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -109,6 +112,27 @@ public sealed class HeartbeatWorker : BackgroundService
                     }
                 }
 
+                // Include efficiency report every 30 minutes for collective intelligence
+                string? efficiencyReport = null;
+                if (_efficiencyCalc != null && DateTimeOffset.UtcNow - _lastEfficiencyReport > TimeSpan.FromMinutes(30))
+                {
+                    try
+                    {
+                        var report = _efficiencyCalc.ComputeReport(_options.PharmacyId ?? "unknown");
+                        var reportJson = System.Text.Json.JsonSerializer.Serialize(report);
+                        var (isClean, _) = Intelligence.ComplianceBoundary.Validate(reportJson);
+                        if (isClean)
+                        {
+                            efficiencyReport = reportJson;
+                            _lastEfficiencyReport = DateTimeOffset.UtcNow;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Efficiency report generation failed — non-critical");
+                    }
+                }
+
                 var payload = new
                 {
                     agentId = _options.AgentId,
@@ -155,7 +179,8 @@ public sealed class HeartbeatWorker : BackgroundService
                         driftHoldSince = canaryHold?.DriftHoldSince,
                         lastVerifiedAt = DateTimeOffset.UtcNow.ToString("o"),
                     },
-                    intelligenceContext = intelligenceContext
+                    intelligenceContext = intelligenceContext,
+                    efficiencyReport = efficiencyReport
                 };
 
                 var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
