@@ -33,6 +33,7 @@ public sealed class HealthSnapshot
         var ipcServer = _sp.GetService(typeof(IpcPipeServer)) as IpcPipeServer;
         var canaryHold = _stateDb.GetCanaryHold(_options.PharmacyId ?? "", "pioneerrx");
         var wbEngine = rxWorker?.WritebackEngine;
+        var learningSessionId = _stateDb.GetActiveSessionId(_options.PharmacyId ?? "");
 
         var snapshot = new
         {
@@ -75,6 +76,27 @@ public sealed class HealthSnapshot
                 enabled = wbEngine?.WritebackEnabled ?? false,
                 triggerDetected = wbEngine?.TriggerDetected ?? false,
             },
+            behavioral = learningSessionId is not null
+                ? (object)new
+                {
+                    sessionId = learningSessionId,
+                    uniqueScreens = _stateDb.GetUniqueScreenCount(learningSessionId),
+                    totalEvents = _stateDb.GetBehavioralEventCount(learningSessionId),
+                    correlatedActions = _stateDb.GetCorrelatedActionCount(learningSessionId),
+                    writebackCandidates = _stateDb.GetWritebackCandidateCount(learningSessionId),
+                    learnedRoutines = _stateDb.GetLearnedRoutineCount(learningSessionId),
+                    routinesWithWriteback = _stateDb.GetRoutinesWithWritebackCount(learningSessionId),
+                }
+                : (object)new
+                {
+                    sessionId = (string?)null,
+                    uniqueScreens = 0,
+                    totalEvents = 0,
+                    correlatedActions = 0,
+                    writebackCandidates = 0,
+                    learnedRoutines = 0,
+                    routinesWithWriteback = 0,
+                },
             timestamp = DateTimeOffset.UtcNow.ToString("o")
         };
 
