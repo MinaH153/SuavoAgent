@@ -19,6 +19,7 @@ public static class IpcCommands
     public const string HelperError = "helper_error";
     public const string GetHealth = "get_health";
     public const string BehavioralEvents = "behavioral_events";
+    public const string GetPharmacySalt = "get_pharmacy_salt";
 }
 
 public static class IpcStatus
