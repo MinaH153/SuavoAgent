@@ -6,7 +6,10 @@ public enum BehavioralEventType
 {
     TreeSnapshot,
     Interaction,
-    KeystrokeCategory
+    KeystrokeCategory,
+    AppFocusChange,
+    SessionChange,
+    StationProfile
 }
 
 /// <summary>
@@ -110,6 +113,41 @@ public sealed record BehavioralEvent
             Timestamp = DateTimeOffset.UtcNow
         };
     }
+
+    public static BehavioralEvent AppFocusChange(
+        string fromProcessName, string toProcessName,
+        string? windowTitleHash, long focusDurationMs) =>
+        new()
+        {
+            Type = BehavioralEventType.AppFocusChange,
+            Subtype = "focus_change",
+            ElementId = toProcessName,
+            ClassName = fromProcessName,
+            NameHash = windowTitleHash,
+            KeystrokeCount = (int)Math.Min(focusDurationMs, int.MaxValue),
+            OccurrenceCount = 1,
+            Timestamp = DateTimeOffset.UtcNow
+        };
+
+    public static BehavioralEvent SessionChange(string changeType, string? userSidHash) =>
+        new()
+        {
+            Type = BehavioralEventType.SessionChange,
+            Subtype = changeType,
+            NameHash = userSidHash,
+            OccurrenceCount = 1,
+            Timestamp = DateTimeOffset.UtcNow
+        };
+
+    public static BehavioralEvent StationProfileEvent(string profileJson) =>
+        new()
+        {
+            Type = BehavioralEventType.StationProfile,
+            Subtype = "station_profile",
+            TreeHash = profileJson,
+            OccurrenceCount = 1,
+            Timestamp = DateTimeOffset.UtcNow
+        };
 
     /// <summary>Returns a new event with Seq assigned (immutable copy).</summary>
     public BehavioralEvent WithSeq(long seq) => this with { Seq = seq };
