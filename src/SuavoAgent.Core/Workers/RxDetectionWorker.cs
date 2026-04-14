@@ -20,8 +20,10 @@ public sealed class RxDetectionWorker : BackgroundService
     private readonly SuavoCloudClient? _cloudClient;
     private readonly AgentStateDb _stateDb;
     private readonly bool _canaryEnabled;
+    private readonly IServiceProvider _serviceProvider;
     private PioneerRxSqlEngine? _sqlEngine;
     private PioneerRxCanarySource? _canarySource;
+    private PioneerRxWritebackEngine? _writebackEngine;
     private CanaryHoldState _holdState = CanaryHoldState.Clear;
     private bool _sqlConnected;
 
@@ -30,6 +32,7 @@ public sealed class RxDetectionWorker : BackgroundService
     public DateTimeOffset? LastDetectionTime { get; private set; }
     public bool IsSqlConnected => _sqlConnected;
     public PioneerRxSqlEngine? SqlEngine => _sqlEngine;
+    public PioneerRxWritebackEngine? WritebackEngine => _writebackEngine;
 
     public RxDetectionWorker(
         ILogger<RxDetectionWorker> logger,
@@ -42,6 +45,7 @@ public sealed class RxDetectionWorker : BackgroundService
         _loggerFactory = loggerFactory;
         _options = options.Value;
         _stateDb = stateDb;
+        _serviceProvider = serviceProvider;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
         _canaryEnabled = !_options.LearningMode;
     }
@@ -263,6 +267,48 @@ public sealed class RxDetectionWorker : BackgroundService
                 _canarySource = new PioneerRxCanarySource(_sqlEngine,
                     _loggerFactory.CreateLogger<PioneerRxCanarySource>());
                 _logger.LogInformation("Canary detection source initialized for PioneerRx");
+            }
+
+            // Create writeback engine with separate connection pool
+            if (_sqlConnected && _sqlEngine != null)
+            {
+                var allGuids = _sqlEngine.GetAllDiscoveredGuids();
+                if (allGuids != null && allGuids.Count >= 5)
+                {
+                    var writebackCsb = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder();
+                    if (!string.IsNullOrEmpty(_options.SqlServer)) writebackCsb.DataSource = _options.SqlServer;
+                    if (!string.IsNullOrEmpty(_options.SqlDatabase)) writebackCsb.InitialCatalog = _options.SqlDatabase;
+                    writebackCsb.ApplicationName = "SuavoWriteback";
+                    writebackCsb.MaxPoolSize = 1;
+                    writebackCsb["Encrypt"] = "true";
+                    writebackCsb["TrustServerCertificate"] = "true";
+                    if (!string.IsNullOrEmpty(_options.SqlUser))
+                    {
+                        writebackCsb.UserID = _options.SqlUser;
+                        writebackCsb.Password = _options.SqlPassword;
+                    }
+                    else
+                    {
+                        writebackCsb.IntegratedSecurity = true;
+                    }
+
+                    _writebackEngine = new PioneerRxWritebackEngine(
+                        writebackCsb.ConnectionString,
+                        allGuids,
+                        _loggerFactory.CreateLogger<PioneerRxWritebackEngine>());
+
+                    await _writebackEngine.DetectTriggersAsync(ct);
+                    _logger.LogInformation("Writeback engine created (enabled={Enabled})", _writebackEngine.WritebackEnabled);
+
+                    // Attach to WritebackProcessor if available
+                    var processor = _serviceProvider.GetService<WritebackProcessor>();
+                    processor?.SetWritebackEngine(_writebackEngine);
+                }
+                else
+                {
+                    _logger.LogWarning("Writeback engine NOT created — insufficient status GUIDs ({Count}/5)",
+                        allGuids?.Count ?? 0);
+                }
             }
         }
         else
