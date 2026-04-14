@@ -81,6 +81,7 @@ public sealed class HealthSnapshot
                 ? (object)new
                 {
                     sessionId = learningSessionId,
+                    pmsVersionHash = (string?)null, // computed from PMS executable during discovery; wired in future pass
                     uniqueScreens = _stateDb.GetUniqueScreenCount(learningSessionId),
                     totalEvents = _stateDb.GetBehavioralEventCount(learningSessionId),
                     treeSnapshotCount = _stateDb.GetBehavioralEventCount(learningSessionId, "tree_snapshot"),
@@ -104,6 +105,7 @@ public sealed class HealthSnapshot
                 : (object)new
                 {
                     sessionId = (string?)null,
+                    pmsVersionHash = (string?)null,
                     uniqueScreens = 0,
                     totalEvents = 0,
                     treeSnapshotCount = 0,

@@ -14,9 +14,40 @@ namespace SuavoAgent.Core.Learning;
 /// Per Codex CRITICAL-2: ComputeDigest produces the approved_model_digest that
 /// binds the approval to the exact reviewed model.
 /// </summary>
-public static class PomExporter
+public class PomExporter
 {
-    public static string Export(AgentStateDb db, string sessionId)
+    private readonly AgentStateDb _db;
+    private readonly string _sessionId;
+    private readonly string _pharmacyId;
+    private readonly string? _pmsVersionHash;
+
+    public PomExporter(AgentStateDb db, string sessionId, string pharmacyId, string? pmsVersionHash = null)
+    {
+        _db = db;
+        _sessionId = sessionId;
+        _pharmacyId = pharmacyId;
+        _pmsVersionHash = pmsVersionHash;
+    }
+
+    /// <summary>
+    /// Instance-based export returning (json, digest) tuple.
+    /// </summary>
+    public (string Json, string Digest) Export()
+    {
+        var json = ExportCore(_db, _sessionId, _pmsVersionHash);
+        var digest = ComputeDigest(_pharmacyId, _sessionId, json);
+        return (json, digest);
+    }
+
+    /// <summary>
+    /// Static overload for backward compatibility — existing callers pass no pmsVersionHash.
+    /// </summary>
+    public static string Export(AgentStateDb db, string sessionId, string? pmsVersionHash = null)
+    {
+        return ExportCore(db, sessionId, pmsVersionHash);
+    }
+
+    private static string ExportCore(AgentStateDb db, string sessionId, string? pmsVersionHash)
     {
         var session = db.GetLearningSession(sessionId);
         if (session is null)
@@ -69,6 +100,7 @@ public static class PomExporter
 
             behavioral = new
             {
+                pmsVersionHash,
                 uniqueScreens = db.GetUniqueScreenCount(sessionId),
                 observationDays = ComputeObservationDays(db, sessionId),
                 // TODO: droppedEventRate comes from heartbeat telemetry (BehavioralEventBuffer.DroppedEventCount
@@ -110,6 +142,7 @@ public static class PomExporter
                         var ext = db.GetCorrelatedActionExtended(sessionId, a.CorrelationKey);
                         var writebackEvents = db.GetFeedbackEventsForTarget(sessionId, a.CorrelationKey, "writeback");
                         var successes = writebackEvents.Count(e => e.PayloadJson?.Contains("\"outcome\":\"success\"") == true);
+                        var source = db.GetCorrelatedActionSource(sessionId, a.CorrelationKey);
                         return new
                         {
                             correlationKey = a.CorrelationKey,
@@ -118,6 +151,9 @@ public static class PomExporter
                             successRate = writebackEvents.Count > 0 ? Math.Round((double)successes / writebackEvents.Count, 2) : 0.0,
                             operatorApproved = ext?.OperatorApproved ?? false,
                             promotionSuspended = ext?.PromotionSuspended ?? false,
+                            origin = source.Source,
+                            firstSeedDigest = source.SeedDigest,
+                            seededAt = source.SeededAt,
                         };
                     }).ToArray(),
                 windowOverrides = db.GetWindowOverrideCount(sessionId),
