@@ -71,7 +71,7 @@ public static class UiaPropertyScrubber
     public static string ScrubColumnHeader(string header, string pharmacySalt) =>
         HmacHash(header, pharmacySalt);
 
-    private static string HmacHash(string value, string salt)
+    public static string HmacHash(string value, string salt)
     {
         var keyBytes = Encoding.UTF8.GetBytes(salt);
         var valueBytes = Encoding.UTF8.GetBytes(value);
