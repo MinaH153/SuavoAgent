@@ -15,7 +15,7 @@ public class SignedCommandVerifier
     private readonly Dictionary<string, ECDsa> _keys = new();
     private readonly string _agentId;
     private readonly string _fingerprint;
-    private readonly HashSet<string> _usedNonces = new();
+    private readonly Dictionary<string, DateTimeOffset> _usedNonces = new();
     private readonly TimeSpan _timestampWindow = TimeSpan.FromSeconds(300);
 
     public SignedCommandVerifier(
@@ -52,8 +52,9 @@ public class SignedCommandVerifier
 
         lock (_usedNonces)
         {
-            if (!_usedNonces.Add(cmd.Nonce))
+            if (_usedNonces.ContainsKey(cmd.Nonce))
                 return new(false, "Nonce replay detected");
+            _usedNonces[cmd.Nonce] = DateTimeOffset.UtcNow;
         }
 
         var dataHash = string.IsNullOrEmpty(cmd.DataHash) ? "" : cmd.DataHash;
@@ -74,7 +75,12 @@ public class SignedCommandVerifier
 
     public void PruneNonces(TimeSpan maxAge)
     {
-        lock (_usedNonces) { _usedNonces.Clear(); }
+        var cutoff = DateTimeOffset.UtcNow - maxAge;
+        lock (_usedNonces)
+        {
+            var expired = _usedNonces.Where(kv => kv.Value < cutoff).Select(kv => kv.Key).ToList();
+            foreach (var key in expired) _usedNonces.Remove(key);
+        }
     }
 
     /// <summary>
