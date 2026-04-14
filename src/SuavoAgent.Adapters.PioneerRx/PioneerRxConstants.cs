@@ -19,6 +19,17 @@ public static class PioneerRxConstants
         StatusToBePutInBin
     };
 
+    /// All delivery-related statuses (3 ready + Out for Delivery + Completed).
+    /// Used by writeback engine for GUID discovery — all 5 must be discovered for writes.
+    public static readonly IReadOnlyList<string> AllDeliveryStatusNames = new[]
+    {
+        StatusWaitingForPickup,
+        StatusWaitingForDelivery,
+        StatusToBePutInBin,
+        StatusOutForDelivery,
+        StatusCompleted
+    };
+
     // Fallback GUIDs from Care Pharmacy — used when lookup table discovery fails
     public static readonly IReadOnlyDictionary<string, Guid> FallbackStatusGuids =
         new Dictionary<string, Guid>

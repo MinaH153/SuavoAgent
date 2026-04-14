@@ -1,3 +1,5 @@
+using SuavoAgent.Adapters.PioneerRx.Sql;
+using SuavoAgent.Contracts.Writeback;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
 
@@ -10,6 +12,8 @@ public sealed class WritebackProcessor : BackgroundService
     private readonly IpcPipeServer _pipeServer;
     private readonly Dictionary<string, WritebackStateMachine> _machines = new();
 
+    private PioneerRxWritebackEngine? _writebackEngine;
+
     public int ProcessIntervalSeconds { get; set; } = 30;
     public int ActiveMachineCount => _machines.Count(m => !m.Value.IsTerminal);
 
@@ -21,6 +25,12 @@ public sealed class WritebackProcessor : BackgroundService
         _logger = logger;
         _stateDb = stateDb;
         _pipeServer = pipeServer;
+    }
+
+    public void SetWritebackEngine(PioneerRxWritebackEngine engine)
+    {
+        _writebackEngine = engine;
+        _logger.LogInformation("Writeback engine attached (enabled={Enabled})", engine.WritebackEnabled);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -64,7 +74,8 @@ public sealed class WritebackProcessor : BackgroundService
         _logger.LogInformation("Recovered {Count} pending writebacks", pending.Count);
     }
 
-    public void EnqueueWriteback(string taskId, string rxNumber)
+    public void EnqueueWriteback(string taskId, string rxNumber, int fillNumber = 0,
+        string transition = "pickup", DateTimeOffset? deliveredAt = null)
     {
         if (_machines.ContainsKey(taskId))
         {
@@ -86,14 +97,14 @@ public sealed class WritebackProcessor : BackgroundService
 
         if (queued.Count == 0) return;
 
-        if (!_pipeServer.IsConnected)
+        if (_writebackEngine == null && !_pipeServer.IsConnected)
         {
-            foreach (var (taskId, machine) in queued)
+            foreach (var (taskId2, machine2) in queued)
             {
-                if (machine.CanFire(WritebackTrigger.HelperDisconnected))
+                if (machine2.CanFire(WritebackTrigger.HelperDisconnected))
                 {
-                    machine.Fire(WritebackTrigger.HelperDisconnected);
-                    _logger.LogDebug("Writeback {TaskId} blocked — no Helper", taskId);
+                    machine2.Fire(WritebackTrigger.HelperDisconnected);
+                    _logger.LogDebug("Writeback {TaskId} blocked — no Helper", taskId2);
                 }
             }
             return;
@@ -103,27 +114,109 @@ public sealed class WritebackProcessor : BackgroundService
         {
             if (ct.IsCancellationRequested) break;
 
+            // If no engine available, skip (backward compatible)
+            if (_writebackEngine == null || !_writebackEngine.WritebackEnabled)
+            {
+                _logger.LogDebug("Writeback {TaskId} — no engine or engine disabled", taskId);
+                continue;
+            }
+
+            // Get Rx info from persisted state
+            var state = _stateDb.GetPendingWritebacks()
+                .FirstOrDefault(s => s.TaskId == taskId);
+            if (state == default) continue;
+
+            if (!int.TryParse(state.RxNumber, out var rxNumber))
+            {
+                _logger.LogWarning("Writeback {TaskId} — invalid RxNumber '{Rx}'", taskId, state.RxNumber);
+                if (machine.CanFire(WritebackTrigger.BusinessError))
+                    machine.Fire(WritebackTrigger.BusinessError);
+                continue;
+            }
+
+            // Per-RxNumber serialization
+            if (!_writebackEngine.TryAcquireRxLock(rxNumber))
+            {
+                _logger.LogDebug("Writeback {TaskId} — Rx {Rx} locked, skipping cycle", taskId, rxNumber);
+                continue;
+            }
+
             try
             {
                 machine.Fire(WritebackTrigger.Claim);
-                machine.Fire(WritebackTrigger.StartUia);
 
-                _logger.LogInformation("Would send writeback {TaskId} to Helper via IPC", taskId);
+                // Resolve RxTransactionID (default to pickup transition)
+                var resolved = await _writebackEngine.ResolveTransactionIdAsync(
+                    rxNumber, 0, "pickup", ct);
 
-                // Real implementation sends IPC command and awaits response:
-                // machine.Fire(WritebackTrigger.WriteComplete);
-                // machine.Fire(WritebackTrigger.VerifyMatch);
-                // machine.Fire(WritebackTrigger.SyncComplete);
+                if (resolved == null)
+                {
+                    _logger.LogWarning("Writeback {TaskId} — Rx {Rx} not in expected state", taskId, rxNumber);
+                    if (machine.CanFire(WritebackTrigger.BusinessError))
+                        machine.Fire(WritebackTrigger.BusinessError);
+                    continue;
+                }
+
+                machine.Fire(WritebackTrigger.StartUia); // → InProgress
+
+                var result = await _writebackEngine.ExecutePickupAsync(
+                    resolved.Value.TxId, resolved.Value.CurrentStatus, ct);
+
+                MapResultToStateMachine(machine, result);
+
+                _logger.LogInformation("Writeback {TaskId} result: {Outcome}", taskId, result.Outcome);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Writeback {TaskId} processing error", taskId);
+                _logger.LogWarning(ex, "Writeback {TaskId} error", taskId);
                 if (machine.CanFire(WritebackTrigger.SystemError))
                     machine.Fire(WritebackTrigger.SystemError);
+            }
+            finally
+            {
+                _writebackEngine.ReleaseRxLock(rxNumber);
             }
         }
 
         await Task.CompletedTask;
+    }
+
+    private void MapResultToStateMachine(WritebackStateMachine machine, WritebackResult result)
+    {
+        switch (result.Outcome)
+        {
+            case "success":
+            case "verified_with_drift":
+                if (machine.CanFire(WritebackTrigger.WriteComplete))
+                    machine.Fire(WritebackTrigger.WriteComplete);
+                if (machine.CanFire(WritebackTrigger.VerifyMatch))
+                    machine.Fire(WritebackTrigger.VerifyMatch);
+                if (machine.CanFire(WritebackTrigger.SyncComplete))
+                    machine.Fire(WritebackTrigger.SyncComplete);
+                break;
+
+            case "already_at_target":
+                if (machine.CanFire(WritebackTrigger.AlreadyAtTarget))
+                    machine.Fire(WritebackTrigger.AlreadyAtTarget);
+                break;
+
+            case "status_conflict":
+            case "trigger_blocked":
+                if (machine.CanFire(WritebackTrigger.BusinessError))
+                    machine.Fire(WritebackTrigger.BusinessError);
+                break;
+
+            case "connection_reset":
+            case "sql_error":
+                if (machine.CanFire(WritebackTrigger.SystemError))
+                    machine.Fire(WritebackTrigger.SystemError);
+                break;
+
+            case "post_verify_mismatch":
+                if (machine.CanFire(WritebackTrigger.VerifyMismatch))
+                    machine.Fire(WritebackTrigger.VerifyMismatch);
+                break;
+        }
     }
 
     private void OnStateChanged(string taskId, WritebackState previousState, WritebackState newState, WritebackTrigger trigger)

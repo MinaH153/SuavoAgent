@@ -11,6 +11,9 @@ public sealed class PioneerRxSqlEngine : IDisposable
     private readonly ILogger<PioneerRxSqlEngine> _logger;
     private SqlConnection? _connection;
     private IReadOnlyList<Guid>? _deliveryReadyGuids;
+    private Dictionary<string, Guid>? _allStatusGuids;
+
+    public IReadOnlyDictionary<string, Guid>? GetAllDiscoveredGuids() => _allStatusGuids;
 
     public bool IsConnected => _connection?.State == System.Data.ConnectionState.Open;
 
@@ -57,6 +60,7 @@ public sealed class PioneerRxSqlEngine : IDisposable
             _logger.LogInformation("SQL connected to {DataSource}", _connection.DataSource);
 
             _deliveryReadyGuids = await DiscoverStatusGuidsAsync(ct);
+            await DiscoverAllStatusGuidsAsync(ct);
             return true;
         }
         catch (Exception ex)
@@ -115,6 +119,53 @@ WHERE Description IN ({statusParams})";
         }
 
         return FallbackGuids();
+    }
+
+    /// <summary>
+    /// Discovers ALL 5 delivery-related status GUIDs (including writeback targets).
+    /// Called once on connect, stored in _allStatusGuids for writeback engine use.
+    /// </summary>
+    private async Task DiscoverAllStatusGuidsAsync(CancellationToken ct)
+    {
+        if (_connection is null) return;
+
+        try
+        {
+            // Discover ALL delivery-related GUIDs (including writeback targets)
+            _allStatusGuids = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
+
+            var allStatusParams = string.Join(", ",
+                Enumerable.Range(0, PioneerRxConstants.AllDeliveryStatusNames.Count)
+                    .Select(i => $"@all{i}"));
+
+            var allQuery = $@"SELECT Description, RxTransactionStatusTypeID
+FROM Prescription.RxTransactionStatusType
+WHERE Description IN ({allStatusParams})
+ORDER BY Description";
+
+            await using var allCmd = new SqlCommand(allQuery, _connection);
+            allCmd.CommandTimeout = 10;
+            for (int i = 0; i < PioneerRxConstants.AllDeliveryStatusNames.Count; i++)
+                allCmd.Parameters.AddWithValue($"@all{i}", PioneerRxConstants.AllDeliveryStatusNames[i]);
+
+            await using var allReader = await allCmd.ExecuteReaderAsync(ct);
+            while (await allReader.ReadAsync(ct))
+            {
+                var desc = allReader.GetString(0);
+                var guid = allReader.GetGuid(1);
+                _allStatusGuids[desc] = guid;
+                _logger.LogDebug("Discovered status GUID: {Description} = {Guid}", desc, guid);
+            }
+
+            _logger.LogInformation("Discovered {Count}/5 delivery status GUIDs", _allStatusGuids.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "All-status GUID discovery failed");
+        }
+
+        // Satisfy the compiler — unreachable but required by the original method signature split
+        return;
     }
 
     private bool _itemJoinFailed;
