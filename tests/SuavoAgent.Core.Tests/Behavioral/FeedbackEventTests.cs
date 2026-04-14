@@ -100,4 +100,28 @@ public class FeedbackEventTests
         // 0.505 - 0.01 = 0.495 → clamped to 0.50
         Assert.Equal(0.50, FeedbackEvent.ApplyDecay(0.505));
     }
+
+    [Fact]
+    public void ApplyDecay_At051_DecaysToFloor()
+    {
+        // 0.51 - 0.01 = 0.50 — exactly at DecayFloor
+        var result = FeedbackEvent.ApplyDecay(0.51);
+        Assert.Equal(0.50, result, precision: 2);
+    }
+
+    [Fact]
+    public void ApplyDecay_AtFloor_StaysAtFloor()
+    {
+        // Already at 0.50 — should stay at 0.50 (early return branch)
+        var result = FeedbackEvent.ApplyDecay(0.50);
+        Assert.Equal(0.50, result, precision: 2);
+    }
+
+    [Fact]
+    public void ApplyDecay_BelowFloor_ClampsToFloor()
+    {
+        // 0.49 is below DecayFloor of 0.50 — should clamp up to 0.50
+        var result = FeedbackEvent.ApplyDecay(0.49);
+        Assert.Equal(0.50, result, precision: 2);
+    }
 }

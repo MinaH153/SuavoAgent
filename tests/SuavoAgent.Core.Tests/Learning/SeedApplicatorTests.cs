@@ -221,6 +221,33 @@ public class SeedApplicatorTests : IDisposable
         Assert.Empty(hashes);
     }
 
+    [Fact]
+    public void ApplyModelSeeds_LocalWins_PreservesLocalConfidence()
+    {
+        // Create local correlation — default confidence is 0.3 (single occurrence)
+        _db.UpsertCorrelatedAction(SessionId, "t1:btn1:q1", "t1", "btn1", "Button", "q1", true, "Tbl");
+
+        var localActions = _db.GetCorrelatedActions(SessionId);
+        var localConfidence = localActions.First(a => a.CorrelationKey == "t1:btn1:q1").Confidence;
+
+        // Seed arrives with higher confidence 0.6
+        var correlations = new[] {
+            new SeedCorrelation("t1:btn1:q1", "t1", "btn1", "Button", "q1", 0.91, 0.94, 14, 0.6)
+        };
+        var response = MakeModelResponse("digest-conf", correlations: correlations);
+
+        _applicator.ApplyModelSeeds(SessionId, response);
+
+        // Local confidence must be preserved — seed should NOT overwrite it
+        var actions = _db.GetCorrelatedActions(SessionId);
+        var match = actions.First(a => a.CorrelationKey == "t1:btn1:q1");
+        Assert.Equal(localConfidence, match.Confidence, precision: 1);
+
+        // Source should remain "local"
+        var source = _db.GetCorrelatedActionSource(SessionId, "t1:btn1:q1");
+        Assert.Equal("local", source.Source);
+    }
+
     // --- Helpers ---
 
     private static SeedResponse MakePatternResponse(string digest,
