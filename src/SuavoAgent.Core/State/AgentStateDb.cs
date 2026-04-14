@@ -2287,6 +2287,22 @@ public sealed class AgentStateDb : IDisposable
         };
     }
 
+    public IReadOnlyList<string> GetRecentWritebackTargets(string sessionId, int withinDays)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-withinDays).ToString("o");
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT DISTINCT target_id FROM feedback_events
+            WHERE session_id = @sid AND source = 'writeback' AND created_at >= @cutoff
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@cutoff", cutoff);
+        var results = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) results.Add(reader.GetString(0));
+        return results;
+    }
+
     public void Dispose()
     {
         _conn.Dispose();
