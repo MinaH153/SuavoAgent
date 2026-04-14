@@ -311,6 +311,7 @@ public sealed class AgentStateDb : IDisposable
                 UNIQUE(session_id, query_shape_hash)
             );
             CREATE INDEX IF NOT EXISTS idx_dqo_session_time ON dmv_query_observations(session_id, last_execution_time);
+            CREATE INDEX IF NOT EXISTS idx_dqo_shape ON dmv_query_observations(session_id, query_shape_hash);
 
             CREATE TABLE IF NOT EXISTS correlated_actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -329,6 +330,7 @@ public sealed class AgentStateDb : IDisposable
                 UNIQUE(session_id, correlation_key)
             );
             CREATE INDEX IF NOT EXISTS idx_ca_session_key ON correlated_actions(session_id, correlation_key);
+            CREATE INDEX IF NOT EXISTS idx_ca_writeback ON correlated_actions(session_id, query_is_write) WHERE query_is_write = 1;
 
             CREATE TABLE IF NOT EXISTS learned_routines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -347,6 +349,7 @@ public sealed class AgentStateDb : IDisposable
                 UNIQUE(session_id, routine_hash)
             );
             CREATE INDEX IF NOT EXISTS idx_lr_session ON learned_routines(session_id);
+            CREATE INDEX IF NOT EXISTS idx_lr_writeback ON learned_routines(session_id, has_writeback_candidate) WHERE has_writeback_candidate = 1;
             """;
         behavioralCmd.ExecuteNonQuery();
     }
@@ -1748,6 +1751,42 @@ public sealed class AgentStateDb : IDisposable
             SELECT COUNT(DISTINCT tree_hash) FROM behavioral_events
             WHERE session_id = @sid AND tree_hash IS NOT NULL
             """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    public IReadOnlyList<string> GetDistinctTreeHashes(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT DISTINCT tree_hash FROM behavioral_events
+            WHERE session_id = @sid AND tree_hash IS NOT NULL
+            ORDER BY tree_hash
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        using var reader = cmd.ExecuteReader();
+        var results = new List<string>();
+        while (reader.Read())
+            results.Add(reader.GetString(0));
+        return results;
+    }
+
+    public string? GetFirstBehavioralEventTimestamp(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT MIN(received_at) FROM behavioral_events
+            WHERE session_id = @sid
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        var result = cmd.ExecuteScalar();
+        return result is DBNull || result is null ? null : result.ToString();
+    }
+
+    public int GetDmvWriteShapeCount(string sessionId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM dmv_query_observations WHERE session_id = @sid AND is_write = 1";
         cmd.Parameters.AddWithValue("@sid", sessionId);
         return Convert.ToInt32(cmd.ExecuteScalar());
     }

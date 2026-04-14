@@ -4,17 +4,22 @@ namespace SuavoAgent.Contracts.Behavioral;
 /// Bounded ring buffer for behavioral events.
 /// Thread-safe. Flush is fire-and-forget (exceptions swallowed).
 /// Evicts oldest events when at capacity.
+/// Flushes when batch size (50 events) OR 5-second timer fires — whichever first.
 /// </summary>
-public sealed class BehavioralEventBuffer
+public sealed class BehavioralEventBuffer : IDisposable
 {
+    private static readonly TimeSpan TimerFlushInterval = TimeSpan.FromSeconds(5);
+
     private readonly int _capacity;
     private readonly int _batchSize;
     private readonly Func<IReadOnlyList<BehavioralEvent>, Task> _flushAction;
     private readonly Queue<BehavioralEvent> _queue = new();
     private readonly object _lock = new();
+    private readonly Timer _flushTimer;
     private long _seq;
     private long _droppedTotal;
     private long _droppedSinceFlush;
+    private bool _disposed;
 
     public BehavioralEventBuffer(
         int capacity,
@@ -24,7 +29,22 @@ public sealed class BehavioralEventBuffer
         _capacity = capacity;
         _batchSize = batchSize;
         _flushAction = flushAction;
+
+        // Timer-based flush: fires every 5 seconds to drain partial batches
+        _flushTimer = new Timer(_ => FireAndForgetFlush(), null,
+            TimerFlushInterval, TimerFlushInterval);
     }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _flushTimer.Dispose();
+    }
+
+    private void FireAndForgetFlush() =>
+        Task.Run(() => FlushAsync());
+
 
     /// <summary>Total events dropped since creation (evicted due to capacity).</summary>
     public long DroppedEventCount

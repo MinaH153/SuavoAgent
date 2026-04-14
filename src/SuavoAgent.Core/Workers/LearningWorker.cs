@@ -21,6 +21,8 @@ public sealed class LearningWorker : BackgroundService
     private readonly List<ILearningObserver> _observers = new();
     private string? _sessionId;
     private bool _inferenceRan;
+    private ActionCorrelator? _actionCorrelator;
+    private BehavioralEventReceiver? _behavioralReceiver;
     private bool _pomUploaded;
     private int _uploadRetryCount;
     private DateTimeOffset _nextUploadRetryAt;
@@ -90,9 +92,14 @@ public sealed class LearningWorker : BackgroundService
         _observers.Add(dmvObs);
 
         // Behavioral correlation and learning instances
-        var actionCorrelator = new ActionCorrelator(_db, _sessionId,
+        _actionCorrelator = new ActionCorrelator(_db, _sessionId,
             clockCalibrated: false);
-        _ = new BehavioralEventReceiver(_db, _sessionId);
+        _behavioralReceiver = new BehavioralEventReceiver(_db, _sessionId,
+            onInteraction: (treeHash, elementId, controlType, timestamp) =>
+                _actionCorrelator.RecordUiEvent(treeHash, elementId, controlType, timestamp));
+
+        // Wire DMV clock calibration state to correlator
+        dmvObs.ClockCalibratedChanged += calibrated => _actionCorrelator.SetClockCalibrated(calibrated);
 
         _db.AppendLearningAudit(_sessionId, "worker", "start",
             $"observers:{_observers.Count}", phiScrubbed: false);

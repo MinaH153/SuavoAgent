@@ -14,15 +14,25 @@ public sealed class BehavioralEventReceiver
 
     private readonly AgentStateDb _db;
     private readonly string _sessionId;
+    private readonly Action<string, string, string?, DateTimeOffset>? _onInteraction;
     private readonly Dictionary<string, DateTimeOffset> _recentTreeHashes = new();
     private long _nextSeq = 1;
 
     public record BatchResult(bool Accepted, int EventsStored, int EventsRejected);
 
-    public BehavioralEventReceiver(AgentStateDb db, string sessionId)
+    /// <param name="db">State database.</param>
+    /// <param name="sessionId">Active learning session ID.</param>
+    /// <param name="onInteraction">
+    /// Optional callback invoked after each Interaction event is persisted.
+    /// Args: (treeHash, elementId, controlType, timestamp).
+    /// Used to feed ActionCorrelator without creating a direct dependency.
+    /// </param>
+    public BehavioralEventReceiver(AgentStateDb db, string sessionId,
+        Action<string, string, string?, DateTimeOffset>? onInteraction = null)
     {
         _db = db;
         _sessionId = sessionId;
+        _onInteraction = onInteraction;
     }
 
     /// <summary>
@@ -73,6 +83,14 @@ public sealed class BehavioralEventReceiver
                 keystrokeCount: evt.KeystrokeCount,
                 occurrenceCount: evt.OccurrenceCount,
                 helperTimestamp: evt.Timestamp.ToString("o"));
+
+            // Notify ActionCorrelator after persisting Interaction events
+            if (evt.Type == BehavioralEventType.Interaction
+                && _onInteraction is not null
+                && evt.ElementId is not null)
+            {
+                _onInteraction(evt.TreeHash ?? "", evt.ElementId, evt.ControlType, evt.Timestamp);
+            }
 
             stored++;
         }

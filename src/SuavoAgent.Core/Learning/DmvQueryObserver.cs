@@ -34,6 +34,12 @@ public sealed class DmvQueryObserver : ILearningObserver
     public bool HasDmvAccess { get; private set; }
     public int ClockOffsetMs { get; private set; }
 
+    /// <summary>
+    /// Raised when clock calibration state changes (first successful calibration or after failure recovery).
+    /// Subscriber (LearningWorker) uses this to update ActionCorrelator's correlation window.
+    /// </summary>
+    public event Action<bool>? ClockCalibratedChanged;
+
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ClockCalibrationInterval = TimeSpan.FromHours(1);
 
@@ -171,6 +177,7 @@ public sealed class DmvQueryObserver : ILearningObserver
                 ClockOffsetMs = (int)(sqlOffset - roundTrip);
                 _logger.LogDebug(
                     "DmvQueryObserver: clock offset = {OffsetMs}ms", ClockOffsetMs);
+                ClockCalibratedChanged?.Invoke(true);
             }
         }
         catch (Exception ex)
@@ -178,6 +185,7 @@ public sealed class DmvQueryObserver : ILearningObserver
             // Non-fatal — fall back to offset = 0
             _logger.LogWarning(ex, "DmvQueryObserver: clock calibration failed, using offset=0");
             ClockOffsetMs = 0;
+            ClockCalibratedChanged?.Invoke(false);
         }
     }
 

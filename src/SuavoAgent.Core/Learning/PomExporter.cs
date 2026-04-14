@@ -69,6 +69,11 @@ public static class PomExporter
             behavioral = new
             {
                 uniqueScreens = db.GetUniqueScreenCount(sessionId),
+                observationDays = ComputeObservationDays(db, sessionId),
+                // TODO: droppedEventRate comes from heartbeat telemetry (BehavioralEventBuffer.DroppedEventCount
+                // in the Helper process). Not available in Core at export time. Wire via IPC heartbeat in future.
+                droppedEventRate = 0.0,
+                screenFingerprints = db.GetDistinctTreeHashes(sessionId),
                 routines = db.GetLearnedRoutines(sessionId).Select(r => new
                 {
                     routineHash = r.RoutineHash,
@@ -101,6 +106,16 @@ public static class PomExporter
             WriteIndented = false,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         });
+    }
+
+    private static double ComputeObservationDays(AgentStateDb db, string sessionId)
+    {
+        var firstTimestamp = db.GetFirstBehavioralEventTimestamp(sessionId);
+        if (firstTimestamp is null) return 0.0;
+        if (!DateTimeOffset.TryParse(firstTimestamp, null,
+            System.Globalization.DateTimeStyles.RoundtripKind, out var firstSeen))
+            return 0.0;
+        return Math.Round((DateTimeOffset.UtcNow - firstSeen).TotalDays, 2);
     }
 
     /// <summary>

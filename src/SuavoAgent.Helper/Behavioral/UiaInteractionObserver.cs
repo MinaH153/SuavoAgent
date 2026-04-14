@@ -3,6 +3,7 @@ using FlaUI.Core.AutomationElements.Infrastructure;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.EventHandlers;
 using FlaUI.UIA2;
+using FlaUI.UIA2.Patterns;
 using Serilog;
 using SuavoAgent.Contracts.Behavioral;
 
@@ -28,6 +29,7 @@ public sealed class UiaInteractionObserver : IDisposable
     // Keep handler references alive for unregister
     private FocusChangedEventHandlerBase? _focusHandler;
     private StructureChangedEventHandlerBase? _structureHandler;
+    private AutomationEventHandlerBase? _invokeHandler;
 
     private bool _disposed;
 
@@ -81,6 +83,21 @@ public sealed class UiaInteractionObserver : IDisposable
             _structureHandler = window.RegisterStructureChangedEvent(
                 TreeScope.Subtree,
                 OnStructureChanged);
+
+            // InvokePattern.Invoked on the window subtree — catches button/menu activations.
+            // Wrapped in try/catch: registration may fail on machines that restrict UIA event
+            // subscriptions (e.g., elevated processes, locked desktops).
+            try
+            {
+                _invokeHandler = window.RegisterAutomationEvent(
+                    InvokePattern.InvokedEvent,
+                    TreeScope.Subtree,
+                    (element, _) => RecordInvocation(element, depth: -1, childIndex: -1));
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(ex, "UiaInteractionObserver: InvokePattern.Invoked registration failed — button clicks will not be correlated");
+            }
 
             _logger.Information(
                 "UiaInteractionObserver: subscribed to PID {Pid}, window {Title}",
@@ -138,6 +155,20 @@ public sealed class UiaInteractionObserver : IDisposable
         catch (Exception ex)
         {
             _logger.Debug(ex, "UiaInteractionObserver: UnregisterStructureChangedEvent warning");
+        }
+
+        try
+        {
+            if (_invokeHandler is not null && _subscribedWindow is not null)
+            {
+                if (_subscribedWindow is IAutomationElementEventUnsubscriber unsub)
+                    unsub.UnregisterAutomationEventHandler(_invokeHandler);
+                _invokeHandler = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug(ex, "UiaInteractionObserver: UnregisterAutomationEventHandler (invoke) warning");
         }
 
         _subscribedWindow = null;
