@@ -129,6 +129,9 @@ if ($pmsType) {
 # ============================================
 # PHASE 2: Extract SQL credentials
 # ============================================
+# Pause transcript during credential discovery — SQL passwords must not be logged
+try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
+
 if (-not $pmsType) {
     Write-Step "Phase 2: Skipping SQL discovery (no PMS detected)"
     $sqlServer = ""
@@ -326,6 +329,9 @@ if (-not $sqlUser -and -not $discoveredConnStr) {
     }
 }
 } # end if ($pmsType)
+
+# Resume transcript — credentials are now in variables, not transcript
+try { Start-Transcript -Path $transcriptPath -Append -ErrorAction SilentlyContinue | Out-Null } catch { }
 
 Write-Host ""
 Write-Host "  +-------------------------------------+" -ForegroundColor White
@@ -539,4 +545,11 @@ Write-Host "  Check logs: Get-Content $dataDir\logs\core-*.log -Tail 50" -Foregr
 Write-Host ""
 Write-Host "  Install log: $transcriptPath" -ForegroundColor Gray
 
-Stop-Transcript | Out-Null
+# Clean up install transcript on success
+try {
+    Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
+    if ($transcriptPath -and (Test-Path $transcriptPath)) {
+        Remove-Item $transcriptPath -Force -ErrorAction SilentlyContinue
+        Write-Ok "Install transcript cleaned up"
+    }
+} catch { }
