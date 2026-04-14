@@ -18,7 +18,10 @@ param(
     [string]$CloudUrl = "https://suavollc.com",
     [string]$ApiKey = "",
     [string]$PharmacyId = "",
-    [string]$ReleaseTag = "v2.0.0-alpha"
+    [string]$ReleaseTag = "v2.0.0-alpha",
+    [string]$RepoOwner = "MinaH153",
+    [string]$RepoName = "SuavoAgent",
+    [switch]$LearningMode
 )
 
 if ($ReleaseTag -notmatch '^v\d+\.\d+\.\d+') {
@@ -29,7 +32,7 @@ if ($ReleaseTag -notmatch '^v\d+\.\d+\.\d+') {
 $ErrorActionPreference = "Stop"
 $installDir = "C:\Program Files\Suavo\Agent"
 $dataDir = "$env:ProgramData\SuavoAgent"
-$base = "https://github.com/MinaH153/SuavoAgent/releases/download/$ReleaseTag"
+$base = "https://github.com/$RepoOwner/$RepoName/releases/download/$ReleaseTag"
 
 function Write-Step($msg) { Write-Host "`n[$((Get-Date).ToString('HH:mm:ss'))] $msg" -ForegroundColor Cyan }
 function Write-Ok($msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
@@ -42,6 +45,14 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 if (-not $isAdmin) {
     Write-Fail "Run as Administrator"
     exit 1
+}
+
+# ── Learning mode prompt (if not explicitly set via flag) ──
+if (-not $PSBoundParameters.ContainsKey('LearningMode')) {
+    $lmResponse = Read-Host "Enable learning mode? (30-day observation before automation) [y/N]"
+    if ($lmResponse -eq 'y' -or $lmResponse -eq 'Y') {
+        $LearningMode = [switch]::new($true)
+    }
 }
 
 Write-Host ""
@@ -397,6 +408,7 @@ $config = @{
         Version = "2.0.0"
         SqlServer = $sqlServer
         SqlDatabase = $sqlDatabase
+        LearningMode = [bool]$LearningMode
     }
 }
 if ($sqlUser) {
