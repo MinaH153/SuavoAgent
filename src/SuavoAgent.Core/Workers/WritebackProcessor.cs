@@ -1,5 +1,6 @@
 using SuavoAgent.Adapters.PioneerRx.Sql;
 using SuavoAgent.Contracts.Writeback;
+using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
 
@@ -13,6 +14,7 @@ public sealed class WritebackProcessor : BackgroundService
     private readonly Dictionary<string, WritebackStateMachine> _machines = new();
 
     private PioneerRxWritebackEngine? _writebackEngine;
+    private string? _sessionId;
 
     public int ProcessIntervalSeconds { get; set; } = 30;
     public int ActiveMachineCount => _machines.Count(m => !m.Value.IsTerminal);
@@ -31,6 +33,12 @@ public sealed class WritebackProcessor : BackgroundService
     {
         _writebackEngine = engine;
         _logger.LogInformation("Writeback engine attached (enabled={Enabled})", engine.WritebackEnabled);
+    }
+
+    public void SetSessionId(string sessionId)
+    {
+        _sessionId = sessionId;
+        _logger.LogInformation("Session ID attached to WritebackProcessor: {SessionId}", sessionId);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -163,6 +171,24 @@ public sealed class WritebackProcessor : BackgroundService
                     resolved.Value.TxId, resolved.Value.CurrentStatus, ct);
 
                 MapResultToStateMachine(machine, result);
+
+                // Record feedback for correlation confidence adjustment
+                if (_sessionId != null)
+                {
+                    try
+                    {
+                        FeedbackCollector.RecordWritebackOutcome(
+                            _stateDb, _sessionId, machine.TaskId,
+                            result.CorrelationKey ?? "",
+                            result.Outcome,
+                            result.UiEventTimestamp ?? DateTimeOffset.UtcNow.ToString("o"),
+                            result.SqlExecutionTimestamp ?? DateTimeOffset.UtcNow.ToString("o"));
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Feedback recording failed for {TaskId} — non-fatal", machine.TaskId);
+                    }
+                }
 
                 _logger.LogInformation("Writeback {TaskId} result: {Outcome}", taskId, result.Outcome);
             }
