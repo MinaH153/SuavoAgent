@@ -517,6 +517,43 @@ public sealed class AgentStateDb : IDisposable
             """;
             stationCmd.ExecuteNonQuery();
         }
+
+        Execute("""
+            CREATE TABLE IF NOT EXISTS document_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                doc_hash TEXT NOT NULL,
+                file_type TEXT,
+                schema_fingerprint TEXT,
+                column_count INTEGER,
+                row_count_bucket TEXT,
+                category TEXT DEFAULT 'unknown',
+                last_touched TEXT DEFAULT (datetime('now')),
+                touch_count INTEGER DEFAULT 1,
+                UNIQUE(session_id, doc_hash)
+            )
+        """);
+
+        Execute("""
+            CREATE TABLE IF NOT EXISTS business_meta (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                business_id TEXT NOT NULL UNIQUE,
+                industry TEXT DEFAULT 'unknown',
+                detected_apps TEXT,
+                station_role TEXT,
+                software_stack_hash TEXT,
+                onboard_ts TEXT DEFAULT (datetime('now')),
+                learning_phase TEXT,
+                agent_version TEXT
+            )
+        """);
+    }
+
+    private void Execute(string sql)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
     }
 
     private void TryAlter(string sql)
@@ -2653,6 +2690,58 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@mon", monitorCount);
         cmd.Parameters.AddWithValue("@os", osVersion);
         cmd.Parameters.AddWithValue("@json", profileJson);
+        cmd.ExecuteNonQuery();
+    }
+
+    // ── Document Profiles ──
+
+    public void UpsertDocumentProfile(string sessionId, string docHash, string? fileType,
+        string? schemaFingerprint, int columnCount, string? rowCountBucket, string? category)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO document_profiles (session_id, doc_hash, file_type, schema_fingerprint,
+                column_count, row_count_bucket, category, last_touched, touch_count)
+            VALUES (@sid, @hash, @type, @schema, @cols, @rows, @cat, datetime('now'), 1)
+            ON CONFLICT(session_id, doc_hash) DO UPDATE SET
+                last_touched = datetime('now'),
+                touch_count = touch_count + 1,
+                schema_fingerprint = COALESCE(@schema, schema_fingerprint),
+                column_count = COALESCE(@cols, column_count)
+        """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@hash", docHash);
+        cmd.Parameters.AddWithValue("@type", (object?)fileType ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@schema", (object?)schemaFingerprint ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@cols", columnCount);
+        cmd.Parameters.AddWithValue("@rows", (object?)rowCountBucket ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@cat", (object?)category ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    // ── Business Meta ──
+
+    public void UpsertBusinessMeta(string businessId, string industry, string? detectedApps,
+        string? stationRole, string? agentVersion, string? learningPhase)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO business_meta (business_id, industry, detected_apps, station_role,
+                agent_version, learning_phase)
+            VALUES (@bid, @ind, @apps, @role, @ver, @phase)
+            ON CONFLICT(business_id) DO UPDATE SET
+                industry = @ind,
+                detected_apps = COALESCE(@apps, detected_apps),
+                station_role = COALESCE(@role, station_role),
+                agent_version = @ver,
+                learning_phase = @phase
+        """;
+        cmd.Parameters.AddWithValue("@bid", businessId);
+        cmd.Parameters.AddWithValue("@ind", industry);
+        cmd.Parameters.AddWithValue("@apps", (object?)detectedApps ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@role", (object?)stationRole ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ver", (object?)agentVersion ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@phase", (object?)learningPhase ?? DBNull.Value);
         cmd.ExecuteNonQuery();
     }
 
