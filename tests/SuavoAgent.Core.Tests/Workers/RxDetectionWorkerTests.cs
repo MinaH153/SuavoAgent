@@ -82,7 +82,7 @@ public class RxDetectionWorkerTests : IDisposable
         Assert.Equal(1, queue.GetArrayLength());
 
         var rx = queue[0];
-        Assert.Equal("12345", rx.GetProperty("rxNumber").GetString());
+        Assert.True(rx.TryGetProperty("rxNumberHash", out _));
         Assert.Equal("Amoxicillin 500mg", rx.GetProperty("drugName").GetString());
         Assert.Equal("00093-3109-01", rx.GetProperty("ndc").GetString());
         Assert.Equal(30m, rx.GetProperty("quantity").GetDecimal());
@@ -94,6 +94,23 @@ public class RxDetectionWorkerTests : IDisposable
         var json = RxDetectionWorker.SerializeRxBatch(Array.Empty<RxMetadata>());
         var doc = JsonDocument.Parse(json);
         Assert.Equal(0, doc.RootElement.GetProperty("data").GetProperty("totalDetected").GetInt32());
+    }
+
+    [Fact]
+    public void SerializeRxBatch_HashesRxNumbers()
+    {
+        var rxs = new List<RxMetadata>
+        {
+            new("12345", "Lisinopril", "12345-678-90",
+                DateTime.UtcNow, 30m, Guid.NewGuid(), DateTimeOffset.UtcNow)
+        };
+
+        var json = RxDetectionWorker.SerializeRxBatch(rxs, "test-salt");
+
+        // Raw Rx number must NOT appear in payload
+        Assert.DoesNotContain("\"12345\"", json);
+        // But hashed version should exist
+        Assert.Contains("rxNumberHash", json);
     }
 
     public void Dispose()

@@ -16,7 +16,7 @@ public class SignedCommandVerifier
     private readonly string _agentId;
     private readonly string _fingerprint;
     private readonly Dictionary<string, DateTimeOffset> _usedNonces = new();
-    private readonly TimeSpan _timestampWindow = TimeSpan.FromSeconds(300);
+    private readonly TimeSpan _timestampWindow = TimeSpan.FromSeconds(120);
 
     public SignedCommandVerifier(
         Dictionary<string, string> keyRegistry,

@@ -113,7 +113,7 @@ public sealed class RxDetectionWorker : BackgroundService
         if (readyRxs.Count > 0)
         {
             _logger.LogInformation("Detected {Count} ready prescriptions (metadata-only)", readyRxs.Count);
-            var json = SerializeRxBatch(readyRxs);
+            var json = SerializeRxBatch(readyRxs, _options.HmacSalt ?? "");
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -152,7 +152,7 @@ public sealed class RxDetectionWorker : BackgroundService
             var result = await _canarySource.DetectWithCanaryAsync(templateBaseline, ct);
             if (result.Rxs.Count > 0)
             {
-                var json = SerializeRxBatch(result.Rxs);
+                var json = SerializeRxBatch(result.Rxs, _options.HmacSalt ?? "");
                 if (!await TrySyncPayloadToCloudAsync(json, ct))
                     _stateDb.InsertUnsyncedBatch(json);
             }
@@ -214,7 +214,7 @@ public sealed class RxDetectionWorker : BackgroundService
         if (detection.Rxs.Count > 0)
         {
             _logger.LogInformation("Canary: {Count} ready prescriptions — schema verified clean", detection.Rxs.Count);
-            var json = SerializeRxBatch(detection.Rxs);
+            var json = SerializeRxBatch(detection.Rxs, _options.HmacSalt ?? "");
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -353,7 +353,7 @@ public sealed class RxDetectionWorker : BackgroundService
     /// Serializes PHI-free metadata batch. Contains ZERO patient data.
     /// Patient data is only accessible via signed fetch_patient command.
     /// </summary>
-    internal static string SerializeRxBatch(IReadOnlyList<RxMetadata> rxs)
+    internal static string SerializeRxBatch(IReadOnlyList<RxMetadata> rxs, string hmacSalt = "")
     {
         var payload = new
         {
@@ -362,7 +362,7 @@ public sealed class RxDetectionWorker : BackgroundService
             {
                 rxDeliveryQueue = rxs.Select(rx => new
                 {
-                    rxNumber = rx.RxNumber,
+                    rxNumberHash = Learning.PhiScrubber.HmacHash(rx.RxNumber, hmacSalt),
                     drugName = rx.DrugName,
                     ndc = rx.Ndc,
                     dateFilled = rx.DateFilled?.ToString("o"),
