@@ -1372,6 +1372,22 @@ public sealed class AgentStateDb : IDisposable
             ContractVersion: reader.GetInt32(8));
     }
 
+    /// <summary>
+    /// Returns the most recent contract fingerprint for a pharmacy from the canary baselines.
+    /// </summary>
+    public string? GetLatestContractFingerprint(string pharmacyId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT contract_fingerprint FROM schema_canary_baselines
+            WHERE pharmacy_id = @pid
+            ORDER BY updated_at DESC LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("@pid", pharmacyId);
+        var result = cmd.ExecuteScalar();
+        return result is DBNull or null ? null : (string)result;
+    }
+
     // ── Canary Incidents ──
 
     public void InsertCanaryIncident(string pharmacyId, string adapterType, string severity,

@@ -452,11 +452,16 @@ public sealed class LearningWorker : BackgroundService
                 ? _db.GetDistinctTreeHashes(_sessionId!)
                 : (IReadOnlyList<string>)Array.Empty<string>();
 
+            var contractFingerprint = _db.GetLatestContractFingerprint(
+                _options.PharmacyId ?? "unknown") ?? "";
+            // PmsVersionHash: not yet computed — populated after PMS executable discovery
+            var pmsVersionHash = "";
+
             var seedReq = new SeedRequest(
                 "PioneerRx",
                 phase,
-                "", // contract fingerprint — populated by cloud from baseline
-                "", // pms version hash — populated by cloud from heartbeat
+                contractFingerprint,
+                pmsVersionHash,
                 treeHashes,
                 _lastSeedDigest);
 
