@@ -65,6 +65,35 @@ public static class PomExporter
                 confidence = c.Confidence,
                 evidence = c.EvidenceJson,
             }).ToArray(),
+
+            behavioral = new
+            {
+                uniqueScreens = db.GetUniqueScreenCount(sessionId),
+                routines = db.GetLearnedRoutines(sessionId).Select(r => new
+                {
+                    routineHash = r.RoutineHash,
+                    path = JsonSerializer.Deserialize<JsonElement>(r.PathJson),
+                    pathLength = r.PathLength,
+                    frequency = r.Frequency,
+                    confidence = r.Confidence,
+                    hasWritebackCandidate = r.HasWritebackCandidate,
+                    correlatedWriteQueries = r.CorrelatedWriteQueries is not null
+                        ? JsonSerializer.Deserialize<JsonElement>(r.CorrelatedWriteQueries) : (JsonElement?)null,
+                }).ToArray(),
+                writebackCandidates = db.GetWritebackCandidates(sessionId).Select(c => new
+                {
+                    correlationKey = c.CorrelationKey,
+                    elementId = c.ElementId,
+                    controlType = c.ControlType,
+                    queryShape = c.QueryShape,
+                    tablesReferenced = c.TablesReferenced is not null
+                        ? JsonSerializer.Deserialize<JsonElement>(c.TablesReferenced) : (JsonElement?)null,
+                    occurrences = c.OccurrenceCount,
+                    confidence = c.Confidence,
+                }).ToArray(),
+                dmvAccess = db.GetDmvQueryObservations(sessionId, 1).Count > 0,
+                totalInteractions = db.GetBehavioralEventCount(sessionId, "interaction"),
+            },
         };
 
         return JsonSerializer.Serialize(export, new JsonSerializerOptions
