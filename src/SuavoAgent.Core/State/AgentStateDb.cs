@@ -400,6 +400,43 @@ public sealed class AgentStateDb : IDisposable
         TryAlter("ALTER TABLE correlated_actions ADD COLUMN consecutive_failures INTEGER DEFAULT 0");
         TryAlter("ALTER TABLE correlated_actions ADD COLUMN stale INTEGER DEFAULT 0");
         TryAlter("ALTER TABLE correlated_actions ADD COLUMN stale_since TEXT");
+
+        // Spec D: Collective Intelligence — seed provenance on correlated_actions
+        TryAlter("ALTER TABLE correlated_actions ADD COLUMN source TEXT NOT NULL DEFAULT 'local'");
+        TryAlter("ALTER TABLE correlated_actions ADD COLUMN seed_digest TEXT");
+        TryAlter("ALTER TABLE correlated_actions ADD COLUMN seeded_at TEXT");
+
+        // Spec D: applied_seeds
+        using (var seedCmd = _conn.CreateCommand())
+        {
+            seedCmd.CommandText = @"
+                CREATE TABLE IF NOT EXISTS applied_seeds (
+                    seed_digest TEXT PRIMARY KEY,
+                    phase TEXT NOT NULL,
+                    applied_at TEXT NOT NULL,
+                    correlations_applied INTEGER NOT NULL,
+                    correlations_skipped INTEGER NOT NULL
+                )";
+            seedCmd.ExecuteNonQuery();
+        }
+
+        // Spec D: seed_items
+        using (var itemCmd = _conn.CreateCommand())
+        {
+            itemCmd.CommandText = @"
+                CREATE TABLE IF NOT EXISTS seed_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    seed_digest TEXT NOT NULL,
+                    item_type TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    applied_at TEXT NOT NULL,
+                    confirmed_at TEXT,
+                    local_match_count INTEGER NOT NULL DEFAULT 0,
+                    rejected_at TEXT,
+                    UNIQUE(seed_digest, item_type, item_key)
+                )";
+            itemCmd.ExecuteNonQuery();
+        }
     }
 
     private void TryAlter(string sql)
@@ -2301,6 +2338,120 @@ public sealed class AgentStateDb : IDisposable
         using var reader = cmd.ExecuteReader();
         while (reader.Read()) results.Add(reader.GetString(0));
         return results;
+    }
+
+    // --- Spec D: Seed state methods ---
+
+    public record CorrelationSource(string Source, string? SeedDigest, string? SeededAt);
+
+    public CorrelationSource GetCorrelatedActionSource(string sessionId, string correlationKey)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT source, seed_digest, seeded_at FROM correlated_actions WHERE session_id = @sid AND correlation_key = @key";
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@key", correlationKey);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return new("local", null, null);
+        return new(r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2));
+    }
+
+    public void SetCorrelatedActionSource(string sessionId, string correlationKey, string source, string? seedDigest, string? seededAt)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE correlated_actions SET source = @src, seed_digest = @dig, seeded_at = @at WHERE session_id = @sid AND correlation_key = @key";
+        cmd.Parameters.AddWithValue("@src", source);
+        cmd.Parameters.AddWithValue("@dig", (object?)seedDigest ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@at", (object?)seededAt ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@key", correlationKey);
+        cmd.ExecuteNonQuery();
+    }
+
+    public record AppliedSeed(string SeedDigest, string Phase, string AppliedAt, int CorrelationsApplied, int CorrelationsSkipped);
+
+    public void InsertAppliedSeed(string seedDigest, string phase, string appliedAt, int correlationsApplied, int correlationsSkipped)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "INSERT OR IGNORE INTO applied_seeds (seed_digest, phase, applied_at, correlations_applied, correlations_skipped) VALUES (@d, @p, @a, @ca, @cs)";
+        cmd.Parameters.AddWithValue("@d", seedDigest);
+        cmd.Parameters.AddWithValue("@p", phase);
+        cmd.Parameters.AddWithValue("@a", appliedAt);
+        cmd.Parameters.AddWithValue("@ca", correlationsApplied);
+        cmd.Parameters.AddWithValue("@cs", correlationsSkipped);
+        cmd.ExecuteNonQuery();
+    }
+
+    public AppliedSeed? GetAppliedSeed(string seedDigest)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT seed_digest, phase, applied_at, correlations_applied, correlations_skipped FROM applied_seeds WHERE seed_digest = @d";
+        cmd.Parameters.AddWithValue("@d", seedDigest);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return null;
+        return new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetInt32(3), r.GetInt32(4));
+    }
+
+    public record SeedItem(int Id, string SeedDigest, string ItemType, string ItemKey, string AppliedAt, string? ConfirmedAt, int LocalMatchCount, string? RejectedAt);
+
+    public void InsertSeedItem(string seedDigest, string itemType, string itemKey, string appliedAt)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "INSERT OR IGNORE INTO seed_items (seed_digest, item_type, item_key, applied_at) VALUES (@d, @t, @k, @a)";
+        cmd.Parameters.AddWithValue("@d", seedDigest);
+        cmd.Parameters.AddWithValue("@t", itemType);
+        cmd.Parameters.AddWithValue("@k", itemKey);
+        cmd.Parameters.AddWithValue("@a", appliedAt);
+        cmd.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<SeedItem> GetSeedItems(string seedDigest)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT id, seed_digest, item_type, item_key, applied_at, confirmed_at, local_match_count, rejected_at FROM seed_items WHERE seed_digest = @d";
+        cmd.Parameters.AddWithValue("@d", seedDigest);
+        var items = new List<SeedItem>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            items.Add(new(r.GetInt32(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4),
+                r.IsDBNull(5) ? null : r.GetString(5), r.GetInt32(6), r.IsDBNull(7) ? null : r.GetString(7)));
+        return items;
+    }
+
+    public void ConfirmSeedItem(string seedDigest, string itemType, string itemKey, string confirmedAt)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = @"
+            UPDATE seed_items SET confirmed_at = COALESCE(confirmed_at, @c), local_match_count = local_match_count + 1
+            WHERE seed_digest = @d AND item_type = @t AND item_key = @k AND rejected_at IS NULL";
+        cmd.Parameters.AddWithValue("@c", confirmedAt);
+        cmd.Parameters.AddWithValue("@d", seedDigest);
+        cmd.Parameters.AddWithValue("@t", itemType);
+        cmd.Parameters.AddWithValue("@k", itemKey);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void RejectSeedItem(string seedDigest, string itemType, string itemKey, string rejectedAt)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE seed_items SET rejected_at = @r WHERE seed_digest = @d AND item_type = @t AND item_key = @k";
+        cmd.Parameters.AddWithValue("@r", rejectedAt);
+        cmd.Parameters.AddWithValue("@d", seedDigest);
+        cmd.Parameters.AddWithValue("@t", itemType);
+        cmd.Parameters.AddWithValue("@k", itemKey);
+        cmd.ExecuteNonQuery();
+    }
+
+    public double GetSeedConfirmationRatio(string seedDigest)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT
+                CAST(SUM(CASE WHEN confirmed_at IS NOT NULL THEN 1 ELSE 0 END) AS REAL) /
+                NULLIF(SUM(CASE WHEN rejected_at IS NULL THEN 1 ELSE 0 END), 0)
+            FROM seed_items WHERE seed_digest = @d";
+        cmd.Parameters.AddWithValue("@d", seedDigest);
+        var result = cmd.ExecuteScalar();
+        return result is double d ? d : 0.0;
     }
 
     public void Dispose()
