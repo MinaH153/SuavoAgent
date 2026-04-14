@@ -1,15 +1,15 @@
 # SuavoAgent v3 "Phantom" — Zero-Config One-Paste Installer
-# Paste into Admin PowerShell at any PioneerRx pharmacy. That's it.
+#
+# INSTALL (paste into Admin PowerShell):
+#   Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/MinaH153/SuavoAgent/main/bootstrap.ps1 -OutFile $env:TEMP\bs.ps1; & $env:TEMP\bs.ps1
 #
 # What it does:
-# 1. Finds PioneerRx install path
-# 2. Reads PioneerPharmacy.exe.config → extracts SQL host
-# 3. Loads Enterprise Library DLL → calls ConnectionStringServer (port 12345)
-# 4. Parses connection string → server, database, user, password
-# 5. Downloads agent binaries from GitHub
-# 6. Writes appsettings.json with discovered credentials
-# 7. Installs + starts Windows services
-# 8. Verifies prescriptions are readable
+# 1. Detects pharmacy management system (PioneerRx, or none)
+# 2. Discovers SQL credentials if PMS found
+# 3. Downloads signed agent binaries from GitHub
+# 4. Writes appsettings.json with discovered credentials
+# 5. Installs + starts Windows services
+# 6. Agent auto-discovers PMS during learning phase if not detected at install
 #
 # SAFETY: ConnectionStringServer is called ONCE. Agent uses MaxPoolSize=1.
 # Never disrupts pharmacy operations.
