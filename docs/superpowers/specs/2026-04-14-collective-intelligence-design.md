@@ -25,17 +25,19 @@ Two independent gates determine transferability of collective knowledge:
 - Validates: SQL shapes execute, table/column refs exist, status GUIDs match
 - Available at: pattern phase entry
 
-**Gate 2 — UI** (tree_hash overlap from UiaTreeObserver)
-- Structural hashes of automation tree per screen
+**Gate 2 — UI** (pms_version_hash + tree_hash overlap from UiaTreeObserver)
+- `pms_version_hash`: hash of PMS executable version/build (exported in behavioral section, sent in seed request)
+- Tree hashes: structural hashes of automation tree per screen
 - Partial overlap valid: 8/10 matching screens → seeds for those 8 screens
+- **Minimum overlap: ≥ 3 non-generic tree_hashes** (generic screens like login/splash excluded via a cloud-maintained exclusion list of high-frequency tree_hashes appearing across >80% of pms_version_hashes). One matching screen is insufficient — could be a common dialog shared across unrelated UI builds.
 - Available at: model phase entry
 
 **Tiered fallback:**
 
 | Schema | UI Overlap | Seed Content | Starting Confidence |
 |---|---|---|---|
-| Match | ≥ 1 tree_hash | Full correlations for overlapping screens | `min(0.6, aggregate_confidence × 0.7)` |
-| Match | None | SQL shapes, status dictionaries, workflow hints only | N/A (structural, no correlations) |
+| Match | ≥ 3 non-generic tree_hashes | Full correlations for overlapping screens | `min(0.6, aggregate_confidence × 0.7)` |
+| Match | < 3 or none | SQL shapes, status dictionaries, workflow hints only | N/A (structural, no correlations) |
 | Mismatch | — | Nothing. Observe-only. | Default 0.3 |
 
 **Transfer discount formula:** `seeded_confidence = min(0.6, aggregate_confidence × 0.7)`
@@ -50,38 +52,55 @@ Encodes collective conviction. Weak signals stay weak.
 
 ## 2. Cloud Tables (7 Pattern-Centric)
 
-Populated from two existing streams: POM (once at model phase) + heartbeat telemetry (continuous). Merge-on-ingest — new contributions upsert, never append pharmacy-specific rows.
+Populated from two existing streams: POM (once at model phase) + heartbeat telemetry (continuous). Two-layer storage: immutable **fact layer** preserves per-contributor data; **materialized aggregate layer** supports fast seed queries.
 
-| # | Table | Key | Source | Contains |
-|---|---|---|---|---|
-| 1 | `pms_fingerprints` | (adapter_type, pms_version_hash) | POM behavioral.screenFingerprints | Tree hashes, contributor_count, last_contributed_at |
-| 2 | `schema_atlas` | (adapter_type, contract_fingerprint) | POM schemas + canary baselines | Table/column/type map, object_fingerprint, status_map_fingerprint, contributor_count, last_seen |
-| 3 | `status_dictionaries` | (adapter_type, status_table, status_guid) | POM discovered_statuses + heartbeat | Description, contributor_count, first_seen, last_seen |
-| 4 | `workflow_templates` | (routine_hash, contract_fingerprint) | POM behavioral.routines | Action path, avg_frequency, avg_confidence, has_writeback_candidate, contributor_count |
-| 5 | `rx_queue_patterns` | (query_shape_hash, contract_fingerprint) | POM behavioral.writebackCandidates | Parameterized SQL, tables_referenced[], aggregate_confidence, aggregate_success_rate, contributor_count |
-| 6 | `collective_correlations` | (correlation_key, contract_fingerprint, tree_hash) | POM writebackCandidates + feedback.confidenceTrajectory | element_id, control_type, query_shape_hash, aggregate_confidence, aggregate_success_rate, contributor_count |
-| 7 | `seed_manifests` | (pharmacy_id, phase, seed_digest) | Cloud assembler at seed pull time | Seed package snapshot, source_contribution_ids (anonymized), gates_passed[], created_at, applied_at |
+### Fact Layer (immutable, append-only)
 
-**Merge-on-ingest rules:**
-- `contributor_count`: increment, deduplicated by contributing pharmacy hash
-- `aggregate_confidence`: weighted average across contributors, weighted by writebackAttempts
+| Table | Key | Contains |
+|---|---|---|
+| `contribution_facts` | (contributor_hash, pattern_type, pattern_key) | Raw contribution per pharmacy per pattern. pattern_type: `correlation`, `query_shape`, `status`, `workflow`, `screen`. Includes confidence, success_rate, sample_count, contributed_at, last_heartbeat_at. |
+
+Each POM decomposition appends/upserts fact rows keyed by `contributor_hash` (SHA-256 of pharmacy_id — anonymized, no reverse lookup). Facts are never deleted, only superseded by newer facts from the same contributor.
+
+### Aggregate Layer (materialized from facts)
+
+| # | Table | Key | Contains |
+|---|---|---|---|
+| 1 | `pms_fingerprints` | (adapter_type, pms_version_hash) | Tree hashes, contributor_count, last_contributed_at |
+| 2 | `schema_atlas` | (adapter_type, contract_fingerprint) | Table/column/type map, object_fingerprint, status_map_fingerprint, contributor_count, last_seen |
+| 3 | `status_dictionaries` | (adapter_type, status_table, status_guid) | Description, contributor_count, first_seen, last_seen |
+| 4 | `workflow_templates` | (routine_hash, contract_fingerprint) | Action path, avg_frequency, avg_confidence, has_writeback_candidate, contributor_count |
+| 5 | `rx_queue_patterns` | (query_shape_hash, contract_fingerprint) | Parameterized SQL, tables_referenced[], aggregate_confidence, aggregate_success_rate, contributor_count |
+| 6 | `collective_correlations` | (correlation_key, contract_fingerprint, tree_hash) | element_id, control_type, query_shape_hash, aggregate_confidence, aggregate_success_rate, contributor_count |
+| 7 | `seed_manifests` | (pharmacy_id, phase, seed_digest) | Seed package snapshot, source_contribution_ids (contributor_hashes from fact layer), gates_passed[], created_at, applied_at |
+
+8 tables total (1 fact + 6 aggregate + 1 manifest).
+
+**Materialization rules** (recomputed from `contribution_facts`):
+- `contributor_count`: distinct contributor_hashes per pattern_key
+- `aggregate_confidence`: weighted average across contributors, weighted by sample_count
 - `aggregate_success_rate`: weighted average, same weighting
-- `last_seen` / `last_contributed_at`: updated to now
+- `last_seen` / `last_contributed_at`: max(contributed_at) across contributors
 
-**Staleness decay** (applied at merge recalculation):
-- Last heartbeat >30 days ago → 0.5× weight
-- Last heartbeat >90 days ago → 0× weight (effectively removed from aggregates)
+**Staleness decay** (applied during materialization):
+- contributor's last_heartbeat_at >30 days ago → 0.5× weight
+- contributor's last_heartbeat_at >90 days ago → 0× weight (excluded from aggregates)
+
+The fact layer enables correct reweighting when contributors go stale, accurate 1.5× failure weighting for seed recipients (Section 5), and real audit provenance through seed_manifests → contributor_hashes → contribution_facts.
 
 **Decomposition flow:**
 ```
 POM arrives (UploadPomAsync)
   → validate signature, store raw POM
-  → extract behavioral.screenFingerprints  → upsert pms_fingerprints
-  → extract schemas + canary baselines     → upsert schema_atlas
-  → extract discovered_statuses            → upsert status_dictionaries
-  → extract behavioral.routines            → upsert workflow_templates
-  → extract writebackCandidates + feedback → upsert rx_queue_patterns
-                                           → upsert collective_correlations (per tree_hash)
+  → compute contributor_hash = SHA-256(pharmacy_id)
+  → upsert contribution_facts for each pattern (keyed by contributor_hash + pattern_type + pattern_key)
+  → rematerialize affected aggregate rows:
+      behavioral.screenFingerprints  → pms_fingerprints
+      schemas + canary baselines     → schema_atlas
+      discovered_statuses            → status_dictionaries
+      behavioral.routines            → workflow_templates
+      writebackCandidates + feedback → rx_queue_patterns
+                                     → collective_correlations (per tree_hash)
 ```
 
 ---
@@ -90,20 +109,22 @@ POM arrives (UploadPomAsync)
 
 ### Endpoint
 
-`GET /api/agent/seed` — ECDSA signed (existing auth pattern)
+`POST /api/agent/seed/pull` — HMAC signed (existing PostSignedAsync pattern)
 
 ### Request
 
 ```json
 {
-  "pharmacy_id": "uuid",
   "adapter_type": "PioneerRx",
   "phase": "pattern | model",
   "contract_fingerprint": "sha256...",
+  "pms_version_hash": "sha256...",
   "tree_hashes": [],
   "last_seed_digest": "sha256... | null"
 }
 ```
+
+Note: `pharmacy_id` is NOT in the request body — derived from authenticated key context (see Section 7).
 
 ### Pull Timing
 
@@ -117,8 +138,11 @@ POM arrives (UploadPomAsync)
 
 - `last_seed_digest` sent with request
 - Exact match → 304 Not Modified (fast path)
-- No exact match → similarity check: if <5% of correlations differ → 304 (fallback)
-- Prevents restart loops from re-applying seeds over feedback-adjusted confidence
+- No exact match → **class-aware similarity check:**
+  - Any removal, deprecation, or gate-loss in the new package vs old → **force new seed** (never 304). Safety-critical changes must propagate even if they affect a single correlation.
+  - Any correlation whose aggregate_confidence crossed a policy threshold (e.g., dropped below 0.5) → **force new seed**.
+  - Otherwise, if <5% of correlations differ in non-safety ways → 304 (fallback).
+- Prevents restart loops from re-applying seeds over feedback-adjusted confidence, while ensuring safety-critical removals always propagate.
 
 ### Response — Pattern Phase (schema-gated)
 
@@ -180,17 +204,21 @@ Tells the agent *what to look for* — no UI→SQL correlations (no UI gate pass
 
 ### Agent-Side Application Rules
 
+**POM export additions** (behavioral section gains `pms_version_hash`; feedback section gains per-correlation `origin`, `first_seed_digest`, `seeded_at`). These are the only changes to the POM structure from Spec D.
+
 **Pattern phase:**
+- Insert all received seeds into `seed_items` with appropriate `item_type` and `item_key`
 - Store query_shapes as observation hints for ActionCorrelator (`RegisterSeededShapes`)
 - Merge status_mappings into local `discovered_statuses` with `source = seed`
 - Store workflow_hints for RoutineDetector validation
 
 **Model phase:**
-- Insert correlations into `correlated_actions` with `confidence = seeded_confidence`, `source = seed`, `seed_digest = <digest>`
-- **Local-wins rule:** Only insert if no local correlation exists for that key. Never overwrite local confidence with a weaker seed.
+- Insert all received correlations into `seed_items` (item_type = `'correlation'`)
+- Insert correlations into `correlated_actions` with `confidence = seeded_confidence`, `source = seed`, `seed_digest = <digest>`, `seeded_at = now`
+- **Local-wins rule:** Only insert if no local correlation exists for that key. Never overwrite local confidence with a weaker seed. Skipped correlations still recorded in `seed_items` with `rejected_at` set.
 - Seeded correlations enter the normal feedback loop (Spec C mechanics)
 
-**Confirmation callback:** `POST /api/agent/seed-confirm` with `{ pharmacy_id, seed_digest, applied_at, correlations_applied, correlations_skipped }` → updates `seed_manifests.applied_at`
+**Confirmation callback:** `POST /api/agent/seed/confirm` with `{ seed_digest, applied_at, correlations_applied, correlations_skipped }` → updates `seed_manifests.applied_at`. pharmacy_id derived from auth context.
 
 ---
 
@@ -218,8 +246,10 @@ Phase transitions become **confirmation-gated** with calendar floors. Seeds tell
 
 ### Confirmation Mechanics
 
-- `PhaseGate` queries `correlated_actions WHERE source = 'seed' AND seed_digest = X` to identify seeded correlations (source column is **load-bearing**)
-- A seeded pattern/correlation is "confirmed" when independently observed at least once through normal UIA/DMV observation
+- `PhaseGate` queries `seed_items WHERE seed_digest = X` — unified across all seed types (query_shape, status_mapping, workflow_hint, correlation). Confirmation ratio = `COUNT(confirmed_at IS NOT NULL) / COUNT(*)`.
+- A seed item is "confirmed" when `confirmed_at` is set — triggered when the agent independently observes the pattern through normal UIA/DMV observation (`local_match_count` increments, `confirmed_at` set on first match).
+- Seed items that contradict local observation get `rejected_at` set and are excluded from the confirmation denominator (so a few bad seeds don't block phase exit).
+- `correlated_actions.source = 'seed'` remains for provenance/POM export but is NOT the confirmation gate — `seed_items` is.
 - ActionCorrelator hint: seeded query shape match reduces co-occurrence threshold from 3 to 2
 
 ### Timeline Impact
@@ -243,9 +273,18 @@ Without seeds: existing time-based transitions (14d pattern, 9d model). Seeds ar
 
 Seeded correlations that fail locally feed back to the collective through existing streams.
 
-**Mechanism:** B's feedback loop demotes/prunes seeded correlation → B's next POM shows the regression → cloud decomposer detects it → reduces aggregate_confidence in collective tables.
+**POM provenance export** (required for cloud to distinguish seeded vs organic):
 
-**Failure weighting:** A pharmacy that *received* a seed and reported failure carries **1.5× weight** in aggregate recalculation (vs 1.0× for organic). Rationale: the seed was explicitly tested in a new environment — failure there is a stronger signal than organic fluctuation at the source.
+Spec C's `confidenceTrajectory` gains three new fields per correlation:
+- `origin`: `'local'` or `'seed'`
+- `first_seed_digest`: digest of the seed that introduced this correlation (null for local)
+- `seeded_at`: timestamp when seed was applied (null for local)
+
+These flow from `correlated_actions.source`, `.seed_digest`, `.seeded_at` into the POM export. No changes to feedback collection or processing — only to the exported shape.
+
+**Mechanism:** B's feedback loop demotes/prunes seeded correlation → B's next POM includes the regression with `origin = 'seed'` + `first_seed_digest` → cloud decomposer matches to `contribution_facts` → reduces aggregate_confidence in materialized aggregates.
+
+**Failure weighting:** A contribution_fact with `origin = 'seed'` (seed-recipient pharmacy reporting on a seeded correlation) carries **1.5× weight** in aggregate materialization (vs 1.0× for organic). Rationale: the seed was explicitly tested in a new environment — failure there is a stronger signal than organic fluctuation at the source. The `first_seed_digest` links back to `seed_manifests` for traceability.
 
 **Circuit breaker:** If `aggregate_confidence` drops below 0.3, row marked `deprecated = true` and excluded from future seed assembly. Not deleted — history preserved for audit.
 
@@ -259,7 +298,7 @@ Seeded correlations that fail locally feed back to the collective through existi
 
 | Component | Location | Responsibility |
 |---|---|---|
-| `SeedClient` | Core/Cloud/ | HTTP calls: GET seed, POST seed-confirm. 304 handling. |
+| `SeedClient` | Core/Cloud/ | HTTP calls: POST seed/pull, POST seed/confirm via PostSignedAsync. 304 handling. |
 | `SeedApplicator` | Core/Learning/ | Apply seeds to local state. Local-wins rule. Source tagging. |
 | `PhaseGate` | Core/Learning/ | 4-gate evaluation. Returns `(ready, gates[])`. |
 
@@ -268,6 +307,7 @@ Seeded correlations that fail locally feed back to the collective through existi
 **correlated_actions — new columns:**
 - `source TEXT NOT NULL DEFAULT 'local'` — `'local'` or `'seed'`
 - `seed_digest TEXT` — null for local correlations
+- `seeded_at TEXT` — when the seed was applied (null for local)
 
 **New table — applied_seeds:**
 - `seed_digest TEXT PRIMARY KEY`
@@ -275,6 +315,18 @@ Seeded correlations that fail locally feed back to the collective through existi
 - `applied_at TEXT NOT NULL`
 - `correlations_applied INTEGER NOT NULL`
 - `correlations_skipped INTEGER NOT NULL`
+
+**New table — seed_items** (tracks ALL seed items for confirmation gating):
+- `id INTEGER PRIMARY KEY`
+- `seed_digest TEXT NOT NULL`
+- `item_type TEXT NOT NULL` — `'query_shape'`, `'status_mapping'`, `'workflow_hint'`, `'correlation'`
+- `item_key TEXT NOT NULL` — type-specific key (query_shape_hash, status_guid, routine_hash, correlation_key)
+- `applied_at TEXT NOT NULL`
+- `confirmed_at TEXT` — null until independently observed locally
+- `local_match_count INTEGER NOT NULL DEFAULT 0` — times independently observed
+- `rejected_at TEXT` — set if local observation contradicts seed
+
+PhaseGate queries `seed_items` (not `correlated_actions`) for confirmation ratios. This handles both pattern-phase seeds (query shapes, status mappings, workflow hints) and model-phase seeds (correlations) uniformly.
 
 ### Modified Components
 
@@ -304,23 +356,25 @@ Defines the interface. Cloud implementation is a separate concern.
 
 | Endpoint | Method | Auth | Purpose |
 |---|---|---|---|
-| `/api/agent/seed` | GET | ECDSA signed | Assemble and return seed package |
-| `/api/agent/seed-confirm` | POST | ECDSA signed | Record application, update seed_manifests |
+| `/api/agent/seed/pull` | POST | HMAC signed (PostSignedAsync) | Assemble and return seed package |
+| `/api/agent/seed/confirm` | POST | HMAC signed (PostSignedAsync) | Record application, update seed_manifests |
+
+**Identity binding:** pharmacy_id is derived from the authenticated API key context on the server side. The request body does NOT carry pharmacy_id — prevents cross-tenant spoofing where one agent requests or confirms seeds on behalf of another pharmacy.
 
 ### Cloud Decomposer
 
-Triggered on POM receipt (existing `POST /api/agent/pom`). Upserts into 6 collective tables. Merge rules: weighted averages, deduplicated contributor counts, staleness decay at recalculation.
+Triggered on POM receipt (existing `POST /api/agent/pom`). Upserts into `contribution_facts` (fact layer), then rematerializes affected aggregate rows in 6 collective tables. Staleness decay applied during materialization.
 
 ### Seed Assembler
 
-Triggered on `GET /api/agent/seed`:
+Triggered on `POST /api/agent/seed/pull` (pharmacy_id from auth context):
 1. Match schema_atlas by adapter_type + contract_fingerprint → schema gate
-2. If phase=model, match pms_fingerprints tree_hashes for overlap → UI gate
-3. Assemble from matching rows in collective tables (filtered by matched tree_hashes)
+2. If phase=model, match pms_fingerprints by pms_version_hash + tree_hashes for overlap → UI gate (≥ 3 non-generic tree_hashes required)
+3. Assemble from matching rows in aggregate tables (filtered by matched tree_hashes)
 4. Pre-compute `seeded_confidence = min(0.6, aggregate_confidence × 0.7)` per correlation
 5. Compute seed_digest (SHA-256 of payload)
-6. Check last_seed_digest: exact match → 304; <5% diff → 304; else → new seed
-7. Create seed_manifests row, return payload
+6. Check last_seed_digest: exact match → 304. Otherwise, class-aware similarity: any removal/deprecation/gate-loss/threshold-crossing → force new seed; else <5% non-safety diff → 304.
+7. Create seed_manifests row (source_contribution_ids from contribution_facts), return payload
 
 ### Manifest Lifecycle
 
