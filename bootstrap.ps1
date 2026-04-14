@@ -1,4 +1,4 @@
-# SuavoAgent v3 "Phantom" — Zero-Config One-Paste Installer
+# SuavoAgent v3 "Phantom" -- Zero-Config One-Paste Installer
 #
 # INSTALL (paste into Admin PowerShell):
 #   Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/MinaH153/SuavoAgent/main/bootstrap.ps1 -OutFile $env:TEMP\bs.ps1; & $env:TEMP\bs.ps1
@@ -29,7 +29,7 @@ if ($ReleaseTag -notmatch '^v\d+\.\d+\.\d+') {
     exit 1
 }
 
-# Auto-log everything — transcript saved to desktop for debugging
+# Auto-log everything -- transcript saved to desktop for debugging
 $transcriptPath = "$env:USERPROFILE\Desktop\suavo-install-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
 Start-Transcript -Path $transcriptPath -Force | Out-Null
 
@@ -43,7 +43,7 @@ function Write-Ok($msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "  [WARN] $msg" -ForegroundColor Yellow }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red }
 
-# ── Require Admin ──
+# -- Require Admin --
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
@@ -51,7 +51,7 @@ if (-not $isAdmin) {
     exit 1
 }
 
-# ── Learning mode prompt (if not explicitly set via flag) ──
+# -- Learning mode prompt (if not explicitly set via flag) --
 if (-not $PSBoundParameters.ContainsKey('LearningMode')) {
     $lmResponse = Read-Host "Enable learning mode? (30-day observation before automation) [y/N]"
     if ($lmResponse -eq 'y' -or $lmResponse -eq 'Y') {
@@ -60,14 +60,14 @@ if (-not $PSBoundParameters.ContainsKey('LearningMode')) {
 }
 
 Write-Host ""
-Write-Host "  ╔═══════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║   SuavoAgent v3 — Zero-Config Setup   ║" -ForegroundColor Cyan
-Write-Host "  ╚═══════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "  +=======================================+" -ForegroundColor Cyan
+Write-Host "  |   SuavoAgent v3 -- Zero-Config Setup   |" -ForegroundColor Cyan
+Write-Host "  +=======================================+" -ForegroundColor Cyan
 Write-Host ""
 
-# ════════════════════════════════════════════
+# ============================================
 # PHASE 1: Detect Pharmacy Management System
-# ════════════════════════════════════════════
+# ============================================
 Write-Step "Phase 1: Detecting pharmacy management system"
 
 $pmsType = $null
@@ -126,9 +126,9 @@ if ($pmsType) {
     Write-Host ""
 }
 
-# ════════════════════════════════════════════
+# ============================================
 # PHASE 2: Extract SQL credentials
-# ════════════════════════════════════════════
+# ============================================
 if (-not $pmsType) {
     Write-Step "Phase 2: Skipping SQL discovery (no PMS detected)"
     $sqlServer = ""
@@ -145,6 +145,7 @@ $sqlDatabase = "PioneerPharmacySystem"
 $sqlUser = $null
 $sqlPassword = $null
 
+if ($pmsType) {
 # Step 2a: Read config for host
 $configXml = [xml](Get-Content $pioneerConfig)
 $pioneerHost = $null
@@ -170,7 +171,7 @@ if (-not $pioneerHost) {
 if ($pioneerHost) {
     Write-Ok "PioneerRx host: $pioneerHost"
 } else {
-    Write-Warn "Could not extract host from config — will try localhost"
+    Write-Warn "Could not extract host from config -- will try localhost"
     $pioneerHost = "localhost"
 }
 
@@ -183,7 +184,7 @@ if (Test-Path $entLibDll) {
     try {
         [System.Reflection.Assembly]::LoadFrom($entLibDll) | Out-Null
 
-        # Find the method — it may be in different classes depending on version
+        # Find the method -- it may be in different classes depending on version
         $dataTypes = [AppDomain]::CurrentDomain.GetAssemblies() |
             Where-Object { $_.GetName().Name -eq "Microsoft.Practices.EnterpriseLibrary.Data" } |
             ForEach-Object { $_.GetTypes() } |
@@ -277,7 +278,7 @@ if ($discoveredConnStr) {
     }
 }
 
-# Step 2e: Fallback — SQL Browser discovery
+# Step 2e: Fallback -- SQL Browser discovery
 if (-not $sqlServer) {
     Write-Host "  Trying SQL Browser on $pioneerHost..." -ForegroundColor Gray
     try {
@@ -311,12 +312,12 @@ if (-not $sqlServer) {
     }
 }
 
-# Step 2f: If we still have no credentials, prompt (skip if no PMS)
-if (-not $sqlServer -and $pmsType) {
+# Step 2f: If we still have no credentials, prompt
+if (-not $sqlServer) {
     Write-Warn "Auto-discovery failed. Manual entry required."
     $sqlServer = Read-Host "  SQL Server (e.g. 192.168.1.78,49202)"
 }
-if (-not $sqlUser -and -not $discoveredConnStr -and $pmsType) {
+if (-not $sqlUser -and -not $discoveredConnStr) {
     Write-Warn "No SQL credentials discovered."
     $needAuth = Read-Host "  Use SQL Auth? (y/n)"
     if ($needAuth -eq 'y') {
@@ -324,17 +325,18 @@ if (-not $sqlUser -and -not $discoveredConnStr -and $pmsType) {
         $sqlPassword = Read-Host "  SQL Password"
     }
 }
+} # end if ($pmsType)
 
 Write-Host ""
-Write-Host "  ┌─────────────────────────────────────┐" -ForegroundColor White
-Write-Host "  │ Server:   $sqlServer" -ForegroundColor White
-Write-Host "  │ Database: $sqlDatabase" -ForegroundColor White
-Write-Host "  │ Auth:     $(if ($sqlUser) { "SQL ($sqlUser)" } else { 'Windows' })" -ForegroundColor White
-Write-Host "  └─────────────────────────────────────┘" -ForegroundColor White
+Write-Host "  +-------------------------------------+" -ForegroundColor White
+Write-Host "  | Server:   $sqlServer" -ForegroundColor White
+Write-Host "  | Database: $sqlDatabase" -ForegroundColor White
+Write-Host "  | Auth:     $(if ($sqlUser) { "SQL ($sqlUser)" } else { 'Windows' })" -ForegroundColor White
+Write-Host "  +-------------------------------------+" -ForegroundColor White
 
-# ════════════════════════════════════════════
+# ============================================
 # PHASE 3: Download agent binaries
-# ════════════════════════════════════════════
+# ============================================
 Write-Step "Phase 3: Downloading SuavoAgent binaries"
 
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
@@ -378,7 +380,7 @@ $binaries = @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper
 # Verify ALL expected binaries have checksum entries before downloading anything
 foreach ($bin in $binaries) {
     if (-not $expectedHashes.ContainsKey($bin)) {
-        Write-Error "CRITICAL: Checksum missing for $bin — aborting install"
+        Write-Error "CRITICAL: Checksum missing for $bin -- aborting install"
         exit 1
     }
 }
@@ -393,7 +395,7 @@ foreach ($bin in $binaries) {
         $sizeMb = [math]::Round((Get-Item $dst).Length / 1MB, 1)
         Write-Ok "$bin ($sizeMb MB)"
     } catch {
-        Write-Fail "Download failed for $bin — $($_.Exception.Message)"
+        Write-Fail "Download failed for $bin -- $($_.Exception.Message)"
         exit 1
     }
     # Verify SHA256 hash against signed checksums
@@ -406,9 +408,9 @@ foreach ($bin in $binaries) {
     Write-Host "  $bin verified: $actualHash" -ForegroundColor Green
 }
 
-# ════════════════════════════════════════════
+# ============================================
 # PHASE 4: Write appsettings.json
-# ════════════════════════════════════════════
+# ============================================
 Write-Step "Phase 4: Writing configuration"
 
 $agentId = "agent-" + ([guid]::NewGuid().ToString("N").Substring(0, 12))
@@ -449,9 +451,9 @@ $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRul
 Set-Acl $configPath $acl
 Write-Ok "Credentials locked down (Admin + SYSTEM + LocalService only)"
 
-# ════════════════════════════════════════════
+# ============================================
 # PHASE 5: Install Windows services
-# ════════════════════════════════════════════
+# ============================================
 Write-Step "Phase 5: Installing Windows services"
 
 # Stop + remove existing
@@ -464,7 +466,7 @@ foreach ($svc in @("SuavoAgent.Broker", "SuavoAgent.Core")) {
     }
 }
 
-# Install Core (runs as LocalService — least privilege)
+# Install Core (runs as LocalService -- least privilege)
 $corePath = Join-Path $installDir "SuavoAgent.Core.exe"
 sc.exe create SuavoAgent.Core binPath= "`"$corePath`"" start= delayed-auto obj= "NT AUTHORITY\LocalService" | Out-Null
 sc.exe description SuavoAgent.Core "Suavo pharmacy agent - SQL polling, cloud sync" | Out-Null
@@ -472,7 +474,7 @@ sc.exe failure SuavoAgent.Core reset= 3600 actions= restart/5000/restart/30000/r
 sc.exe failureflag SuavoAgent.Core 1 | Out-Null
 Write-Ok "SuavoAgent.Core service registered"
 
-# Install Broker (runs as LocalSystem — needs SeTcbPrivilege for WTSQueryUserToken + CreateProcessAsUser)
+# Install Broker (runs as LocalSystem -- needs SeTcbPrivilege for WTSQueryUserToken + CreateProcessAsUser)
 $brokerPath = Join-Path $installDir "SuavoAgent.Broker.exe"
 sc.exe create SuavoAgent.Broker binPath= "`"$brokerPath`"" start= delayed-auto obj= "LocalSystem" | Out-Null
 sc.exe description SuavoAgent.Broker "Suavo pharmacy agent - session broker" | Out-Null
@@ -497,9 +499,9 @@ Start-Service SuavoAgent.Core
 Start-Sleep 3
 Start-Service SuavoAgent.Broker -ErrorAction SilentlyContinue
 
-# ════════════════════════════════════════════
+# ============================================
 # PHASE 6: Verify
-# ════════════════════════════════════════════
+# ============================================
 Write-Step "Phase 6: Verification"
 
 foreach ($svc in @("SuavoAgent.Core", "SuavoAgent.Broker")) {
@@ -512,9 +514,9 @@ foreach ($svc in @("SuavoAgent.Core", "SuavoAgent.Broker")) {
 }
 
 Write-Host ""
-Write-Host "  ╔═══════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "  ║   SuavoAgent v3 — Installation Complete   ║" -ForegroundColor Green
-Write-Host "  ╚═══════════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "  +===========================================+" -ForegroundColor Green
+Write-Host "  |   SuavoAgent v3 -- Installation Complete   |" -ForegroundColor Green
+Write-Host "  +===========================================+" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Install:  $installDir" -ForegroundColor White
 Write-Host "  Data:     $dataDir" -ForegroundColor White
@@ -528,7 +530,7 @@ Write-Host ""
 
 Get-ChildItem "$installDir\*.exe" | ForEach-Object {
     $sizeMb = [math]::Round($_.Length / 1MB, 1)
-    Write-Host "  $($_.Name) — $sizeMb MB" -ForegroundColor Gray
+    Write-Host "  $($_.Name) -- $sizeMb MB" -ForegroundColor Gray
 }
 
 Write-Host ""
