@@ -66,35 +66,102 @@ Write-Host "  +=======================================+" -ForegroundColor Cyan
 Write-Host ""
 
 # ============================================
-# DISCLOSURE: Employee Monitoring Notice
+# TERMS OF SERVICE + EMPLOYEE MONITORING CONSENT
 # ============================================
+# This consent is recorded digitally and uploaded to the Suavo cloud
+# on first heartbeat. No separate paperwork needed.
 Write-Host ""
-Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Yellow
-Write-Host "  ║  IMPORTANT: EMPLOYEE MONITORING DISCLOSURE          ║" -ForegroundColor Yellow
-Write-Host "  ╠══════════════════════════════════════════════════════╣" -ForegroundColor Yellow
-Write-Host "  ║  SuavoAgent monitors workstation activity to        ║" -ForegroundColor White
-Write-Host "  ║  optimize delivery operations. It collects:         ║" -ForegroundColor White
-Write-Host "  ║                                                     ║" -ForegroundColor White
-Write-Host "  ║  - Application usage patterns and durations         ║" -ForegroundColor Gray
-Write-Host "  ║  - Workstation hardware profile                     ║" -ForegroundColor Gray
-Write-Host "  ║  - Login/logout timing (shift patterns)             ║" -ForegroundColor Gray
-Write-Host "  ║  - Website domain categories (NOT specific URLs)    ║" -ForegroundColor Gray
-Write-Host "  ║  - Print event counts (NOT document content)        ║" -ForegroundColor Gray
-Write-Host "  ║                                                     ║" -ForegroundColor White
-Write-Host "  ║  It does NOT collect keystrokes, screen content,    ║" -ForegroundColor White
-Write-Host "  ║  passwords, email, or personal data.                ║" -ForegroundColor White
-Write-Host "  ║                                                     ║" -ForegroundColor White
-Write-Host "  ║  BY PROCEEDING, YOU CONFIRM:                        ║" -ForegroundColor Yellow
-Write-Host "  ║  - You are authorized to install on this machine    ║" -ForegroundColor White
-Write-Host "  ║  - You will notify employees per your state's laws  ║" -ForegroundColor White
-Write-Host "  ║  - CT, DE, NY require written employee notice       ║" -ForegroundColor Red
-Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Yellow
+Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "  ║         SUAVOAGENT TERMS & CONSENT                  ║" -ForegroundColor Cyan
+Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
-$confirm = Read-Host "  Type YES to confirm and proceed"
-if ($confirm -ne "YES") {
+Write-Host "  SuavoAgent is workplace monitoring software that observes" -ForegroundColor White
+Write-Host "  business workstation activity to optimize delivery operations." -ForegroundColor White
+Write-Host ""
+Write-Host "  WHAT IT COLLECTS:" -ForegroundColor Yellow
+Write-Host "    - Application usage patterns and durations" -ForegroundColor Gray
+Write-Host "    - Workstation hardware profile" -ForegroundColor Gray
+Write-Host "    - Login/logout timing (shift patterns)" -ForegroundColor Gray
+Write-Host "    - Website domain categories (NOT specific URLs)" -ForegroundColor Gray
+Write-Host "    - Print event counts (NOT document content)" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  WHAT IT NEVER COLLECTS:" -ForegroundColor Green
+Write-Host "    - Keystrokes, passwords, or typed text" -ForegroundColor Gray
+Write-Host "    - Screen captures or screenshots" -ForegroundColor Gray
+Write-Host "    - Email, message, or chat content" -ForegroundColor Gray
+Write-Host "    - Personal browsing history or specific URLs" -ForegroundColor Gray
+Write-Host "    - File contents or document data" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  LEGAL REQUIREMENTS:" -ForegroundColor Red
+Write-Host "    CT, DE, NY: Written notice to each employee REQUIRED by law" -ForegroundColor Red
+Write-Host "    CA: CCPA notice at collection required" -ForegroundColor Red
+Write-Host "    All states: Employee notification is recommended best practice" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  BY PROCEEDING, THE AUTHORIZING PARTY CONFIRMS:" -ForegroundColor Yellow
+Write-Host "    1. Authorization to install monitoring software on this machine" -ForegroundColor White
+Write-Host "    2. Responsibility to notify all employees per applicable state laws" -ForegroundColor White
+Write-Host "    3. Agreement to Suavo's Terms of Service and Privacy Policy" -ForegroundColor White
+Write-Host "    4. Execution of Business Associate Agreement (if healthcare)" -ForegroundColor White
+Write-Host ""
+
+# Collect authorizing party info — this gets recorded in the consent receipt
+$authName = Read-Host "  Authorizing party full name"
+if ([string]::IsNullOrWhiteSpace($authName)) {
+    Write-Host "  Installation cancelled — authorizing party name required." -ForegroundColor Red
+    exit 0
+}
+$authTitle = Read-Host "  Title (e.g., Owner, Pharmacy Manager)"
+if ([string]::IsNullOrWhiteSpace($authTitle)) { $authTitle = "Authorized Representative" }
+
+$confirmState = Read-Host "  State where this business operates (e.g., CA, NY, TX)"
+if ([string]::IsNullOrWhiteSpace($confirmState)) { $confirmState = "Unknown" }
+
+# Check if mandatory notice state
+$mandatoryNoticeStates = @("CT","DE","NY")
+$highRiskStates = @("CA","IL","MA","MD","CO","MT")
+$stateUpper = $confirmState.ToUpper().Trim()
+if ($mandatoryNoticeStates -contains $stateUpper) {
+    Write-Host ""
+    Write-Host "  *** $stateUpper REQUIRES written employee notice before monitoring ***" -ForegroundColor Red
+    Write-Host "  You MUST distribute the employee notice template to all staff" -ForegroundColor Red
+    Write-Host "  at this workstation BEFORE SuavoAgent begins collecting data." -ForegroundColor Red
+    Write-Host ""
+    $noticeConfirm = Read-Host "  Type CONFIRMED to acknowledge this legal requirement"
+    if ($noticeConfirm -ne "CONFIRMED") {
+        Write-Host "  Installation cancelled — employee notice acknowledgment required in $stateUpper." -ForegroundColor Red
+        exit 0
+    }
+} elseif ($highRiskStates -contains $stateUpper) {
+    Write-Host ""
+    Write-Host "  NOTE: $stateUpper has strong privacy protections. Employee notice is" -ForegroundColor Yellow
+    Write-Host "  strongly recommended even if not strictly required by statute." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+Write-Host ""
+$finalConfirm = Read-Host "  Type AGREE to accept terms and proceed with installation"
+if ($finalConfirm -ne "AGREE") {
     Write-Host "  Installation cancelled." -ForegroundColor Red
     exit 0
 }
+
+# Build consent receipt — saved locally and uploaded on first heartbeat
+$consentTimestamp = (Get-Date).ToString("o")
+$consentReceipt = @{
+    consentVersion = "1.0"
+    authorizingParty = @{
+        name = $authName
+        title = $authTitle
+    }
+    businessState = $stateUpper
+    mandatoryNoticeState = ($mandatoryNoticeStates -contains $stateUpper)
+    consentTimestamp = $consentTimestamp
+    termsAccepted = $true
+    employeeNoticeAcknowledged = ($mandatoryNoticeStates -contains $stateUpper)
+    installerVersion = "3.8.0"
+    machineFingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
+}
+Write-Ok "Consent recorded: $authName ($authTitle) at $consentTimestamp"
 Write-Host ""
 
 # ============================================
@@ -475,6 +542,14 @@ if ($sqlUser) {
 $configJson = $config | ConvertTo-Json -Depth 5
 $configPath = Join-Path $installDir "appsettings.json"
 Set-Content -Path $configPath -Value $configJson -Encoding UTF8
+
+# Write consent receipt to ProgramData — uploaded to cloud on first heartbeat
+$consentPath = Join-Path $dataDir "consent-receipt.json"
+$consentReceipt.pharmacyId = $PharmacyId
+$consentReceipt.agentId = $agentId
+$consentJson = $consentReceipt | ConvertTo-Json -Depth 5
+Set-Content -Path $consentPath -Value $consentJson -Encoding UTF8
+Write-Ok "Consent receipt saved to $consentPath"
 Write-Ok "appsettings.json written to $installDir"
 
 # Lock down appsettings (contains SQL credentials)

@@ -34,6 +34,7 @@ public sealed class HeartbeatWorker : BackgroundService
     private bool _lastAuditChainValid = true;
     private int _lastRxCount;
     private DateTimeOffset? _lastSyncAt;
+    private bool _consentReceiptSent;
 
     public HeartbeatWorker(
         ILogger<HeartbeatWorker> logger,
@@ -152,6 +153,28 @@ public sealed class HeartbeatWorker : BackgroundService
                     }
                 }
 
+                // Upload consent receipt on first heartbeat (once)
+                string? consentReceipt = null;
+                if (!_consentReceiptSent)
+                {
+                    try
+                    {
+                        var consentPath = Path.Combine(
+                            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                            "SuavoAgent", "consent-receipt.json");
+                        if (File.Exists(consentPath))
+                        {
+                            consentReceipt = File.ReadAllText(consentPath);
+                            _consentReceiptSent = true;
+                            _logger.LogInformation("Consent receipt will be uploaded to cloud");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Consent receipt read failed");
+                    }
+                }
+
                 // Fleet signals — every heartbeat (lightweight)
                 string? fleetSignals = null;
                 if (_fleetChannels != null)
@@ -217,7 +240,8 @@ public sealed class HeartbeatWorker : BackgroundService
                     },
                     intelligenceContext = intelligenceContext,
                     efficiencyReport = efficiencyReport,
-                    fleetSignals = fleetSignals
+                    fleetSignals = fleetSignals,
+                    consentReceipt = consentReceipt
                 };
 
                 var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
