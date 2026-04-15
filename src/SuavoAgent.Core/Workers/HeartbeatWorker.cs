@@ -429,6 +429,13 @@ public sealed class HeartbeatWorker : BackgroundService
                 _decommissionPendingSince = Stopwatch.GetTimestamp();
                 _stateDb.AppendChainedAuditEntry(new AuditEntry(
                     agentId, "decommission", "", "DecommissionPending", "decommission_phase1"));
+
+                // Generate random confirmation token for phase 2 (F8: non-deterministic, non-cloud-computable)
+                var phase1ConfirmBytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+                var phase1ConfirmToken = Convert.ToHexString(phase1ConfirmBytes).ToLowerInvariant();
+                _stateDb.SetConfigValue("decommission_confirm_token", phase1ConfirmToken);
+                _logger.LogInformation("Decommission phase 1: confirmation token generated and stored locally");
+
                 _logger.LogWarning("DECOMMISSION phase 1 — awaiting confirmation (5+ min)");
                 return;
             }
@@ -466,7 +473,7 @@ public sealed class HeartbeatWorker : BackgroundService
                 return;
             }
 
-            // Require pharmacy-specific confirmation token (second factor)
+            // Require confirmation token generated during phase 1 (random, locally stored)
             var dataEl = scEl.TryGetProperty("data", out var d2) ? d2 : scEl;
             var confirmToken = dataEl.TryGetProperty("confirmationToken", out var ctok) ? ctok.GetString() : null;
             if (string.IsNullOrEmpty(confirmToken))
@@ -474,9 +481,8 @@ public sealed class HeartbeatWorker : BackgroundService
                 _logger.LogWarning("Decommission phase 2 rejected — missing confirmationToken");
                 return;
             }
-            var expectedToken = PhiScrubber.HmacHash(
-                $"decommission:{_options.PharmacyId}:{_options.AgentId}", _options.HmacSalt ?? "");
-            if (!confirmToken.Equals(expectedToken[..32], StringComparison.Ordinal))
+            var expectedToken = _stateDb.GetConfigValue("decommission_confirm_token");
+            if (string.IsNullOrEmpty(expectedToken) || !confirmToken.Equals(expectedToken, StringComparison.Ordinal))
             {
                 _logger.LogWarning("Decommission phase 2 rejected — invalid confirmationToken");
                 return;

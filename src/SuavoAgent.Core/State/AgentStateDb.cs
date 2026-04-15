@@ -547,6 +547,8 @@ public sealed class AgentStateDb : IDisposable
                 agent_version TEXT
             )
         """);
+
+        Execute("CREATE TABLE IF NOT EXISTS config_kv (key TEXT PRIMARY KEY, value TEXT)");
     }
 
     private void Execute(string sql)
@@ -554,6 +556,23 @@ public sealed class AgentStateDb : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
+    }
+
+    public void SetConfigValue(string key, string value)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "INSERT OR REPLACE INTO config_kv (key, value) VALUES (@k, @v)";
+        cmd.Parameters.AddWithValue("@k", key);
+        cmd.Parameters.AddWithValue("@v", value);
+        cmd.ExecuteNonQuery();
+    }
+
+    public string? GetConfigValue(string key)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT value FROM config_kv WHERE key = @k";
+        cmd.Parameters.AddWithValue("@k", key);
+        return cmd.ExecuteScalar() as string;
     }
 
     private void TryAlter(string sql)
