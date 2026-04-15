@@ -25,7 +25,7 @@ public sealed class DeliveryReceiptGenerator
         string? driverName = null, string? proofImageBase64 = null)
     {
         var signatureHtml = !string.IsNullOrEmpty(cmd.SignatureSvg)
-            ? $"<div class=\"signature-box\"><h4>Recipient Signature</h4>{cmd.SignatureSvg}</div>"
+            ? $"<div class=\"signature-box\"><h4>Recipient Signature</h4>{SanitizeSvg(cmd.SignatureSvg)}</div>"
             : "<div class=\"signature-box\"><h4>Recipient Signature</h4><p class=\"no-sig\">No signature captured</p></div>";
 
         var proofHtml = !string.IsNullOrEmpty(proofImageBase64)
@@ -237,6 +237,16 @@ public sealed class DeliveryReceiptGenerator
         }
 
         return purged;
+    }
+
+    private static string SanitizeSvg(string? svg)
+    {
+        if (string.IsNullOrEmpty(svg)) return "";
+        // Strip script tags and event handlers from SVG
+        var sanitized = System.Text.RegularExpressions.Regex.Replace(svg, @"<script[^>]*>.*?</script>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+        sanitized = System.Text.RegularExpressions.Regex.Replace(sanitized, @"\bon\w+\s*=", "data-blocked=", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        sanitized = System.Text.RegularExpressions.Regex.Replace(sanitized, @"<foreignObject[^>]*>.*?</foreignObject>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+        return sanitized;
     }
 
     private static string MaskId(string idValue)
