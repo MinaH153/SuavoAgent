@@ -9,7 +9,7 @@ public sealed class PrintEventObserver : IDisposable
     private readonly string _pharmacySalt;
     private readonly ILogger _logger;
     private volatile bool _disposed;
-    private int _lastJobId;
+    private readonly HashSet<int> _seenJobHashes = new();
 
     public int PrintEventCount { get; private set; }
 
@@ -48,11 +48,15 @@ public sealed class PrintEventObserver : IDisposable
             if (!Directory.Exists(spoolerDir)) return;
 
             var spoolFiles = Directory.GetFiles(spoolerDir, "*.SPL");
+            var currentHashes = new HashSet<int>();
+
             foreach (var file in spoolFiles)
             {
-                var jobId = file.GetHashCode();
-                if (jobId == _lastJobId) continue;
-                _lastJobId = jobId;
+                var jobHash = file.GetHashCode();
+                currentHashes.Add(jobHash);
+
+                if (_seenJobHashes.Contains(jobHash)) continue; // already processed
+                _seenJobHashes.Add(jobHash);
 
                 var evt = BehavioralEvent.Interaction(
                     subtype: "print_job",
@@ -65,6 +69,9 @@ public sealed class PrintEventObserver : IDisposable
                 _buffer.Enqueue(evt);
                 PrintEventCount++;
             }
+
+            // Remove hashes for files that no longer exist (completed jobs)
+            _seenJobHashes.IntersectWith(currentHashes);
         }
         catch { }
     }

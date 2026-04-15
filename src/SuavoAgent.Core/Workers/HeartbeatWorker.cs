@@ -82,6 +82,22 @@ public sealed class HeartbeatWorker : BackgroundService
         {
             _stateDb.PruneOldNonces(TimeSpan.FromMinutes(10));
 
+            // Daily pruning of observation data (30-day retention)
+            if (DateTimeOffset.UtcNow.Hour == 3 && DateTimeOffset.UtcNow.Minute < 1)
+            {
+                try
+                {
+                    var pruned = _stateDb.PruneBehavioralEventsByAge(TimeSpan.FromDays(30));
+                    pruned += _stateDb.PruneAppSessionsByAge(TimeSpan.FromDays(30));
+                    if (pruned > 0)
+                        _logger.LogInformation("Pruned {Count} expired observation records", pruned);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Observation pruning failed");
+                }
+            }
+
             // Hoist canaryHold so the delay block can read it even if the try throws
             (string Severity, int BlockedCycles, string DriftHoldSince)? canaryHold = null;
 

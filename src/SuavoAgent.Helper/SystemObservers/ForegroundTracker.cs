@@ -13,8 +13,11 @@ public sealed class ForegroundTracker : IDisposable
     private string? _currentProcessName;
     private DateTimeOffset _focusStart;
     private volatile bool _disposed;
+    private Action<string, string?>? _onAppFocused;
 
     public int TransitionCount { get; private set; }
+
+    public void OnAppFocusChanged(Action<string, string?> callback) => _onAppFocused = callback;
 
     public ForegroundTracker(BehavioralEventBuffer buffer, string pharmacySalt, ILogger logger)
     {
@@ -73,6 +76,22 @@ public sealed class ForegroundTracker : IDisposable
         {
             _buffer.Enqueue(BehavioralEvent.AppFocusChange(prevProcess, processName, titleHash, duration));
             TransitionCount++;
+
+            // Extract domain if this is a browser (for BrowserDomainObserver)
+            string? extractedDomain = null;
+            try
+            {
+                var sb2 = new System.Text.StringBuilder(256);
+                GetWindowText(hwnd, sb2, sb2.Capacity);
+                var rawTitle = sb2.ToString();
+                if (BrowserDomainObserver.IsBrowserProcess(processName))
+                    extractedDomain = BrowserDomainObserver.ExtractDomain(rawTitle);
+            }
+            catch { }
+
+            // Notify registered observers
+            try { _onAppFocused?.Invoke(processName, extractedDomain); }
+            catch { } // observer errors must not crash the tracker
         }
     }
 

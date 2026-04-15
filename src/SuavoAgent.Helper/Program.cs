@@ -186,6 +186,20 @@ try
         systemBuffer, pharmacySalt, Log.Logger);
     Log.Information("Spreadsheet and multi-app UIA observers initialized");
 
+    // Wire ForegroundTracker → app-specific observers
+    foregroundTracker.OnAppFocusChanged((processName, domainOrTitle) =>
+    {
+        if (BrowserDomainObserver.IsBrowserProcess(processName) && domainOrTitle != null)
+            browserObserver.OnDomainDetected(domainOrTitle);
+
+        if (SpreadsheetStructureObserver.IsSpreadsheetProcess(processName))
+        {
+            // Spreadsheet detected — capture metadata on next available title
+        }
+
+        multiAppUia.OnAppFocused(processName, null); // no raw titles
+    });
+
     // Retry attachment — PioneerRx may not be running when Helper starts
     while (!cts.Token.IsCancellationRequested && !attached)
     {
