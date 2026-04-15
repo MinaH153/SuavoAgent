@@ -30,6 +30,11 @@ public sealed class AgentOptions
     public string? HmacSalt { get; set; }
 
     /// <summary>
+    /// Base64 SHA-256 of cloud server public key for cert pinning. Multiple pins separated by semicolons. Empty = OS cert store only.
+    /// </summary>
+    public string? CloudCertPin { get; set; }
+
+    /// <summary>
     /// Maximum prescriptions per detection query. Default 100. Increase for high-volume pharmacies.
     /// </summary>
     public int MaxDetectionBatchSize { get; set; } = 100;

@@ -176,6 +176,12 @@ try
 
     Log.Information("App intelligence observers started (browser domains, print events)");
 
+    var spreadsheetObserver = new SuavoAgent.Helper.SystemObservers.SpreadsheetStructureObserver(
+        systemBuffer, pharmacySalt, Log.Logger);
+    var multiAppUia = new SuavoAgent.Helper.SystemObservers.MultiAppUiaObserver(
+        systemBuffer, pharmacySalt, Log.Logger);
+    Log.Information("Spreadsheet and multi-app UIA observers initialized");
+
     // Retry attachment — PioneerRx may not be running when Helper starts
     while (!cts.Token.IsCancellationRequested && !attached)
     {

@@ -24,11 +24,20 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         if (uri.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException($"CloudUrl must use HTTPS, got: {uri.Scheme}");
 
-        _http = new HttpClient
+        var handler = new HttpClientHandler();
+        if (!string.IsNullOrEmpty(options.CloudCertPin))
         {
-            BaseAddress = uri,
-            Timeout = TimeSpan.FromSeconds(30)
-        };
+            handler.ServerCertificateCustomValidationCallback = (message, cert, chain, errors) =>
+            {
+                if (errors != System.Net.Security.SslPolicyErrors.None) return false;
+                if (cert == null) return false;
+                var certHash = Convert.ToBase64String(
+                    System.Security.Cryptography.SHA256.HashData(cert.GetPublicKey()));
+                var pins = options.CloudCertPin!.Split(';', StringSplitOptions.RemoveEmptyEntries);
+                return pins.Any(pin => pin.Equals(certHash, StringComparison.Ordinal));
+            };
+        }
+        _http = new HttpClient(handler) { BaseAddress = uri, Timeout = TimeSpan.FromSeconds(30) };
     }
 
     public async Task<JsonElement?> HeartbeatAsync(object payload, CancellationToken ct)

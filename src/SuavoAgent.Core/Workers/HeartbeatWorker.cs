@@ -21,6 +21,7 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly SignedCommandVerifier? _commandVerifier;
     private readonly Intelligence.ContextAssembler? _contextAssembler;
     private readonly Intelligence.EfficiencyCalculator? _efficiencyCalc;
+    private readonly Intelligence.FleetDataChannels? _fleetChannels;
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
@@ -46,6 +47,7 @@ public sealed class HeartbeatWorker : BackgroundService
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
         _contextAssembler = new Intelligence.ContextAssembler(stateDb);
         _efficiencyCalc = new Intelligence.EfficiencyCalculator(stateDb);
+        _fleetChannels = new Intelligence.FleetDataChannels(stateDb);
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -133,6 +135,23 @@ public sealed class HeartbeatWorker : BackgroundService
                     }
                 }
 
+                // Fleet signals — every heartbeat (lightweight)
+                string? fleetSignals = null;
+                if (_fleetChannels != null)
+                {
+                    try
+                    {
+                        var signals = _fleetChannels.ComputeSignals(_options.PharmacyId ?? "unknown");
+                        var signalsJson = System.Text.Json.JsonSerializer.Serialize(signals);
+                        var (isClean, _) = Intelligence.ComplianceBoundary.Validate(signalsJson);
+                        if (isClean) fleetSignals = signalsJson;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Fleet signal computation failed");
+                    }
+                }
+
                 var payload = new
                 {
                     agentId = _options.AgentId,
@@ -180,7 +199,8 @@ public sealed class HeartbeatWorker : BackgroundService
                         lastVerifiedAt = DateTimeOffset.UtcNow.ToString("o"),
                     },
                     intelligenceContext = intelligenceContext,
-                    efficiencyReport = efficiencyReport
+                    efficiencyReport = efficiencyReport,
+                    fleetSignals = fleetSignals
                 };
 
                 var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
@@ -295,7 +315,7 @@ public sealed class HeartbeatWorker : BackgroundService
                     await HandleFetchPatientAsync(scEl, cmd, ct);
                     break;
                 case "decommission":
-                    await HandleDecommissionAsync(ct);
+                    await HandleDecommissionAsync(scEl, ct);
                     break;
                 case "update":
                     await HandleUpdateAsync(scEl, ct);
@@ -397,7 +417,7 @@ public sealed class HeartbeatWorker : BackgroundService
     /// Blocks if archive upload fails. 1h timeout auto-cancels in main loop.
     /// Only reachable via ECDSA-signed command envelope.
     /// </summary>
-    private async Task HandleDecommissionAsync(CancellationToken ct)
+    private async Task HandleDecommissionAsync(JsonElement scEl, CancellationToken ct)
     {
         try
         {
@@ -445,6 +465,23 @@ public sealed class HeartbeatWorker : BackgroundService
                 _decommissionPendingSince = null;
                 return;
             }
+
+            // Require pharmacy-specific confirmation token (second factor)
+            var dataEl = scEl.TryGetProperty("data", out var d2) ? d2 : scEl;
+            var confirmToken = dataEl.TryGetProperty("confirmationToken", out var ctok) ? ctok.GetString() : null;
+            if (string.IsNullOrEmpty(confirmToken))
+            {
+                _logger.LogWarning("Decommission phase 2 rejected — missing confirmationToken");
+                return;
+            }
+            var expectedToken = PhiScrubber.HmacHash(
+                $"decommission:{_options.PharmacyId}:{_options.AgentId}", _options.HmacSalt ?? "");
+            if (!confirmToken.Equals(expectedToken[..32], StringComparison.Ordinal))
+            {
+                _logger.LogWarning("Decommission phase 2 rejected — invalid confirmationToken");
+                return;
+            }
+            _logger.LogInformation("Decommission confirmation token validated");
 
             _stateDb.AppendChainedAuditEntry(new AuditEntry(
                 agentId, "decommission", "DecommissionPending", "Decommissioned", "decommission_phase2"));
