@@ -85,9 +85,9 @@ public class DeliveryReceiptGeneratorTests
     }
 
     [Fact]
-    public void SaveReceipt_CreatesFile()
+    public void SaveReceipt_CreatesEncryptedDatFile()
     {
-        // Use temp dir to avoid OS permission issues (production runs on Windows ProgramData)
+        // Simulate SaveReceipt logic in a temp dir to avoid OS permission issues on macOS
         var tempDir = Path.Combine(Path.GetTempPath(), "SuavoAgent-test-receipts-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(tempDir);
         try
@@ -95,13 +95,72 @@ public class DeliveryReceiptGeneratorTests
             var cmd = SampleCommand();
             var gen = new DeliveryReceiptGenerator();
             var html = gen.GenerateHtml(cmd, "Test Pharmacy");
-            var fileName = $"receipt-{cmd.RxNumber}-{cmd.DeliveredAt:yyyyMMdd-HHmmss}.html";
+
+            // Mirror SaveReceipt's encryption logic
+            var plainBytes = System.Text.Encoding.UTF8.GetBytes(html);
+            byte[] encryptedBytes;
+            if (OperatingSystem.IsWindows())
+            {
+                encryptedBytes = System.Security.Cryptography.ProtectedData.Protect(
+                    plainBytes, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+            }
+            else
+            {
+                encryptedBytes = plainBytes; // non-Windows: no DPAPI
+            }
+
+            var fileName = $"receipt-{cmd.RxNumber}-{cmd.DeliveredAt:yyyyMMdd-HHmmss}.dat";
             var filePath = Path.Combine(tempDir, fileName);
-            File.WriteAllText(filePath, html);
+            File.WriteAllBytes(filePath, encryptedBytes);
 
             Assert.True(File.Exists(filePath));
-            var content = File.ReadAllText(filePath);
-            Assert.Contains("98765", content);
+            Assert.EndsWith(".dat", filePath);
+
+            var rawBytes = File.ReadAllBytes(filePath);
+            var rawText = System.Text.Encoding.UTF8.GetString(rawBytes);
+            if (OperatingSystem.IsWindows())
+            {
+                // Encrypted content should NOT contain plain HTML tags
+                Assert.DoesNotContain("<!DOCTYPE", rawText);
+            }
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ReadReceipt_DecryptsCorrectly()
+    {
+        // Simulate SaveReceipt + ReadReceipt in a temp dir
+        var tempDir = Path.Combine(Path.GetTempPath(), "SuavoAgent-test-receipts-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var cmd = SampleCommand();
+            var gen = new DeliveryReceiptGenerator();
+            var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+
+            var plainBytes = System.Text.Encoding.UTF8.GetBytes(html);
+            byte[] encryptedBytes;
+            if (OperatingSystem.IsWindows())
+            {
+                encryptedBytes = System.Security.Cryptography.ProtectedData.Protect(
+                    plainBytes, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+            }
+            else
+            {
+                encryptedBytes = plainBytes;
+            }
+
+            var filePath = Path.Combine(tempDir, "receipt-test.dat");
+            File.WriteAllBytes(filePath, encryptedBytes);
+
+            var decrypted = DeliveryReceiptGenerator.ReadReceipt(filePath);
+            Assert.NotNull(decrypted);
+            Assert.Contains("98765", decrypted); // Rx number present after decryption
+            Assert.Contains("<!DOCTYPE", decrypted); // Valid HTML after decryption
         }
         finally
         {

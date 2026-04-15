@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using SuavoAgent.Contracts.Models;
 
 namespace SuavoAgent.Core.Receipts;
@@ -147,6 +148,7 @@ public sealed class DeliveryReceiptGenerator
 
     /// <summary>
     /// Generates the receipt and saves to the delivery-receipts folder.
+    /// DPAPI-encrypted at rest — triggers HIPAA breach notification safe harbor.
     /// Returns the file path.
     /// </summary>
     public string SaveReceipt(DeliveryWritebackCommand cmd, string pharmacyName,
@@ -158,11 +160,83 @@ public sealed class DeliveryReceiptGenerator
         Directory.CreateDirectory(receiptsDir);
 
         var html = GenerateHtml(cmd, pharmacyName, driverName, proofImageBase64);
-        var fileName = $"receipt-{cmd.RxNumber}-{cmd.DeliveredAt:yyyyMMdd-HHmmss}.html";
+
+        // DPAPI-encrypt at rest — triggers HIPAA breach notification safe harbor
+        // Machine-scope: any process on this machine can decrypt (LocalService needs access)
+        var plainBytes = System.Text.Encoding.UTF8.GetBytes(html);
+        byte[] encryptedBytes;
+        if (OperatingSystem.IsWindows())
+        {
+            encryptedBytes = ProtectedData.Protect(plainBytes, null, DataProtectionScope.LocalMachine);
+        }
+        else
+        {
+            encryptedBytes = plainBytes; // non-Windows: no DPAPI, store as-is (dev only)
+        }
+
+        var fileName = $"receipt-{cmd.RxNumber}-{cmd.DeliveredAt:yyyyMMdd-HHmmss}.dat";
         var filePath = Path.Combine(receiptsDir, fileName);
-        File.WriteAllText(filePath, html);
+        File.WriteAllBytes(filePath, encryptedBytes);
 
         return filePath;
+    }
+
+    /// <summary>
+    /// Decrypts and returns the HTML content of a receipt file.
+    /// Used by the dashboard/portal to display receipts on demand.
+    /// </summary>
+    public static string? ReadReceipt(string filePath)
+    {
+        if (!File.Exists(filePath)) return null;
+
+        var encryptedBytes = File.ReadAllBytes(filePath);
+        byte[] plainBytes;
+        if (OperatingSystem.IsWindows())
+        {
+            plainBytes = ProtectedData.Unprotect(encryptedBytes, null, DataProtectionScope.LocalMachine);
+        }
+        else
+        {
+            plainBytes = encryptedBytes;
+        }
+        return System.Text.Encoding.UTF8.GetString(plainBytes);
+    }
+
+    /// <summary>
+    /// Purges receipt files older than the retention period.
+    /// Logs each deletion for audit trail.
+    /// Returns the number of files purged.
+    /// </summary>
+    public static int PurgeExpiredReceipts(int retentionDays, Microsoft.Extensions.Logging.ILogger? logger = null)
+    {
+        var receiptsDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "delivery-receipts");
+        if (!Directory.Exists(receiptsDir)) return 0;
+
+        var cutoff = DateTime.UtcNow.AddDays(-retentionDays);
+        var purged = 0;
+
+        foreach (var file in Directory.GetFiles(receiptsDir, "receipt-*.dat"))
+        {
+            var fileInfo = new FileInfo(file);
+            if (fileInfo.CreationTimeUtc < cutoff)
+            {
+                try
+                {
+                    File.Delete(file);
+                    purged++;
+                    logger?.LogInformation("Purged expired receipt: {FileName} (created {Created})",
+                        fileInfo.Name, fileInfo.CreationTimeUtc);
+                }
+                catch (Exception ex)
+                {
+                    logger?.LogWarning(ex, "Failed to purge receipt: {FileName}", fileInfo.Name);
+                }
+            }
+        }
+
+        return purged;
     }
 
     private static string MaskId(string idValue)
