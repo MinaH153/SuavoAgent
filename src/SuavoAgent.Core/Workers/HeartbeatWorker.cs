@@ -35,6 +35,7 @@ public sealed class HeartbeatWorker : BackgroundService
     private int _helperConsecutiveFailures;
     private bool _lastAuditChainValid = true;
     private int _lastRxCount;
+    private DateOnly _lastPruneDate;
     private DateTimeOffset? _lastSyncAt;
     private bool _consentReceiptSent;
 
@@ -86,8 +87,10 @@ public sealed class HeartbeatWorker : BackgroundService
             _stateDb.PruneOldNonces(TimeSpan.FromMinutes(10));
 
             // Daily pruning of observation data (30-day retention)
-            if (DateTimeOffset.UtcNow.Hour == 3 && DateTimeOffset.UtcNow.Minute < 1)
+            var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.DateTime);
+            if (today != _lastPruneDate)
             {
+                _lastPruneDate = today;
                 try
                 {
                     var pruned = _stateDb.PruneBehavioralEventsByAge(TimeSpan.FromDays(30));
