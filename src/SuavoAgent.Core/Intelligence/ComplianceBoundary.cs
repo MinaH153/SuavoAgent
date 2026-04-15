@@ -16,6 +16,14 @@ public static class ComplianceBoundary
         new(@"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", RegexOptions.Compiled),          // IP address (HIPAA identifier #15)
     };
 
+    private static readonly HashSet<string> SafeContextKeywords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "drugName", "itemName", "medicationDisplay", "ndc", "tradeName",
+        "industry", "metric", "appName", "processName", "category",
+        "version", "agentVersion", "osVersion", "dayOfWeek", "hourKey",
+        "loadLevel", "periodType", "periodKey", "fileType"
+    };
+
     private static readonly HashSet<string> MustBeHashedFields = new(StringComparer.OrdinalIgnoreCase)
     {
         "windowTitleHash", "nameHash", "machineNameHash", "docHash",
@@ -30,8 +38,13 @@ public static class ComplianceBoundary
             var matches = pattern.Matches(json);
             foreach (Match match in matches)
             {
-                if (!IsSafeValue(match.Value))
-                    violations.Add($"PHI pattern detected: '{Redact(match.Value)}'");
+                if (IsSafeValue(match.Value)) continue;
+                // Check if match is near a safe field name
+                var start = Math.Max(0, match.Index - 40);
+                var context = json[start..match.Index];
+                if (SafeContextKeywords.Any(k => context.Contains(k, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                violations.Add($"PHI pattern detected: '{Redact(match.Value)}'");
             }
         }
         return (violations.Count == 0, violations);
@@ -66,6 +79,8 @@ public static class ComplianceBoundary
         }
         // ISO timestamps are safe
         if (value.Contains('T') && value.Contains(':')) return true;
+        // NDC patterns (5-4-2 or 5-3-2 digit format)
+        if (Regex.IsMatch(value, @"^\d{4,5}-\d{3,4}-\d{1,2}$")) return true;
         return false;
     }
 
