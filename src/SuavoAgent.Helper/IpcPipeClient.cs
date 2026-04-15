@@ -9,6 +9,7 @@ public sealed class IpcPipeClient : IDisposable
 {
     private readonly string _pipeName;
     private readonly ILogger _logger;
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
     private NamedPipeClientStream? _pipe;
 
     public bool IsConnected => _pipe?.IsConnected ?? false;
@@ -40,6 +41,7 @@ public sealed class IpcPipeClient : IDisposable
         if (_pipe == null || !IsConnected)
             return null;
 
+        await _writeLock.WaitAsync(ct);
         try
         {
             var json = JsonSerializer.Serialize(request);
@@ -54,6 +56,10 @@ public sealed class IpcPipeClient : IDisposable
         {
             _logger.Warning(ex, "IPC send failed for {Command}", request.Command);
             return null;
+        }
+        finally
+        {
+            _writeLock.Release();
         }
     }
 
