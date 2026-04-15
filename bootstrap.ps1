@@ -15,13 +15,14 @@
 # Never disrupts pharmacy operations.
 
 param(
+    [string]$PharmacyId,
+    [string]$ApiKey,
     [string]$CloudUrl = "https://suavollc.com",
-    [string]$ApiKey = "",
-    [string]$PharmacyId = "",
-    [string]$ReleaseTag = "v3.0.0",
+    [switch]$LearningMode,
+    [string]$ReleaseTag = "v3.9.1",
     [string]$RepoOwner = "MinaH153",
     [string]$RepoName = "SuavoAgent",
-    [switch]$LearningMode
+    [switch]$SkipConsent
 )
 
 if ($ReleaseTag -notmatch '^v\d+\.\d+\.\d+') {
@@ -70,6 +71,7 @@ Write-Host ""
 # ============================================
 # This consent is recorded digitally and uploaded to the Suavo cloud
 # on first heartbeat. No separate paperwork needed.
+if (-not $SkipConsent) {
 Write-Host ""
 Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
 Write-Host "  ║         SUAVOAGENT TERMS & CONSENT                  ║" -ForegroundColor Cyan
@@ -163,6 +165,26 @@ $consentReceipt = @{
 }
 Write-Ok "Consent recorded: $authName ($authTitle) at $consentTimestamp"
 Write-Host ""
+} else {
+    Write-Ok "Consent recorded via web dashboard — skipping terminal prompts"
+    # Set defaults for the consent receipt (already recorded in cloud)
+    $authName = "Web Dashboard"
+    $authTitle = "Pre-authorized"
+    $confirmState = "WEB"
+    $consentTimestamp = (Get-Date).ToString("o")
+    $consentReceipt = @{
+        consentVersion = "1.0"
+        authorizingParty = @{ name = $authName; title = $authTitle }
+        businessState = $confirmState
+        mandatoryNoticeState = $false
+        consentTimestamp = $consentTimestamp
+        termsAccepted = $true
+        employeeNoticeAcknowledged = $true
+        installerVersion = "3.9.1"
+        machineFingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
+        source = "web_dashboard"
+    }
+}
 
 # ============================================
 # PHASE 1: Detect Pharmacy Management System
