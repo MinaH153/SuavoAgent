@@ -59,4 +59,29 @@ public class ComplianceBoundaryTests
         var (isClean, _) = ComplianceBoundary.Validate(json);
         Assert.True(isClean);
     }
+
+    [Fact]
+    public void Validate_WithPhoneNumber_Rejects()
+    {
+        var json = """{"data":"Call 555-123-4567"}""";
+        var (isClean, _) = ComplianceBoundary.Validate(json);
+        Assert.False(isClean);
+    }
+
+    [Fact]
+    public void Validate_WithNamePair_Rejects()
+    {
+        var json = """{"patient":"John Smith"}""";
+        var (isClean, _) = ComplianceBoundary.Validate(json);
+        Assert.False(isClean);
+    }
+
+    [Fact]
+    public void Validate_IpAddress_NotTreatedAsVersion()
+    {
+        var json = """{"server":"192.168.0.10"}""";
+        var (isClean, _) = ComplianceBoundary.Validate(json);
+        // IP addresses should be flagged (HIPAA identifier #15)
+        Assert.False(isClean);
+    }
 }

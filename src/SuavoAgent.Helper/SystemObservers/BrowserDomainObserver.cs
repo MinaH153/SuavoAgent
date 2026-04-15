@@ -35,12 +35,13 @@ public sealed class BrowserDomainObserver
     public static bool IsBrowserProcess(string processName) =>
         BrowserProcesses.Contains(processName);
 
-    public void OnBrowserFocused(string windowTitle)
+    /// <summary>
+    /// Called with a pre-extracted domain (already sanitized by the caller).
+    /// The raw window title should NEVER reach this method — hash or extract domain at the call site.
+    /// </summary>
+    public void OnDomainDetected(string domain)
     {
-        if (string.IsNullOrEmpty(windowTitle)) return;
-
-        var domain = ExtractDomain(windowTitle);
-        if (domain == null) return;
+        if (string.IsNullOrEmpty(domain)) return;
 
         var domainHash = UiaPropertyScrubber.HmacHash(domain, _pharmacySalt);
         if (domainHash == _lastDomainHash) return;

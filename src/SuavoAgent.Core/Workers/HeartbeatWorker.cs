@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Behavioral;
@@ -429,6 +430,13 @@ public sealed class HeartbeatWorker : BackgroundService
                 _decommissionPendingSince = Stopwatch.GetTimestamp();
                 _stateDb.AppendChainedAuditEntry(new AuditEntry(
                     agentId, "decommission", "", "DecommissionPending", "decommission_phase1"));
+
+                // Generate random confirmation token for phase 2 (F8: non-deterministic, non-cloud-computable)
+                var phase1ConfirmBytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+                var phase1ConfirmToken = Convert.ToHexString(phase1ConfirmBytes).ToLowerInvariant();
+                _stateDb.SetConfigValue("decommission_confirm_token", phase1ConfirmToken);
+                _logger.LogInformation("Decommission phase 1: confirmation token generated and stored locally");
+
                 _logger.LogWarning("DECOMMISSION phase 1 — awaiting confirmation (5+ min)");
                 return;
             }
@@ -466,7 +474,7 @@ public sealed class HeartbeatWorker : BackgroundService
                 return;
             }
 
-            // Require pharmacy-specific confirmation token (second factor)
+            // Require confirmation token generated during phase 1 (random, locally stored)
             var dataEl = scEl.TryGetProperty("data", out var d2) ? d2 : scEl;
             var confirmToken = dataEl.TryGetProperty("confirmationToken", out var ctok) ? ctok.GetString() : null;
             if (string.IsNullOrEmpty(confirmToken))
@@ -474,9 +482,8 @@ public sealed class HeartbeatWorker : BackgroundService
                 _logger.LogWarning("Decommission phase 2 rejected — missing confirmationToken");
                 return;
             }
-            var expectedToken = PhiScrubber.HmacHash(
-                $"decommission:{_options.PharmacyId}:{_options.AgentId}", _options.HmacSalt ?? "");
-            if (!confirmToken.Equals(expectedToken[..32], StringComparison.Ordinal))
+            var expectedToken = _stateDb.GetConfigValue("decommission_confirm_token");
+            if (string.IsNullOrEmpty(expectedToken) || !confirmToken.Equals(expectedToken, StringComparison.Ordinal))
             {
                 _logger.LogWarning("Decommission phase 2 rejected — invalid confirmationToken");
                 return;
@@ -508,6 +515,14 @@ public sealed class HeartbeatWorker : BackgroundService
                 var dataDir = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                     "SuavoAgent");
+
+                // Validate paths contain only safe characters before any shell operation
+                var safePathChars = new Regex(@"^[a-zA-Z0-9\s\\_:.\\/-]+$");
+                if (!safePathChars.IsMatch(installDir) || !safePathChars.IsMatch(dataDir))
+                {
+                    _logger.LogError("Decommission aborted — install/data paths contain unsafe characters");
+                    return;
+                }
 
                 // Use cmd.exe with delayed cleanup — avoids PowerShell entirely
                 var cleanupCmd = $"/C timeout /t 5 /nobreak >nul & sc delete SuavoAgent.Core & sc delete SuavoAgent.Broker & rmdir /s /q \"{installDir}\" & rmdir /s /q \"{dataDir}\"";
