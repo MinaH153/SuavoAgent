@@ -66,6 +66,38 @@ Write-Host "  +=======================================+" -ForegroundColor Cyan
 Write-Host ""
 
 # ============================================
+# DISCLOSURE: Employee Monitoring Notice
+# ============================================
+Write-Host ""
+Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Yellow
+Write-Host "  ║  IMPORTANT: EMPLOYEE MONITORING DISCLOSURE          ║" -ForegroundColor Yellow
+Write-Host "  ╠══════════════════════════════════════════════════════╣" -ForegroundColor Yellow
+Write-Host "  ║  SuavoAgent monitors workstation activity to        ║" -ForegroundColor White
+Write-Host "  ║  optimize delivery operations. It collects:         ║" -ForegroundColor White
+Write-Host "  ║                                                     ║" -ForegroundColor White
+Write-Host "  ║  - Application usage patterns and durations         ║" -ForegroundColor Gray
+Write-Host "  ║  - Workstation hardware profile                     ║" -ForegroundColor Gray
+Write-Host "  ║  - Login/logout timing (shift patterns)             ║" -ForegroundColor Gray
+Write-Host "  ║  - Website domain categories (NOT specific URLs)    ║" -ForegroundColor Gray
+Write-Host "  ║  - Print event counts (NOT document content)        ║" -ForegroundColor Gray
+Write-Host "  ║                                                     ║" -ForegroundColor White
+Write-Host "  ║  It does NOT collect keystrokes, screen content,    ║" -ForegroundColor White
+Write-Host "  ║  passwords, email, or personal data.                ║" -ForegroundColor White
+Write-Host "  ║                                                     ║" -ForegroundColor White
+Write-Host "  ║  BY PROCEEDING, YOU CONFIRM:                        ║" -ForegroundColor Yellow
+Write-Host "  ║  - You are authorized to install on this machine    ║" -ForegroundColor White
+Write-Host "  ║  - You will notify employees per your state's laws  ║" -ForegroundColor White
+Write-Host "  ║  - CT, DE, NY require written employee notice       ║" -ForegroundColor Red
+Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Yellow
+Write-Host ""
+$confirm = Read-Host "  Type YES to confirm and proceed"
+if ($confirm -ne "YES") {
+    Write-Host "  Installation cancelled." -ForegroundColor Red
+    exit 0
+}
+Write-Host ""
+
+# ============================================
 # PHASE 1: Detect Pharmacy Management System
 # ============================================
 Write-Step "Phase 1: Detecting pharmacy management system"
