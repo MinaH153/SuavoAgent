@@ -3,11 +3,13 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Contracts.Models;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
+using SuavoAgent.Core.Receipts;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
@@ -729,16 +731,52 @@ public sealed class HeartbeatWorker : BackgroundService
                 deliveredAt = parsed;
         }
 
-        var writebackProcessor = _serviceProvider.GetService<WritebackProcessor>();
-        if (writebackProcessor != null)
+        if (!_options.ReceiptOnlyMode)
         {
-            writebackProcessor.EnqueueWriteback(taskId, rxNumberStr, fillNumber, transition, deliveredAt);
-            _logger.LogInformation("delivery_writeback enqueued: {Transition} Rx {RxHash}",
-                transition, hashedRx[..12]);
+            var writebackProcessor = _serviceProvider.GetService<WritebackProcessor>();
+            if (writebackProcessor != null)
+            {
+                writebackProcessor.EnqueueWriteback(taskId, rxNumberStr, fillNumber, transition, deliveredAt);
+                _logger.LogInformation("delivery_writeback enqueued: {Transition} Rx {RxHash}",
+                    transition, hashedRx[..12]);
+            }
+            else
+            {
+                _logger.LogWarning("delivery_writeback: WritebackProcessor not available");
+            }
         }
         else
         {
-            _logger.LogWarning("delivery_writeback: WritebackProcessor not available");
+            _logger.LogInformation("ReceiptOnlyMode: skipping writeback for Rx {RxHash}, receipt saved", hashedRx[..12]);
+        }
+
+        // Generate delivery receipt locally (audit failsafe)
+        try
+        {
+            var receiptCmd = new DeliveryWritebackCommand(
+                TaskId: taskId,
+                RxNumber: rxNumberStr,
+                FillNumber: fillNumber,
+                ExternalSaleId: dataEl.TryGetProperty("externalSaleId", out var esi) ? esi.GetString() ?? "" : "",
+                RecipientFirstName: dataEl.TryGetProperty("recipientFirstName", out var rfn) ? rfn.GetString() ?? "" : "",
+                RecipientLastName: dataEl.TryGetProperty("recipientLastName", out var rln) ? rln.GetString() ?? "" : "",
+                RecipientIdType: dataEl.TryGetProperty("recipientIdType", out var rit) ? rit.GetInt32() : 0,
+                RecipientIdValue: dataEl.TryGetProperty("recipientIdValue", out var riv) ? riv.GetString() ?? "" : "",
+                RecipientIdState: dataEl.TryGetProperty("recipientIdState", out var ris) ? ris.GetString() ?? "" : "",
+                SignatureSvg: dataEl.TryGetProperty("signatureSvg", out var sig) ? sig.GetString() : null,
+                Price: dataEl.TryGetProperty("price", out var pr) ? pr.GetDecimal() : 0,
+                Tax: dataEl.TryGetProperty("tax", out var tx) ? tx.GetDecimal() : 0,
+                CounselingStatus: dataEl.TryGetProperty("counselingStatus", out var cs2) ? cs2.GetInt32() : 0,
+                DeliveredAt: deliveredAt ?? DateTimeOffset.UtcNow);
+
+            var receiptGen = new DeliveryReceiptGenerator();
+            var receiptPath = receiptGen.SaveReceipt(receiptCmd, _options.PharmacyId ?? "Unknown Pharmacy",
+                driverName: dataEl.TryGetProperty("driverName", out var dn) ? dn.GetString() : null);
+            _logger.LogInformation("Delivery receipt saved: {Path}", receiptPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to generate delivery receipt — writeback continues");
         }
 
         if (isControlled)

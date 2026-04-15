@@ -9,7 +9,7 @@ public sealed class AgentOptions
     public string? MachineFingerprint { get; set; }
     public int HeartbeatIntervalSeconds { get; set; } = 30;
     public int HeartbeatJitterSeconds { get; set; } = 5;
-    public string Version { get; set; } = "3.0.0";
+    public string Version { get; set; } = "3.9.0";
     public string UpdateChannel { get; set; } = "stable";
     public string? SqlServer { get; set; }
     public string? SqlDatabase { get; set; }
@@ -44,6 +44,13 @@ public sealed class AgentOptions
     /// When false, uses the existing PioneerRx adapter directly.
     /// </summary>
     public bool LearningMode { get; set; }
+
+    /// <summary>
+    /// When true, agent generates delivery receipts but does NOT write back to PMS database.
+    /// For pharmacies that want proof-of-delivery without SQL writes.
+    /// Receipts are saved to ProgramData\SuavoAgent\delivery-receipts\.
+    /// </summary>
+    public bool ReceiptOnlyMode { get; set; }
 
     /// <summary>
     /// Multi-pharmacy config. When populated, each entry gets its own detection worker.
