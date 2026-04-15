@@ -16,6 +16,7 @@ public sealed class WritebackProcessor : BackgroundService
     private readonly IpcPipeServer _pipeServer;
     private readonly AgentOptions _options;
     private readonly Dictionary<string, WritebackStateMachine> _machines = new();
+    private readonly Dictionary<string, string> _rxNumbers = new();
 
     private PioneerRxWritebackEngine? _writebackEngine;
     private string? _sessionId;
@@ -99,6 +100,7 @@ public sealed class WritebackProcessor : BackgroundService
 
         var machine = new WritebackStateMachine(taskId, WritebackState.Queued, OnStateChanged);
         _machines[taskId] = machine;
+        _rxNumbers[taskId] = rxNumber;
         _stateDb.UpsertWritebackState(taskId, rxNumber, WritebackState.Queued, 0, null);
         _logger.LogInformation("Enqueued writeback {TaskId} for Rx {RxHash}", taskId, PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? ""));
     }
@@ -259,7 +261,8 @@ public sealed class WritebackProcessor : BackgroundService
         var machine = _machines.GetValueOrDefault(taskId);
         if (machine != null)
         {
-            _stateDb.UpsertWritebackState(taskId, "", newState, machine.RetryCount, null);
+            var rxNum = _rxNumbers.GetValueOrDefault(taskId, "");
+            _stateDb.UpsertWritebackState(taskId, rxNum, newState, machine.RetryCount, null);
 
             // Exponential backoff: 1min, 5min, 15min
             if (trigger == WritebackTrigger.SystemError)
