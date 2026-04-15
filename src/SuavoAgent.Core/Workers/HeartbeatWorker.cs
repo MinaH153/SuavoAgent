@@ -295,7 +295,7 @@ public sealed class HeartbeatWorker : BackgroundService
                     await HandleFetchPatientAsync(scEl, cmd, ct);
                     break;
                 case "decommission":
-                    await HandleDecommissionAsync(ct);
+                    await HandleDecommissionAsync(scEl, ct);
                     break;
                 case "update":
                     await HandleUpdateAsync(scEl, ct);
@@ -397,7 +397,7 @@ public sealed class HeartbeatWorker : BackgroundService
     /// Blocks if archive upload fails. 1h timeout auto-cancels in main loop.
     /// Only reachable via ECDSA-signed command envelope.
     /// </summary>
-    private async Task HandleDecommissionAsync(CancellationToken ct)
+    private async Task HandleDecommissionAsync(JsonElement scEl, CancellationToken ct)
     {
         try
         {
@@ -445,6 +445,23 @@ public sealed class HeartbeatWorker : BackgroundService
                 _decommissionPendingSince = null;
                 return;
             }
+
+            // Require pharmacy-specific confirmation token (second factor)
+            var dataEl = scEl.TryGetProperty("data", out var d2) ? d2 : scEl;
+            var confirmToken = dataEl.TryGetProperty("confirmationToken", out var ctok) ? ctok.GetString() : null;
+            if (string.IsNullOrEmpty(confirmToken))
+            {
+                _logger.LogWarning("Decommission phase 2 rejected — missing confirmationToken");
+                return;
+            }
+            var expectedToken = PhiScrubber.HmacHash(
+                $"decommission:{_options.PharmacyId}:{_options.AgentId}", _options.HmacSalt ?? "");
+            if (!confirmToken.Equals(expectedToken[..32], StringComparison.Ordinal))
+            {
+                _logger.LogWarning("Decommission phase 2 rejected — invalid confirmationToken");
+                return;
+            }
+            _logger.LogInformation("Decommission confirmation token validated");
 
             _stateDb.AppendChainedAuditEntry(new AuditEntry(
                 agentId, "decommission", "DecommissionPending", "Decommissioned", "decommission_phase2"));
