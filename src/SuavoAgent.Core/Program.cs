@@ -53,9 +53,9 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    Log.Information("SuavoAgent.Core starting v3.0.0");
-
     var builder = Host.CreateApplicationBuilder(args);
+    var startupVersion = builder.Configuration.GetSection("Agent").Get<AgentOptions>()?.Version ?? "unknown";
+    Log.Information("SuavoAgent.Core starting v{Version}", startupVersion);
     builder.Services.AddWindowsService(options => options.ServiceName = "SuavoAgent.Core");
     builder.Services.AddSerilog();
 

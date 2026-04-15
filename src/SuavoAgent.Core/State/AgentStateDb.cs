@@ -574,7 +574,7 @@ public sealed class AgentStateDb : IDisposable
         Execute("CREATE INDEX IF NOT EXISTS idx_wb_state ON writeback_states(state)");
         Execute("CREATE INDEX IF NOT EXISTS idx_ub_status ON unsynced_batches(status)");
         Execute("CREATE INDEX IF NOT EXISTS idx_audit_id ON audit_entries(id)");
-        Execute("CREATE INDEX IF NOT EXISTS idx_canary_incidents_resolved ON schema_canary_incidents(resolved)");
+        Execute("CREATE INDEX IF NOT EXISTS idx_canary_incidents_resolved ON schema_canary_incidents(resolved_at)");
     }
 
     private void Execute(string sql)
