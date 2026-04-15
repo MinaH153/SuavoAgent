@@ -549,6 +549,27 @@ public sealed class AgentStateDb : IDisposable
         """);
 
         Execute("CREATE TABLE IF NOT EXISTS config_kv (key TEXT PRIMARY KEY, value TEXT)");
+
+        // Readiness timing pipeline
+        Execute("""
+            CREATE TABLE IF NOT EXISTS readiness_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                rx_number_hash TEXT NOT NULL,
+                entered_at TEXT,
+                filled_at TEXT,
+                verified_at TEXT,
+                ready_at TEXT,
+                picked_up_at TEXT,
+                elapsed_minutes REAL,
+                day_of_week INTEGER,
+                hour_of_day INTEGER,
+                is_controlled INTEGER DEFAULT 0,
+                concurrent_queue_depth INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """);
+        Execute("CREATE INDEX IF NOT EXISTS idx_readiness_day ON readiness_samples(day_of_week, hour_of_day)");
     }
 
     private void Execute(string sql)
@@ -2785,6 +2806,55 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@ver", (object?)agentVersion ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@phase", (object?)learningPhase ?? DBNull.Value);
         cmd.ExecuteNonQuery();
+    }
+
+    // ── Readiness timing pipeline ──────────────────────────────────────
+
+    public void InsertReadinessSample(string sessionId, string rxNumberHash,
+        DateTimeOffset? enteredAt, DateTimeOffset? filledAt, DateTimeOffset? verifiedAt,
+        DateTimeOffset? readyAt, DateTimeOffset? pickedUpAt,
+        double? elapsedMinutes, int dayOfWeek, int hourOfDay,
+        bool isControlled, int concurrentQueueDepth)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO readiness_samples (session_id, rx_number_hash, entered_at, filled_at,
+                verified_at, ready_at, picked_up_at, elapsed_minutes, day_of_week, hour_of_day,
+                is_controlled, concurrent_queue_depth)
+            VALUES (@sid, @rx, @entered, @filled, @verified, @ready, @picked, @elapsed,
+                @dow, @hour, @controlled, @depth)
+        """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@rx", rxNumberHash);
+        cmd.Parameters.AddWithValue("@entered", (object?)enteredAt?.ToString("o") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@filled", (object?)filledAt?.ToString("o") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@verified", (object?)verifiedAt?.ToString("o") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ready", (object?)readyAt?.ToString("o") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@picked", (object?)pickedUpAt?.ToString("o") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@elapsed", (object?)elapsedMinutes ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@dow", dayOfWeek);
+        cmd.Parameters.AddWithValue("@hour", hourOfDay);
+        cmd.Parameters.AddWithValue("@controlled", isControlled ? 1 : 0);
+        cmd.Parameters.AddWithValue("@depth", concurrentQueueDepth);
+        cmd.ExecuteNonQuery();
+    }
+
+    public (double AvgMinutes, double StdDevMinutes, int SampleCount) GetReadinessStats(int dayOfWeek, int hourOfDay)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT AVG(elapsed_minutes),
+                   SQRT(AVG(elapsed_minutes * elapsed_minutes) - AVG(elapsed_minutes) * AVG(elapsed_minutes)),
+                   COUNT(*)
+            FROM readiness_samples
+            WHERE day_of_week = @dow AND hour_of_day = @hour AND elapsed_minutes IS NOT NULL
+        """;
+        cmd.Parameters.AddWithValue("@dow", dayOfWeek);
+        cmd.Parameters.AddWithValue("@hour", hourOfDay);
+        using var reader = cmd.ExecuteReader();
+        if (reader.Read() && !reader.IsDBNull(0))
+            return (reader.GetDouble(0), reader.IsDBNull(1) ? 0 : reader.GetDouble(1), reader.GetInt32(2));
+        return (0, 0, 0);
     }
 
     public void Dispose()
