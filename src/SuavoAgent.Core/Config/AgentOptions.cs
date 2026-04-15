@@ -46,11 +46,12 @@ public sealed class AgentOptions
     public bool LearningMode { get; set; }
 
     /// <summary>
-    /// When true, agent generates delivery receipts but does NOT write back to PMS database.
-    /// For pharmacies that want proof-of-delivery without SQL writes.
-    /// Receipts are saved to ProgramData\SuavoAgent\delivery-receipts\.
+    /// Default: true. Agent generates digital delivery receipts (signature, photo, timestamp)
+    /// replacing the paper receipt + scanner workflow. Receipts are DPAPI-encrypted locally
+    /// and viewable on the pharmacy dashboard.
+    /// When false, agent ALSO writes delivery status back to PMS SQL (requires explicit opt-in).
     /// </summary>
-    public bool ReceiptOnlyMode { get; set; }
+    public bool ReceiptOnlyMode { get; set; } = true;
 
     /// <summary>
     /// Retention period for delivery receipt files in days. Default 2555 (7 years).
