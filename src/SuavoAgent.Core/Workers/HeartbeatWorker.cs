@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Behavioral;
@@ -514,6 +515,14 @@ public sealed class HeartbeatWorker : BackgroundService
                 var dataDir = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                     "SuavoAgent");
+
+                // Validate paths contain only safe characters before any shell operation
+                var safePathChars = new Regex(@"^[a-zA-Z0-9\s\\_:.\\/-]+$");
+                if (!safePathChars.IsMatch(installDir) || !safePathChars.IsMatch(dataDir))
+                {
+                    _logger.LogError("Decommission aborted — install/data paths contain unsafe characters");
+                    return;
+                }
 
                 // Use cmd.exe with delayed cleanup — avoids PowerShell entirely
                 var cleanupCmd = $"/C timeout /t 5 /nobreak >nul & sc delete SuavoAgent.Core & sc delete SuavoAgent.Broker & rmdir /s /q \"{installDir}\" & rmdir /s /q \"{dataDir}\"";
