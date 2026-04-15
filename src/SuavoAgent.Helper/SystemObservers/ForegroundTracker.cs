@@ -13,8 +13,11 @@ public sealed class ForegroundTracker : IDisposable
     private string? _currentProcessName;
     private DateTimeOffset _focusStart;
     private volatile bool _disposed;
+    private Action<string, string?>? _onAppFocused;
 
     public int TransitionCount { get; private set; }
+
+    public void OnAppFocusChanged(Action<string, string?> callback) => _onAppFocused = callback;
 
     public ForegroundTracker(BehavioralEventBuffer buffer, string pharmacySalt, ILogger logger)
     {
@@ -73,6 +76,10 @@ public sealed class ForegroundTracker : IDisposable
         {
             _buffer.Enqueue(BehavioralEvent.AppFocusChange(prevProcess, processName, titleHash, duration));
             TransitionCount++;
+
+            // Notify registered observers
+            try { _onAppFocused?.Invoke(processName, null); }
+            catch { } // observer errors must not crash the tracker
         }
     }
 
