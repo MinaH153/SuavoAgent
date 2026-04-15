@@ -17,6 +17,8 @@ public sealed class WritebackProcessor : BackgroundService
     private readonly AgentOptions _options;
     private readonly Dictionary<string, WritebackStateMachine> _machines = new();
     private readonly Dictionary<string, string> _rxNumbers = new();
+    private readonly Dictionary<string, string> _transitions = new();
+    private readonly Dictionary<string, DateTimeOffset?> _deliveredAts = new();
 
     private PioneerRxWritebackEngine? _writebackEngine;
     private string? _sessionId;
@@ -101,8 +103,11 @@ public sealed class WritebackProcessor : BackgroundService
         var machine = new WritebackStateMachine(taskId, WritebackState.Queued, OnStateChanged);
         _machines[taskId] = machine;
         _rxNumbers[taskId] = rxNumber;
+        _transitions[taskId] = transition;
+        _deliveredAts[taskId] = deliveredAt;
         _stateDb.UpsertWritebackState(taskId, rxNumber, WritebackState.Queued, 0, null);
-        _logger.LogInformation("Enqueued writeback {TaskId} for Rx {RxHash}", taskId, PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? ""));
+        _logger.LogInformation("Enqueued writeback {TaskId} for Rx {RxHash} transition={Transition}",
+            taskId, PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? ""), transition);
     }
 
     private async Task ProcessPendingWritebacksAsync(CancellationToken ct)
@@ -167,13 +172,18 @@ public sealed class WritebackProcessor : BackgroundService
             {
                 machine.Fire(WritebackTrigger.Claim);
 
-                // Resolve RxTransactionID (default to pickup transition)
+                // Determine transition type (default to pickup for backward compatibility)
+                var transition = _transitions.GetValueOrDefault(taskId, "pickup");
+                var deliveredAt = _deliveredAts.GetValueOrDefault(taskId);
+
+                // Resolve RxTransactionID using the correct transition filter
                 var resolved = await _writebackEngine.ResolveTransactionIdAsync(
-                    rxNumber, 0, "pickup", ct);
+                    rxNumber, 0, transition, ct);
 
                 if (resolved == null)
                 {
-                    _logger.LogWarning("Writeback {TaskId} — Rx {Rx} not in expected state", taskId, rxNumber);
+                    _logger.LogWarning("Writeback {TaskId} — Rx {Rx} not in expected state for {Transition}",
+                        taskId, rxNumber, transition);
                     if (machine.CanFire(WritebackTrigger.BusinessError))
                         machine.Fire(WritebackTrigger.BusinessError);
                     continue;
@@ -181,8 +191,18 @@ public sealed class WritebackProcessor : BackgroundService
 
                 machine.Fire(WritebackTrigger.StartUia); // → InProgress
 
-                var result = await _writebackEngine.ExecutePickupAsync(
-                    resolved.Value.TxId, resolved.Value.CurrentStatus, ct);
+                // Route to correct writeback method based on transition
+                WritebackResult result;
+                if (transition == "complete")
+                {
+                    result = await _writebackEngine.ExecuteCompleteAsync(
+                        resolved.Value.TxId, deliveredAt ?? DateTimeOffset.UtcNow, ct);
+                }
+                else
+                {
+                    result = await _writebackEngine.ExecutePickupAsync(
+                        resolved.Value.TxId, resolved.Value.CurrentStatus, ct);
+                }
 
                 MapResultToStateMachine(machine, result);
 
