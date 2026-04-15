@@ -6,7 +6,13 @@ namespace SuavoAgent.Core.Intelligence;
 public sealed class FleetDataChannels
 {
     private readonly AgentStateDb _db;
-    public FleetDataChannels(AgentStateDb db) => _db = db;
+    private readonly ReadinessPredictor _predictor;
+
+    public FleetDataChannels(AgentStateDb db)
+    {
+        _db = db;
+        _predictor = new ReadinessPredictor(db);
+    }
 
     public FleetSignals ComputeSignals(string pharmacyId)
     {
@@ -16,9 +22,26 @@ public sealed class FleetDataChannels
             PharmacyId = pharmacyId,
             ComputedAt = now,
             OrderVolume = new OrderVolumeSignal { CurrentHourKey = now.ToString("yyyy-MM-ddTHH"), DayOfWeek = now.DayOfWeek.ToString() },
-            PickupReadiness = new PickupReadinessSignal(),
+            PickupReadiness = ComputePickupReadiness(),
             BusinessHours = new BusinessHoursSignal { IsCurrentlyActive = true, ActiveToday = true },
             Capacity = new CapacitySignal { CurrentLoadLevel = LoadLevel.Normal, ActionVelocityVsBaseline = 1.0, ErrorRateVsBaseline = 1.0 }
+        };
+    }
+
+    private PickupReadinessSignal ComputePickupReadiness()
+    {
+        var prediction = _predictor.PredictReadiness();
+        if (prediction == null)
+        {
+            return new PickupReadinessSignal(); // no data yet
+        }
+
+        return new PickupReadinessSignal
+        {
+            AvgFillTimeMinutes = prediction.PredictedMinutes,
+            EstimatedReadyIn = TimeSpan.FromMinutes(prediction.PredictedMinutes),
+            ConfidencePct = prediction.ConfidencePct,
+            SampleSize = prediction.SampleCount
         };
     }
 }

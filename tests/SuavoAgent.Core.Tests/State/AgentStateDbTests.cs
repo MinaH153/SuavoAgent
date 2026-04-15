@@ -155,6 +155,29 @@ public class AgentStateDbTests : IDisposable
         finally { File.Delete(dbPath); }
     }
 
+    [Fact]
+    public void ReadinessSample_InsertAndStats()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test-readiness-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var db = new AgentStateDb(dbPath);
+            db.InsertReadinessSample("s1", "rxhash1",
+                DateTimeOffset.UtcNow.AddMinutes(-25), DateTimeOffset.UtcNow.AddMinutes(-15),
+                DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow, null,
+                25.0, 1, 10, false, 5);
+            db.InsertReadinessSample("s1", "rxhash2",
+                DateTimeOffset.UtcNow.AddMinutes(-20), DateTimeOffset.UtcNow.AddMinutes(-10),
+                DateTimeOffset.UtcNow.AddMinutes(-3), DateTimeOffset.UtcNow, null,
+                20.0, 1, 10, false, 3);
+
+            var stats = db.GetReadinessStats(1, 10);
+            Assert.Equal(2, stats.SampleCount);
+            Assert.InRange(stats.AvgMinutes, 22.0, 23.0); // avg of 25 and 20
+        }
+        finally { File.Delete(dbPath); }
+    }
+
     public void Dispose()
     {
         _db.Dispose();
