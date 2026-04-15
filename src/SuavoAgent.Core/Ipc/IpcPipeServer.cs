@@ -52,12 +52,34 @@ public sealed class IpcPipeServer : IDisposable
 
                         var clientProc = System.Diagnostics.Process.GetProcessById((int)clientPid);
                         var clientName = clientProc.ProcessName;
+
+                        // Verify process name is a known SuavoAgent binary
                         if (clientName != "SuavoAgent.Helper" && clientName != "SuavoAgent.Broker")
                         {
                             _logger.LogWarning("IPC: Rejected connection from unauthorized process {Name} (PID {Pid})",
                                 clientName, clientPid);
                             pipe.Disconnect();
                             continue;
+                        }
+
+                        // Verify executable path is under the SuavoAgent install directory (anti-spoofing)
+                        try
+                        {
+                            var clientPath = clientProc.MainModule?.FileName;
+                            var installDir = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
+                                ?? AppContext.BaseDirectory;
+                            if (clientPath != null && !clientPath.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
+                            {
+                                _logger.LogWarning("IPC: Rejected connection from outside install dir: {Path} (expected under {Dir})",
+                                    clientPath, installDir);
+                                pipe.Disconnect();
+                                continue;
+                            }
+                        }
+                        catch (System.ComponentModel.Win32Exception)
+                        {
+                            // MainModule access may fail for cross-architecture processes — allow if name matched
+                            _logger.LogDebug("IPC: Could not verify client path (access denied) — allowing by name match");
                         }
                     }
                     catch (Exception ex)
