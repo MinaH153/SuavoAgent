@@ -514,6 +514,25 @@ foreach ($bin in $binaries) {
 }
 
 # ============================================
+# SECURITY CHECK: BitLocker Status
+# ============================================
+Write-Step "Security: Checking disk encryption"
+$bitlockerStatus = $null
+try {
+    $bitlockerStatus = (manage-bde -status $env:SystemDrive 2>$null | Select-String "Protection Status").ToString()
+} catch { }
+
+if ($bitlockerStatus -and $bitlockerStatus -match "Protection On") {
+    Write-Ok "BitLocker is ENABLED on $env:SystemDrive — HIPAA breach safe harbor active"
+} else {
+    Write-Warn "BitLocker is NOT enabled on $env:SystemDrive"
+    Write-Host "  HIPAA RECOMMENDATION: Enable BitLocker for full-disk encryption" -ForegroundColor Yellow
+    Write-Host "  Without BitLocker, a stolen computer = reportable HIPAA breach" -ForegroundColor Yellow
+    Write-Host "  Delivery receipts are encrypted by SuavoAgent (DPAPI) regardless" -ForegroundColor Gray
+    Write-Host ""
+}
+
+# ============================================
 # PHASE 4: Write appsettings.json
 # ============================================
 Write-Step "Phase 4: Writing configuration"
