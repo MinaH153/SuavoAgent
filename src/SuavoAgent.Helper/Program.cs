@@ -237,13 +237,11 @@ try
 
             if (attachFailures >= maxAttachRetries)
             {
-                Log.Warning("PioneerRx not found after {Max} attempts — exiting", maxAttachRetries);
+                Log.Warning("PioneerRx not found after {Max} attempts — will restart via Broker", maxAttachRetries);
                 await ipcClient.TrySendAsync("pioneer_attach_exhausted",
-                    System.Text.Json.JsonSerializer.Serialize(new
-                    {
-                        totalAttempts = attachFailures
-                    }), cts.Token);
-                break;
+                    System.Text.Json.JsonSerializer.Serialize(new { totalAttempts = attachFailures }), cts.Token);
+                // Exit with non-zero so Broker relaunches us
+                Environment.Exit(1);
             }
 
             await Task.Delay(TimeSpan.FromSeconds(10), cts.Token);
@@ -281,8 +279,10 @@ try
                     attachFailures++;
                     if (attachFailures >= maxAttachRetries)
                     {
-                        Log.Warning("PioneerRx re-attach failed after {Max} attempts", maxAttachRetries);
-                        break;
+                        Log.Warning("PioneerRx re-attach failed after {Max} attempts — will restart via Broker", maxAttachRetries);
+                        await ipcClient.TrySendAsync("pioneer_attach_exhausted",
+                            System.Text.Json.JsonSerializer.Serialize(new { totalAttempts = attachFailures }), cts.Token);
+                        Environment.Exit(1);
                     }
                     await Task.Delay(TimeSpan.FromSeconds(10), cts.Token);
                 }
