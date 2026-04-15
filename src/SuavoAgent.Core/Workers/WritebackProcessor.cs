@@ -107,6 +107,12 @@ public sealed class WritebackProcessor : BackgroundService
 
     private async Task ProcessPendingWritebacksAsync(CancellationToken ct)
     {
+        if (_options.ReceiptOnlyMode)
+        {
+            _logger.LogDebug("ReceiptOnlyMode — skipping writeback processing");
+            return;
+        }
+
         var queued = _machines
             .Where(m => m.Value.CurrentState == WritebackState.Queued)
             .ToList();
