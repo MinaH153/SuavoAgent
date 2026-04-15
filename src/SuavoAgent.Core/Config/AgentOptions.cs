@@ -46,6 +46,13 @@ public sealed class AgentOptions
     public bool LearningMode { get; set; }
 
     /// <summary>
+    /// When true, agent generates delivery receipts but does NOT write back to PMS database.
+    /// For pharmacies that want proof-of-delivery without SQL writes.
+    /// Receipts are saved to ProgramData\SuavoAgent\delivery-receipts\.
+    /// </summary>
+    public bool ReceiptOnlyMode { get; set; }
+
+    /// <summary>
     /// Multi-pharmacy config. When populated, each entry gets its own detection worker.
     /// Backwards-compatible: if empty, falls back to the top-level SqlServer/PharmacyId fields.
     /// </summary>

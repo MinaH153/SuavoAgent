@@ -731,16 +731,23 @@ public sealed class HeartbeatWorker : BackgroundService
                 deliveredAt = parsed;
         }
 
-        var writebackProcessor = _serviceProvider.GetService<WritebackProcessor>();
-        if (writebackProcessor != null)
+        if (!_options.ReceiptOnlyMode)
         {
-            writebackProcessor.EnqueueWriteback(taskId, rxNumberStr, fillNumber, transition, deliveredAt);
-            _logger.LogInformation("delivery_writeback enqueued: {Transition} Rx {RxHash}",
-                transition, hashedRx[..12]);
+            var writebackProcessor = _serviceProvider.GetService<WritebackProcessor>();
+            if (writebackProcessor != null)
+            {
+                writebackProcessor.EnqueueWriteback(taskId, rxNumberStr, fillNumber, transition, deliveredAt);
+                _logger.LogInformation("delivery_writeback enqueued: {Transition} Rx {RxHash}",
+                    transition, hashedRx[..12]);
+            }
+            else
+            {
+                _logger.LogWarning("delivery_writeback: WritebackProcessor not available");
+            }
         }
         else
         {
-            _logger.LogWarning("delivery_writeback: WritebackProcessor not available");
+            _logger.LogInformation("ReceiptOnlyMode: skipping writeback for Rx {RxHash}, receipt saved", hashedRx[..12]);
         }
 
         // Generate delivery receipt locally (audit failsafe)
