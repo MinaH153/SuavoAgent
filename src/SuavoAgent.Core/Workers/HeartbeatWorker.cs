@@ -99,6 +99,19 @@ public sealed class HeartbeatWorker : BackgroundService
                 {
                     _logger.LogDebug(ex, "Observation pruning failed");
                 }
+
+                // Purge expired delivery receipts (7-year default retention)
+                try
+                {
+                    var receiptsPurged = Receipts.DeliveryReceiptGenerator.PurgeExpiredReceipts(
+                        _options.ReceiptRetentionDays);
+                    if (receiptsPurged > 0)
+                        _logger.LogInformation("Purged {Count} expired delivery receipts", receiptsPurged);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Receipt purge failed");
+                }
             }
 
             // Hoist canaryHold so the delay block can read it even if the try throws

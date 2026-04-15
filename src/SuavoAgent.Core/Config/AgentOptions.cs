@@ -53,6 +53,13 @@ public sealed class AgentOptions
     public bool ReceiptOnlyMode { get; set; }
 
     /// <summary>
+    /// Retention period for delivery receipt files in days. Default 2555 (7 years).
+    /// Covers most conservative state pharmacy record retention requirements.
+    /// DEA minimum for controlled substance records is 730 days (2 years).
+    /// </summary>
+    public int ReceiptRetentionDays { get; set; } = 2555;
+
+    /// <summary>
     /// Multi-pharmacy config. When populated, each entry gets its own detection worker.
     /// Backwards-compatible: if empty, falls back to the top-level SqlServer/PharmacyId fields.
     /// </summary>
