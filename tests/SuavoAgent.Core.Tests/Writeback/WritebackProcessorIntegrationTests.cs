@@ -62,12 +62,14 @@ public class WritebackProcessorIntegrationTests
         var machine = new WritebackStateMachine("task-1", WritebackState.Queued,
             (_, _, _, _) => { });
 
-        for (int i = 0; i < 3; i++)
+        // Exhaust MaxRetries (5) with SystemError
+        for (int i = 0; i < WritebackStateMachine.MaxRetries; i++)
         {
             machine.Fire(WritebackTrigger.Claim);
             machine.Fire(WritebackTrigger.SystemError);
         }
 
+        // Next error should dead-letter → ManualReview
         machine.Fire(WritebackTrigger.Claim);
         machine.Fire(WritebackTrigger.SystemError);
         Assert.Equal(WritebackState.ManualReview, machine.CurrentState);
@@ -104,14 +106,14 @@ public class WritebackProcessorIntegrationTests
         machine.Fire(WritebackTrigger.Claim);
         machine.Fire(WritebackTrigger.StartUia);
 
-        // 3 verify mismatches = max verify attempts
-        for (int i = 0; i < 3; i++)
+        // MaxVerifyAttempts (3) verify mismatches
+        for (int i = 0; i < WritebackStateMachine.MaxVerifyAttempts; i++)
         {
             machine.Fire(WritebackTrigger.WriteComplete);
             machine.Fire(WritebackTrigger.VerifyMismatch); // back to InProgress
         }
 
-        // 4th mismatch → BusinessError → ManualReview (guard in Fire)
+        // Next mismatch → DeadLetter → ManualReview (guard in Fire)
         machine.Fire(WritebackTrigger.WriteComplete);
         machine.Fire(WritebackTrigger.VerifyMismatch);
         Assert.Equal(WritebackState.ManualReview, machine.CurrentState);

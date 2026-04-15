@@ -69,15 +69,33 @@ public class WritebackStateMachineTests
     }
 
     [Fact]
-    public void BusinessError_ImmediateManualReview()
+    public void BusinessError_RetriesInsteadOfDeadLettering()
     {
         var sm = Create();
         sm.Fire(WritebackTrigger.Claim);
-        sm.Fire(WritebackTrigger.StartUia);
+        sm.Fire(WritebackTrigger.BusinessError);
+
+        // BusinessError now retries (back to Queued) instead of immediate ManualReview
+        Assert.Equal(WritebackState.Queued, sm.CurrentState);
+        Assert.Equal(1, sm.RetryCount);
+        Assert.False(sm.IsTerminal);
+    }
+
+    [Fact]
+    public void BusinessError_DeadLettersAfterMaxRetries()
+    {
+        var sm = Create();
+        for (int i = 0; i < WritebackStateMachine.MaxRetries; i++)
+        {
+            sm.Fire(WritebackTrigger.Claim);
+            sm.Fire(WritebackTrigger.BusinessError);
+        }
+        // Next BusinessError should dead-letter → ManualReview
+        sm.Fire(WritebackTrigger.Claim);
         sm.Fire(WritebackTrigger.BusinessError);
 
         Assert.Equal(WritebackState.ManualReview, sm.CurrentState);
-        Assert.Equal(0, sm.RetryCount);
+        Assert.True(sm.IsTerminal);
     }
 
     [Fact]

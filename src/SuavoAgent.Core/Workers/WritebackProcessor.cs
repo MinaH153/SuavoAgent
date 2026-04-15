@@ -19,6 +19,7 @@ public sealed class WritebackProcessor : BackgroundService
     private readonly Dictionary<string, string> _rxNumbers = new();
     private readonly Dictionary<string, string> _transitions = new();
     private readonly Dictionary<string, DateTimeOffset?> _deliveredAts = new();
+    private readonly Dictionary<string, DateTimeOffset> _nextRetryAt = new();
 
     private PioneerRxWritebackEngine? _writebackEngine;
     private string? _sessionId;
@@ -118,8 +119,10 @@ public sealed class WritebackProcessor : BackgroundService
             return;
         }
 
+        var now = DateTimeOffset.UtcNow;
         var queued = _machines
             .Where(m => m.Value.CurrentState == WritebackState.Queued)
+            .Where(m => !_nextRetryAt.TryGetValue(m.Key, out var nra) || nra <= now)
             .ToList();
 
         if (queued.Count == 0) return;
@@ -290,14 +293,16 @@ public sealed class WritebackProcessor : BackgroundService
             var rxNum = _rxNumbers.GetValueOrDefault(taskId, "");
             _stateDb.UpsertWritebackState(taskId, rxNum, newState, machine.RetryCount, null);
 
-            // Exponential backoff: 1min, 5min, 15min
-            if (trigger == WritebackTrigger.SystemError)
+            // Exponential backoff: 30s, 60s, 120s, 240s, 480s (30 * 2^n)
+            if (trigger is WritebackTrigger.SystemError or WritebackTrigger.BusinessError)
             {
-                var delays = new[] { 60, 300, 900 };
                 var retryCount = machine.RetryCount;
-                if (retryCount > 0 && retryCount <= delays.Length)
+                if (retryCount > 0 && retryCount <= WritebackStateMachine.MaxRetries)
                 {
-                    _stateDb.UpdateNextRetryAt(taskId, DateTimeOffset.UtcNow.AddSeconds(delays[retryCount - 1]));
+                    var delaySeconds = 30 * (1 << (retryCount - 1)); // 30, 60, 120, 240, 480
+                    var retryAt = DateTimeOffset.UtcNow.AddSeconds(delaySeconds);
+                    _nextRetryAt[taskId] = retryAt;
+                    _stateDb.UpdateNextRetryAt(taskId, retryAt);
                 }
             }
         }
@@ -306,7 +311,15 @@ public sealed class WritebackProcessor : BackgroundService
             taskId, "writeback_transition",
             previousState.ToString(), newState.ToString(), trigger.ToString()));
 
-        if (newState is WritebackState.Done or WritebackState.ManualReview)
+        if (newState == WritebackState.ManualReview && trigger == WritebackTrigger.DeadLetter)
+        {
+            var rxNum = _rxNumbers.GetValueOrDefault(taskId, "");
+            _stateDb.UpsertWritebackState(taskId, rxNum, newState, machine?.RetryCount ?? 0,
+                "max retries exceeded");
+            _logger.LogWarning("Writeback {TaskId} DEAD-LETTERED after {Retries} retries",
+                taskId, machine?.RetryCount ?? 0);
+        }
+        else if (newState is WritebackState.Done or WritebackState.ManualReview)
         {
             _logger.LogInformation("Writeback {TaskId} reached terminal state: {State}", taskId, newState);
         }

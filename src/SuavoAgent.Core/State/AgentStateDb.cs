@@ -658,6 +658,13 @@ public sealed class AgentStateDb : IDisposable
         return results;
     }
 
+    public int GetFailedWritebackCount()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM writeback_states WHERE state = 'ManualReview'";
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
     public void UpdateNextRetryAt(string taskId, DateTimeOffset nextRetry)
     {
         using var cmd = _conn.CreateCommand();

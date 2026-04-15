@@ -210,6 +210,9 @@ public sealed class HeartbeatWorker : BackgroundService
                     }
                 }
 
+                var pendingWbCount = _stateDb.GetPendingWritebacks().Count;
+                var failedWbCount = _stateDb.GetFailedWritebackCount();
+
                 var payload = new
                 {
                     agentId = _options.AgentId,
@@ -221,6 +224,11 @@ public sealed class HeartbeatWorker : BackgroundService
                     memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
                     status = "online",
                     pioneerrxStatus = sqlConnected ? "connected" : "not_connected",
+                    // Top-level fields for cloud stats extraction
+                    sqlConnected = sqlConnected,
+                    pendingWritebackCount = pendingWbCount,
+                    failedWritebackCount = failedWbCount,
+                    rxReadyCount = _lastRxCount,
                     sql = new
                     {
                         connected = sqlConnected,
@@ -233,9 +241,9 @@ public sealed class HeartbeatWorker : BackgroundService
                     },
                     writeback = new
                     {
-                        pending = _stateDb.GetPendingWritebacks().Count,
-                        manualReview = 0,
-                        writebackEnabled = true, // simplified — full check would need engine reference
+                        pending = pendingWbCount,
+                        failed = failedWbCount,
+                        writebackEnabled = true,
                     },
                     audit = new
                     {

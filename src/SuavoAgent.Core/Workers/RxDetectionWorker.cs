@@ -112,8 +112,28 @@ public sealed class RxDetectionWorker : BackgroundService
 
         if (readyRxs.Count > 0)
         {
-            _logger.LogInformation("Detected {Count} ready prescriptions (metadata-only)", readyRxs.Count);
-            var json = SerializeRxBatch(readyRxs, _options.HmacSalt ?? "");
+            _logger.LogInformation("Detected {Count} ready prescriptions", readyRxs.Count);
+
+            // Enrich with patient delivery details (HIPAA: minimum necessary for delivery)
+            Dictionary<string, RxPatientDetails>? patientMap = null;
+            try
+            {
+                patientMap = new Dictionary<string, RxPatientDetails>();
+                foreach (var rx in readyRxs)
+                {
+                    var pd = await _sqlEngine!.PullPatientForRxAsync(rx.RxNumber, ct);
+                    if (pd != null) patientMap[rx.RxNumber] = pd;
+                }
+                _logger.LogDebug("Enriched {Count}/{Total} Rxs with patient details",
+                    patientMap.Count, readyRxs.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Patient detail enrichment failed — syncing without");
+                patientMap = null;
+            }
+
+            var json = SerializeRxBatch(readyRxs, _options.HmacSalt ?? "", patientMap);
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -350,25 +370,41 @@ public sealed class RxDetectionWorker : BackgroundService
     }
 
     /// <summary>
-    /// Serializes PHI-free metadata batch. Contains ZERO patient data.
-    /// Patient data is only accessible via signed fetch_patient command.
+    /// Serializes Rx batch with optional patient delivery details.
+    /// RxNumber is plaintext (operational ID). Patient fields are PHI
+    /// but travel over HMAC-authenticated TLS to our own cloud.
     /// </summary>
-    internal static string SerializeRxBatch(IReadOnlyList<RxMetadata> rxs, string hmacSalt = "")
+    internal static string SerializeRxBatch(
+        IReadOnlyList<RxMetadata> rxs,
+        string hmacSalt = "",
+        IReadOnlyDictionary<string, RxPatientDetails>? patientDetails = null)
     {
         var payload = new
         {
             snapshotType = "rx_delivery_queue",
             data = new
             {
-                rxDeliveryQueue = rxs.Select(rx => new
+                rxDeliveryQueue = rxs.Select(rx =>
                 {
-                    rxNumberHash = Learning.PhiScrubber.HmacHash(rx.RxNumber, hmacSalt),
-                    drugName = rx.DrugName,
-                    ndc = rx.Ndc,
-                    dateFilled = rx.DateFilled?.ToString("o"),
-                    quantity = rx.Quantity,
-                    statusGuid = rx.StatusGuid.ToString(),
-                    detectedAt = rx.DetectedAt.ToString("o")
+                    var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
+                    return new
+                    {
+                        rxNumber = rx.RxNumber,
+                        drugName = rx.DrugName,
+                        ndc = rx.Ndc,
+                        dateFilled = rx.DateFilled?.ToString("o"),
+                        quantity = rx.Quantity,
+                        statusGuid = rx.StatusGuid.ToString(),
+                        detectedAt = rx.DetectedAt.ToString("o"),
+                        patientFirstName = pd?.FirstName,
+                        patientLastInitial = pd?.LastInitial,
+                        patientPhone = pd?.Phone,
+                        deliveryAddress1 = pd?.Address1,
+                        deliveryAddress2 = pd?.Address2,
+                        deliveryCity = pd?.City,
+                        deliveryState = pd?.State,
+                        deliveryZip = pd?.Zip
+                    };
                 }).ToArray(),
                 totalDetected = rxs.Count,
                 syncedAt = DateTimeOffset.UtcNow.ToString("o")
