@@ -161,6 +161,10 @@ try
 
     Log.Information("System observers started (foreground tracker, station profiler, session observer)");
 
+    // Employee disclosure indicator (CT/DE/NY compliance)
+    var trayIndicator = new SuavoAgent.Helper.SystemTray.TrayIndicator(Log.Logger);
+    trayIndicator.Start();
+
     // ── App intelligence observers ──
     var adapterDir = Path.Combine(AppContext.BaseDirectory, "adapters");
     var industryAdapter = SuavoAgent.Core.Config.IndustryAdapter.LoadForIndustry("pharmacy", adapterDir);
@@ -278,6 +282,7 @@ try
     }
 
     // Cleanup system observers
+    trayIndicator?.Dispose();
     fgTrackerCts?.Cancel();
     foregroundTracker?.Dispose();
     sessionObserver?.Dispose();
