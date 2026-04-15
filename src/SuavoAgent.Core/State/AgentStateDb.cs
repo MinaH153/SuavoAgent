@@ -570,6 +570,11 @@ public sealed class AgentStateDb : IDisposable
             )
         """);
         Execute("CREATE INDEX IF NOT EXISTS idx_readiness_day ON readiness_samples(day_of_week, hour_of_day)");
+
+        Execute("CREATE INDEX IF NOT EXISTS idx_wb_state ON writeback_states(state)");
+        Execute("CREATE INDEX IF NOT EXISTS idx_ub_status ON unsynced_batches(status)");
+        Execute("CREATE INDEX IF NOT EXISTS idx_audit_id ON audit_entries(id)");
+        Execute("CREATE INDEX IF NOT EXISTS idx_canary_incidents_resolved ON schema_canary_incidents(resolved)");
     }
 
     private void Execute(string sql)
