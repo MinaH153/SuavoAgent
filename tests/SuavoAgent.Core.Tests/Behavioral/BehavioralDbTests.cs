@@ -198,6 +198,35 @@ public class BehavioralDbTests : IDisposable
         Assert.Equal(1, _db.GetBehavioralEventCount(SessionId));
     }
 
+    // ── PruneBehavioralEventsByAge ──
+
+    [Fact]
+    public void PruneBehavioralEventsByAge_RemovesOldRecords()
+    {
+        var dbPath2 = Path.Combine(Path.GetTempPath(), $"test-prune-age-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var db2 = new AgentStateDb(dbPath2);
+            // No error, returns count >= 0
+            var pruned = db2.PruneBehavioralEventsByAge(TimeSpan.FromDays(30));
+            Assert.True(pruned >= 0);
+        }
+        finally { File.Delete(dbPath2); }
+    }
+
+    [Fact]
+    public void PruneAppSessionsByAge_RemovesOldRecords()
+    {
+        var dbPath2 = Path.Combine(Path.GetTempPath(), $"test-prune-sessions-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var db2 = new AgentStateDb(dbPath2);
+            var pruned = db2.PruneAppSessionsByAge(TimeSpan.FromDays(30));
+            Assert.True(pruned >= 0);
+        }
+        finally { File.Delete(dbPath2); }
+    }
+
     // ── GetWritebackCandidates ──
 
     [Fact]

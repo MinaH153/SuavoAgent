@@ -2107,6 +2107,29 @@ public sealed class AgentStateDb : IDisposable
         return Convert.ToInt32(result);
     }
 
+    /// <summary>
+    /// Prunes behavioral events older than the specified retention period.
+    /// Prevents unbounded disk growth (~2 MB/day = 730 MB/year without pruning).
+    /// </summary>
+    public int PruneBehavioralEventsByAge(TimeSpan retention)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM behavioral_events WHERE received_at < @cutoff";
+        cmd.Parameters.AddWithValue("@cutoff", DateTimeOffset.UtcNow.Subtract(retention).ToString("o"));
+        return cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Prunes app_sessions older than the specified retention period.
+    /// </summary>
+    public int PruneAppSessionsByAge(TimeSpan retention)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM app_sessions WHERE start_ts < @cutoff";
+        cmd.Parameters.AddWithValue("@cutoff", DateTimeOffset.UtcNow.Subtract(retention).ToString("o"));
+        return cmd.ExecuteNonQuery();
+    }
+
     // ── Feedback Events CRUD ──
 
     public int InsertFeedbackEvent(FeedbackEvent evt)
