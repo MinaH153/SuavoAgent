@@ -3,7 +3,9 @@
 param(
     [string]$InstallDir = "C:\Program Files\Suavo\Agent",
     [string]$PublishDir = ".\publish",
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$KeepData,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,8 +21,68 @@ $serviceBroker = "SuavoAgent.Broker"
 $serviceCore = "SuavoAgent.Core"
 $dataDir = "$env:ProgramData\SuavoAgent"
 
+function Invoke-SecureDeleteFile {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    try {
+        $fi = Get-Item -LiteralPath $Path -Force
+        $len = [int64]$fi.Length
+        if ($len -gt 0) {
+            $buffer = New-Object byte[] ([Math]::Min($len, 1048576))
+            $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+            $fs = [System.IO.File]::Open($Path, 'Open', 'Write', 'None')
+            try {
+                $written = [int64]0
+                while ($written -lt $len) {
+                    $chunk = [Math]::Min($buffer.Length, $len - $written)
+                    $rng.GetBytes($buffer, 0, $chunk)
+                    $fs.Write($buffer, 0, $chunk)
+                    $written += $chunk
+                }
+                $fs.Flush($true)
+            } finally {
+                $fs.Dispose()
+                $rng.Dispose()
+            }
+        }
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    } catch {
+        Write-Host "  [warn] secure-delete failed for $Path — $_" -ForegroundColor Yellow
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-SecureWipeDir {
+    param([Parameter(Mandatory)][string]$Root)
+    if (-not (Test-Path -LiteralPath $Root)) { return }
+    $sensitive = @('*.dat', 'state.db', 'state.db-wal', 'state.db-shm', 'state.key',
+        'consent-receipt.json', 'audit-*.json', '*.db', '*.key')
+    foreach ($pattern in $sensitive) {
+        Get-ChildItem -LiteralPath $Root -Recurse -Force -File -Filter $pattern -ErrorAction SilentlyContinue |
+            ForEach-Object { Invoke-SecureDeleteFile -Path $_.FullName }
+    }
+    Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 if ($Uninstall) {
     Write-Host "=== Uninstalling SuavoAgent ===" -ForegroundColor Yellow
+
+    if (-not $KeepData -and -not $Force) {
+        Write-Host ""
+        Write-Host "This will SECURELY ERASE all local pharmacy data:" -ForegroundColor Red
+        Write-Host "  - $dataDir\delivery-receipts\  (DEA audit receipts)" -ForegroundColor Red
+        Write-Host "  - $dataDir\state.db            (encrypted agent state)" -ForegroundColor Red
+        Write-Host "  - $dataDir\state.key           (DPAPI-wrapped key)" -ForegroundColor Red
+        Write-Host "  - $dataDir\consent-receipt.json (HIPAA consent record)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Ensure remote decommission has acknowledged the archive digest BEFORE proceeding." -ForegroundColor Yellow
+        $confirm = Read-Host "Type WIPE to confirm, or KEEP to preserve data"
+        if ($confirm -eq "KEEP") { $KeepData = $true }
+        elseif ($confirm -ne "WIPE") {
+            Write-Host "Aborted." -ForegroundColor Yellow
+            exit 1
+        }
+    }
 
     # Stop services
     foreach ($svc in @($serviceBroker, $serviceCore)) {
@@ -38,6 +100,18 @@ if ($Uninstall) {
 
     Write-Host "Removing files from $InstallDir..."
     if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir }
+
+    if ($KeepData) {
+        Write-Host "Data dir preserved at $dataDir (KeepData)." -ForegroundColor Yellow
+    } else {
+        Write-Host "Secure-wiping $dataDir..." -ForegroundColor Yellow
+        Invoke-SecureWipeDir -Root $dataDir
+        if (Test-Path $dataDir) {
+            Write-Host "  [warn] residual files remain in $dataDir — inspect manually" -ForegroundColor Yellow
+        } else {
+            Write-Host "  data directory erased" -ForegroundColor Green
+        }
+    }
 
     Write-Host "=== Uninstall Complete ===" -ForegroundColor Green
     exit 0
