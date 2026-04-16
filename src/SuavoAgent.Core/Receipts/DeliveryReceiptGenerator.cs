@@ -339,6 +339,8 @@ public sealed class ReceiptBranding
 /// </summary>
 internal static class SafeSvgSanitizer
 {
+    private const string SvgNs = "http://www.w3.org/2000/svg";
+
     private static readonly HashSet<string> AllowedElements = new(StringComparer.OrdinalIgnoreCase)
     {
         "svg", "g", "path", "polyline", "polygon", "line",
@@ -352,14 +354,13 @@ internal static class SafeSvgSanitizer
         "cx", "cy", "r", "rx", "ry",
         "stroke", "fill", "stroke-width", "stroke-linecap", "stroke-linejoin",
         "stroke-dasharray", "fill-rule", "fill-opacity", "stroke-opacity",
-        "transform", "font-family", "font-size", "text-anchor",
-        "xmlns"
+        "transform", "font-family", "font-size", "text-anchor"
     };
 
     public static string Sanitize(string svg)
     {
         if (string.IsNullOrWhiteSpace(svg)) return "";
-        if (svg.Length > 200_000) return ""; // 200 KB hard cap
+        if (svg.Length > 200_000) return "";
 
         XDocument doc;
         try
@@ -387,20 +388,12 @@ internal static class SafeSvgSanitizer
     {
         if (!AllowedElements.Contains(source.Name.LocalName)) return null;
 
-        var element = new XElement(XName.Get(source.Name.LocalName.ToLowerInvariant()));
+        var localName = source.Name.LocalName.ToLowerInvariant();
+        var element = new XElement(XName.Get(localName, SvgNs));
 
         foreach (var attr in source.Attributes())
         {
-            if (attr.IsNamespaceDeclaration)
-            {
-                // Only the default xmlns for SVG — skip xlink, ev, etc.
-                if (string.IsNullOrEmpty(attr.Name.LocalName) || attr.Name.LocalName == "xmlns")
-                {
-                    if (attr.Value == "http://www.w3.org/2000/svg")
-                        element.SetAttributeValue("xmlns", attr.Value);
-                }
-                continue;
-            }
+            if (attr.IsNamespaceDeclaration) continue;
             if (!AllowedAttributes.Contains(attr.Name.LocalName)) continue;
             if (!IsSafeAttributeValue(attr.Value)) continue;
             element.SetAttributeValue(XName.Get(attr.Name.LocalName.ToLowerInvariant()), attr.Value);

@@ -1,3 +1,4 @@
+using System.Text;
 using SuavoAgent.Contracts.Models;
 using SuavoAgent.Core.Receipts;
 using Xunit;
@@ -6,6 +7,10 @@ namespace SuavoAgent.Core.Tests.Receipts;
 
 public class DeliveryReceiptGeneratorTests
 {
+    private static readonly byte[] FileMagic = "SVRC"u8.ToArray();
+    private const byte FileVersion = 1;
+    private const int HeaderLength = 5; // magic (4) + version (1)
+
     private static DeliveryWritebackCommand SampleCommand() => new(
         TaskId: "task-12345678-abcd",
         RxNumber: "98765",
@@ -16,11 +21,20 @@ public class DeliveryReceiptGeneratorTests
         RecipientIdType: 1,
         RecipientIdValue: "D1234567",
         RecipientIdState: "CA",
-        SignatureSvg: "<svg><path d='M10 80 Q 95 10 180 80'/></svg>",
+        SignatureSvg: "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d='M10 80 Q 95 10 180 80'/></svg>",
         Price: 12.50m,
         Tax: 1.09m,
         CounselingStatus: 2,
         DeliveredAt: DateTimeOffset.UtcNow);
+
+    private static byte[] WrapForRead(byte[] payload)
+    {
+        var framed = new byte[HeaderLength + payload.Length];
+        Buffer.BlockCopy(FileMagic, 0, framed, 0, FileMagic.Length);
+        framed[FileMagic.Length] = FileVersion;
+        Buffer.BlockCopy(payload, 0, framed, HeaderLength, payload.Length);
+        return framed;
+    }
 
     [Fact]
     public void GenerateHtml_ContainsRxNumber()
@@ -33,11 +47,11 @@ public class DeliveryReceiptGeneratorTests
     }
 
     [Fact]
-    public void GenerateHtml_ContainsSignatureSvg()
+    public void GenerateHtml_IncludesSanitizedSignature()
     {
         var gen = new DeliveryReceiptGenerator();
         var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy");
-        Assert.Contains("<svg>", html);
+        Assert.Contains("<svg", html);
         Assert.Contains("Recipient Signature", html);
     }
 
@@ -46,8 +60,8 @@ public class DeliveryReceiptGeneratorTests
     {
         var gen = new DeliveryReceiptGenerator();
         var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy");
-        Assert.Contains("****4567", html); // last 4 visible
-        Assert.DoesNotContain("D1234567", html); // full ID NOT visible
+        Assert.Contains("****4567", html);
+        Assert.DoesNotContain("D1234567", html);
     }
 
     [Fact]
@@ -76,64 +90,151 @@ public class DeliveryReceiptGeneratorTests
     }
 
     [Fact]
-    public void GenerateHtml_WithProofPhoto()
+    public void GenerateHtml_ValidBase64Proof_IsEmbedded()
     {
         var gen = new DeliveryReceiptGenerator();
-        var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy", proofImageBase64: "abc123fake");
-        Assert.Contains("data:image/jpeg;base64,abc123fake", html);
+        var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy", proofImageBase64: "abc123/+=");
+        Assert.Contains("data:image/jpeg;base64,abc123/+=", html);
         Assert.Contains("Proof of Delivery", html);
     }
 
     [Fact]
-    public void SaveReceipt_CreatesEncryptedDatFile()
+    public void GenerateHtml_MaliciousProofPayload_IsRejected()
     {
-        // Simulate SaveReceipt logic in a temp dir to avoid OS permission issues on macOS
-        var tempDir = Path.Combine(Path.GetTempPath(), "SuavoAgent-test-receipts-" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(tempDir);
-        try
-        {
-            var cmd = SampleCommand();
-            var gen = new DeliveryReceiptGenerator();
-            var html = gen.GenerateHtml(cmd, "Test Pharmacy");
-
-            // Mirror SaveReceipt's encryption logic
-            var plainBytes = System.Text.Encoding.UTF8.GetBytes(html);
-            byte[] encryptedBytes;
-            if (OperatingSystem.IsWindows())
-            {
-                encryptedBytes = System.Security.Cryptography.ProtectedData.Protect(
-                    plainBytes, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
-            }
-            else
-            {
-                encryptedBytes = plainBytes; // non-Windows: no DPAPI
-            }
-
-            var fileName = $"receipt-{cmd.RxNumber}-{cmd.DeliveredAt:yyyyMMdd-HHmmss}.dat";
-            var filePath = Path.Combine(tempDir, fileName);
-            File.WriteAllBytes(filePath, encryptedBytes);
-
-            Assert.True(File.Exists(filePath));
-            Assert.EndsWith(".dat", filePath);
-
-            var rawBytes = File.ReadAllBytes(filePath);
-            var rawText = System.Text.Encoding.UTF8.GetString(rawBytes);
-            if (OperatingSystem.IsWindows())
-            {
-                // Encrypted content should NOT contain plain HTML tags
-                Assert.DoesNotContain("<!DOCTYPE", rawText);
-            }
-        }
-        finally
-        {
-            Directory.Delete(tempDir, recursive: true);
-        }
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy",
+            proofImageBase64: "\"><script>alert(1)</script>");
+        Assert.DoesNotContain("<script>alert(1)</script>", html);
+        Assert.DoesNotContain("Proof of Delivery", html);
     }
 
     [Fact]
-    public void ReadReceipt_DecryptsCorrectly()
+    public void GenerateHtml_ScriptInjectionInRecipientName_IsEncoded()
     {
-        // Simulate SaveReceipt + ReadReceipt in a temp dir
+        var cmd = SampleCommand() with
+        {
+            RecipientFirstName = "<script>alert(1)</script>",
+            RecipientLastName = "\"><img src=x onerror=alert(2)>"
+        };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        Assert.DoesNotContain("<script>alert(1)</script>", html);
+        Assert.DoesNotContain("<img src=x onerror=", html);
+        Assert.Contains("&lt;script&gt;alert(1)&lt;/script&gt;", html);
+        Assert.Contains("&lt;img src=x onerror=alert(2)&gt;", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_ScriptInjectionInPharmacyName_IsEncoded()
+    {
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(SampleCommand(), "<script>x()</script>");
+        Assert.DoesNotContain("<script>x()</script>", html);
+        Assert.Contains("&lt;script&gt;", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_MaliciousBrandingColor_FallsBackToDefault()
+    {
+        var branding = new ReceiptBranding
+        {
+            PrimaryColor = "red;}</style><script>alert(1)</script>"
+        };
+        var gen = new DeliveryReceiptGenerator(branding);
+        var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy");
+        Assert.DoesNotContain("<script>alert(1)</script>", html);
+        Assert.Contains(ReceiptBranding.Default.PrimaryColor, html);
+    }
+
+    [Fact]
+    public void GenerateHtml_SvgScriptTag_IsStripped()
+    {
+        var cmd = SampleCommand() with { SignatureSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script><path d='M1 1'/></svg>" };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        Assert.DoesNotContain("<script>", html);
+        Assert.DoesNotContain("alert(1)", html);
+        Assert.Contains("<path", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_SvgStyleImportJavascript_IsStripped()
+    {
+        var cmd = SampleCommand() with
+        {
+            SignatureSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@import url(javascript:alert(1));</style><path d='M1 1'/></svg>"
+        };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        Assert.DoesNotContain("@import url(javascript", html);
+        Assert.DoesNotContain("javascript:alert", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_SvgUseWithXlinkHref_IsStripped()
+    {
+        var cmd = SampleCommand() with
+        {
+            SignatureSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"><use xlink:href=\"javascript:alert(1)\"/></svg>"
+        };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        Assert.DoesNotContain("javascript:", html);
+        Assert.DoesNotContain("<use", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_SvgOnloadHandler_IsStripped()
+    {
+        var cmd = SampleCommand() with
+        {
+            SignatureSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\" onload=\"alert(1)\"><path d='M1 1'/></svg>"
+        };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        Assert.DoesNotContain("onload", html);
+        Assert.DoesNotContain("alert(1)", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_SvgAnimateWithOnbegin_IsStripped()
+    {
+        var cmd = SampleCommand() with
+        {
+            SignatureSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><animate onbegin=\"alert(1)\" attributeName=\"x\"/></svg>"
+        };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        Assert.DoesNotContain("onbegin", html);
+        Assert.DoesNotContain("<animate", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_MalformedSvg_YieldsEmpty()
+    {
+        var cmd = SampleCommand() with { SignatureSvg = "<svg><unclosed" };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        Assert.Contains("Recipient Signature", html);
+        Assert.DoesNotContain("<unclosed", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_SvgWithDtdDoctype_IsStripped()
+    {
+        var cmd = SampleCommand() with
+        {
+            SignatureSvg = "<!DOCTYPE svg [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><svg xmlns=\"http://www.w3.org/2000/svg\"><text>&xxe;</text></svg>"
+        };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        Assert.DoesNotContain("passwd", html);
+        Assert.DoesNotContain("ENTITY", html);
+    }
+
+    [Fact]
+    public void ReadReceipt_WithValidMagicHeader_DecryptsCorrectly()
+    {
         var tempDir = Path.Combine(Path.GetTempPath(), "SuavoAgent-test-receipts-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(tempDir);
         try
@@ -142,30 +243,55 @@ public class DeliveryReceiptGeneratorTests
             var gen = new DeliveryReceiptGenerator();
             var html = gen.GenerateHtml(cmd, "Test Pharmacy");
 
-            var plainBytes = System.Text.Encoding.UTF8.GetBytes(html);
-            byte[] encryptedBytes;
-            if (OperatingSystem.IsWindows())
-            {
-                encryptedBytes = System.Security.Cryptography.ProtectedData.Protect(
-                    plainBytes, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
-            }
-            else
-            {
-                encryptedBytes = plainBytes;
-            }
+            var plain = Encoding.UTF8.GetBytes(html);
+            var cipher = OperatingSystem.IsWindows()
+                ? System.Security.Cryptography.ProtectedData.Protect(plain, null,
+                    System.Security.Cryptography.DataProtectionScope.LocalMachine)
+                : plain;
 
             var filePath = Path.Combine(tempDir, "receipt-test.dat");
-            File.WriteAllBytes(filePath, encryptedBytes);
+            File.WriteAllBytes(filePath, WrapForRead(cipher));
 
             var decrypted = DeliveryReceiptGenerator.ReadReceipt(filePath);
             Assert.NotNull(decrypted);
-            Assert.Contains("98765", decrypted); // Rx number present after decryption
-            Assert.Contains("<!DOCTYPE", decrypted); // Valid HTML after decryption
+            Assert.Contains("98765", decrypted);
+            Assert.Contains("<!DOCTYPE", decrypted);
         }
-        finally
+        finally { Directory.Delete(tempDir, recursive: true); }
+    }
+
+    [Fact]
+    public void ReadReceipt_WithBadMagic_ReturnsNull()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "SuavoAgent-test-receipts-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
         {
-            Directory.Delete(tempDir, recursive: true);
+            var filePath = Path.Combine(tempDir, "receipt-bad.dat");
+            File.WriteAllBytes(filePath, "BOGUS"u8.ToArray());
+            Assert.Null(DeliveryReceiptGenerator.ReadReceipt(filePath));
         }
+        finally { Directory.Delete(tempDir, recursive: true); }
+    }
+
+    [Fact]
+    public void ReadReceipt_Truncated_ReturnsNull()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "SuavoAgent-test-receipts-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var filePath = Path.Combine(tempDir, "receipt-short.dat");
+            File.WriteAllBytes(filePath, new byte[] { 0x53, 0x56 }); // only 2 bytes
+            Assert.Null(DeliveryReceiptGenerator.ReadReceipt(filePath));
+        }
+        finally { Directory.Delete(tempDir, recursive: true); }
+    }
+
+    [Fact]
+    public void ReadReceipt_MissingFile_ReturnsNull()
+    {
+        Assert.Null(DeliveryReceiptGenerator.ReadReceipt(Path.Combine(Path.GetTempPath(), "nope-" + Guid.NewGuid().ToString("N") + ".dat")));
     }
 
     [Fact]
@@ -173,6 +299,6 @@ public class DeliveryReceiptGeneratorTests
     {
         var gen = new DeliveryReceiptGenerator();
         var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy");
-        Assert.Contains("$13.59", html); // 12.50 + 1.09
+        Assert.Contains("$13.59", html);
     }
 }
