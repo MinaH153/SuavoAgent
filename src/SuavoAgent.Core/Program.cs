@@ -62,6 +62,10 @@ try
     builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
 
     var agentOpts = builder.Configuration.GetSection("Agent").Get<AgentOptions>() ?? new AgentOptions();
+    Log.Information(
+        "Writeback mode: {Mode} (SQL writes {Status}) — audit receipts always generated",
+        agentOpts.ReceiptOnlyMode ? "RECEIPT-ONLY" : "FULL WRITEBACK",
+        agentOpts.ReceiptOnlyMode ? "DISABLED" : "ENABLED");
     if (!string.IsNullOrWhiteSpace(agentOpts.ApiKey))
     {
         var cloudClient = new SuavoCloudClient(agentOpts);

@@ -243,7 +243,8 @@ public sealed class HeartbeatWorker : BackgroundService
                     {
                         pending = pendingWbCount,
                         failed = failedWbCount,
-                        writebackEnabled = true,
+                        receiptOnlyMode = _options.ReceiptOnlyMode,
+                        writebackEngineEnabled = rxWorker?.WritebackEngine?.WritebackEnabled ?? false,
                     },
                     audit = new
                     {

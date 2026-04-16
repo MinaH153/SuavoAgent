@@ -74,6 +74,7 @@ public sealed class HealthSnapshot
             },
             writebackEngine = new
             {
+                receiptOnlyMode = _options.ReceiptOnlyMode,
                 enabled = wbEngine?.WritebackEnabled ?? false,
                 triggerDetected = wbEngine?.TriggerDetected ?? false,
             },
