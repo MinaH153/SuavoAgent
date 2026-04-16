@@ -70,6 +70,7 @@ public sealed class DeliveryReceiptGenerator
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;"/>
 <title>Delivery Receipt — Rx #{{safeRx}}</title>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -354,7 +355,7 @@ internal static class SafeSvgSanitizer
         "cx", "cy", "r", "rx", "ry",
         "stroke", "fill", "stroke-width", "stroke-linecap", "stroke-linejoin",
         "stroke-dasharray", "fill-rule", "fill-opacity", "stroke-opacity",
-        "transform", "font-family", "font-size", "text-anchor"
+        "transform", "font-size", "text-anchor"
     };
 
     public static string Sanitize(string svg)

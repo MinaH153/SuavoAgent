@@ -301,4 +301,43 @@ public class DeliveryReceiptGeneratorTests
         var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy");
         Assert.Contains("$13.59", html);
     }
+
+    [Fact]
+    public void GenerateHtml_ContainsContentSecurityPolicy()
+    {
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy");
+        Assert.Contains("Content-Security-Policy", html);
+        Assert.Contains("default-src 'none'", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_SvgFontFamilyCssEscape_IsStripped()
+    {
+        // font-family is removed from AllowedAttributes — CSS escape injection blocked
+        var cmd = SampleCommand() with
+        {
+            SignatureSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text font-family=\"serif&#x5c;0022;expression(alert(1))\" x=\"10\" y=\"20\">X</text></svg>"
+        };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        Assert.DoesNotContain("font-family", html.Replace("<style>", "").Split("</style>")[^1]); // not in SVG output
+        Assert.DoesNotContain("expression(", html);
+    }
+
+    [Fact]
+    public void GenerateHtml_SvgFontFamilyAttribute_IsDropped()
+    {
+        var cmd = SampleCommand() with
+        {
+            SignatureSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text font-family=\"Arial\" x=\"0\" y=\"10\">sig</text></svg>"
+        };
+        var gen = new DeliveryReceiptGenerator();
+        var html = gen.GenerateHtml(cmd, "Test Pharmacy");
+        // font-family should not appear in the sanitized SVG portion (it may appear in the <style> block)
+        var svgStart = html.IndexOf("<svg", StringComparison.Ordinal);
+        var svgEnd = html.IndexOf("</svg>", svgStart, StringComparison.Ordinal) + 6;
+        var svgPart = html[svgStart..svgEnd];
+        Assert.DoesNotContain("font-family", svgPart);
+    }
 }
