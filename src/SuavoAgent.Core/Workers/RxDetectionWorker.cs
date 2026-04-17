@@ -7,6 +7,7 @@ using SuavoAgent.Contracts.Canary;
 using SuavoAgent.Core.Canary;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Contracts.Models;
 
@@ -133,7 +134,7 @@ public sealed class RxDetectionWorker : BackgroundService
                 patientMap = null;
             }
 
-            var json = SerializeRxBatch(readyRxs, _options.HmacSalt ?? "", patientMap);
+            var json = SerializeRxBatch(readyRxs, _options.HmacSalt ?? "[no-hmac-salt]", patientMap);
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -172,7 +173,7 @@ public sealed class RxDetectionWorker : BackgroundService
             var result = await _canarySource.DetectWithCanaryAsync(templateBaseline, ct);
             if (result.Rxs.Count > 0)
             {
-                var json = SerializeRxBatch(result.Rxs, _options.HmacSalt ?? "");
+                var json = SerializeRxBatch(result.Rxs, _options.HmacSalt ?? "[no-hmac-salt]");
                 if (!await TrySyncPayloadToCloudAsync(json, ct))
                     _stateDb.InsertUnsyncedBatch(json);
             }
@@ -234,7 +235,7 @@ public sealed class RxDetectionWorker : BackgroundService
         if (detection.Rxs.Count > 0)
         {
             _logger.LogInformation("Canary: {Count} ready prescriptions — schema verified clean", detection.Rxs.Count);
-            var json = SerializeRxBatch(detection.Rxs, _options.HmacSalt ?? "");
+            var json = SerializeRxBatch(detection.Rxs, _options.HmacSalt ?? "[no-hmac-salt]");
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -387,9 +388,12 @@ public sealed class RxDetectionWorker : BackgroundService
                 rxDeliveryQueue = rxs.Select(rx =>
                 {
                     var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
+                    var rxHash = !string.IsNullOrEmpty(hmacSalt)
+                        ? PhiScrubber.HmacHash(rx.RxNumber, hmacSalt)
+                        : PhiScrubber.HmacHash(rx.RxNumber, "[no-hmac-salt]");
                     return new
                     {
-                        rxNumber = rx.RxNumber,
+                        rxNumber = rxHash,
                         drugName = rx.DrugName,
                         ndc = rx.Ndc,
                         dateFilled = rx.DateFilled?.ToString("o"),

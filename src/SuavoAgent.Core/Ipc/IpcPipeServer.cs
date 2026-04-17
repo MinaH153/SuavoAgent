@@ -84,8 +84,11 @@ public sealed class IpcPipeServer : IDisposable
                             continue;
                         }
 
-                        var installDir = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
+                        // Use parent dir as install root (Core/Helper/Broker are sibling subdirs).
+                        // Append separator so "C:\Suavo\" doesn't match "C:\SuavoEvil\...".
+                        var installRoot = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
                             ?? AppContext.BaseDirectory;
+                        var installDir = installRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
                         if (!clientPath.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
                         {
                             _logger.LogWarning("IPC: Rejected connection from outside install dir: {Path} (expected under {Dir})",

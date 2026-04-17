@@ -297,6 +297,8 @@ public sealed class HeartbeatWorker : BackgroundService
                 // All destructive actions require ECDSA-signed command envelope.
                 if (response.HasValue)
                     await ProcessSignedCommandAsync(response.Value, stoppingToken);
+
+                _commandVerifier?.PruneNonces(TimeSpan.FromMinutes(5));
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -440,7 +442,7 @@ public sealed class HeartbeatWorker : BackgroundService
         }
 
         // Hash Rx number before audit/logging — Rx numbers are PHI when linked to patient context
-        var hashedRx = PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "");
+        var hashedRx = PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "[no-hmac-salt]");
 
         // Audit PHI access before touching any patient data
         _stateDb.AppendChainedAuditEntry(new AuditEntry(
@@ -621,15 +623,27 @@ public sealed class HeartbeatWorker : BackgroundService
 
                 _logger.LogWarning("Decommission: wiping data directory {DataDir}", dataDir);
                 if (Directory.Exists(dataDir))
+                {
+                    // Secure-erase sensitive files before bulk delete
+                    foreach (var sensitive in new[] { "state.db", "state.db.key", "pipe.nonce" })
+                    {
+                        var p = Path.Combine(dataDir, sensitive);
+                        try { State.AgentStateDb.SecureDelete(p); } catch { }
+                    }
                     try { Directory.Delete(dataDir, recursive: true); } catch (Exception ex) {
                         _logger.LogWarning(ex, "Could not delete data directory"); }
+                }
 
                 _logger.LogWarning("Decommission: wiping install directory {InstallDir}", installDir);
                 _ = Task.Run(async () =>
                 {
                     await Task.Delay(2000);
                     if (Directory.Exists(installDir))
+                    {
+                        // Secure-erase appsettings.json (contains DPAPI-sealed credentials) before bulk delete
+                        try { State.AgentStateDb.SecureDelete(Path.Combine(installDir, "appsettings.json")); } catch { }
                         try { Directory.Delete(installDir, recursive: true); } catch { }
+                    }
                 });
 
                 _logger.LogWarning("Decommission complete — agent terminating");
@@ -773,7 +787,7 @@ public sealed class HeartbeatWorker : BackgroundService
             return;
         }
 
-        var hashedRx = PhiScrubber.HmacHash(rxNumberStr, _options.HmacSalt ?? "");
+        var hashedRx = PhiScrubber.HmacHash(rxNumberStr, _options.HmacSalt ?? "[no-hmac-salt]");
 
         _stateDb.AppendChainedAuditEntry(new AuditEntry(
             TaskId: hashedRx,

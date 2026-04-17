@@ -92,9 +92,12 @@ public class DeliveryReceiptGeneratorTests
     [Fact]
     public void GenerateHtml_ValidBase64Proof_IsEmbedded()
     {
+        // Construct a minimal valid JPEG: FF D8 FF + padding to keep base64 clean
+        var jpegPrefix = new byte[] { 0xFF, 0xD8, 0xFF, 0xE0 };
+        var b64 = Convert.ToBase64String(jpegPrefix);
         var gen = new DeliveryReceiptGenerator();
-        var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy", proofImageBase64: "abc123/+=");
-        Assert.Contains("data:image/jpeg;base64,abc123/+=", html);
+        var html = gen.GenerateHtml(SampleCommand(), "Test Pharmacy", proofImageBase64: b64);
+        Assert.Contains($"data:image/jpeg;base64,{b64}", html);
         Assert.Contains("Proof of Delivery", html);
     }
 

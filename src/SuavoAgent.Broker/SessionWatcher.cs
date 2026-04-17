@@ -79,8 +79,8 @@ public sealed class SessionWatcher : BackgroundService
             using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(manifestPath));
             if (!doc.RootElement.TryGetProperty("SuavoAgent.Helper.exe", out var hashEl))
             {
-                _logger.LogWarning("Helper hash not in manifest — skipping integrity check");
-                return true;
+                _logger.LogError("Helper hash not in manifest — refusing to launch (fail-closed)");
+                return false;
             }
             var expected = hashEl.GetString() ?? "";
             using var stream = File.OpenRead(helperPath);
@@ -97,8 +97,8 @@ public sealed class SessionWatcher : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Helper integrity check error — allowing launch");
-            return true;
+            _logger.LogError(ex, "Helper integrity check error — refusing to launch (fail-closed)");
+            return false;
         }
     }
 

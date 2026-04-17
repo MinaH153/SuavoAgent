@@ -44,7 +44,7 @@ public sealed class DeliveryReceiptGenerator
             ? "<div class=\"signature-box\"><h4>Recipient Signature</h4><p class=\"no-sig\">No signature captured</p></div>"
             : $"<div class=\"signature-box\"><h4>Recipient Signature</h4>{SafeSvgSanitizer.Sanitize(cmd.SignatureSvg)}</div>";
 
-        var proofHtml = string.IsNullOrEmpty(proofImageBase64) || !IsValidBase64(proofImageBase64)
+        var proofHtml = string.IsNullOrEmpty(proofImageBase64) || !IsValidJpegBase64(proofImageBase64)
             ? ""
             : $"<div class=\"proof-photo\"><h4>Proof of Delivery</h4><img src=\"data:image/jpeg;base64,{proofImageBase64}\" alt=\"Delivery proof\" /></div>";
 
@@ -294,16 +294,22 @@ public sealed class DeliveryReceiptGenerator
 
     private static string E(string? value) => string.IsNullOrEmpty(value) ? "" : WebUtility.HtmlEncode(value);
 
-    private static bool IsValidBase64(string value)
+    private static bool IsValidJpegBase64(string value)
     {
-        if (value.Length > 5_000_000) return false; // ~3.7 MB decoded — hard cap
+        if (value.Length > 5_000_000 || value.Length < 4) return false; // ~3.7 MB decoded — hard cap
         foreach (var c in value)
         {
             var ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
                 || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
             if (!ok) return false;
         }
-        return true;
+        // Verify JPEG magic bytes (FF D8 FF) — rejects non-JPEG data URIs (SVG, HTML, etc.)
+        try
+        {
+            var prefix = Convert.FromBase64String(value[..4]); // 4 base64 chars = exactly 3 bytes
+            return prefix.Length >= 3 && prefix[0] == 0xFF && prefix[1] == 0xD8 && prefix[2] == 0xFF;
+        }
+        catch { return false; }
     }
 
     private static string CssColor(string? candidate, string fallback)
@@ -315,6 +321,8 @@ public sealed class DeliveryReceiptGenerator
             var ok = char.IsLetterOrDigit(c) || c == '#' || c == '(' || c == ')' || c == ',' || c == ' ' || c == '.' || c == '%';
             if (!ok) return fallback;
         }
+        // Reject url() injection regardless of character allowlist
+        if (candidate.Contains("url", StringComparison.OrdinalIgnoreCase)) return fallback;
         return candidate;
     }
 }

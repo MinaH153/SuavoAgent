@@ -87,13 +87,10 @@ public static class SelfUpdater
             if (!VerifyManifestSignature(downloadUrl, expectedSha256, version, signature, logger))
                 return false;
 
-            // 1. Download
+            // 1. Download with 200 MB size cap
             logger.LogInformation("Downloading update v{Version} from {Url}", version, downloadUrl);
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-            await using var stream = await http.GetStreamAsync(downloadUrl, ct);
-            await using var file = File.Create(newExe);
-            await stream.CopyToAsync(file, ct);
-            file.Close();
+            await DownloadWithSizeLimitAsync(http, downloadUrl, newExe, ct);
 
             // 2. Verify SHA256
             var actualHash = await ComputeSha256Async(newExe, ct);
@@ -242,10 +239,7 @@ public static class SelfUpdater
                 stagedFiles.Add(newPath);
 
                 logger.LogInformation("Downloading {Binary} from {Url}", d.Binary, d.Url);
-                await using var stream = await http.GetStreamAsync(d.Url, ct);
-                await using var file = File.Create(newPath);
-                await stream.CopyToAsync(file, ct);
-                file.Close();
+                await DownloadWithSizeLimitAsync(http, d.Url, newPath, ct);
 
                 var actualHash = await ComputeSha256Async(newPath, ct);
                 if (!string.Equals(actualHash, d.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -282,6 +276,34 @@ public static class SelfUpdater
             try { File.Delete(f); } catch { }
         var sentinel = Path.Combine(installDir, "update-pending.flag");
         try { if (File.Exists(sentinel)) File.Delete(sentinel); } catch { }
+    }
+
+    private const long MaxUpdateBytes = 200 * 1024 * 1024; // 200 MB — matches BinaryDownloader cap
+
+    private static async Task DownloadWithSizeLimitAsync(
+        HttpClient http, string url, string destPath, CancellationToken ct)
+    {
+        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+
+        var totalBytes = response.Content.Headers.ContentLength ?? -1;
+        if (totalBytes > MaxUpdateBytes)
+            throw new InvalidOperationException(
+                $"Update binary too large ({totalBytes / (1024 * 1024)} MB > 200 MB limit) — aborting");
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        await using var file = File.Create(destPath);
+        var buffer = new byte[81920];
+        long totalRead = 0;
+        int bytesRead;
+        while ((bytesRead = await stream.ReadAsync(buffer, ct)) > 0)
+        {
+            await file.WriteAsync(buffer.AsMemory(0, bytesRead), ct);
+            totalRead += bytesRead;
+            if (totalRead > MaxUpdateBytes)
+                throw new InvalidOperationException(
+                    $"Update binary exceeded 200 MB limit mid-stream — aborting");
+        }
     }
 
     public static void CleanupOldBinaries(ILogger logger)

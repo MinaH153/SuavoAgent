@@ -59,7 +59,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
 
     public async Task SendPatientDetailsAsync(string rxNumber, object details, string commandId, CancellationToken ct)
     {
-        var rxNumberHash = Learning.PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "");
+        var rxNumberHash = Learning.PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "[no-hmac-salt]");
         await PostSignedAsync("/api/agent/patient-details", new { rxNumberHash, details, commandId }, ct);
     }
 
