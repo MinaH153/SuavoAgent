@@ -26,8 +26,15 @@ try
     var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
+    // H-10: resolve pipe name from --pipe arg (written by Core, passed by Broker)
+    var pipeName = "SuavoAgent";
+    for (var i = 0; i < args.Length - 1; i++)
+    {
+        if (args[i] == "--pipe") { pipeName = args[i + 1]; break; }
+    }
+
     using var pioneer = new PioneerRxUiaEngine(Log.Logger);
-    using var ipcClient = new IpcPipeClient("SuavoAgent", Log.Logger);
+    using var ipcClient = new IpcPipeClient(pipeName, Log.Logger);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
     int attachFailures = 0;

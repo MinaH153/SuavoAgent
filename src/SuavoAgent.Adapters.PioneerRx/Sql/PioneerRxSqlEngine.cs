@@ -53,6 +53,14 @@ public sealed class PioneerRxSqlEngine : IDisposable
         _connectionString = csb.ConnectionString;
     }
 
+    // H-4/H-13: Required tables that must exist to prove we connected to PioneerRx, not a LAN impostor.
+    private static readonly (string Schema, string Table)[] RequiredTables =
+    {
+        ("Prescription", "Rx"),
+        ("Prescription", "RxTransaction"),
+        ("Prescription", "RxTransactionStatusType"),
+    };
+
     public async Task<bool> TryConnectAsync(CancellationToken ct)
     {
         try
@@ -60,6 +68,14 @@ public sealed class PioneerRxSqlEngine : IDisposable
             _connection = new SqlConnection(_connectionString);
             await _connection.OpenAsync(ct);
             _logger.LogInformation("SQL connected to {DataSource}", _connection.DataSource);
+
+            if (!await VerifyPioneerRxSchemaAsync(ct))
+            {
+                _logger.LogError("SQL schema fingerprint failed — disconnecting (H-4: LAN impostor protection)");
+                _connection.Dispose();
+                _connection = null;
+                return false;
+            }
 
             _deliveryReadyGuids = await DiscoverStatusGuidsAsync(ct);
             await DiscoverAllStatusGuidsAsync(ct);
@@ -70,6 +86,35 @@ public sealed class PioneerRxSqlEngine : IDisposable
             _logger.LogWarning(ex, "SQL connection failed");
             _connection?.Dispose();
             _connection = null;
+            return false;
+        }
+    }
+
+    private async Task<bool> VerifyPioneerRxSchemaAsync(CancellationToken ct)
+    {
+        if (_connection is null) return false;
+        const string query = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=@s AND TABLE_NAME=@t";
+        try
+        {
+            foreach (var (schema, table) in RequiredTables)
+            {
+                await using var cmd = new SqlCommand(query, _connection);
+                cmd.CommandTimeout = 5;
+                cmd.Parameters.AddWithValue("@s", schema);
+                cmd.Parameters.AddWithValue("@t", table);
+                var count = (int)(await cmd.ExecuteScalarAsync(ct))!;
+                if (count == 0)
+                {
+                    _logger.LogWarning("Schema fingerprint: [{Schema}].[{Table}] not found — rejecting connection", schema, table);
+                    return false;
+                }
+            }
+            _logger.LogInformation("Schema fingerprint verified — PioneerRx schema confirmed");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Schema fingerprint query failed");
             return false;
         }
     }

@@ -37,6 +37,11 @@ public static class SelfUpdater
     internal const string CommandPublicKeyDer =
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1mIlEiYIEqjp/YBymnFH9FEUxYFXd+Y25cPiF5wdcEo9CP+760IMxHgajrUt9A3zJ47dwV893LWwlZ1/nDP3YA==";
 
+    // ECDSA P-256 public key for verifying seed response bodies (H-11).
+    // Uses the same command-signing key — cloud signs seed payloads before returning them.
+    // Prevents a compromised cloud from injecting malicious SQL shapes.
+    internal const string SeedPublicKeyDer = CommandPublicKeyDer;
+
     private static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)
     {
         "github.com",

@@ -11,7 +11,9 @@ public sealed class SeedClient
 
     public async Task<SeedResponse?> PullAsync(SeedRequest request, CancellationToken ct)
     {
-        var result = await _signer.PostSignedAsync("/api/agent/seed/pull", request, ct);
+        // H-11: Verify ECDSA signature on response body — cloud compromise cannot inject SQL shapes
+        var result = await _signer.PostSignedVerifiedAsync(
+            "/api/agent/seed/pull", request, SelfUpdater.SeedPublicKeyDer, ct);
         if (result is null) return null;
         return JsonSerializer.Deserialize<SeedResponse>(result.Value.GetRawText());
     }

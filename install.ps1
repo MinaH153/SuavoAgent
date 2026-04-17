@@ -162,6 +162,19 @@ if (Test-Path $appSettings) {
     Copy-Item $appSettings (Join-Path $InstallDir "appsettings.json") -Force
 }
 
+# H-8: Write binary integrity manifest so Broker can verify Helper before launch
+Write-Host "Computing binary hashes..." -ForegroundColor Yellow
+$manifest = @{}
+foreach ($sub in @("Core", "Broker", "Helper")) {
+    $exePath = Join-Path $InstallDir "SuavoAgent.$sub.exe"
+    $hash = (Get-FileHash $exePath -Algorithm SHA256).Hash.ToLower()
+    $manifest["SuavoAgent.$sub.exe"] = $hash
+    Write-Host "  SuavoAgent.$sub.exe: $hash" -ForegroundColor Gray
+}
+$manifestPath = Join-Path $dataDir "binaries.manifest"
+$manifest | ConvertTo-Json | Set-Content $manifestPath -Encoding UTF8
+Write-Host "  binaries.manifest written to $manifestPath" -ForegroundColor Gray
+
 # Register Core service (least-privilege virtual account)
 $corePath = Join-Path $InstallDir "SuavoAgent.Core.exe"
 Write-Host "Registering $serviceCore service..." -ForegroundColor Yellow
