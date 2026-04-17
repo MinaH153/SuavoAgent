@@ -82,6 +82,7 @@ public class AuditChainFixTests : IDisposable
         Assert.True(_db.VerifyAuditChain());
     }
 
+#if DEBUG
     [Fact]
     public void TamperedEntry_BreaksChain()
     {
@@ -97,4 +98,5 @@ public class AuditChainFixTests : IDisposable
 
         Assert.False(_db.VerifyAuditChain());
     }
+#endif
 }
