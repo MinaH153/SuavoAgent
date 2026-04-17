@@ -79,7 +79,7 @@ public class SchemaConstraintTests : IDisposable
         var applicator = new SeedApplicator(_db);
         var response = new SeedResponse("digest-atomic", 1, "pattern",
             new[] { "schema" }, null, null,
-            new[] { new SeedQueryShape("qs-1", "SELECT 1", new[] { "T" }, 0.8, 5) },
+            new[] { new SeedQueryShape("qs-1", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [StatusID]=@s0", new[] { "Prescription.Rx" }, 0.8, 5) },
             new[] { new SeedStatusMapping("ST", "g-1", "Done", 10) },
             null);
 
@@ -99,7 +99,7 @@ public class SchemaConstraintTests : IDisposable
         var response = new SeedResponse("digest-model", 1, "model",
             new[] { "schema" }, null,
             new[] { new SeedCorrelation("t1:btn1:q1", "t1", "btn1", "Button", "q1", 0.9, 0.8, 3, 0.5) },
-            new[] { new SeedQueryShape("qs-1", "SELECT 1", new[] { "T" }, 0.8, 5) },
+            new[] { new SeedQueryShape("qs-1", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [StatusID]=@s0", new[] { "Prescription.Rx" }, 0.8, 5) },
             new[] { new SeedStatusMapping("ST", "g-1", "Done", 10) },
             null);
 

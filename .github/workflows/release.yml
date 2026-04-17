@@ -24,7 +24,7 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
       - name: Restore + Build
-        run: dotnet build SuavoAgent.sln -c Release -r win-x64 --no-self-contained
+        run: dotnet build SuavoAgent.sln -c Release
 
       - name: Test
         run: dotnet test SuavoAgent.sln -c Release --no-build -v normal

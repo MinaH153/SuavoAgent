@@ -62,24 +62,39 @@ public sealed class IpcPipeServer : IDisposable
                             continue;
                         }
 
-                        // Verify executable path is under the SuavoAgent install directory (anti-spoofing)
+                        // Verify executable path is under the SuavoAgent install directory (anti-spoofing).
+                        // Fail-closed: if MainModule cannot be read, reject — a cross-arch or ACL-denied
+                        // binary is exactly the shape an attacker would wear.
+                        string? clientPath;
                         try
                         {
-                            var clientPath = clientProc.MainModule?.FileName;
-                            var installDir = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
-                                ?? AppContext.BaseDirectory;
-                            if (clientPath != null && !clientPath.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
-                            {
-                                _logger.LogWarning("IPC: Rejected connection from outside install dir: {Path} (expected under {Dir})",
-                                    clientPath, installDir);
-                                pipe.Disconnect();
-                                continue;
-                            }
+                            clientPath = clientProc.MainModule?.FileName;
                         }
-                        catch (System.ComponentModel.Win32Exception)
+                        catch (Exception ex)
                         {
-                            // MainModule access may fail for cross-architecture processes — allow if name matched
-                            _logger.LogDebug("IPC: Could not verify client path (access denied) — allowing by name match");
+                            _logger.LogWarning(ex, "IPC: MainModule unreadable for PID {Pid} — rejecting", clientPid);
+                            pipe.Disconnect();
+                            continue;
+                        }
+
+                        if (string.IsNullOrEmpty(clientPath))
+                        {
+                            _logger.LogWarning("IPC: Empty client path for PID {Pid} — rejecting", clientPid);
+                            pipe.Disconnect();
+                            continue;
+                        }
+
+                        // Use parent dir as install root (Core/Helper/Broker are sibling subdirs).
+                        // Append separator so "C:\Suavo\" doesn't match "C:\SuavoEvil\...".
+                        var installRoot = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
+                            ?? AppContext.BaseDirectory;
+                        var installDir = installRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                        if (!clientPath.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogWarning("IPC: Rejected connection from outside install dir: {Path} (expected under {Dir})",
+                                clientPath, installDir);
+                            pipe.Disconnect();
+                            continue;
                         }
                     }
                     catch (Exception ex)
@@ -189,11 +204,13 @@ public sealed class IpcPipeServer : IDisposable
                     System.Security.Principal.WellKnownSidType.NetworkServiceSid, null),
                 System.IO.Pipes.PipeAccessRights.FullControl,
                 System.Security.AccessControl.AccessControlType.Allow));
-            // Helper runs as interactive user (launched by Broker via CreateProcessAsUser).
-            // Without this rule, Helper gets Access Denied on pipe connect.
+            // Helper runs as the logged-on interactive user (launched by Broker via CreateProcessAsUser).
+            // Interactive SID (S-1-5-4) covers physical + RDP sessions but excludes service accounts,
+            // network logons, and anonymous logons — strictly narrower than AuthenticatedUser.
+            // Binary identity is still pinned via MainModule path check in the listen loop.
             security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
                 new System.Security.Principal.SecurityIdentifier(
-                    System.Security.Principal.WellKnownSidType.AuthenticatedUserSid, null),
+                    System.Security.Principal.WellKnownSidType.InteractiveSid, null),
                 System.IO.Pipes.PipeAccessRights.ReadWrite,
                 System.Security.AccessControl.AccessControlType.Allow));
 

@@ -11,10 +11,26 @@ public sealed class SeedApplicator
     public record ApplyResult(int ItemsApplied, bool AlreadyApplied);
     public record ModelApplyResult(int CorrelationsApplied, int CorrelationsSkipped, bool AlreadyApplied);
 
+    // Validate every seeded SQL shape through the tokenizer before storing.
+    // A single failure rejects the entire batch (fail-closed).
+    private static bool ValidateQueryShapes(IReadOnlyList<SeedQueryShape> shapes)
+    {
+        foreach (var qs in shapes)
+        {
+            if (SqlTokenizer.TryNormalize(qs.ParameterizedSql) is null)
+                return false;
+        }
+        return true;
+    }
+
     public ApplyResult ApplyPatternSeeds(string sessionId, SeedResponse response)
     {
         if (_db.GetAppliedSeed(response.SeedDigest) is not null)
             return new(0, AlreadyApplied: true);
+
+        if (!ValidateQueryShapes(response.QueryShapes))
+            throw new InvalidOperationException(
+                $"Seed {response.SeedDigest} rejected — one or more QueryShapes failed SqlTokenizer validation");
 
         using var txn = _db.BeginTransaction();
         var now = DateTimeOffset.UtcNow.ToString("o");
@@ -50,6 +66,10 @@ public sealed class SeedApplicator
     {
         if (_db.GetAppliedSeed(response.SeedDigest) is not null)
             return new(0, 0, AlreadyApplied: true);
+
+        if (!ValidateQueryShapes(response.QueryShapes))
+            throw new InvalidOperationException(
+                $"Seed {response.SeedDigest} rejected — one or more QueryShapes failed SqlTokenizer validation");
 
         using var txn = _db.BeginTransaction();
         var now = DateTimeOffset.UtcNow.ToString("o");

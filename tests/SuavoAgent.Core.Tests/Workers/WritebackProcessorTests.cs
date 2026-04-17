@@ -57,6 +57,24 @@ public class WritebackProcessorTests : IDisposable
         Assert.Equal(2, _processor.ActiveMachineCount);
     }
 
+    [Fact]
+    public void RxNumber_Preserved_AcrossRestart()
+    {
+        // Enqueue and persist to DB (simulating process before crash)
+        _processor.EnqueueWriteback("task-crash", "RX99999", fillNumber: 7, transition: "complete");
+
+        // Simulate process restart: dispose current DB, open a fresh instance on same file
+        _db.Dispose();
+        using var db2 = new AgentStateDb(_dbPath);
+
+        var pending = db2.GetPendingWritebacks();
+        Assert.Single(pending);
+        Assert.Equal("task-crash", pending[0].TaskId);
+        // Actual Rx number must survive restart (stored in rx_number_enc, not just HMAC hash)
+        Assert.Equal("RX99999", pending[0].RxNumber);
+        Assert.Equal(WritebackState.Queued, pending[0].State);
+    }
+
     public void Dispose()
     {
         _pipe.Dispose();

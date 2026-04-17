@@ -11,12 +11,17 @@ namespace SuavoAgent.Core.Workers;
 
 public sealed class WritebackProcessor : BackgroundService
 {
+    private static readonly HashSet<string> AllowedTransitions =
+        new(StringComparer.OrdinalIgnoreCase) { "pickup", "complete" };
+
     private readonly ILogger<WritebackProcessor> _logger;
     private readonly AgentStateDb _stateDb;
     private readonly IpcPipeServer _pipeServer;
     private readonly AgentOptions _options;
+    private readonly object _lock = new();
     private readonly Dictionary<string, WritebackStateMachine> _machines = new();
     private readonly Dictionary<string, string> _rxNumbers = new();
+    private readonly Dictionary<string, int> _fillNumbers = new();
     private readonly Dictionary<string, string> _transitions = new();
     private readonly Dictionary<string, DateTimeOffset?> _deliveredAts = new();
     private readonly Dictionary<string, DateTimeOffset> _nextRetryAt = new();
@@ -81,13 +86,18 @@ public sealed class WritebackProcessor : BackgroundService
     private void RecoverPendingWritebacks()
     {
         var pending = _stateDb.GetDueWritebacks();
-        foreach (var (taskId, state, rxNumber, retryCount, _) in pending)
+        lock (_lock)
         {
-            _logger.LogInformation("Recovering writeback {TaskId} in state {State} (retries: {Retries})",
-                taskId, state, retryCount);
+            foreach (var (taskId, state, rxNumber, retryCount, _) in pending)
+            {
+                _logger.LogInformation("Recovering writeback {TaskId} in state {State} (retries: {Retries})",
+                    taskId, state, retryCount);
 
-            var machine = new WritebackStateMachine(taskId, state, OnStateChanged, retryCount);
-            _machines[taskId] = machine;
+                var machine = new WritebackStateMachine(taskId, state, OnStateChanged, retryCount);
+                _machines[taskId] = machine;
+                if (!string.IsNullOrEmpty(rxNumber))
+                    _rxNumbers[taskId] = rxNumber;
+            }
         }
         _logger.LogInformation("Recovered {Count} pending writebacks", pending.Count);
     }
@@ -95,20 +105,28 @@ public sealed class WritebackProcessor : BackgroundService
     public void EnqueueWriteback(string taskId, string rxNumber, int fillNumber = 0,
         string transition = "pickup", DateTimeOffset? deliveredAt = null)
     {
-        if (_machines.ContainsKey(taskId))
-        {
-            _logger.LogDebug("Writeback {TaskId} already tracked", taskId);
-            return;
-        }
+        if (!AllowedTransitions.Contains(transition))
+            throw new ArgumentException(
+                $"Invalid transition '{transition}' — only 'pickup' and 'complete' are allowed", nameof(transition));
 
-        var machine = new WritebackStateMachine(taskId, WritebackState.Queued, OnStateChanged);
-        _machines[taskId] = machine;
-        _rxNumbers[taskId] = rxNumber;
-        _transitions[taskId] = transition;
-        _deliveredAts[taskId] = deliveredAt;
+        lock (_lock)
+        {
+            if (_machines.ContainsKey(taskId))
+            {
+                _logger.LogDebug("Writeback {TaskId} already tracked", taskId);
+                return;
+            }
+
+            var machine = new WritebackStateMachine(taskId, WritebackState.Queued, OnStateChanged);
+            _machines[taskId] = machine;
+            _rxNumbers[taskId] = rxNumber;
+            _fillNumbers[taskId] = fillNumber;
+            _transitions[taskId] = transition;
+            _deliveredAts[taskId] = deliveredAt;
+        }
         _stateDb.UpsertWritebackState(taskId, rxNumber, WritebackState.Queued, 0, null);
         _logger.LogInformation("Enqueued writeback {TaskId} for Rx {RxHash} transition={Transition}",
-            taskId, PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? ""), transition);
+            taskId, PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "[no-hmac-salt]"), transition);
     }
 
     private async Task ProcessPendingWritebacksAsync(CancellationToken ct)
@@ -120,10 +138,14 @@ public sealed class WritebackProcessor : BackgroundService
         }
 
         var now = DateTimeOffset.UtcNow;
-        var queued = _machines
-            .Where(m => m.Value.CurrentState == WritebackState.Queued)
-            .Where(m => !_nextRetryAt.TryGetValue(m.Key, out var nra) || nra <= now)
-            .ToList();
+        List<KeyValuePair<string, WritebackStateMachine>> queued;
+        lock (_lock)
+        {
+            queued = _machines
+                .Where(m => m.Value.CurrentState == WritebackState.Queued)
+                .Where(m => !_nextRetryAt.TryGetValue(m.Key, out var nra) || nra <= now)
+                .ToList();
+        }
 
         if (queued.Count == 0) return;
 
@@ -158,7 +180,7 @@ public sealed class WritebackProcessor : BackgroundService
 
             if (!int.TryParse(state.RxNumber, out var rxNumber))
             {
-                _logger.LogWarning("Writeback {TaskId} — invalid RxNumber '{RxHash}'", taskId, PhiScrubber.HmacHash(state.RxNumber, _options.HmacSalt ?? ""));
+                _logger.LogWarning("Writeback {TaskId} — invalid RxNumber '{RxHash}'", taskId, PhiScrubber.HmacHash(state.RxNumber, _options.HmacSalt ?? "[no-hmac-salt]"));
                 if (machine.CanFire(WritebackTrigger.BusinessError))
                     machine.Fire(WritebackTrigger.BusinessError);
                 continue;
@@ -167,7 +189,8 @@ public sealed class WritebackProcessor : BackgroundService
             // Per-RxNumber serialization
             if (!_writebackEngine.TryAcquireRxLock(rxNumber))
             {
-                _logger.LogDebug("Writeback {TaskId} — Rx {Rx} locked, skipping cycle", taskId, rxNumber);
+                _logger.LogDebug("Writeback {TaskId} — Rx {RxHash} locked, skipping cycle",
+                    taskId, PhiScrubber.HmacHash(rxNumber.ToString(), _options.HmacSalt ?? "[no-hmac-salt]"));
                 continue;
             }
 
@@ -176,17 +199,24 @@ public sealed class WritebackProcessor : BackgroundService
                 machine.Fire(WritebackTrigger.Claim);
 
                 // Determine transition type (default to pickup for backward compatibility)
-                var transition = _transitions.GetValueOrDefault(taskId, "pickup");
-                var deliveredAt = _deliveredAts.GetValueOrDefault(taskId);
+                string transition;
+                DateTimeOffset? deliveredAt;
+                int fillNumber;
+                lock (_lock)
+                {
+                    transition = _transitions.GetValueOrDefault(taskId, "pickup");
+                    deliveredAt = _deliveredAts.GetValueOrDefault(taskId);
+                    fillNumber = _fillNumbers.GetValueOrDefault(taskId, 0);
+                }
 
                 // Resolve RxTransactionID using the correct transition filter
                 var resolved = await _writebackEngine.ResolveTransactionIdAsync(
-                    rxNumber, 0, transition, ct);
+                    rxNumber, fillNumber, transition, ct);
 
                 if (resolved == null)
                 {
-                    _logger.LogWarning("Writeback {TaskId} — Rx {Rx} not in expected state for {Transition}",
-                        taskId, rxNumber, transition);
+                    _logger.LogWarning("Writeback {TaskId} — Rx {RxHash} not in expected state for {Transition}",
+                        taskId, PhiScrubber.HmacHash(rxNumber.ToString(), _options.HmacSalt ?? "[no-hmac-salt]"), transition);
                     if (machine.CanFire(WritebackTrigger.BusinessError))
                         machine.Fire(WritebackTrigger.BusinessError);
                     continue;
@@ -287,23 +317,31 @@ public sealed class WritebackProcessor : BackgroundService
         _logger.LogInformation("Writeback {TaskId} {From} -> {To} ({Trigger})",
             taskId, previousState, newState, trigger);
 
-        var machine = _machines.GetValueOrDefault(taskId);
+        WritebackStateMachine? machine;
+        string rxNum;
+        lock (_lock)
+        {
+            machine = _machines.GetValueOrDefault(taskId);
+            rxNum = _rxNumbers.GetValueOrDefault(taskId, "");
+            if (machine != null && trigger is WritebackTrigger.SystemError or WritebackTrigger.BusinessError)
+            {
+                var retryCount = machine.RetryCount;
+                if (retryCount > 0 && retryCount <= WritebackStateMachine.MaxRetries)
+                {
+                    var delaySeconds = 30 * (1 << (retryCount - 1));
+                    _nextRetryAt[taskId] = DateTimeOffset.UtcNow.AddSeconds(delaySeconds);
+                }
+            }
+        }
         if (machine != null)
         {
-            var rxNum = _rxNumbers.GetValueOrDefault(taskId, "");
             _stateDb.UpsertWritebackState(taskId, rxNum, newState, machine.RetryCount, null);
 
             // Exponential backoff: 30s, 60s, 120s, 240s, 480s (30 * 2^n)
             if (trigger is WritebackTrigger.SystemError or WritebackTrigger.BusinessError)
             {
-                var retryCount = machine.RetryCount;
-                if (retryCount > 0 && retryCount <= WritebackStateMachine.MaxRetries)
-                {
-                    var delaySeconds = 30 * (1 << (retryCount - 1)); // 30, 60, 120, 240, 480
-                    var retryAt = DateTimeOffset.UtcNow.AddSeconds(delaySeconds);
-                    _nextRetryAt[taskId] = retryAt;
+                if (_nextRetryAt.TryGetValue(taskId, out var retryAt))
                     _stateDb.UpdateNextRetryAt(taskId, retryAt);
-                }
             }
         }
 
@@ -313,7 +351,6 @@ public sealed class WritebackProcessor : BackgroundService
 
         if (newState == WritebackState.ManualReview && trigger == WritebackTrigger.DeadLetter)
         {
-            var rxNum = _rxNumbers.GetValueOrDefault(taskId, "");
             _stateDb.UpsertWritebackState(taskId, rxNum, newState, machine?.RetryCount ?? 0,
                 "max retries exceeded");
             _logger.LogWarning("Writeback {TaskId} DEAD-LETTERED after {Retries} retries",

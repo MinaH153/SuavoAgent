@@ -62,6 +62,16 @@ try
     builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
 
     var agentOpts = builder.Configuration.GetSection("Agent").Get<AgentOptions>() ?? new AgentOptions();
+
+    // H-1: Seal plaintext credentials with DPAPI on first run (Windows only)
+    SuavoAgent.Core.Config.CredentialProtector.SealSecretsFile(
+        Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
+        LoggerFactory.Create(lb => lb.AddSerilog()).CreateLogger("CredentialProtector"));
+
+    Log.Information(
+        "Writeback mode: {Mode} (SQL writes {Status}) — audit receipts always generated",
+        agentOpts.ReceiptOnlyMode ? "RECEIPT-ONLY" : "FULL WRITEBACK",
+        agentOpts.ReceiptOnlyMode ? "DISABLED" : "ENABLED");
     if (!string.IsNullOrWhiteSpace(agentOpts.ApiKey))
     {
         var cloudClient = new SuavoCloudClient(agentOpts);
@@ -185,10 +195,22 @@ try
     builder.Services.AddSingleton<BehavioralEventReceiver>(sp =>
         new BehavioralEventReceiver(sp.GetRequiredService<AgentStateDb>(), sessionId: "ipc"));
 
+    // H-10: Write ephemeral pipe nonce so Broker can pass the randomised pipe name to Helper.
+    // An attacker without knowledge of the nonce cannot pre-create a squatting pipe server.
+    var pipeNonce = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8));
+    var pipeName = $"SuavoAgent-{pipeNonce}";
+    {
+        var nonceDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SuavoAgent");
+        Directory.CreateDirectory(nonceDir);
+        File.WriteAllText(Path.Combine(nonceDir, "pipe.nonce"), pipeNonce);
+    }
+
     builder.Services.AddSingleton<IpcPipeServer>(sp =>
     {
         var logger = sp.GetRequiredService<ILogger<IpcPipeServer>>();
-        return new IpcPipeServer("SuavoAgent", msg =>
+        var eventRateLimiter = new SuavoAgent.Core.Ipc.EventRateLimiter(maxEventsPerSecond: 500);
+        return new IpcPipeServer(pipeName, msg =>
         {
             logger.LogDebug("IPC: {Command}", msg.Command);
 
@@ -209,19 +231,38 @@ try
                     var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
                     var db = sp.GetRequiredService<AgentStateDb>();
                     var sessionId = db.GetActiveSessionId(opts.PharmacyId ?? "");
-                    var salt = sessionId != null ? db.GetOrCreateHmacSalt(sessionId) : "";
-                    var saltJson = System.Text.Json.JsonSerializer.SerializeToElement(salt);
+                    var masterSalt = sessionId != null ? db.GetOrCreateHmacSalt(sessionId) : "";
+                    // C-1: derive date-scoped ephemeral key — master salt never crosses the IPC boundary.
+                    // Leaking the derived key can't de-anonymize data from other days.
+                    string ephemeralKey = "";
+                    if (masterSalt.Length > 0)
+                    {
+                        var dayBytes = System.Text.Encoding.UTF8.GetBytes(
+                            DateTimeOffset.UtcNow.ToString("yyyy-MM-dd"));
+                        ephemeralKey = Convert.ToBase64String(
+                            System.Security.Cryptography.HMACSHA256.HashData(
+                                System.Text.Encoding.UTF8.GetBytes(masterSalt), dayBytes));
+                    }
+                    var saltJson = System.Text.Json.JsonSerializer.SerializeToElement(ephemeralKey);
                     return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
                         msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, saltJson, null));
                 }
 
                 case SuavoAgent.Contracts.Ipc.IpcCommands.BehavioralEvents:
                 {
+                    if (!eventRateLimiter.TryAcquire())
+                    {
+                        logger.LogWarning("IPC: BehavioralEvents rate limit exceeded (dropped={Total})",
+                            eventRateLimiter.DroppedTotal);
+                        return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                            msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.BadRequest, msg.Command, null,
+                            new SuavoAgent.Contracts.Ipc.IpcError("rate_limited", "rate limit exceeded", true, 0)));
+                    }
                     var events = msg.Data.HasValue
                         ? System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Behavioral.BehavioralEvent>>(
                             msg.Data.Value.GetRawText())
                         : null;
-                    // Cap batch size at 200 to prevent memory/disk abuse (H-6)
+                    // Cap batch size at 200 to prevent memory/disk abuse
                     if (events != null && events.Count > 200)
                     {
                         var originalCount = events.Count;
@@ -240,6 +281,12 @@ try
 
                 case SuavoAgent.Contracts.Ipc.IpcCommands.SystemEvents:
                 {
+                    if (!eventRateLimiter.TryAcquire())
+                    {
+                        return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                            msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.BadRequest, msg.Command, null,
+                            new SuavoAgent.Contracts.Ipc.IpcError("rate_limited", "rate limit exceeded", true, 0)));
+                    }
                     var events = msg.Data.HasValue
                         ? System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Behavioral.BehavioralEvent>>(
                             msg.Data.Value.GetRawText())
@@ -276,6 +323,16 @@ try
     builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));
 
     var host = builder.Build();
+
+    // H-1: Decrypt DPAPI-wrapped credentials for runtime use (must happen before services start)
+    if (OperatingSystem.IsWindows())
+    {
+        var runtimeOpts = host.Services.GetRequiredService<IOptions<AgentOptions>>().Value;
+        runtimeOpts.ApiKey = SuavoAgent.Core.Config.CredentialProtector.Unprotect(runtimeOpts.ApiKey);
+        runtimeOpts.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(runtimeOpts.SqlPassword);
+        foreach (var ph in runtimeOpts.Pharmacies)
+            ph.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(ph.SqlPassword);
+    }
 
     var pipeServer = host.Services.GetRequiredService<IpcPipeServer>();
     pipeServer.Start(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);

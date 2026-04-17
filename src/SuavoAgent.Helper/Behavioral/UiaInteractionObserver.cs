@@ -100,8 +100,7 @@ public sealed class UiaInteractionObserver : IDisposable
             }
 
             _logger.Information(
-                "UiaInteractionObserver: subscribed to PID {Pid}, window {Title}",
-                processId, window.Title);
+                "UiaInteractionObserver: subscribed to PID {Pid}", processId);
         }
         catch (Exception ex)
         {

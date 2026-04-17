@@ -26,8 +26,15 @@ try
     var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
+    // H-10: resolve pipe name from --pipe arg (written by Core, passed by Broker)
+    var pipeName = "SuavoAgent";
+    for (var i = 0; i < args.Length - 1; i++)
+    {
+        if (args[i] == "--pipe") { pipeName = args[i + 1]; break; }
+    }
+
     using var pioneer = new PioneerRxUiaEngine(Log.Logger);
-    using var ipcClient = new IpcPipeClient("SuavoAgent", Log.Logger);
+    using var ipcClient = new IpcPipeClient(pipeName, Log.Logger);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
     int attachFailures = 0;
@@ -56,7 +63,8 @@ try
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "Failed to fetch pharmacySalt from Core — using empty salt");
+            Log.Error(ex, "Cannot fetch pharmacySalt from Core — halting behavioral observation (HIPAA fail-closed)");
+            cts.Cancel();
         }
         return "";
     }
@@ -207,7 +215,7 @@ try
         {
             attached = true;
             attachFailures = 0;
-            Log.Information("Attached to PioneerRx: {Title}", pioneer.WindowTitle);
+            Log.Information("Attached to PioneerRx PID {Pid}", pioneer.ProcessId);
 
             // Report success to Core via IPC
             await ipcClient.TrySendAsync("pioneer_attached", null, cts.Token);
@@ -265,7 +273,7 @@ try
                 if (pioneer.TryAttach())
                 {
                     attached = true;
-                    Log.Information("Re-attached to PioneerRx: {Title}", pioneer.WindowTitle);
+                    Log.Information("Re-attached to PioneerRx PID {Pid}", pioneer.ProcessId);
                     await ipcClient.TrySendAsync("pioneer_reattached", null, cts.Token);
 
                     // Re-fetch salt in case session rotated

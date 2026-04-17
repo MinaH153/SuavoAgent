@@ -25,7 +25,7 @@ public class SeedApplicatorTests : IDisposable
     public void ApplyPatternSeeds_InsertsItemsCorrectly()
     {
         var response = MakePatternResponse("digest-1",
-            queryShapes: new[] { new SeedQueryShape("qs-1", "UPDATE X SET Y=@p", new[] { "X" }, 0.88, 12) },
+            queryShapes: new[] { new SeedQueryShape("qs-1", "UPDATE [Prescription].[RxTransaction] SET [StatusID]=@p WHERE [RxNumber]=@rx", new[] { "Prescription.RxTransaction" }, 0.88, 12) },
             statusMappings: new[] { new SeedStatusMapping("StatusTable", "guid-1", "Completed", 15) },
             workflowHints: new[] { new SeedWorkflowHint("wf-1", 4, 35.0, true, 8) });
 
@@ -57,7 +57,7 @@ public class SeedApplicatorTests : IDisposable
     {
         _db.InsertAppliedSeed("digest-1", "pattern", "2026-04-14T00:00:00Z", 3, 0);
         var response = MakePatternResponse("digest-1",
-            queryShapes: new[] { new SeedQueryShape("qs-1", "SQL", new[] { "T" }, 0.8, 5) });
+            queryShapes: new[] { new SeedQueryShape("qs-1", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [StatusID]=@s0", new[] { "Prescription.Rx" }, 0.8, 5) });
 
         var result = _applicator.ApplyPatternSeeds(SessionId, response);
 
@@ -69,7 +69,7 @@ public class SeedApplicatorTests : IDisposable
     public void ApplyPatternSeeds_NoWorkflowHints_CountsCorrectly()
     {
         var response = MakePatternResponse("digest-2",
-            queryShapes: new[] { new SeedQueryShape("qs-1", "SELECT 1", new[] { "T" }, 0.9, 3) },
+            queryShapes: new[] { new SeedQueryShape("qs-1", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [StatusID]=@s0", new[] { "Prescription.Rx" }, 0.9, 3) },
             workflowHints: null);
 
         var result = _applicator.ApplyPatternSeeds(SessionId, response);
@@ -201,8 +201,8 @@ public class SeedApplicatorTests : IDisposable
     {
         var response = MakePatternResponse("digest-7",
             queryShapes: new[] {
-                new SeedQueryShape("qs-a", "SELECT 1", new[] { "T" }, 0.9, 5),
-                new SeedQueryShape("qs-b", "SELECT 2", new[] { "T" }, 0.8, 3),
+                new SeedQueryShape("qs-a", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [StatusID]=@s0", new[] { "Prescription.Rx" }, 0.9, 5),
+                new SeedQueryShape("qs-b", "SELECT [RxNumber] FROM [Prescription].[RxTransaction] WHERE [StatusID]=@s1", new[] { "Prescription.RxTransaction" }, 0.8, 3),
             },
             statusMappings: new[] { new SeedStatusMapping("Tbl", "guid-x", "Done", 2) });
 

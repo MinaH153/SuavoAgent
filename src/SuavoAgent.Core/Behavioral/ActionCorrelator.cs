@@ -19,6 +19,7 @@ public sealed class ActionCorrelator
     private readonly List<UiEvent> _window = new();
     private readonly HashSet<string> _seededShapes = new();
     private string? _activeSeedDigest;
+    private readonly object _lock = new();
 
     public ActionCorrelator(AgentStateDb db, string sessionId, double correlationWindowSeconds = 2.0, bool clockCalibrated = true)
     {
@@ -30,7 +31,7 @@ public sealed class ActionCorrelator
     /// <summary>
     /// Sets the active seed digest for confirming seed items on independent observation.
     /// </summary>
-    public void SetActiveSeedDigest(string? digest) => _activeSeedDigest = digest;
+    public void SetActiveSeedDigest(string? digest) { lock (_lock) _activeSeedDigest = digest; }
 
     /// <summary>
     /// Registers query shape hashes that came from collective intelligence seeds.
@@ -38,7 +39,10 @@ public sealed class ActionCorrelator
     /// </summary>
     public void RegisterSeededShapes(IEnumerable<string> shapeHashes)
     {
-        foreach (var h in shapeHashes) _seededShapes.Add(h);
+        lock (_lock)
+        {
+            foreach (var h in shapeHashes) _seededShapes.Add(h);
+        }
     }
 
     /// <summary>
@@ -46,7 +50,7 @@ public sealed class ActionCorrelator
     /// </summary>
     public void SetClockCalibrated(bool calibrated)
     {
-        _correlationWindowSeconds = calibrated ? 2.0 : 5.0;
+        lock (_lock) _correlationWindowSeconds = calibrated ? 2.0 : 5.0;
     }
 
     /// <summary>
@@ -54,8 +58,11 @@ public sealed class ActionCorrelator
     /// </summary>
     public void RecordUiEvent(string treeHash, string elementId, string? controlType, DateTimeOffset timestamp)
     {
-        PruneExpired(timestamp);
-        _window.Add(new UiEvent(treeHash, elementId, controlType, timestamp));
+        lock (_lock)
+        {
+            PruneExpired(timestamp);
+            _window.Add(new UiEvent(treeHash, elementId, controlType, timestamp));
+        }
     }
 
     /// <summary>
@@ -68,36 +75,38 @@ public sealed class ActionCorrelator
         if (!DateTimeOffset.TryParse(lastExecutionTimeIso, null, System.Globalization.DateTimeStyles.RoundtripKind, out var sqlTime))
             return;
 
-        PruneExpired(sqlTime);
+        UiEvent? closest;
+        bool isSeeded;
+        string? activeSeed;
 
-        if (_window.Count == 0)
-            return;
-
-        // Check per-key window overrides from recalibration
-        double effectiveWindowSeconds = _correlationWindowSeconds;
-        if (_window.Count > 0)
+        lock (_lock)
         {
-            var closestUi = _window[^1]; // most recent UI event
+            PruneExpired(sqlTime);
+            if (_window.Count == 0) return;
+
+            double effectiveWindowSeconds = _correlationWindowSeconds;
+            var closestUi = _window[^1];
             var overrideWindow = _db.GetWindowOverride(_sessionId, closestUi.TreeHash, closestUi.ElementId);
             if (overrideWindow.HasValue)
                 effectiveWindowSeconds = overrideWindow.Value;
-        }
-        var window = TimeSpan.FromSeconds(effectiveWindowSeconds);
-        UiEvent? closest = null;
-        TimeSpan closestDelta = TimeSpan.MaxValue;
 
-        foreach (var evt in _window)
-        {
-            var delta = (sqlTime - evt.Timestamp).Duration();
-            if (delta <= window && delta < closestDelta)
+            var window = TimeSpan.FromSeconds(effectiveWindowSeconds);
+            closest = null;
+            var closestDelta = TimeSpan.MaxValue;
+            foreach (var evt in _window)
             {
-                closest = evt;
-                closestDelta = delta;
+                var delta = (sqlTime - evt.Timestamp).Duration();
+                if (delta <= window && delta < closestDelta)
+                {
+                    closest = evt;
+                    closestDelta = delta;
+                }
             }
-        }
 
-        if (closest is null)
-            return;
+            if (closest is null) return;
+            isSeeded = _seededShapes.Contains(queryShapeHash);
+            activeSeed = _activeSeedDigest;
+        }
 
         var correlationKey = $"{closest.TreeHash}:{closest.ElementId}:{queryShapeHash}";
         _db.UpsertCorrelatedAction(
@@ -109,14 +118,13 @@ public sealed class ActionCorrelator
             queryShapeHash: queryShapeHash,
             isWrite: isWrite,
             tablesReferenced: tablesReferenced,
-            seededShape: _seededShapes.Contains(queryShapeHash));
+            seededShape: isSeeded);
 
-        // Confirm seeded items when independently observed (Spec D)
-        if (_activeSeedDigest is not null && _seededShapes.Contains(queryShapeHash))
+        if (activeSeed is not null && isSeeded)
         {
             var now = DateTimeOffset.UtcNow.ToString("o");
-            _db.ConfirmSeedItem(_activeSeedDigest, "query_shape", queryShapeHash, now);
-            _db.ConfirmSeedItem(_activeSeedDigest, "correlation", correlationKey, now);
+            _db.ConfirmSeedItem(activeSeed, "query_shape", queryShapeHash, now);
+            _db.ConfirmSeedItem(activeSeed, "correlation", correlationKey, now);
         }
     }
 

@@ -73,4 +73,6 @@ internal sealed class FakePostSigner : IPostSigner
     public FakePostSigner(Func<string, object, JsonElement?> handler) => _handler = handler;
     public Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct) =>
         Task.FromResult(_handler(path, payload));
+    public Task<JsonElement?> PostSignedVerifiedAsync(string path, object payload, string publicKeyDer, CancellationToken ct) =>
+        Task.FromResult(_handler(path, payload));
 }

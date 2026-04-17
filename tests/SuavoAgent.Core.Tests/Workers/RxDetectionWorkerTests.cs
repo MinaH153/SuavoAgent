@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Contracts.Models;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Workers;
 using Xunit;
@@ -100,7 +101,8 @@ public class RxDetectionWorkerTests : IDisposable
         Assert.Equal(1, queue.GetArrayLength());
 
         var rx = queue[0];
-        Assert.Equal("12345", rx.GetProperty("rxNumber").GetString());
+        var expectedHash = PhiScrubber.HmacHash("12345", "[no-hmac-salt]");
+        Assert.Equal(expectedHash, rx.GetProperty("rxNumber").GetString());
         Assert.Equal("Amoxicillin 500mg", rx.GetProperty("drugName").GetString());
         Assert.Equal("00093-3109-01", rx.GetProperty("ndc").GetString());
         Assert.Equal(30m, rx.GetProperty("quantity").GetDecimal());
@@ -115,7 +117,7 @@ public class RxDetectionWorkerTests : IDisposable
     }
 
     [Fact]
-    public void SerializeRxBatch_SendsPlaintextRxNumber()
+    public void SerializeRxBatch_HashesRxNumber()
     {
         var rxs = new List<RxMetadata>
         {
@@ -123,12 +125,13 @@ public class RxDetectionWorkerTests : IDisposable
                 DateTime.UtcNow, 30m, Guid.NewGuid(), DateTimeOffset.UtcNow)
         };
 
-        var json = RxDetectionWorker.SerializeRxBatch(rxs);
+        var json = RxDetectionWorker.SerializeRxBatch(rxs, "test-salt");
         var doc = JsonDocument.Parse(json);
         var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
 
-        // Plaintext Rx number for cloud inbox matching
-        Assert.Equal("12345", rx.GetProperty("rxNumber").GetString());
+        var expectedHash = PhiScrubber.HmacHash("12345", "test-salt");
+        Assert.Equal(expectedHash, rx.GetProperty("rxNumber").GetString());
+        Assert.NotEqual("12345", rx.GetProperty("rxNumber").GetString());
     }
 
     [Fact]
@@ -167,7 +170,7 @@ public class RxDetectionWorkerTests : IDisposable
         Assert.Equal(2, queue.GetArrayLength());
 
         var rx1 = queue[0];
-        Assert.Equal("99001", rx1.GetProperty("rxNumber").GetString());
+        Assert.Equal(PhiScrubber.HmacHash("99001", "test-salt"), rx1.GetProperty("rxNumber").GetString());
         Assert.Equal("Metformin 500mg", rx1.GetProperty("drugName").GetString());
         Assert.Equal("Sarah", rx1.GetProperty("patientFirstName").GetString());
         Assert.Equal("M", rx1.GetProperty("patientLastInitial").GetString());
@@ -179,7 +182,7 @@ public class RxDetectionWorkerTests : IDisposable
         Assert.Equal("92392", rx1.GetProperty("deliveryZip").GetString());
 
         var rx2 = queue[1];
-        Assert.Equal("99002", rx2.GetProperty("rxNumber").GetString());
+        Assert.Equal(PhiScrubber.HmacHash("99002", "test-salt"), rx2.GetProperty("rxNumber").GetString());
         Assert.Equal("Ahmed", rx2.GetProperty("patientFirstName").GetString());
         Assert.Equal("789 Pine St", rx2.GetProperty("deliveryAddress1").GetString());
     }

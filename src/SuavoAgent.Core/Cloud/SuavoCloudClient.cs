@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using SuavoAgent.Core.Config;
@@ -7,6 +8,12 @@ namespace SuavoAgent.Core.Cloud;
 public interface IPostSigner
 {
     Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct);
+
+    /// <summary>
+    /// Like PostSignedAsync but also verifies the response body's ECDSA signature (H-11).
+    /// Returns null if the response is unsigned or signature verification fails.
+    /// </summary>
+    Task<JsonElement?> PostSignedVerifiedAsync(string path, object payload, string publicKeyDer, CancellationToken ct);
 }
 
 public sealed class SuavoCloudClient : IPostSigner, IDisposable
@@ -52,7 +59,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
 
     public async Task SendPatientDetailsAsync(string rxNumber, object details, string commandId, CancellationToken ct)
     {
-        var rxNumberHash = Learning.PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "");
+        var rxNumberHash = Learning.PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "[no-hmac-salt]");
         await PostSignedAsync("/api/agent/patient-details", new { rxNumberHash, details, commandId }, ct);
     }
 
@@ -76,6 +83,49 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
             return null;
 
         return JsonSerializer.Deserialize<JsonElement>(responseBody);
+    }
+
+    public async Task<JsonElement?> PostSignedVerifiedAsync(string path, object payload, string publicKeyDer, CancellationToken ct)
+    {
+        var body = JsonSerializer.Serialize(payload);
+        var timestamp = DateTimeOffset.UtcNow.ToString("o");
+        var signature = _signer.Sign(timestamp, body);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, path);
+        request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+        request.Headers.Add("x-agent-api-key", _options.ApiKey);
+        request.Headers.Add("x-agent-timestamp", timestamp);
+        request.Headers.Add("x-agent-signature", signature);
+
+        using var response = await _http.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+
+        var responseBody = await response.Content.ReadAsStringAsync(ct);
+        if (string.IsNullOrWhiteSpace(responseBody))
+            return null;
+
+        // H-11: Reject seed responses with missing or invalid ECDSA signature.
+        if (!response.Headers.TryGetValues("X-Response-Signature", out var sigValues)
+            || !VerifyEcdsaSignature(responseBody, sigValues.FirstOrDefault() ?? "", publicKeyDer))
+        {
+            Serilog.Log.Warning("Seed response ECDSA signature missing or invalid — rejecting (H-11)");
+            return null;
+        }
+
+        return JsonSerializer.Deserialize<JsonElement>(responseBody);
+    }
+
+    private static bool VerifyEcdsaSignature(string body, string signatureBase64, string publicKeyDer)
+    {
+        if (string.IsNullOrEmpty(signatureBase64)) return false;
+        try
+        {
+            using var ecdsa = ECDsa.Create();
+            ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(publicKeyDer), out _);
+            var sigBytes = Convert.FromBase64String(signatureBase64);
+            return ecdsa.VerifyData(Encoding.UTF8.GetBytes(body), sigBytes, HashAlgorithmName.SHA256);
+        }
+        catch { return false; }
     }
 
     public record AuditArchiveAck(string ArchiveId, string ArchiveDigest, string Timestamp);

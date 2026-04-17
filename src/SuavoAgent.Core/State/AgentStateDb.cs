@@ -28,6 +28,7 @@ public sealed class AgentStateDb : IDisposable
         _conn = new SqliteConnection(connStr);
         _conn.Open();
         InitSchema();
+        _auditChainSeed = GetOrCreateGlobalSalt("audit-chain-seed");
     }
 
     private void InitSchema()
@@ -98,6 +99,9 @@ public sealed class AgentStateDb : IDisposable
 
         // Migrate: add next_retry_at for exponential backoff
         TryAlter("ALTER TABLE writeback_states ADD COLUMN next_retry_at TEXT");
+
+        // Migrate: add DPAPI-encrypted rx number (actual value for crash recovery); rx_number column now stores HMAC hash
+        TryAlter("ALTER TABLE writeback_states ADD COLUMN rx_number_enc TEXT");
 
         // POM tables for Learning Agent
         using var pomCmd = _conn.CreateCommand();
@@ -601,6 +605,21 @@ public sealed class AgentStateDb : IDisposable
         return cmd.ExecuteScalar() as string;
     }
 
+    private string GetOrCreateGlobalSalt(string key)
+    {
+        var newSalt = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        using var insertCmd = _conn.CreateCommand();
+        insertCmd.CommandText = "INSERT OR IGNORE INTO config_kv (key, value) VALUES (@k, @v)";
+        insertCmd.Parameters.AddWithValue("@k", key);
+        insertCmd.Parameters.AddWithValue("@v", newSalt);
+        insertCmd.ExecuteNonQuery();
+
+        using var readCmd = _conn.CreateCommand();
+        readCmd.CommandText = "SELECT value FROM config_kv WHERE key = @k";
+        readCmd.Parameters.AddWithValue("@k", key);
+        return (string)readCmd.ExecuteScalar()!;
+    }
+
     private void TryAlter(string sql)
     {
         try
@@ -619,8 +638,8 @@ public sealed class AgentStateDb : IDisposable
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO writeback_states (task_id, state, rx_number, retry_count, error, created_at, updated_at)
-            VALUES (@taskId, @state, @rxNumber, @retryCount, @error, @now, @now)
+            INSERT INTO writeback_states (task_id, state, rx_number, rx_number_enc, retry_count, error, created_at, updated_at)
+            VALUES (@taskId, @state, @rxNumberHash, @rxNumberEnc, @retryCount, @error, @now, @now)
             ON CONFLICT(task_id) DO UPDATE SET
                 state = @state,
                 retry_count = @retryCount,
@@ -629,7 +648,8 @@ public sealed class AgentStateDb : IDisposable
             """;
         cmd.Parameters.AddWithValue("@taskId", taskId);
         cmd.Parameters.AddWithValue("@state", state.ToString());
-        cmd.Parameters.AddWithValue("@rxNumber", rxNumber);
+        cmd.Parameters.AddWithValue("@rxNumberHash", HmacRxNumber(rxNumber));
+        cmd.Parameters.AddWithValue("@rxNumberEnc", (object?)EncryptRxNumber(rxNumber) ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@retryCount", retryCount);
         cmd.Parameters.AddWithValue("@error", (object?)error ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
@@ -640,7 +660,7 @@ public sealed class AgentStateDb : IDisposable
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
-            SELECT task_id, state, rx_number, retry_count FROM writeback_states
+            SELECT task_id, state, rx_number, retry_count, rx_number_enc FROM writeback_states
             WHERE state NOT IN ('Done', 'ManualReview')
             ORDER BY created_at ASC
             """;
@@ -650,10 +670,11 @@ public sealed class AgentStateDb : IDisposable
         while (reader.Read())
         {
             var stateStr = reader.GetString(1);
-            if (Enum.TryParse<WritebackState>(stateStr, out var state))
-            {
-                results.Add((reader.GetString(0), state, reader.GetString(2), reader.GetInt32(3)));
-            }
+            if (!Enum.TryParse<WritebackState>(stateStr, out var state)) continue;
+            var enc = reader.IsDBNull(4) ? null : reader.GetString(4);
+            // Prefer decrypted enc value; fall back to rx_number (plaintext for old rows pre-migration)
+            var actualRx = DecryptRxNumber(enc) ?? reader.GetString(2);
+            results.Add((reader.GetString(0), state, actualRx, reader.GetInt32(3)));
         }
         return results;
     }
@@ -679,7 +700,7 @@ public sealed class AgentStateDb : IDisposable
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
-            SELECT task_id, state, rx_number, retry_count, next_retry_at FROM writeback_states
+            SELECT task_id, state, rx_number, retry_count, next_retry_at, rx_number_enc FROM writeback_states
             WHERE state NOT IN ('Done', 'ManualReview')
               AND (next_retry_at IS NULL OR next_retry_at <= @now)
             ORDER BY created_at ASC
@@ -693,14 +714,17 @@ public sealed class AgentStateDb : IDisposable
             var stateStr = reader.GetString(1);
             if (!Enum.TryParse<WritebackState>(stateStr, out var state)) continue;
             DateTimeOffset? nextRetry = reader.IsDBNull(4) ? null : DateTimeOffset.Parse(reader.GetString(4));
-            results.Add((reader.GetString(0), state, reader.GetString(2), reader.GetInt32(3), nextRetry));
+            var enc = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var actualRx = DecryptRxNumber(enc) ?? reader.GetString(2);
+            results.Add((reader.GetString(0), state, actualRx, reader.GetInt32(3), nextRetry));
         }
         return results;
     }
 
-    private static readonly string AuditChainSeed =
-        Convert.ToBase64String(SHA256.HashData(
-            Encoding.UTF8.GetBytes("SuavoAgent-audit-chain-v1")));
+    // Per-installation audit chain seed — loaded from hmac_salts table after schema init.
+    // Using a per-install secret prevents an attacker who knows the codebase from pre-computing
+    // the expected genesis hash of a forged chain.
+    private string _auditChainSeed = "";
 
     public void AppendAuditEntry(string taskId, WritebackState from, WritebackState to, WritebackTrigger trigger, string? prevHash)
     {
@@ -734,7 +758,7 @@ public sealed class AgentStateDb : IDisposable
             """;
         using var reader = cmd.ExecuteReader();
         if (!reader.Read()) return null;
-        var prevHash = reader.IsDBNull(0) ? AuditChainSeed : reader.GetString(0);
+        var prevHash = reader.IsDBNull(0) ? _auditChainSeed : reader.GetString(0);
         var taskId = reader.GetString(1);
         var eventType = reader.IsDBNull(2) ? "writeback_transition" : reader.GetString(2);
         var from = reader.GetString(3);
@@ -757,7 +781,7 @@ public sealed class AgentStateDb : IDisposable
 
     internal string AppendChainedAuditEntry(AuditEntry entry, string timestamp)
     {
-        var prevHash = GetLastAuditHash() ?? AuditChainSeed;
+        var prevHash = GetLastAuditHash() ?? _auditChainSeed;
         var newHash = ComputeAuditHash(prevHash, entry.TaskId, entry.EventType,
             entry.FromState, entry.ToState, entry.Trigger, timestamp);
 
@@ -777,7 +801,9 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@eventType", entry.EventType);
         cmd.Parameters.AddWithValue("@commandId", (object?)entry.CommandId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@requesterId", (object?)entry.RequesterId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@rxNumber", (object?)entry.RxNumber ?? DBNull.Value);
+        // Store HMAC hash of rx_number — never store raw PHI in audit log
+        var rxHash = entry.RxNumber != null ? HmacRxNumber(entry.RxNumber) : null;
+        cmd.Parameters.AddWithValue("@rxNumber", (object?)rxHash ?? DBNull.Value);
         cmd.ExecuteNonQuery();
         return newHash;
     }
@@ -790,7 +816,7 @@ public sealed class AgentStateDb : IDisposable
             FROM audit_entries ORDER BY id ASC
             """;
         using var reader = cmd.ExecuteReader();
-        var expectedPrev = AuditChainSeed;
+        var expectedPrev = _auditChainSeed;
         while (reader.Read())
         {
             var taskId = reader.GetString(0);
@@ -807,6 +833,7 @@ public sealed class AgentStateDb : IDisposable
         return true;
     }
 
+#if DEBUG
     internal void TamperAuditEntryForTest(int id, string fromState, string toState)
     {
         using var cmd = _conn.CreateCommand();
@@ -816,12 +843,19 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@to", toState);
         cmd.ExecuteNonQuery();
     }
+#endif
 
     public string ExportAuditArchiveJson()
     {
         var entries = new List<Dictionary<string, object?>>();
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM audit_entries ORDER BY id ASC";
+        // Exclude rx_number — already stored as HMAC hash but omit entirely from cloud export
+        // to minimise PHI surface area. The audit chain integrity is in prev_hash, not rx_number.
+        cmd.CommandText = """
+            SELECT id, task_id, from_state, to_state, trigger, timestamp, prev_hash,
+                   event_type, command_id, requester_id
+            FROM audit_entries ORDER BY id ASC
+            """;
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
@@ -837,7 +871,11 @@ public sealed class AgentStateDb : IDisposable
     {
         var states = new List<Dictionary<string, object?>>();
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM writeback_states";
+        // Exclude rx_number_enc (encrypted PHI) — state export is for operational monitoring only
+        cmd.CommandText = """
+            SELECT task_id, state, rx_number, retry_count, error, created_at, updated_at, next_retry_at
+            FROM writeback_states
+            """;
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
@@ -961,10 +999,12 @@ public sealed class AgentStateDb : IDisposable
         logger.LogInformation("Migrating state.db to encrypted storage...");
 
         var encPath = dbPath + ".enc";
-        using (var plain = new SqliteConnection($"Data Source={dbPath}"))
+        var plainCsb = new SqliteConnectionStringBuilder { DataSource = dbPath };
+        var encCsb = new SqliteConnectionStringBuilder { DataSource = encPath, Password = password };
+        using (var plain = new SqliteConnection(plainCsb.ConnectionString))
         {
             plain.Open();
-            using var encConn = new SqliteConnection($"Data Source={encPath};Password={password}");
+            using var encConn = new SqliteConnection(encCsb.ConnectionString);
             encConn.Open();
             plain.BackupDatabase(encConn);
         }
@@ -982,7 +1022,7 @@ public sealed class AgentStateDb : IDisposable
         logger.LogInformation("Migration complete — state.db is now encrypted");
     }
 
-    private static void SecureDelete(string path)
+    internal static void SecureDelete(string path)
     {
         if (!File.Exists(path)) return;
         var length = new FileInfo(path).Length;
@@ -2872,5 +2912,46 @@ public sealed class AgentStateDb : IDisposable
     public void Dispose()
     {
         _conn.Dispose();
+    }
+
+    private string HmacRxNumber(string rxNumber)
+    {
+        using var hmac = new HMACSHA256(Convert.FromBase64String(_auditChainSeed));
+        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(rxNumber ?? "")));
+    }
+
+    private static string? EncryptRxNumber(string rxNumber)
+    {
+        if (!OperatingSystem.IsWindows()) return rxNumber;
+        return EncryptRxNumberWindows(rxNumber);
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static string EncryptRxNumberWindows(string rxNumber)
+    {
+        var plain = Encoding.UTF8.GetBytes(rxNumber ?? "");
+        var enc = System.Security.Cryptography.ProtectedData.Protect(
+            plain, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+        return Convert.ToBase64String(enc);
+    }
+
+    private static string? DecryptRxNumber(string? enc)
+    {
+        if (string.IsNullOrEmpty(enc)) return null;
+        if (!OperatingSystem.IsWindows()) return enc;
+        return DecryptRxNumberWindows(enc);
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static string? DecryptRxNumberWindows(string enc)
+    {
+        try
+        {
+            var bytes = Convert.FromBase64String(enc);
+            var plain = System.Security.Cryptography.ProtectedData.Unprotect(
+                bytes, null, System.Security.Cryptography.DataProtectionScope.LocalMachine);
+            return Encoding.UTF8.GetString(plain);
+        }
+        catch { return null; }
     }
 }

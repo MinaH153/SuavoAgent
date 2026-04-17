@@ -45,8 +45,7 @@ public sealed class PioneerRxUiaEngine : IDisposable
                 return false;
             }
 
-            _logger.Information("Attached to PioneerRx PID {Pid}, window: {Title}",
-                processes[0].Id, _mainWindow.Title);
+            _logger.Information("Attached to PioneerRx PID {Pid}", processes[0].Id);
             return true;
         }
         catch (Exception ex)

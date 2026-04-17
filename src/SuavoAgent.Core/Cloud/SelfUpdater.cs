@@ -37,6 +37,11 @@ public static class SelfUpdater
     internal const string CommandPublicKeyDer =
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1mIlEiYIEqjp/YBymnFH9FEUxYFXd+Y25cPiF5wdcEo9CP+760IMxHgajrUt9A3zJ47dwV893LWwlZ1/nDP3YA==";
 
+    // ECDSA P-256 public key for verifying seed response bodies (H-11).
+    // Uses the same command-signing key — cloud signs seed payloads before returning them.
+    // Prevents a compromised cloud from injecting malicious SQL shapes.
+    internal const string SeedPublicKeyDer = CommandPublicKeyDer;
+
     private static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)
     {
         "github.com",
@@ -82,13 +87,10 @@ public static class SelfUpdater
             if (!VerifyManifestSignature(downloadUrl, expectedSha256, version, signature, logger))
                 return false;
 
-            // 1. Download
+            // 1. Download with 200 MB size cap
             logger.LogInformation("Downloading update v{Version} from {Url}", version, downloadUrl);
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-            await using var stream = await http.GetStreamAsync(downloadUrl, ct);
-            await using var file = File.Create(newExe);
-            await stream.CopyToAsync(file, ct);
-            file.Close();
+            await DownloadWithSizeLimitAsync(http, downloadUrl, newExe, ct);
 
             // 2. Verify SHA256
             var actualHash = await ComputeSha256Async(newExe, ct);
@@ -237,10 +239,7 @@ public static class SelfUpdater
                 stagedFiles.Add(newPath);
 
                 logger.LogInformation("Downloading {Binary} from {Url}", d.Binary, d.Url);
-                await using var stream = await http.GetStreamAsync(d.Url, ct);
-                await using var file = File.Create(newPath);
-                await stream.CopyToAsync(file, ct);
-                file.Close();
+                await DownloadWithSizeLimitAsync(http, d.Url, newPath, ct);
 
                 var actualHash = await ComputeSha256Async(newPath, ct);
                 if (!string.Equals(actualHash, d.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -277,6 +276,34 @@ public static class SelfUpdater
             try { File.Delete(f); } catch { }
         var sentinel = Path.Combine(installDir, "update-pending.flag");
         try { if (File.Exists(sentinel)) File.Delete(sentinel); } catch { }
+    }
+
+    private const long MaxUpdateBytes = 200 * 1024 * 1024; // 200 MB — matches BinaryDownloader cap
+
+    private static async Task DownloadWithSizeLimitAsync(
+        HttpClient http, string url, string destPath, CancellationToken ct)
+    {
+        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+
+        var totalBytes = response.Content.Headers.ContentLength ?? -1;
+        if (totalBytes > MaxUpdateBytes)
+            throw new InvalidOperationException(
+                $"Update binary too large ({totalBytes / (1024 * 1024)} MB > 200 MB limit) — aborting");
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        await using var file = File.Create(destPath);
+        var buffer = new byte[81920];
+        long totalRead = 0;
+        int bytesRead;
+        while ((bytesRead = await stream.ReadAsync(buffer, ct)) > 0)
+        {
+            await file.WriteAsync(buffer.AsMemory(0, bytesRead), ct);
+            totalRead += bytesRead;
+            if (totalRead > MaxUpdateBytes)
+                throw new InvalidOperationException(
+                    $"Update binary exceeded 200 MB limit mid-stream — aborting");
+        }
     }
 
     public static void CleanupOldBinaries(ILogger logger)
@@ -408,6 +435,17 @@ public static class SelfUpdater
                 return false;
             }
 
+            // Re-verify staged binary hashes before swap — closes TOCTOU window
+            // between download-time hash check and restart-time swap
+            if (!VerifyStagedBinaries(installDir, manifest, logger))
+            {
+                logger.LogWarning("Staged binary re-verification failed — discarding update");
+                File.Delete(sentinel);
+                foreach (var f in Directory.GetFiles(installDir, "*.exe.new"))
+                    try { File.Delete(f); } catch { }
+                return false;
+            }
+
             if (SwapBinaries(installDir, logger))
             {
                 File.Delete(sentinel);
@@ -425,6 +463,32 @@ public static class SelfUpdater
             try { File.Delete(sentinel); } catch { }
             return false;
         }
+    }
+
+    private static bool VerifyStagedBinaries(string installDir, UpdateManifest manifest, ILogger logger)
+    {
+        var expected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SuavoAgent.Core.exe"]   = manifest.CoreSha256,
+            ["SuavoAgent.Broker.exe"] = manifest.BrokerSha256,
+            ["SuavoAgent.Helper.exe"] = manifest.HelperSha256,
+        };
+
+        foreach (var (binary, expectedHash) in expected)
+        {
+            var newPath = Path.Combine(installDir, binary + ".new");
+            if (!File.Exists(newPath)) continue;
+
+            using var stream = File.OpenRead(newPath);
+            var actual = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            if (!string.Equals(actual, expectedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogWarning("Re-verification mismatch for {Binary}: expected {Expected}, got {Actual}",
+                    binary, expectedHash, actual);
+                return false;
+            }
+        }
+        return true;
     }
 
     private static async Task<string> ComputeSha256Async(string filePath, CancellationToken ct)

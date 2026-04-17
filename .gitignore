@@ -6,3 +6,8 @@ obj/
 *.DS_Store
 packages/
 TestResults/
+.next/
+publish/**/*.pdb
+publish/**/*.runtimeconfig.json
+publish/**/appsettings.json
+publish/**/Config/

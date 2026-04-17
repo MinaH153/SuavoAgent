@@ -64,6 +64,54 @@ public sealed class SessionWatcher : BackgroundService
         LaunchHelper(activeSessionId);
     }
 
+    private bool VerifyHelperIntegrity(string helperPath)
+    {
+        var manifestPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "binaries.manifest");
+        if (!File.Exists(manifestPath))
+        {
+            _logger.LogWarning("binaries.manifest not found — skipping Helper integrity check");
+            return true;
+        }
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(manifestPath));
+            if (!doc.RootElement.TryGetProperty("SuavoAgent.Helper.exe", out var hashEl))
+            {
+                _logger.LogError("Helper hash not in manifest — refusing to launch (fail-closed)");
+                return false;
+            }
+            var expected = hashEl.GetString() ?? "";
+            using var stream = File.OpenRead(helperPath);
+            var actual = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();
+            if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogError("Helper binary hash mismatch — refusing to launch. Expected={Expected} Actual={Actual}",
+                    expected, actual);
+                return false;
+            }
+            _logger.LogDebug("Helper binary integrity verified");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Helper integrity check error — refusing to launch (fail-closed)");
+            return false;
+        }
+    }
+
+    private static string? ReadPipeNonce()
+    {
+        var noncePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "pipe.nonce");
+        if (!File.Exists(noncePath)) return null;
+        try { return File.ReadAllText(noncePath).Trim(); }
+        catch { return null; }
+    }
+
     private void LaunchHelper(uint sessionId)
     {
         var helperPath = Path.Combine(AppContext.BaseDirectory, "SuavoAgent.Helper.exe");
@@ -73,10 +121,17 @@ public sealed class SessionWatcher : BackgroundService
             return;
         }
 
+        // H-8: Verify binary hash against install manifest before launch
+        if (!VerifyHelperIntegrity(helperPath))
+            return;
+
         try
         {
             int? pid = null;
-            var args = $"--session {sessionId}";
+            // H-10: Pass randomised pipe nonce so Helper connects to Core's non-guessable pipe
+            var nonce = ReadPipeNonce();
+            var pipeArg = nonce != null ? $" --pipe SuavoAgent-{nonce}" : "";
+            var args = $"--session {sessionId}{pipeArg}";
 
             // Prefer CreateProcessAsUser on Windows — launches Helper in the user's
             // interactive session with their environment and desktop access.
