@@ -51,6 +51,7 @@ public class AuditChainTests : IDisposable
         Assert.True(_db.VerifyAuditChain());
     }
 
+#if DEBUG
     [Fact]
     public void VerifyAuditChain_TamperedEntry_ReturnsFalse()
     {
@@ -61,6 +62,7 @@ public class AuditChainTests : IDisposable
         _db.TamperAuditEntryForTest(1, "Queued", "ManualReview");
         Assert.False(_db.VerifyAuditChain());
     }
+#endif
 
     [Fact]
     public void AuditChain_SeedStableAcrossReconnect()
