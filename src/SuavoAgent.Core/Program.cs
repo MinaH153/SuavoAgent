@@ -192,6 +192,7 @@ try
     builder.Services.AddSingleton<IpcPipeServer>(sp =>
     {
         var logger = sp.GetRequiredService<ILogger<IpcPipeServer>>();
+        var eventRateLimiter = new SuavoAgent.Core.Ipc.EventRateLimiter(maxEventsPerSecond: 500);
         return new IpcPipeServer("SuavoAgent", msg =>
         {
             logger.LogDebug("IPC: {Command}", msg.Command);
@@ -221,11 +222,19 @@ try
 
                 case SuavoAgent.Contracts.Ipc.IpcCommands.BehavioralEvents:
                 {
+                    if (!eventRateLimiter.TryAcquire())
+                    {
+                        logger.LogWarning("IPC: BehavioralEvents rate limit exceeded (dropped={Total})",
+                            eventRateLimiter.DroppedTotal);
+                        return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                            msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.BadRequest, msg.Command, null,
+                            new SuavoAgent.Contracts.Ipc.IpcError("rate_limited", "rate limit exceeded", true, 0)));
+                    }
                     var events = msg.Data.HasValue
                         ? System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Behavioral.BehavioralEvent>>(
                             msg.Data.Value.GetRawText())
                         : null;
-                    // Cap batch size at 200 to prevent memory/disk abuse (H-6)
+                    // Cap batch size at 200 to prevent memory/disk abuse
                     if (events != null && events.Count > 200)
                     {
                         var originalCount = events.Count;
@@ -244,6 +253,12 @@ try
 
                 case SuavoAgent.Contracts.Ipc.IpcCommands.SystemEvents:
                 {
+                    if (!eventRateLimiter.TryAcquire())
+                    {
+                        return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
+                            msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.BadRequest, msg.Command, null,
+                            new SuavoAgent.Contracts.Ipc.IpcError("rate_limited", "rate limit exceeded", true, 0)));
+                    }
                     var events = msg.Data.HasValue
                         ? System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Behavioral.BehavioralEvent>>(
                             msg.Data.Value.GetRawText())

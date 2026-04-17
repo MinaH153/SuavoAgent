@@ -583,21 +583,56 @@ public sealed class HeartbeatWorker : BackgroundService
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                     "SuavoAgent");
 
-                // Validate paths contain only safe characters before any shell operation
-                var safePathChars = new Regex(@"^[a-zA-Z0-9\s\\_:.\\/-]+$");
-                if (!safePathChars.IsMatch(installDir) || !safePathChars.IsMatch(dataDir))
+                // Delete services and wipe directories using C# directly — no shell delegation
+                _logger.LogWarning("Decommission: stopping and deleting services");
+                foreach (var svcName in new[] { "SuavoAgent.Core", "SuavoAgent.Broker" })
                 {
-                    _logger.LogError("Decommission aborted — install/data paths contain unsafe characters");
-                    return;
+                    try
+                    {
+                        using var sc = new System.ServiceProcess.ServiceController(svcName);
+                        if (sc.Status != System.ServiceProcess.ServiceControllerStatus.Stopped)
+                        {
+                            sc.Stop();
+                            sc.WaitForStatus(System.ServiceProcess.ServiceControllerStatus.Stopped,
+                                TimeSpan.FromSeconds(10));
+                        }
+                    }
+                    catch (Exception scEx)
+                    {
+                        _logger.LogWarning(scEx, "Could not stop service {Svc}", svcName);
+                    }
+
+                    try
+                    {
+                        using var process = System.Diagnostics.Process.Start(
+                            new System.Diagnostics.ProcessStartInfo("sc.exe")
+                            {
+                                ArgumentList = { "delete", svcName },
+                                CreateNoWindow = true,
+                                UseShellExecute = false
+                            });
+                        process?.WaitForExit(5000);
+                    }
+                    catch (Exception scEx)
+                    {
+                        _logger.LogWarning(scEx, "Could not delete service {Svc}", svcName);
+                    }
                 }
 
-                // Use cmd.exe with delayed cleanup — avoids PowerShell entirely
-                var cleanupCmd = $"/C timeout /t 5 /nobreak >nul & sc delete SuavoAgent.Core & sc delete SuavoAgent.Broker & rmdir /s /q \"{installDir}\" & rmdir /s /q \"{dataDir}\"";
-                var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", cleanupCmd)
-                    { CreateNoWindow = true, UseShellExecute = false };
-                System.Diagnostics.Process.Start(psi);
+                _logger.LogWarning("Decommission: wiping data directory {DataDir}", dataDir);
+                if (Directory.Exists(dataDir))
+                    try { Directory.Delete(dataDir, recursive: true); } catch (Exception ex) {
+                        _logger.LogWarning(ex, "Could not delete data directory"); }
 
-                _logger.LogWarning("Decommission cleanup launched — agent will terminate in ~5 seconds");
+                _logger.LogWarning("Decommission: wiping install directory {InstallDir}", installDir);
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(2000);
+                    if (Directory.Exists(installDir))
+                        try { Directory.Delete(installDir, recursive: true); } catch { }
+                });
+
+                _logger.LogWarning("Decommission complete — agent terminating");
                 Environment.Exit(0);
             }
         }

@@ -279,7 +279,10 @@ public sealed class KeyboardCategoryHook : IDisposable
             ? TimingBucket.Normal // single keystroke — use Normal as default bucket
             : ClassifyTiming(elapsed);
 
-        var ev = BehavioralEvent.Keystroke(_currentCategory, timing, _currentCount);
+        // BAA clause: digit sequences capped at 3 to prevent identifier reconstruction
+        var reportCount = (_currentCategory == KeystrokeCategory.Digit && _currentCount > 3)
+            ? 3 : _currentCount;
+        var ev = BehavioralEvent.Keystroke(_currentCategory, timing, reportCount);
         _buffer.Enqueue(ev);
 
         _hasSequence = false;

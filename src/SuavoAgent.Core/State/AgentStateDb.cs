@@ -807,6 +807,7 @@ public sealed class AgentStateDb : IDisposable
         return true;
     }
 
+#if DEBUG
     internal void TamperAuditEntryForTest(int id, string fromState, string toState)
     {
         using var cmd = _conn.CreateCommand();
@@ -816,6 +817,7 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@to", toState);
         cmd.ExecuteNonQuery();
     }
+#endif
 
     public string ExportAuditArchiveJson()
     {

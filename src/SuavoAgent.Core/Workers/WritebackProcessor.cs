@@ -17,6 +17,7 @@ public sealed class WritebackProcessor : BackgroundService
     private readonly AgentOptions _options;
     private readonly Dictionary<string, WritebackStateMachine> _machines = new();
     private readonly Dictionary<string, string> _rxNumbers = new();
+    private readonly Dictionary<string, int> _fillNumbers = new();
     private readonly Dictionary<string, string> _transitions = new();
     private readonly Dictionary<string, DateTimeOffset?> _deliveredAts = new();
     private readonly Dictionary<string, DateTimeOffset> _nextRetryAt = new();
@@ -104,6 +105,7 @@ public sealed class WritebackProcessor : BackgroundService
         var machine = new WritebackStateMachine(taskId, WritebackState.Queued, OnStateChanged);
         _machines[taskId] = machine;
         _rxNumbers[taskId] = rxNumber;
+        _fillNumbers[taskId] = fillNumber;
         _transitions[taskId] = transition;
         _deliveredAts[taskId] = deliveredAt;
         _stateDb.UpsertWritebackState(taskId, rxNumber, WritebackState.Queued, 0, null);
@@ -180,8 +182,9 @@ public sealed class WritebackProcessor : BackgroundService
                 var deliveredAt = _deliveredAts.GetValueOrDefault(taskId);
 
                 // Resolve RxTransactionID using the correct transition filter
+                var fillNumber = _fillNumbers.GetValueOrDefault(taskId, 0);
                 var resolved = await _writebackEngine.ResolveTransactionIdAsync(
-                    rxNumber, 0, transition, ct);
+                    rxNumber, fillNumber, transition, ct);
 
                 if (resolved == null)
                 {

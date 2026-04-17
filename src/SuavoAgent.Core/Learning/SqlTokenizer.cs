@@ -24,11 +24,12 @@ public static partial class SqlTokenizer
         "SELECT", "INSERT", "UPDATE", "DELETE"
     };
 
-    // DDL/EXEC/remote = discard
+    // DDL/EXEC/remote/encoding functions = discard
     private static readonly HashSet<string> BlockedKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
         "CREATE", "ALTER", "DROP", "TRUNCATE", "EXEC", "EXECUTE", "GRANT", "REVOKE", "DENY",
-        "OPENQUERY", "OPENROWSET", "OPENDATASOURCE"
+        "OPENQUERY", "OPENROWSET", "OPENDATASOURCE",
+        "CHAR", "NCHAR"  // ASCII/Unicode codepoint encoding — bypass path for PHI in short numerics
     };
 
     // Remote data source functions — block even mid-query (they appear as function calls)

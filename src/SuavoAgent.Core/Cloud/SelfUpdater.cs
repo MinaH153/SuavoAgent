@@ -408,6 +408,17 @@ public static class SelfUpdater
                 return false;
             }
 
+            // Re-verify staged binary hashes before swap — closes TOCTOU window
+            // between download-time hash check and restart-time swap
+            if (!VerifyStagedBinaries(installDir, manifest, logger))
+            {
+                logger.LogWarning("Staged binary re-verification failed — discarding update");
+                File.Delete(sentinel);
+                foreach (var f in Directory.GetFiles(installDir, "*.exe.new"))
+                    try { File.Delete(f); } catch { }
+                return false;
+            }
+
             if (SwapBinaries(installDir, logger))
             {
                 File.Delete(sentinel);
@@ -425,6 +436,32 @@ public static class SelfUpdater
             try { File.Delete(sentinel); } catch { }
             return false;
         }
+    }
+
+    private static bool VerifyStagedBinaries(string installDir, UpdateManifest manifest, ILogger logger)
+    {
+        var expected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SuavoAgent.Core.exe"]   = manifest.CoreSha256,
+            ["SuavoAgent.Broker.exe"] = manifest.BrokerSha256,
+            ["SuavoAgent.Helper.exe"] = manifest.HelperSha256,
+        };
+
+        foreach (var (binary, expectedHash) in expected)
+        {
+            var newPath = Path.Combine(installDir, binary + ".new");
+            if (!File.Exists(newPath)) continue;
+
+            using var stream = File.OpenRead(newPath);
+            var actual = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            if (!string.Equals(actual, expectedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogWarning("Re-verification mismatch for {Binary}: expected {Expected}, got {Actual}",
+                    binary, expectedHash, actual);
+                return false;
+            }
+        }
+        return true;
     }
 
     private static async Task<string> ComputeSha256Async(string filePath, CancellationToken ct)

@@ -25,8 +25,8 @@ public class SeedLifecycleIntegrationTests : IDisposable
         // 1. Apply pattern seeds
         var patternResponse = new SeedResponse("digest-p", 1, "pattern", new[] { "schema" }, null, null,
             new[] {
-                new SeedQueryShape("qs-1", "UPDATE X SET Y=@p", new[] { "X" }, 0.9, 10),
-                new SeedQueryShape("qs-2", "SELECT * FROM Y", new[] { "Y" }, 0.8, 8),
+                new SeedQueryShape("qs-1", "UPDATE [Prescription].[RxTransaction] SET [StatusID]=@p WHERE [RxNumber]=@rx", new[] { "Prescription.RxTransaction" }, 0.9, 10),
+                new SeedQueryShape("qs-2", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [StatusID]=@s0", new[] { "Prescription.Rx" }, 0.8, 8),
             },
             new[] { new SeedStatusMapping("ST", "guid-1", "Completed", 15) },
             new[] { new SeedWorkflowHint("wf-1", 3, 20, true, 5) });
@@ -92,7 +92,7 @@ public class SeedLifecycleIntegrationTests : IDisposable
     {
         var applicator = new SeedApplicator(_db);
         var response = new SeedResponse("digest-1", 1, "pattern", new[] { "schema" }, null, null,
-            new[] { new SeedQueryShape("qs-1", "SQL", new[] { "T" }, 0.8, 5) },
+            new[] { new SeedQueryShape("qs-1", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [StatusID]=@s0", new[] { "Prescription.Rx" }, 0.8, 5) },
             Array.Empty<SeedStatusMapping>(), null);
 
         var first = applicator.ApplyPatternSeeds(SessionId, response);
@@ -132,10 +132,10 @@ public class SeedLifecycleIntegrationTests : IDisposable
         // Apply 4 pattern seeds, confirm only 1 (25% < 50% abort threshold)
         var response = new SeedResponse("digest-abort", 1, "pattern", new[] { "schema" }, null, null,
             new[] {
-                new SeedQueryShape("qs-1", "SQL1", new[] { "T" }, 0.9, 10),
-                new SeedQueryShape("qs-2", "SQL2", new[] { "T" }, 0.8, 8),
-                new SeedQueryShape("qs-3", "SQL3", new[] { "T" }, 0.7, 6),
-                new SeedQueryShape("qs-4", "SQL4", new[] { "T" }, 0.6, 4),
+                new SeedQueryShape("qs-1", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [StatusID]=@s0", new[] { "Prescription.Rx" }, 0.9, 10),
+                new SeedQueryShape("qs-2", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [StatusID]=@s1", new[] { "Prescription.Rx" }, 0.8, 8),
+                new SeedQueryShape("qs-3", "SELECT [RxNumber] FROM [Prescription].[Rx] WHERE [FillDate]=@d0", new[] { "Prescription.Rx" }, 0.7, 6),
+                new SeedQueryShape("qs-4", "SELECT [RxNumber] FROM [Prescription].[RxTransaction] WHERE [StatusID]=@s2", new[] { "Prescription.RxTransaction" }, 0.6, 4),
             },
             Array.Empty<SeedStatusMapping>(), null);
 
