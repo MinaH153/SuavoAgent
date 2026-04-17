@@ -37,7 +37,7 @@ jobs:
 
       - name: Build + Test
         run: |
-          dotnet build SuavoAgent.sln -c Release -r win-x64 --no-self-contained
+          dotnet build SuavoAgent.sln -c Release
           dotnet test SuavoAgent.sln -c Release --no-build -v normal
 
       - name: Publish all binaries
