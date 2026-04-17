@@ -171,6 +171,13 @@ internal static class BinaryDownloader
                 await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead));
                 totalRead += bytesRead;
 
+                // Enforce size limit mid-stream — server may omit Content-Length
+                if (totalRead > MaxDownloadBytes)
+                {
+                    ConsoleUI.WriteFail($"{label} exceeded {MaxDownloadBytes / (1024 * 1024)} MB limit mid-stream — aborting");
+                    return false;
+                }
+
                 if (totalBytes > 0)
                     ConsoleUI.WriteProgress(label, totalRead, totalBytes);
             }

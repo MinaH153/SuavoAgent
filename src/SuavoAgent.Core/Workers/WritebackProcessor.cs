@@ -11,6 +11,9 @@ namespace SuavoAgent.Core.Workers;
 
 public sealed class WritebackProcessor : BackgroundService
 {
+    private static readonly HashSet<string> AllowedTransitions =
+        new(StringComparer.OrdinalIgnoreCase) { "pickup", "complete" };
+
     private readonly ILogger<WritebackProcessor> _logger;
     private readonly AgentStateDb _stateDb;
     private readonly IpcPipeServer _pipeServer;
@@ -96,6 +99,10 @@ public sealed class WritebackProcessor : BackgroundService
     public void EnqueueWriteback(string taskId, string rxNumber, int fillNumber = 0,
         string transition = "pickup", DateTimeOffset? deliveredAt = null)
     {
+        if (!AllowedTransitions.Contains(transition))
+            throw new ArgumentException(
+                $"Invalid transition '{transition}' — only 'pickup' and 'complete' are allowed", nameof(transition));
+
         if (_machines.ContainsKey(taskId))
         {
             _logger.LogDebug("Writeback {TaskId} already tracked", taskId);

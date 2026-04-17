@@ -28,6 +28,7 @@ public sealed class AgentStateDb : IDisposable
         _conn = new SqliteConnection(connStr);
         _conn.Open();
         InitSchema();
+        _auditChainSeed = GetOrCreateGlobalSalt("audit-chain-seed");
     }
 
     private void InitSchema()
@@ -601,6 +602,21 @@ public sealed class AgentStateDb : IDisposable
         return cmd.ExecuteScalar() as string;
     }
 
+    private string GetOrCreateGlobalSalt(string key)
+    {
+        var newSalt = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        using var insertCmd = _conn.CreateCommand();
+        insertCmd.CommandText = "INSERT OR IGNORE INTO config_kv (key, value) VALUES (@k, @v)";
+        insertCmd.Parameters.AddWithValue("@k", key);
+        insertCmd.Parameters.AddWithValue("@v", newSalt);
+        insertCmd.ExecuteNonQuery();
+
+        using var readCmd = _conn.CreateCommand();
+        readCmd.CommandText = "SELECT value FROM config_kv WHERE key = @k";
+        readCmd.Parameters.AddWithValue("@k", key);
+        return (string)readCmd.ExecuteScalar()!;
+    }
+
     private void TryAlter(string sql)
     {
         try
@@ -698,9 +714,10 @@ public sealed class AgentStateDb : IDisposable
         return results;
     }
 
-    private static readonly string AuditChainSeed =
-        Convert.ToBase64String(SHA256.HashData(
-            Encoding.UTF8.GetBytes("SuavoAgent-audit-chain-v1")));
+    // Per-installation audit chain seed — loaded from hmac_salts table after schema init.
+    // Using a per-install secret prevents an attacker who knows the codebase from pre-computing
+    // the expected genesis hash of a forged chain.
+    private string _auditChainSeed = "";
 
     public void AppendAuditEntry(string taskId, WritebackState from, WritebackState to, WritebackTrigger trigger, string? prevHash)
     {
@@ -734,7 +751,7 @@ public sealed class AgentStateDb : IDisposable
             """;
         using var reader = cmd.ExecuteReader();
         if (!reader.Read()) return null;
-        var prevHash = reader.IsDBNull(0) ? AuditChainSeed : reader.GetString(0);
+        var prevHash = reader.IsDBNull(0) ? _auditChainSeed : reader.GetString(0);
         var taskId = reader.GetString(1);
         var eventType = reader.IsDBNull(2) ? "writeback_transition" : reader.GetString(2);
         var from = reader.GetString(3);
@@ -757,7 +774,7 @@ public sealed class AgentStateDb : IDisposable
 
     internal string AppendChainedAuditEntry(AuditEntry entry, string timestamp)
     {
-        var prevHash = GetLastAuditHash() ?? AuditChainSeed;
+        var prevHash = GetLastAuditHash() ?? _auditChainSeed;
         var newHash = ComputeAuditHash(prevHash, entry.TaskId, entry.EventType,
             entry.FromState, entry.ToState, entry.Trigger, timestamp);
 
@@ -790,7 +807,7 @@ public sealed class AgentStateDb : IDisposable
             FROM audit_entries ORDER BY id ASC
             """;
         using var reader = cmd.ExecuteReader();
-        var expectedPrev = AuditChainSeed;
+        var expectedPrev = _auditChainSeed;
         while (reader.Read())
         {
             var taskId = reader.GetString(0);
@@ -963,10 +980,12 @@ public sealed class AgentStateDb : IDisposable
         logger.LogInformation("Migrating state.db to encrypted storage...");
 
         var encPath = dbPath + ".enc";
-        using (var plain = new SqliteConnection($"Data Source={dbPath}"))
+        var plainCsb = new SqliteConnectionStringBuilder { DataSource = dbPath };
+        var encCsb = new SqliteConnectionStringBuilder { DataSource = encPath, Password = password };
+        using (var plain = new SqliteConnection(plainCsb.ConnectionString))
         {
             plain.Open();
-            using var encConn = new SqliteConnection($"Data Source={encPath};Password={password}");
+            using var encConn = new SqliteConnection(encCsb.ConnectionString);
             encConn.Open();
             plain.BackupDatabase(encConn);
         }

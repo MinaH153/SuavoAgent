@@ -63,18 +63,24 @@ public class AuditChainTests : IDisposable
     }
 
     [Fact]
-    public void AuditChain_DeterministicSeed()
+    public void AuditChain_SeedStableAcrossReconnect()
     {
-        var db2Path = _dbPath + ".2";
-        using var db2 = new AgentStateDb(db2Path);
-        var fixedTimestamp = "2026-04-10T00:00:00.0000000+00:00";
-        var hash1 = _db.AppendChainedAuditEntry(new AuditEntry(
-            "task-1", "writeback_transition", "Queued", "Claimed", "Claim"), fixedTimestamp);
-        var hash2 = db2.AppendChainedAuditEntry(new AuditEntry(
-            "task-1", "writeback_transition", "Queued", "Claimed", "Claim"), fixedTimestamp);
-        Assert.Equal(hash1, hash2);
-        db2.Dispose();
-        try { File.Delete(db2Path); } catch { }
+        // Per-installation seed must persist across reconnects to the same DB.
+        var tempPath = Path.Combine(Path.GetTempPath(), $"suavo_seed_test_{Guid.NewGuid():N}.db");
+        try
+        {
+            using (var db1 = new AgentStateDb(tempPath))
+            {
+                db1.AppendChainedAuditEntry(new AuditEntry(
+                    "task-1", "writeback_transition", "Queued", "Claimed", "Claim"));
+            }
+            using var db2 = new AgentStateDb(tempPath);
+            Assert.True(db2.VerifyAuditChain());
+        }
+        finally
+        {
+            try { File.Delete(tempPath); } catch { }
+        }
     }
 
     [Fact]

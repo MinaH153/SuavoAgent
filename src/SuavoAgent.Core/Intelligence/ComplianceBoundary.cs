@@ -39,10 +39,14 @@ public static class ComplianceBoundary
             foreach (Match match in matches)
             {
                 if (IsSafeValue(match.Value)) continue;
-                // Check if match is near a safe field name
-                var start = Math.Max(0, match.Index - 40);
+                // Only exempt if match is a direct JSON value of a safe field name —
+                // require "safeKey": immediately before the value. Bare substring match
+                // within 40 chars was too broad (adjacent-field false-negative).
+                var start = Math.Max(0, match.Index - 60);
                 var context = json[start..match.Index];
-                if (SafeContextKeywords.Any(k => context.Contains(k, StringComparison.OrdinalIgnoreCase)))
+                if (SafeContextKeywords.Any(k =>
+                    context.Contains($"\"{k}\":", StringComparison.OrdinalIgnoreCase) ||
+                    context.Contains($"\"{k}\" :", StringComparison.OrdinalIgnoreCase)))
                     continue;
                 violations.Add($"PHI pattern detected: '{Redact(match.Value)}'");
             }

@@ -37,16 +37,28 @@ public static partial class PhiScrubber
     [GeneratedRegex(@"^[A-Z][a-z]+\s+[A-Z][a-z]+(?=\s+-)", RegexOptions.Compiled)]
     private static partial Regex LeadingNamePattern();
 
-    // Contextual name: 2-word capitalized name near a PHI keyword (Patient, Name, Rx, DOB, SSN, Phone, Address)
-    // Word boundary prevents matching inside compound words like "PioneerRx"
+    // Contextual name: 2-word capitalized name near a PHI keyword
     [GeneratedRegex(@"\b(?:Patient|Name|Rx|DOB|SSN|Phone|Address)\s*[:=\-|]\s*([A-Z][a-z]+\s+[A-Z][a-z]+)", RegexOptions.Compiled)]
     private static partial Regex ContextualNamePattern();
 
-    private static readonly Regex[] PhiPatterns = new[]
-    {
+    // NPI: 10-digit National Provider Identifier (HIPAA Safe Harbor identifier #6)
+    [GeneratedRegex(@"\bNPI[:\s#]?\s*\d{10}\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    private static partial Regex NpiPattern();
+
+    // DEA number: 2 letters + 7 digits (e.g. AB1234567)
+    [GeneratedRegex(@"\b[A-Z]{2}\d{7}\b", RegexOptions.Compiled)]
+    private static partial Regex DeaPattern();
+
+    // Rx number in context: "Rx #12345", "RxNo: 12345", "Rx Number 12345"
+    [GeneratedRegex(@"\bRx\s*[#Nn]o?[:\s.]+\d{4,10}\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    private static partial Regex RxNumberPattern();
+
+    private static readonly Regex[] PhiPatterns =
+    [
         SsnPattern(), PhonePattern(), DatePattern(), MrnPattern(),
-        NameContextPattern(), LeadingNamePattern()
-    };
+        NameContextPattern(), LeadingNamePattern(),
+        NpiPattern(), DeaPattern(), RxNumberPattern(), ContextualNamePattern(),
+    ];
 
     public static string? ScrubText(string? text)
     {
@@ -54,11 +66,13 @@ public static partial class PhiScrubber
 
         var result = text;
         foreach (var pattern in PhiPatterns)
-            result = pattern.Replace(result, Redacted);
-
-        // Apply contextual name pattern last — replaces capture group 1 (the name) with [NAME]
-        result = ContextualNamePattern().Replace(result, m =>
-            m.Value.Replace(m.Groups[1].Value, "[NAME]"));
+        {
+            // ContextualNamePattern replaces only capture group 1 (the name portion)
+            if (pattern == ContextualNamePattern())
+                result = pattern.Replace(result, m => m.Value.Replace(m.Groups[1].Value, "[NAME]"));
+            else
+                result = pattern.Replace(result, Redacted);
+        }
         return result;
     }
 
