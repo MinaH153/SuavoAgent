@@ -240,6 +240,43 @@ try
         return engine;
     });
 
+    // Tier-2 Reasoning — local inference. Selected at startup based on
+    // ReasoningOptions + on-disk model verification. Default: NullLocalInference
+    // so the agent boots useful in rules-only mode. Real LLM wiring lands in
+    // Week 2c once a signed model manifest is shipped to GitHub releases.
+    builder.Services.AddSingleton<ActionVerifier>();
+    builder.Services.AddSingleton<IModelManager, LocalFileModelManager>();
+    builder.Services.AddSingleton<ILocalInference>(sp =>
+    {
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
+        if (!opts.Enabled)
+        {
+            Log.Information("Tier-2 LocalInference disabled (Reasoning.Enabled=false) — running rules-only");
+            return new NullLocalInference();
+        }
+
+        // IModelManager verification — if the model file is missing or fails
+        // SHA-256 check, fall back to Null. Never start up with a tampered model.
+        var mgr = sp.GetRequiredService<IModelManager>();
+        var verify = mgr.VerifyAsync(CancellationToken.None).GetAwaiter().GetResult();
+        if (!verify.IsValid)
+        {
+            Log.Warning("Tier-2 LocalInference unavailable — {Reason}. Falling back to NullLocalInference",
+                verify.Reason);
+            return new NullLocalInference();
+        }
+
+        // Model is present and verified. Real LLamaSharp wiring goes here in
+        // Week 2c — today we still return Null and log that a real model
+        // would have loaded. This keeps the config surface honest without
+        // forcing operators to roll back when they upgrade.
+        Log.Warning("Tier-2 model verified at {Path} but LLamaSharp wiring not yet shipped " +
+                    "(Week 2c). Falling back to NullLocalInference.", verify.Path);
+        return new NullLocalInference();
+    });
+
+    builder.Services.AddSingleton<TieredBrain>();
+
     builder.Services.AddSingleton<IpcPipeServer>(sp =>
     {
         var logger = sp.GetRequiredService<ILogger<IpcPipeServer>>();
@@ -368,9 +405,11 @@ try
             ph.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(ph.SqlPassword);
     }
 
-    // Eager-resolve RuleEngine so a malformed rule catalog crashes the host
-    // at startup instead of deferring until the first evaluation.
+    // Eager-resolve RuleEngine + TieredBrain so any startup-time config error
+    // (malformed rule catalog, tampered model, etc.) crashes the host
+    // immediately rather than surfacing the first time a worker calls in.
     _ = host.Services.GetRequiredService<RuleEngine>();
+    _ = host.Services.GetRequiredService<TieredBrain>();
 
     var pipeServer = host.Services.GetRequiredService<IpcPipeServer>();
     pipeServer.Start(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);

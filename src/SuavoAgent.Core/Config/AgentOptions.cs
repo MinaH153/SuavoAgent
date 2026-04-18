@@ -61,6 +61,13 @@ public sealed class AgentOptions
     public int ReceiptRetentionDays { get; set; } = 2555;
 
     /// <summary>
+    /// Tier-2 (LocalInference) configuration. When Enabled=false or ModelPath
+    /// not present on disk, the agent runs rules-only and TieredBrain escalates
+    /// any NoMatch straight to the operator approval queue.
+    /// </summary>
+    public ReasoningOptions Reasoning { get; set; } = new();
+
+    /// <summary>
     /// Multi-pharmacy config. When populated, each entry gets its own detection worker.
     /// Backwards-compatible: if empty, falls back to the top-level SqlServer/PharmacyId fields.
     /// </summary>
