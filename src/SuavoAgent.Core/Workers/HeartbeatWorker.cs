@@ -962,10 +962,18 @@ public sealed class HeartbeatWorker : BackgroundService
         var ndcColumn = dataEl.TryGetProperty("ndcColumn", out var nc) ? nc.GetString() ?? "NDC" : "NDC";
         var supplierColumn = dataEl.TryGetProperty("supplierColumn", out var sc2) ? sc2.GetString() ?? "Supplier" : "Supplier";
         var costColumn = dataEl.TryGetProperty("costColumn", out var cc) ? cc.GetString() ?? "Cost (per unit)" : "Cost (per unit)";
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
 
         if (string.IsNullOrEmpty(excelPath))
         {
             _logger.LogWarning("run_pricing_job: missing excelPath");
+            await AckAsync(false, null, "missing excelPath");
             return;
         }
 
@@ -974,17 +982,20 @@ public sealed class HeartbeatWorker : BackgroundService
         if (!string.Equals(ext, ".xlsx", StringComparison.OrdinalIgnoreCase))
         {
             _logger.LogWarning("run_pricing_job: excelPath rejected — must be .xlsx");
+            await AckAsync(false, null, "excelPath must be .xlsx");
             return;
         }
         if (excelPath.StartsWith(@"\\") || !Path.IsPathRooted(excelPath))
         {
             _logger.LogWarning("run_pricing_job: excelPath rejected — must be local absolute path");
+            await AckAsync(false, null, "excelPath must be local absolute path");
             return;
         }
         var canonicalPath = Path.GetFullPath(excelPath);
         if (!string.Equals(canonicalPath, excelPath, StringComparison.OrdinalIgnoreCase))
         {
             _logger.LogWarning("run_pricing_job: excelPath rejected — canonicalization changed path");
+            await AckAsync(false, null, "excelPath canonicalization mismatch");
             return;
         }
 
@@ -992,6 +1003,7 @@ public sealed class HeartbeatWorker : BackgroundService
         if (!await _pricingJobSemaphore.WaitAsync(TimeSpan.Zero, ct))
         {
             _logger.LogWarning("run_pricing_job: another job is already running, command ignored");
+            await AckAsync(false, null, "another pricing job is already running");
             return;
         }
 
@@ -1009,6 +1021,7 @@ public sealed class HeartbeatWorker : BackgroundService
                 {
                     _logger.LogError("run_pricing_job: cannot connect to Helper command pipe");
                     _stateDb.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+                    await AckAsync(false, null, "Helper command pipe unreachable");
                     return;
                 }
             }
@@ -1017,6 +1030,16 @@ public sealed class HeartbeatWorker : BackgroundService
 
             _logger.LogInformation("Pricing job {JobId} finished: {Status} — {Completed}/{Total}",
                 jobId, progress.Status, progress.CompletedItems, progress.TotalItems);
+
+            var ok = progress.Status == PricingJobStatus.Completed;
+            await AckAsync(ok, new
+            {
+                jobId,
+                totalItems = progress.TotalItems,
+                completedItems = progress.CompletedItems,
+                failedItems = progress.FailedItems,
+                status = progress.Status.ToString(),
+            }, ok ? null : "pricing job failed — see agent logs");
         }
         finally
         {

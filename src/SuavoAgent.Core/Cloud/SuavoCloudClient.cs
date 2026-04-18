@@ -128,6 +128,31 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         catch { return false; }
     }
 
+    /// <summary>
+    /// Acknowledges execution of a signed cloud command. Updates agent_commands row
+    /// with status=executed or failed, plus optional result/error.
+    /// </summary>
+    public async Task AckCommandAsync(string commandId, bool success, object? result, string? error, CancellationToken ct)
+    {
+        try
+        {
+            await PostSignedAsync(
+                $"/api/agent/commands/{commandId}/ack",
+                new
+                {
+                    status = success ? "executed" : "failed",
+                    result,
+                    error,
+                },
+                ct);
+        }
+        catch (Exception ex)
+        {
+            // Best-effort ack — don't crash the agent if cloud is unreachable.
+            Serilog.Log.Warning(ex, "AckCommand failed for {CommandId}", commandId);
+        }
+    }
+
     public record AuditArchiveAck(string ArchiveId, string ArchiveDigest, string Timestamp);
 
     public async Task<AuditArchiveAck?> UploadAuditArchiveAsync(string archiveJson, string digest, CancellationToken ct)
