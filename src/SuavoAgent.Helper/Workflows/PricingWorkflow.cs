@@ -264,16 +264,18 @@ public sealed class PricingWorkflow
     }
 
     /// <summary>
-    /// Reads the supplier catalog DataGrid on the Pricing tab.
-    /// Returns the entry with the lowest Cost Per Unit.
-    /// Grid columns confirmed from screenshot: Name, NDC, Supplier, Cost, Cost Per Unit, Status, ...
-    /// The grid is already sorted by the "linked" 340B row first; we find the cheapest by scanning all rows.
+    /// Reads the supplier catalog DataGrid on the Pricing tab and returns the entry
+    /// with the lowest Cost Per Unit.
+    ///
+    /// Columns are resolved by header NAME, not ordinal (Codex M-4). If PioneerRx
+    /// reorders, hides, or adds columns, the lookup still finds the right fields.
+    /// Falls back to documented ordinals (5=Supplier, 10=Cost Per Unit) only if
+    /// header row is not discoverable — and emits a warning when that happens.
     /// </summary>
     private (string supplier, decimal cost)? ReadCheapestSupplier(Window editWindow, ConditionFactory cf)
     {
         try
         {
-            // Wait for the DataGrid/Table to load
             var deadline = DateTime.UtcNow + GridLoadTimeout;
             AutomationElement? grid = null;
             while (DateTime.UtcNow < deadline)
@@ -297,6 +299,8 @@ public sealed class PricingWorkflow
                 return null;
             }
 
+            var (supplierIdx, costIdx) = ResolvePricingColumns(grid, cf);
+
             string? bestSupplier = null;
             decimal bestCost = decimal.MaxValue;
 
@@ -306,15 +310,10 @@ public sealed class PricingWorkflow
                     .Concat(row.FindAllChildren(cf.ByControlType(ControlType.DataItem)))
                     .ToArray();
 
-                // Column layout from screenshot (0-indexed):
-                // 0=Linked, 1=Inventory Group, 2=Name, 3=NDC, 4=UPC, 5=Supplier,
-                // 6=Supplier Item Number, 7=Manufacturer, 8=Shipping Size,
-                // 9=Cost, 10=Cost Per Unit, ...
-                // We want column 5 (Supplier) and column 10 (Cost Per Unit)
-                if (cells.Length < 11) continue;
+                if (cells.Length <= Math.Max(supplierIdx, costIdx)) continue;
 
-                var supplierText = cells[5].Name?.Trim() ?? "";
-                var costText = cells[10].Name?.Trim() ?? "";
+                var supplierText = cells[supplierIdx].Name?.Trim() ?? "";
+                var costText = cells[costIdx].Name?.Trim() ?? "";
 
                 if (string.IsNullOrEmpty(supplierText)) continue;
                 if (!decimal.TryParse(costText,
@@ -335,6 +334,64 @@ public sealed class PricingWorkflow
         {
             _logger.Debug(ex, "PricingWorkflow: ReadCheapestSupplier error");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Resolves the Supplier and Cost Per Unit column indices by header name.
+    /// WPF DataGrid exposes headers as Header/HeaderItem control types. Falls back
+    /// to documented ordinals if no header row is found, with a warning logged.
+    /// </summary>
+    private (int supplierIdx, int costIdx) ResolvePricingColumns(AutomationElement grid, ConditionFactory cf)
+    {
+        const int DefaultSupplierIdx = 5;
+        const int DefaultCostIdx = 10;
+
+        try
+        {
+            // Look for a Header descendant (WPF DataGrid exposes column headers as Header control)
+            var header = grid.FindFirstDescendant(cf.ByControlType(ControlType.Header));
+            if (header == null)
+            {
+                _logger.Warning("PricingWorkflow: no Header found in grid — falling back to hardcoded column ordinals");
+                return (DefaultSupplierIdx, DefaultCostIdx);
+            }
+
+            var headerCells = header.FindAllDescendants(cf.ByControlType(ControlType.HeaderItem));
+            if (headerCells.Length == 0)
+            {
+                _logger.Warning("PricingWorkflow: Header has no HeaderItems — falling back to hardcoded column ordinals");
+                return (DefaultSupplierIdx, DefaultCostIdx);
+            }
+
+            int supplierIdx = -1, costIdx = -1;
+            for (int i = 0; i < headerCells.Length; i++)
+            {
+                var name = headerCells[i].Name?.Trim() ?? "";
+                if (supplierIdx == -1 && name.Equals("Supplier", StringComparison.OrdinalIgnoreCase))
+                    supplierIdx = i;
+                else if (costIdx == -1 &&
+                         (name.Equals("Cost Per Unit", StringComparison.OrdinalIgnoreCase) ||
+                          name.Equals("Cost (per unit)", StringComparison.OrdinalIgnoreCase)))
+                    costIdx = i;
+            }
+
+            if (supplierIdx == -1 || costIdx == -1)
+            {
+                _logger.Warning("PricingWorkflow: could not resolve Supplier/Cost columns by header name " +
+                    "(Supplier={Sup}, Cost={Cost}) — falling back to hardcoded ordinals",
+                    supplierIdx, costIdx);
+                return (DefaultSupplierIdx, DefaultCostIdx);
+            }
+
+            _logger.Debug("PricingWorkflow: resolved columns — Supplier=col {Sup}, Cost Per Unit=col {Cost}",
+                supplierIdx, costIdx);
+            return (supplierIdx, costIdx);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "PricingWorkflow: column resolution error — falling back to hardcoded ordinals");
+            return (DefaultSupplierIdx, DefaultCostIdx);
         }
     }
 

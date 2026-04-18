@@ -42,11 +42,22 @@ public sealed class ExcelPricingWriter
 
             foreach (var r in results)
             {
-                if (!r.Found || r.RowIndex < 2) continue;
-                ws.Cells[r.RowIndex, supplierCol].Value = r.SupplierName ?? "";
-                ws.Cells[r.RowIndex, costCol].Value = r.CostPerUnit.HasValue
-                    ? (object)r.CostPerUnit.Value
-                    : "";
+                if (r.RowIndex < 2) continue;
+
+                if (r.Found)
+                {
+                    ws.Cells[r.RowIndex, supplierCol].Value = r.SupplierName ?? "";
+                    ws.Cells[r.RowIndex, costCol].Value = r.CostPerUnit.HasValue
+                        ? (object)r.CostPerUnit.Value
+                        : "";
+                }
+                else
+                {
+                    // [M-5] Clear stale supplier/cost values on failed rows so they
+                    // don't appear valid from a prior successful run.
+                    ws.Cells[r.RowIndex, supplierCol].Value = "";
+                    ws.Cells[r.RowIndex, costCol].Value = "";
+                }
             }
 
             // Atomic save: write to temp then replace
