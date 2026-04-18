@@ -42,11 +42,24 @@ public sealed record InferenceRequest
     public required string EscalationReason { get; init; }
 
     /// <summary>
-    /// Restrict allowed actions. Defaults to the whole enum, but callers should
-    /// typically narrow based on skill (e.g. pricing-lookup never needs Escalate).
+    /// Restrict allowed actions. Default is SAFE actions only (read-only,
+    /// escalation, log, ask-operator). Destructive actions (Click, Type,
+    /// PressKey) must be explicitly opted into per skill (Codex C-3). A caller
+    /// that forgets to narrow should NOT be able to authorize a destructive
+    /// proposal by accident.
     /// </summary>
-    public IReadOnlySet<RuleActionType> AllowedActions { get; init; } =
-        new HashSet<RuleActionType>(Enum.GetValues<RuleActionType>());
+    public IReadOnlySet<RuleActionType> AllowedActions { get; init; } = SafeDefault;
+
+    /// <summary>The built-in safe default — no destructive actions.</summary>
+    public static readonly IReadOnlySet<RuleActionType> SafeDefault =
+        new HashSet<RuleActionType>
+        {
+            RuleActionType.VerifyElement,
+            RuleActionType.WaitForElement,
+            RuleActionType.Escalate,
+            RuleActionType.AskOperator,
+            RuleActionType.Log,
+        };
 
     /// <summary>Max wall-clock time the caller will wait for this proposal.</summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(3);

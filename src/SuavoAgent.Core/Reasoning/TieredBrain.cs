@@ -110,6 +110,8 @@ public sealed class TieredBrain
         }
 
         // --- Tier 2: local inference -------------------------------------------
+        // Note: IsReady here now means "configured and verified" (Codex M-1),
+        // not "already loaded in RAM". Lazy-load happens inside ProposeAsync.
         if (!_localInference.IsReady)
         {
             _logger.LogInformation("TieredBrain: Tier 2 unavailable — escalating to operator");
@@ -125,8 +127,10 @@ public sealed class TieredBrain
         {
             Context = ctx,
             EscalationReason = ruleResult.Reason,
-            AllowedActions = allowedTier2Actions ??
-                new HashSet<RuleActionType>(Enum.GetValues<RuleActionType>()),
+            // Safe-by-default — no destructive actions unless caller opts in.
+            // Callers that want Tier-2 to propose Click/Type/PressKey must pass
+            // an explicit allowedTier2Actions (Codex C-3).
+            AllowedActions = allowedTier2Actions ?? InferenceRequest.SafeDefault,
         };
 
         InferenceProposal? proposal;
@@ -134,7 +138,14 @@ public sealed class TieredBrain
         {
             proposal = await _localInference.ProposeAsync(request, ct);
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Caller canceled — propagate instead of masking as an escalation
+            // (Codex M-2). Upstream workers need to see cancellation so they
+            // can tear down cleanly.
+            throw;
+        }
+        catch (OperationCanceledException)
         {
             _logger.LogWarning("TieredBrain: Tier 2 timed out");
             return new BrainDecision

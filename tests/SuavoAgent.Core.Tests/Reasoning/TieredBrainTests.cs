@@ -28,12 +28,17 @@ public class TieredBrainTests
     [Fact]
     public async Task Decide_NoRuleMatches_EscalatesToLocalInference()
     {
+        // Destructive proposal at 0.99 with AutoExecuteTier2Destructive=true
+        // AND explicit Click in allowlist — permissive path to prove the
+        // escalation pipeline works.
         var mock = new MockLocalInference();
-        mock.EnqueueApproved(RuleActionType.Click, 0.97, ("name", "Save"));
+        mock.EnqueueApproved(RuleActionType.Click, 0.99, ("name", "Save"));
 
-        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock, autoExecuteDestructive: true);
 
-        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
+        var decision = await brain.DecideAsync(
+            Ctx("s1", visible: new[] { "Save" }),
+            allowedTier2Actions: new HashSet<RuleActionType> { RuleActionType.Click });
 
         Assert.Equal(MatchOutcome.Matched, decision.Outcome);
         Assert.Equal(DecisionTier.LocalInference, decision.Tier);
@@ -98,8 +103,9 @@ public class TieredBrainTests
     [Fact]
     public async Task Decide_ProposalLowConfidence_OperatorApprovalRequired()
     {
+        // Read-only action at below-threshold confidence (0.80 < 0.85 spec floor).
         var mock = new MockLocalInference();
-        mock.EnqueueApproved(RuleActionType.Click, 0.80, ("name", "Save"));
+        mock.EnqueueApproved(RuleActionType.VerifyElement, 0.80, ("name", "Save"));
         var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
 
         var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
@@ -107,6 +113,24 @@ public class TieredBrainTests
         Assert.Equal(MatchOutcome.Blocked, decision.Outcome);
         Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
         Assert.Equal(VerificationOutcome.OperatorApprovalRequired, decision.Verification!.Outcome);
+    }
+
+    [Fact]
+    public async Task Decide_DestructiveProposal_AlwaysGoesToOperator_UnderDefaultPolicy()
+    {
+        // Default AutoExecuteTier2Destructive=false → any Tier-2 Click goes
+        // to operator regardless of confidence.
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.Click, 1.0, ("name", "Save"));
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock); // default (not permissive)
+
+        var decision = await brain.DecideAsync(
+            Ctx("s1", visible: new[] { "Save" }),
+            allowedTier2Actions: new HashSet<RuleActionType> { RuleActionType.Click });
+
+        Assert.Equal(MatchOutcome.Blocked, decision.Outcome);
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.Contains("AutoExecuteTier2Destructive", decision.Verification!.Reason);
     }
 
     // --- Precondition short-circuit -----------------------------------------
@@ -148,10 +172,11 @@ public class TieredBrainTests
     {
         var mock = new MockLocalInference();
         mock.EnqueueApproved(RuleActionType.Click, 0.99, ("name", "Save"));
-        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock, autoExecuteDestructive: true);
 
         var decision = await brain.DecideAsync(
             Ctx("s1", visible: new[] { "Save" }),
+            allowedTier2Actions: new HashSet<RuleActionType> { RuleActionType.Click },
             shadowMode: true);
 
         Assert.Equal(MatchOutcome.NoMatch, decision.Outcome);
@@ -180,10 +205,13 @@ public class TieredBrainTests
 
     // --- helpers ------------------------------------------------------------
 
-    private static TieredBrain Brain(IEnumerable<Rule> rules, MockLocalInference mock)
+    private static TieredBrain Brain(
+        IEnumerable<Rule> rules,
+        MockLocalInference mock,
+        bool autoExecuteDestructive = false)
     {
         var engine = new RuleEngine(rules, NullLogger<RuleEngine>.Instance);
-        var verifier = new ActionVerifier();
+        var verifier = new ActionVerifier(autoExecuteDestructive);
         return new TieredBrain(engine, mock, verifier, NullLogger<TieredBrain>.Instance);
     }
 

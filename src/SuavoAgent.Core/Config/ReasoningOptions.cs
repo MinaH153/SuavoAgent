@@ -29,6 +29,25 @@ public sealed class ReasoningOptions
     public string? ModelSha256 { get; set; }
 
     /// <summary>
+    /// Directory holding the native llama.cpp + ggml binaries that LLamaSharp
+    /// P/Invokes into. We do NOT ship these by default — their presence is a
+    /// vendor fingerprint (Codex C-1). When Tier-2 is enabled the operator
+    /// places llama.dll, ggml.dll, and optionally llava_shared.dll here.
+    /// Default: %ProgramData%\SuavoAgent\native\ (resolved in DI).
+    /// </summary>
+    public string? NativeLibraryPath { get; set; }
+
+    /// <summary>
+    /// When false (default), any destructive Tier-2 proposal (Click, Type,
+    /// PressKey) is routed to the operator approval queue regardless of
+    /// confidence. Model-reported confidence alone is not a trust signal
+    /// until we have deterministic calibration (Codex M-4). Set true only
+    /// when a pharmacy has accepted the risk of auto-executing Tier-2
+    /// destructive actions.
+    /// </summary>
+    public bool AutoExecuteTier2Destructive { get; set; }
+
+    /// <summary>
     /// Friendly id for audit trails — e.g. "llama-3.2-1b-q4_k_m". Bundled into
     /// every InferenceProposal.ModelId so the pattern miner can attribute
     /// decisions to specific model versions.

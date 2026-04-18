@@ -244,7 +244,8 @@ try
     // ReasoningOptions + on-disk model verification. Default: NullLocalInference
     // so the agent boots useful in rules-only mode. Real LLM wiring lands in
     // Week 2c once a signed model manifest is shipped to GitHub releases.
-    builder.Services.AddSingleton<ActionVerifier>();
+    builder.Services.AddSingleton<ActionVerifier>(sp =>
+        new ActionVerifier(sp.GetRequiredService<IOptions<AgentOptions>>()));
     builder.Services.AddSingleton<IModelManager, LocalFileModelManager>();
     builder.Services.AddSingleton<ILocalInference>(sp =>
     {
@@ -255,10 +256,23 @@ try
             return new NullLocalInference();
         }
 
-        // IModelManager verification — if the model file is missing or fails
-        // SHA-256 check, fall back to Null. Never start up with a tampered model.
+        // IModelManager verification with a bounded timeout so SHA-256 of a
+        // 2 GB model cannot stall Windows service start indefinitely (Codex
+        // suggestion). Run as Task.Run so the sync-wait doesn't deadlock on
+        // the startup thread's sync context.
         var mgr = sp.GetRequiredService<IModelManager>();
-        var verify = mgr.VerifyAsync(CancellationToken.None).GetAwaiter().GetResult();
+        ModelVerificationResult verify;
+        try
+        {
+            using var verifyCts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            verify = Task.Run(() => mgr.VerifyAsync(verifyCts.Token)).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Tier-2 LocalInference verification threw — falling back to NullLocalInference");
+            return new NullLocalInference();
+        }
+
         if (!verify.IsValid)
         {
             Log.Warning("Tier-2 LocalInference unavailable — {Reason}. Falling back to NullLocalInference",
@@ -267,8 +281,9 @@ try
         }
 
         // Model verified — construct the real LLamaSharp-backed inference.
-        // The model itself loads lazily on first ProposeAsync call to keep
-        // startup fast; loading takes 2–5 s for Llama-3.2-1B on CPU.
+        // Weights load lazily on first ProposeAsync call (2–5 s on CPU).
+        // Native llama.cpp binaries come from ReasoningOptions.NativeLibraryPath
+        // (Codex C-1); they are NOT shipped by the installer.
         Log.Information("Tier-2 LocalInference ENABLED — model '{Id}' at {Path}",
             opts.ModelId, verify.Path);
         var agentOpts = sp.GetRequiredService<IOptions<AgentOptions>>();

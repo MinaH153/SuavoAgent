@@ -73,6 +73,12 @@ If any of those are missing → fail-closed, send me the log.
 
 This is the full LLM path. Skip if you just want to verify install.
 
+> **Why this is a two-part opt-in:** the default installer does NOT ship the
+> native `llama.dll` / `ggml.dll` binaries. Those are a vendor fingerprint
+> and their presence alone is detectable by PMS vendors that inventory loaded
+> modules. So enabling Tier-2 requires the operator to consciously drop BOTH
+> (a) the model file and (b) the native backend binaries.
+
 ### 4a. Download a GGUF model
 
 Download `Llama-3.2-1B-Instruct-Q4_K_M.gguf` (~770 MB) from Hugging Face:
@@ -95,7 +101,29 @@ Get-FileHash C:\ProgramData\SuavoAgent\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf 
 
 Copy the hex string.
 
-### 4b. Edit agent config
+### 4b. Drop the native llama.cpp binaries
+
+The native binaries ship as a separate "Tier-2 Inference Pack" on the GitHub
+release alongside the agent. Download from:
+
+```
+https://github.com/MinaH153/SuavoAgent/releases/latest → LLamaSharp.Backend.Cpu.win-x64.zip
+```
+
+Extract to:
+
+```
+C:\ProgramData\SuavoAgent\native\
+├── llama.dll
+├── ggml.dll
+└── llava_shared.dll   (optional, only if you want vision models)
+```
+
+These DLLs are a distinctive fingerprint for any PMS vendor that inspects
+loaded modules. Keeping them in a separate path (not `C:\Program Files\`)
+means they only appear on pharmacies that explicitly opted into Tier-2.
+
+### 4c. Edit agent config
 
 Open `C:\Program Files\SuavoAgent\Core\appsettings.json` in an admin editor. Add the `Reasoning` section:
 
@@ -107,14 +135,22 @@ Open `C:\Program Files\SuavoAgent\Core\appsettings.json` in an admin editor. Add
     "ModelPath": "C:\\ProgramData\\SuavoAgent\\models\\Llama-3.2-1B-Instruct-Q4_K_M.gguf",
     "ModelSha256": "<paste hash from step 4a>",
     "ModelId": "llama-3.2-1b-q4_k_m",
+    "NativeLibraryPath": "C:\\ProgramData\\SuavoAgent\\native",
     "ContextSize": 2048,
     "MaxOutputTokens": 400,
-    "IdleUnloadSeconds": 60
+    "IdleUnloadSeconds": 60,
+    "AutoExecuteTier2Destructive": false
   }
 }
 ```
 
-### 4c. Restart the Core service
+> **AutoExecuteTier2Destructive defaults to false.** This means any destructive
+> proposal (Click, Type, PressKey) from Tier-2 goes to the operator approval
+> queue even at model-reported confidence 1.0 — model self-confidence is not a
+> deterministic trust signal yet. Leave false until we have pattern-miner
+> calibration (Week 4).
+
+### 4d. Restart the Core service
 
 ```powershell
 Restart-Service SuavoAgent.Core

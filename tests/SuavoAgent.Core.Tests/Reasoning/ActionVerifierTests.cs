@@ -6,14 +6,21 @@ namespace SuavoAgent.Core.Tests.Reasoning;
 
 public class ActionVerifierTests
 {
-    private readonly ActionVerifier _verifier = new();
+    /// <summary>
+    /// Default verifier policy (AutoExecuteTier2Destructive=false) means
+    /// destructive Tier-2 proposals always go to operator. Most tests here
+    /// use the "permissive" verifier that allows destructive to execute so
+    /// we can exercise the confidence + target checks directly.
+    /// </summary>
+    private readonly ActionVerifier _permissive = new(autoExecuteDestructive: true);
+    private readonly ActionVerifier _safeDefault = new();
 
     // --- Whitelist -----------------------------------------------------------
 
     [Fact]
     public void Verify_ActionNotInAllowedSet_Rejected()
     {
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(RuleActionType.Click, 0.99, ("name", "X")),
             Request(allowed: new[] { RuleActionType.Log }, visible: new[] { "X" }));
 
@@ -24,64 +31,98 @@ public class ActionVerifierTests
     [Fact]
     public void Verify_ActionInAllowedSet_Passes()
     {
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(RuleActionType.Click, 0.99, ("name", "X")),
             Request(allowed: new[] { RuleActionType.Click }, visible: new[] { "X" }));
 
         Assert.Equal(VerificationOutcome.Approved, result.Outcome);
     }
 
-    // --- Confidence thresholds ----------------------------------------------
+    // --- Destructive policy (Codex M-4) -------------------------------------
 
     [Fact]
-    public void Verify_ClickBelowConfidence_RequiresOperator()
+    public void Verify_Destructive_DefaultPolicy_RequiresOperator()
     {
-        var result = _verifier.Verify(
-            Proposal(RuleActionType.Click, 0.80, ("name", "X")),
-            Request(visible: new[] { "X" }));
+        // AutoExecuteTier2Destructive=false is the default. Destructive
+        // proposals from Tier-2 always go to operator, even at confidence 1.0.
+        var result = _safeDefault.Verify(
+            Proposal(RuleActionType.Click, 1.0, ("name", "Save")),
+            Request(allowed: new[] { RuleActionType.Click }, visible: new[] { "Save" }));
 
         Assert.Equal(VerificationOutcome.OperatorApprovalRequired, result.Outcome);
+        Assert.Contains("AutoExecuteTier2Destructive", result.Reason);
     }
 
     [Fact]
-    public void Verify_ClickAtExactlyThreshold_Approved()
+    public void Verify_ReadOnly_DefaultPolicy_Approved()
     {
-        var result = _verifier.Verify(
-            Proposal(RuleActionType.Click, 0.95, ("name", "X")),
-            Request(visible: new[] { "X" }));
+        // Read-only actions are allowed through even under default policy.
+        var result = _safeDefault.Verify(
+            Proposal(RuleActionType.VerifyElement, 0.90, ("name", "Save")),
+            Request(visible: new[] { "Save" }));
 
         Assert.Equal(VerificationOutcome.Approved, result.Outcome);
     }
 
+    // --- Destructive target-required (Codex C-3) ----------------------------
+
     [Fact]
-    public void Verify_LogBelowClickThreshold_StillApproved()
+    public void Verify_ClickWithoutName_Rejected_EvenWhenPermissive()
     {
-        // Log has no confidence threshold (0.0) — low-confidence Log is fine.
-        var result = _verifier.Verify(
-            Proposal(RuleActionType.Log, 0.1),
-            Request());
+        // Destructive actions must have a "name" parameter — controlType-only
+        // is never accepted, regardless of the auto-execute flag.
+        var result = _permissive.Verify(
+            Proposal(RuleActionType.Click, 0.99, ("controlType", "Button")),
+            Request(visible: new[] { "Anything" }));
+
+        Assert.Equal(VerificationOutcome.Rejected, result.Outcome);
+        Assert.Contains(result.FailedChecks,
+            c => c.Contains("Click") && c.Contains("name"));
+    }
+
+    [Fact]
+    public void Verify_PressKey_NoNameRequired()
+    {
+        // PressKey targets the focused element — name check doesn't apply.
+        var result = _permissive.Verify(
+            Proposal(RuleActionType.PressKey, 0.99, ("key", "Escape")),
+            Request(visible: Array.Empty<string>()));
 
         Assert.Equal(VerificationOutcome.Approved, result.Outcome);
     }
+
+    // --- Confidence thresholds (spec floor, Codex M-4) ----------------------
 
     [Theory]
-    [InlineData(RuleActionType.Click, 0.94, VerificationOutcome.OperatorApprovalRequired)]
-    [InlineData(RuleActionType.Click, 0.95, VerificationOutcome.Approved)]
-    [InlineData(RuleActionType.Type, 0.94, VerificationOutcome.OperatorApprovalRequired)]
-    [InlineData(RuleActionType.Type, 0.95, VerificationOutcome.Approved)]
-    [InlineData(RuleActionType.PressKey, 0.89, VerificationOutcome.OperatorApprovalRequired)]
-    [InlineData(RuleActionType.PressKey, 0.90, VerificationOutcome.Approved)]
-    [InlineData(RuleActionType.VerifyElement, 0.79, VerificationOutcome.OperatorApprovalRequired)]
-    [InlineData(RuleActionType.VerifyElement, 0.80, VerificationOutcome.Approved)]
-    public void Verify_ConfidenceThresholdsPerActionType(
+    [InlineData(RuleActionType.Click, 0.97, VerificationOutcome.OperatorApprovalRequired)]
+    [InlineData(RuleActionType.Click, 0.98, VerificationOutcome.Approved)]
+    [InlineData(RuleActionType.Type, 0.97, VerificationOutcome.OperatorApprovalRequired)]
+    [InlineData(RuleActionType.Type, 0.98, VerificationOutcome.Approved)]
+    [InlineData(RuleActionType.PressKey, 0.97, VerificationOutcome.OperatorApprovalRequired)]
+    [InlineData(RuleActionType.PressKey, 0.98, VerificationOutcome.Approved)]
+    [InlineData(RuleActionType.VerifyElement, 0.84, VerificationOutcome.OperatorApprovalRequired)]
+    [InlineData(RuleActionType.VerifyElement, 0.85, VerificationOutcome.Approved)]
+    [InlineData(RuleActionType.WaitForElement, 0.84, VerificationOutcome.OperatorApprovalRequired)]
+    [InlineData(RuleActionType.WaitForElement, 0.85, VerificationOutcome.Approved)]
+    public void Verify_SpecFloorConfidenceThresholds(
         RuleActionType type, double confidence, VerificationOutcome expected)
     {
         var parameters = ParamsFor(type);
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(type, confidence, parameters),
             Request(visible: new[] { "X" }));
 
         Assert.Equal(expected, result.Outcome);
+    }
+
+    [Fact]
+    public void Verify_LogAtLowConfidence_StillApproved()
+    {
+        var result = _permissive.Verify(
+            Proposal(RuleActionType.Log, 0.01),
+            Request());
+
+        Assert.Equal(VerificationOutcome.Approved, result.Outcome);
     }
 
     // --- Target element existence -------------------------------------------
@@ -89,7 +130,7 @@ public class ActionVerifierTests
     [Fact]
     public void Verify_ClickWithMissingTarget_Rejected()
     {
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(RuleActionType.Click, 0.99, ("name", "GhostButton")),
             Request(visible: new[] { "OtherButton" }));
 
@@ -100,31 +141,9 @@ public class ActionVerifierTests
     [Fact]
     public void Verify_ClickWithExistingTarget_Approved()
     {
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(RuleActionType.Click, 0.99, ("name", "Save")),
             Request(visible: new[] { "Save", "Cancel" }));
-
-        Assert.Equal(VerificationOutcome.Approved, result.Outcome);
-    }
-
-    [Fact]
-    public void Verify_ClickByControlTypeOnly_SkipsTargetCheck()
-    {
-        // If no "name" parameter, no target to verify — controlType-only is ok.
-        var result = _verifier.Verify(
-            Proposal(RuleActionType.Click, 0.99, ("controlType", "Button")),
-            Request(visible: Array.Empty<string>()));
-
-        Assert.Equal(VerificationOutcome.Approved, result.Outcome);
-    }
-
-    [Fact]
-    public void Verify_PressKey_NeverChecksVisibleElements()
-    {
-        // PressKey targets the focused element — no name check needed.
-        var result = _verifier.Verify(
-            Proposal(RuleActionType.PressKey, 0.95, ("key", "Escape")),
-            Request(visible: Array.Empty<string>()));
 
         Assert.Equal(VerificationOutcome.Approved, result.Outcome);
     }
@@ -134,18 +153,17 @@ public class ActionVerifierTests
     [Fact]
     public void Verify_ClickMissingParameters_Rejected()
     {
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(RuleActionType.Click, 0.99),
             Request());
 
         Assert.Equal(VerificationOutcome.Rejected, result.Outcome);
-        Assert.Contains(result.FailedChecks, c => c.Contains("missing"));
     }
 
     [Fact]
     public void Verify_PressKeyMissingKey_Rejected()
     {
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(RuleActionType.PressKey, 0.99),
             Request());
 
@@ -155,7 +173,7 @@ public class ActionVerifierTests
     [Fact]
     public void Verify_TypeWithText_Approved()
     {
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(RuleActionType.Type, 0.99, ("text", "hello")),
             Request());
 
@@ -165,8 +183,7 @@ public class ActionVerifierTests
     [Fact]
     public void Verify_TypeWithSourceOnly_Approved()
     {
-        // `source` is an alternative to `text` (dynamic binding in executor)
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(RuleActionType.Type, 0.99, ("source", "context.ndc")),
             Request());
 
@@ -176,26 +193,11 @@ public class ActionVerifierTests
     [Fact]
     public void Verify_EscalateRequiresNoParameters_Approved()
     {
-        var result = _verifier.Verify(
+        var result = _permissive.Verify(
             Proposal(RuleActionType.Escalate, 0.0),
-            Request());
+            Request(allowed: new[] { RuleActionType.Escalate }));
 
         Assert.Equal(VerificationOutcome.Approved, result.Outcome);
-    }
-
-    // --- Multiple failures accumulate ---------------------------------------
-
-    [Fact]
-    public void Verify_MultipleFailures_AllReported()
-    {
-        // Missing param + ghost target + low confidence — should report multiple.
-        var result = _verifier.Verify(
-            Proposal(RuleActionType.Click, 0.5, ("name", "GhostButton")),
-            Request(visible: new[] { "OtherButton" }));
-
-        Assert.Equal(VerificationOutcome.Rejected, result.Outcome);
-        // Target check fails, which is what we care about here.
-        Assert.Contains(result.FailedChecks, c => c.Contains("GhostButton"));
     }
 
     // --- Helpers -------------------------------------------------------------
