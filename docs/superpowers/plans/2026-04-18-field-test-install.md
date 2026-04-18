@@ -216,13 +216,70 @@ You should see under `C:\ProgramData\SuavoAgent\screens\`:
 20260418T153045123_abc123...scn    (encrypted, ~400 KB for 1920x1080)
 ```
 
-### 4.5d. Week 3a limitations
+### 4.5d. Optional: Enable Tesseract OCR
 
-- `NullScreenExtractor` returns an empty frame — no OCR or VLM yet. Week 3b
-  adds Tesseract. Week 3c adds Phi-3.5-vision.
-- Screens stay local forever (until TTL). No transmission path to cloud.
+Tesseract extracts text regions from screenshots. Scrubbed through PhiScrubber
+before any output leaves the extractor. Two-part opt-in like Tier-2 LLM.
+
+#### Drop Tesseract native libraries
+
+Download the Windows Tesseract binaries:
+```
+https://github.com/UB-Mannheim/tesseract/wiki → tesseract-5.x.x-win64.zip
+```
+
+Extract to (these live OUTSIDE Program Files for the same vendor-stealth
+reason as LLama binaries):
+```
+C:\ProgramData\SuavoAgent\tesseract\
+├── tesseract.dll
+├── leptonica-1.85.0.dll
+├── ... (all native DLLs)
+└── tessdata\
+    └── eng.traineddata
+```
+
+#### Extend vision.json
+
+```json
+{
+  "Enabled": true,
+  "RetentionHours": 24,
+  "MaxStoredScreens": 500,
+  "Tesseract": {
+    "Enabled": true,
+    "NativeLibraryPath": "C:\\ProgramData\\SuavoAgent\\tesseract",
+    "TessdataPath": "C:\\ProgramData\\SuavoAgent\\tesseract\\tessdata",
+    "Language": "eng",
+    "MinConfidence": 50,
+    "IdleUnloadSeconds": 120
+  }
+}
+```
+
+Restart Core service. Helper log should show:
+```
+[INF] ScrubbedExtractorFactory: selecting Tesseract (language=eng)
+```
+
+Trigger `capture_screen` IPC — now returns real TextRegions with bounding
+boxes + confidence. Scrubbed through PhiScrubber before the frame leaves
+the extractor.
+
+### 4.5e. Week 3 roadmap
+
+| Week | Feature | Status |
+|---|---|---|
+| 3a | Capture + store + scrub pipeline scaffolding | ✅ v3.10.4 |
+| 3a | Codex hardening (4 criticals + 5 mediums) | ✅ v3.10.6 |
+| 3b | Tesseract OCR | ✅ current |
+| 3c | Phi-3.5-vision (VLM with layout understanding) | planned |
+
+### 4.5f. Known limitations
+
 - No Core-side consumer yet — the IPC handler exists but nothing calls it
-  automatically. Integration with TieredBrain happens in a later week.
+  automatically. Integration with TieredBrain happens in Week 4.
+- Screens stay local. No cloud transmission path.
 
 ## Step 5 — Field test the signed command pipeline (no PioneerRx required)
 

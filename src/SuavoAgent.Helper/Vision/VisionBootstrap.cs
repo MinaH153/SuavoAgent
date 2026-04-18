@@ -49,7 +49,7 @@ public static class VisionBootstrap
             // EncryptedScreenStore is Windows-only (C-3 — no plaintext fallback).
             // Constructor throws on non-Windows hosts, ACL failures, bad paths.
             IScreenStore store = new EncryptedScreenStore(agentOpts, logger);
-            IScreenExtractor extractor = ScrubbedExtractorFactory.CreateDefault();
+            IScreenExtractor extractor = ScrubbedExtractorFactory.Create(agentOpts, logger);
 
             logger.Information(
                 "Vision ENABLED — capture={CaptureAvailable}, retention={RetHours}h, cap={Max}, extractor={Ext}",

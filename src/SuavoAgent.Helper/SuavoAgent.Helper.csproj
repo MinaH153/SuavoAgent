@@ -22,6 +22,10 @@
     <!-- System.Drawing.Common: GDI BitBlt screen capture. Windows-only supported
          surface; guarded at runtime with OperatingSystem.IsWindows(). -->
     <PackageReference Include="System.Drawing.Common" Version="8.0.10" />
+    <!-- Tesseract OCR managed wrapper only. Native tesseract.dll + leptonica
+         binaries are operator-provided at TesseractOptions.NativeLibraryPath,
+         same stealth pattern as LLamaSharp (Codex C-1 precedent). -->
+    <PackageReference Include="Tesseract" Version="5.2.0" ExcludeAssets="runtime;native" />
   </ItemGroup>
 
   <ItemGroup>

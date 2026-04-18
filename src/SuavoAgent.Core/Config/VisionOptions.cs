@@ -42,4 +42,52 @@ public sealed class VisionOptions
     /// buggy caller can't overwhelm disk or extractor.
     /// </summary>
     public int MinIntervalMs { get; set; } = 1000;
+
+    /// <summary>
+    /// Optional Tesseract OCR configuration. When Enabled=false OR required
+    /// binaries/traineddata aren't present, the pipeline falls back to
+    /// NullScreenExtractor (empty frames).
+    /// </summary>
+    public TesseractOptions Tesseract { get; set; } = new();
+}
+
+/// <summary>
+/// Tesseract OCR opt-in. Mirrors the Tier-2 native-libs pattern — we do NOT
+/// ship Tesseract binaries by default. Operators who want OCR drop the
+/// native libs and traineddata files at the configured paths.
+/// </summary>
+public sealed class TesseractOptions
+{
+    /// <summary>Default false. Enable requires operator to drop binaries.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Directory containing tesseract.dll / leptonica-1.83.1.dll / etc. on
+    /// Windows. Required when Enabled=true. Extractor fails closed and
+    /// returns null on load if this isn't readable.
+    /// </summary>
+    public string? NativeLibraryPath { get; set; }
+
+    /// <summary>
+    /// Directory containing language traineddata files (eng.traineddata
+    /// and friends). Required when Enabled=true.
+    /// </summary>
+    public string? TessdataPath { get; set; }
+
+    /// <summary>Tesseract language id. Default "eng".</summary>
+    public string Language { get; set; } = "eng";
+
+    /// <summary>
+    /// Confidence floor (0–100 per Tesseract convention). Regions below this
+    /// confidence are dropped from the output. Default 50 — Tesseract treats
+    /// anything &lt; 60 as unreliable, so we default slightly more permissive
+    /// but still filter out garbage.
+    /// </summary>
+    public int MinConfidence { get; set; } = 50;
+
+    /// <summary>
+    /// Unload the engine after this many idle seconds to free RAM (~50-100 MB).
+    /// Default 120. Set 0 to keep loaded forever.
+    /// </summary>
+    public int IdleUnloadSeconds { get; set; } = 120;
 }
