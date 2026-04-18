@@ -57,10 +57,9 @@ public class ScreenCaptureControllerTests
     }
 
     [Fact]
-    public async Task Capture_StoreFails_StillReturnsFrameWithNullId()
+    public async Task Capture_StoreFailsByDefault_ReturnsNull()
     {
-        // Losing storage shouldn't block reasoning — the frame itself is
-        // still safe to hand to Tier-2. Storage is retention, not auth.
+        // Codex M-1 — default policy is fail-closed on store failure.
         var controller = new ScreenCaptureController(
             new FakeCapture
             {
@@ -73,9 +72,50 @@ public class ScreenCaptureControllerTests
 
         var result = await controller.CaptureAndExtractAsync(CancellationToken.None);
 
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task Capture_StoreFailsWithOverride_ReturnsFrameWithNullId()
+    {
+        // Opt-in: explicit allowStoreFailure for non-production flows only.
+        var controller = new ScreenCaptureController(
+            new FakeCapture
+            {
+                Available = true,
+                Result = new ScreenBytes(new byte[] { 1 }, 100, 100, DateTimeOffset.UtcNow),
+            },
+            new FakeStore { StoreResult = null },
+            new FakeExtractor { Ready = true },
+            Log);
+
+        var result = await controller.CaptureAndExtractAsync(
+            CancellationToken.None, allowStoreFailure: true);
+
         Assert.NotNull(result);
         Assert.Null(result.StorageId);
-        Assert.NotNull(result.Frame);
+    }
+
+    [Fact]
+    public async Task Capture_ExtractFails_OrphanDeleted()
+    {
+        // Codex M-2 — when extract returns null, the stored file must be
+        // removed so it doesn't live out its TTL as orphan disk cost.
+        var store = new FakeStore { StoreResult = "orphan-1" };
+        var controller = new ScreenCaptureController(
+            new FakeCapture
+            {
+                Available = true,
+                Result = new ScreenBytes(new byte[] { 1 }, 100, 100, DateTimeOffset.UtcNow),
+            },
+            store,
+            new FakeExtractor { Result = null },
+            Log);
+
+        var result = await controller.CaptureAndExtractAsync(CancellationToken.None);
+
+        Assert.Null(result);
+        Assert.Contains("orphan-1", store.DeletedIds);
     }
 
     [Fact]
@@ -109,12 +149,19 @@ public class ScreenCaptureControllerTests
     private sealed class FakeStore : IScreenStore
     {
         public string? StoreResult { get; set; } = "fake-id";
+        public List<string> DeletedIds { get; } = new();
+
         public Task<string?> StoreAsync(ScreenBytes screen, CancellationToken ct) =>
             Task.FromResult(StoreResult);
         public Task<ScreenBytes?> LoadAsync(string id, CancellationToken ct) =>
             Task.FromResult<ScreenBytes?>(null);
         public Task<int> PurgeExpiredAsync(CancellationToken ct) =>
             Task.FromResult(0);
+        public Task<bool> DeleteAsync(string id, CancellationToken ct)
+        {
+            DeletedIds.Add(id);
+            return Task.FromResult(true);
+        }
     }
 
     private sealed class FakeExtractor : IScreenExtractor

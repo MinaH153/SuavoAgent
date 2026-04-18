@@ -46,8 +46,10 @@ public static class VisionBootstrap
             IScreenCapture capture = OperatingSystem.IsWindows()
                 ? new GdiScreenCapture(agentOpts, logger)
                 : new NullScreenCapture();
+            // EncryptedScreenStore is Windows-only (C-3 — no plaintext fallback).
+            // Constructor throws on non-Windows hosts, ACL failures, bad paths.
             IScreenStore store = new EncryptedScreenStore(agentOpts, logger);
-            IScreenExtractor extractor = new PhiScrubbingExtractor(new NullScreenExtractor());
+            IScreenExtractor extractor = ScrubbedExtractorFactory.CreateDefault();
 
             logger.Information(
                 "Vision ENABLED — capture={CaptureAvailable}, retention={RetHours}h, cap={Max}, extractor={Ext}",

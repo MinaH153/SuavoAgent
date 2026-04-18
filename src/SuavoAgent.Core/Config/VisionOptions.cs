@@ -19,15 +19,21 @@ public sealed class VisionOptions
     public string? StorageDirectory { get; set; }
 
     /// <summary>
-    /// How long to retain encrypted screens before auto-purge. Default 24 hours.
-    /// Set to 0 to disable retention (rare — mostly for compliance-heavy
-    /// tenants that purge after every read).
+    /// How long to retain encrypted screens before TTL-based auto-purge. Default 24 hours.
+    /// <para>
+    /// <b>0 = disable TTL-based purge</b>. Files still purge once MaxStoredScreens
+    /// is exceeded (oldest-first), but there is no time-based cutoff. The old
+    /// doc-comment claimed "0 = purge after every read" — that was never what
+    /// the code did (Codex M-3). If you need purge-after-read behavior, take
+    /// it up per-skill at the caller.
+    /// </para>
     /// </summary>
     public int RetentionHours { get; set; } = 24;
 
     /// <summary>
     /// Max screens retained before oldest-first purge kicks in, regardless of
     /// retention window. Prevents disk runaway if capture cadence spikes.
+    /// Must be &gt;= 1 — the store validates at construction (Codex M-5).
     /// </summary>
     public int MaxStoredScreens { get; set; } = 500;
 

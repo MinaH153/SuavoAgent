@@ -8,13 +8,36 @@ using Xunit;
 namespace SuavoAgent.Helper.Tests.Vision;
 
 /// <summary>
-/// On macOS these tests run without DPAPI — the store falls back to
-/// plaintext and still round-trips correctly. On Windows the payload is
-/// DPAPI-encrypted at rest but the store's contract is identical.
+/// Windows-only — EncryptedScreenStore throws PlatformNotSupportedException
+/// on non-Windows hosts (Codex C-3: no plaintext fallback). These tests are
+/// skipped on macOS CI but must pass on Windows.
 /// </summary>
 public class EncryptedScreenStoreTests
 {
+    // Skip fact helper — returns a "skip" xunit attribute tag when not on Windows.
+    public class WindowsFactAttribute : FactAttribute
+    {
+        public WindowsFactAttribute()
+        {
+            if (!OperatingSystem.IsWindows())
+                Skip = "Windows-only (EncryptedScreenStore is Windows-gated).";
+        }
+    }
+
+    // Non-Windows check: the constructor MUST throw. Runs on all platforms;
+    // on Windows we just assert the inverse.
     [Fact]
+    public void Constructor_NonWindows_Throws()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            // On Windows we can't easily simulate non-Windows; just skip.
+            return;
+        }
+        Assert.Throws<PlatformNotSupportedException>(() => NewStore(Path.GetTempPath()));
+    }
+
+    [WindowsFact]
     public async Task StoreAndLoad_RoundTripsBytes()
     {
         using var dir = new TempDir();
@@ -31,7 +54,7 @@ public class EncryptedScreenStoreTests
         Assert.Equal(original.Png, loaded.Value.Png);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Load_UnknownId_ReturnsNull()
     {
         using var dir = new TempDir();
@@ -40,7 +63,7 @@ public class EncryptedScreenStoreTests
         Assert.Null(loaded);
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Purge_TtlExpired_RemovesOldFiles()
     {
         using var dir = new TempDir();
@@ -57,7 +80,7 @@ public class EncryptedScreenStoreTests
         Assert.False(File.Exists(file));
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Purge_CapExceeded_RemovesOldestFirst()
     {
         using var dir = new TempDir();
@@ -83,7 +106,7 @@ public class EncryptedScreenStoreTests
         Assert.True(File.Exists(Path.Combine(dir.Path, $"{ids[2]}.scn")));
     }
 
-    [Fact]
+    [WindowsFact]
     public async Task Store_WithZeroBytesOk()
     {
         // Degenerate case — empty PNG. Should still round-trip.

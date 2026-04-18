@@ -8,14 +8,15 @@ namespace SuavoAgent.Helper.Vision;
 /// This is the HIPAA boundary of the vision pipeline: every text that leaves
 /// the extractor must have passed through PhiScrubber.ScrubText.
 ///
-/// Wrap the real extractor (Null / Tesseract / VLM) with this at DI time so
-/// there is no code path that emits unscrubbed frames.
+/// Internal — callers never construct this directly. The public entry point
+/// is <see cref="ScrubbedExtractorFactory"/>, which guarantees every returned
+/// extractor is wrapped in this decorator (Codex suggestion).
 /// </summary>
-public sealed class PhiScrubbingExtractor : IScreenExtractor
+internal sealed class PhiScrubbingExtractor : IScreenExtractor
 {
     private readonly IScreenExtractor _inner;
 
-    public PhiScrubbingExtractor(IScreenExtractor inner)
+    internal PhiScrubbingExtractor(IScreenExtractor inner)
     {
         _inner = inner;
     }

@@ -24,7 +24,9 @@ public sealed class GdiScreenCapture : IScreenCapture
 {
     private readonly VisionOptions _options;
     private readonly ILogger _logger;
-    private DateTimeOffset _lastCapture = DateTimeOffset.MinValue;
+    // Monotonic tick count (Codex M-4) — does NOT jump on NTP sync / DST / manual
+    // clock change. Using wall clock here caused rate-limit stalls and bursts.
+    private long _lastCaptureTicks = -1;
     private readonly object _rateLock = new();
 
     public GdiScreenCapture(IOptions<AgentOptions> options, ILogger logger)
@@ -82,14 +84,20 @@ public sealed class GdiScreenCapture : IScreenCapture
     {
         lock (_rateLock)
         {
-            var now = DateTimeOffset.UtcNow;
-            var elapsed = (now - _lastCapture).TotalMilliseconds;
-            if (elapsed < Math.Max(0, _options.MinIntervalMs))
+            // Environment.TickCount64 is monotonic since OS boot; immune to NTP
+            // rollback and DST changes (Codex M-4).
+            var now = Environment.TickCount64;
+            var minInterval = Math.Max(0, _options.MinIntervalMs);
+            if (_lastCaptureTicks >= 0)
             {
-                _logger.Debug("GdiScreenCapture: rate-limited ({Ms}ms since last)", elapsed);
-                return false;
+                var elapsed = now - _lastCaptureTicks;
+                if (elapsed < minInterval)
+                {
+                    _logger.Debug("GdiScreenCapture: rate-limited ({Ms}ms since last)", elapsed);
+                    return false;
+                }
             }
-            _lastCapture = now;
+            _lastCaptureTicks = now;
             return true;
         }
     }

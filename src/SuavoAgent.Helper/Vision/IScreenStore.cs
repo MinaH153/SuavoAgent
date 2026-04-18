@@ -30,4 +30,11 @@ public interface IScreenStore
     /// Returns the number of files removed.
     /// </summary>
     Task<int> PurgeExpiredAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Deletes a specific stored screen by id. Used to clean up orphans when
+    /// extraction fails after successful storage (Codex M-2). Returns true if
+    /// the file was deleted, false if it didn't exist or couldn't be removed.
+    /// </summary>
+    Task<bool> DeleteAsync(string id, CancellationToken ct);
 }

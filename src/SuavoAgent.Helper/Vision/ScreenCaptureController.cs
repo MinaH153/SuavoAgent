@@ -33,9 +33,16 @@ public sealed class ScreenCaptureController
     /// <summary>
     /// Captures the current screen, stores the encrypted bytes, extracts a
     /// scrubbed ScreenFrame. Returns the storage id + frame, or null if any
-    /// stage failed / vision is disabled.
+    /// stage failed.
+    ///
+    /// Fails CLOSED on store failure (Codex M-1) — a broken store/ACL/disk
+    /// config must not silently allow vision output with no retention trail.
+    /// Set <paramref name="allowStoreFailure"/> to true only for explicit
+    /// non-production flows (e.g. dev/testing).
     /// </summary>
-    public async Task<CaptureResult?> CaptureAndExtractAsync(CancellationToken ct)
+    public async Task<CaptureResult?> CaptureAndExtractAsync(
+        CancellationToken ct,
+        bool allowStoreFailure = false)
     {
         if (!_capture.IsAvailable)
         {
@@ -47,15 +54,27 @@ public sealed class ScreenCaptureController
         if (screen == null) return null;
 
         var storedId = await _store.StoreAsync(screen.Value, ct);
-        if (storedId == null)
+        if (storedId == null && !allowStoreFailure)
         {
-            _logger.Warning("ScreenCaptureController: store failed, continuing without retention");
+            _logger.Warning(
+                "ScreenCaptureController: store failed — refusing to proceed " +
+                "(set allowStoreFailure=true explicitly for non-production flows)");
+            return null;
         }
 
         var frame = await _extractor.ExtractAsync(screen.Value, ct);
         if (frame == null)
         {
             _logger.Warning("ScreenCaptureController: extraction returned null");
+            // Codex M-2: remove orphan on extract failure so it doesn't live
+            // out its TTL as unreferenced disk cost.
+            if (storedId != null)
+            {
+                var deleted = await _store.DeleteAsync(storedId, ct);
+                _logger.Debug(
+                    "ScreenCaptureController: orphan cleanup for {Id} → deleted={Deleted}",
+                    storedId, deleted);
+            }
             return null;
         }
 

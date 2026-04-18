@@ -1,4 +1,7 @@
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Serilog;
@@ -8,21 +11,31 @@ using SuavoAgent.Core.Config;
 namespace SuavoAgent.Helper.Vision;
 
 /// <summary>
-/// DPAPI-encrypted file store for captured screens.
+/// Per-user DPAPI(CurrentUser)-encrypted screen store. Windows-only — fails
+/// closed on non-Windows platforms to avoid the plaintext fallback that
+/// would create raw screens-at-rest in CI / development (Codex C-3).
 ///
-/// Layout (under VisionOptions.StorageDirectory or ProgramData\SuavoAgent\screens):
-///   - {timestamp-iso}_{uuid}.scn    ← DPAPI(LocalMachine) encrypted payload
+/// Multi-tenant safety (Codex C-1):
+///   - DPAPI scope is CurrentUser, so only the user who captured a screen
+///     can decrypt it. User B on the same machine cannot Unprotect user A's
+///     files even if they have filesystem read access.
+///   - Directory is per-user (default: %LOCALAPPDATA%\SuavoAgent\screens\),
+///     ACL-locked to SYSTEM + Administrators + the specific current user
+///     SID (not the generic InteractiveSid).
+///   - Directory setup is a hard readiness check — any failure refuses to
+///     construct the store (Codex C-4).
 ///
-/// The payload is a JSON envelope containing width, height, captured_at, and
-/// the PNG bytes base64-encoded. DPAPI(LocalMachine) means only this machine
-/// can decrypt — exfiltration of the file alone leaks nothing.
+/// Integrity (Codex C-2):
+///   - Every envelope contains a SHA-256 of the PNG bytes AND the file id.
+///   - LoadAsync verifies the id matches the requested filename and the
+///     hash matches the bytes before returning. File-swap attacks fail.
 ///
 /// Retention:
-///   - TTL purge: anything older than VisionOptions.RetentionHours deleted
-///   - Cap purge: oldest-first purge when file count exceeds MaxStoredScreens
-///
-/// Never throws for I/O failures — fail-closed with a warning log.
+///   - TTL purge: files older than RetentionHours deleted
+///   - Cap purge: oldest-first when count exceeds MaxStoredScreens
+///   - RetentionHours=0 still means "TTL disabled" — documented.
 /// </summary>
+[SupportedOSPlatform("windows")]
 public sealed class EncryptedScreenStore : IScreenStore
 {
     private readonly VisionOptions _options;
@@ -31,44 +44,48 @@ public sealed class EncryptedScreenStore : IScreenStore
 
     public EncryptedScreenStore(IOptions<AgentOptions> options, ILogger logger)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "EncryptedScreenStore requires Windows — non-Windows hosts would " +
+                "either write plaintext (HIPAA violation) or fail at runtime (Codex C-3).");
+        }
+
         _options = options.Value.Vision;
         _logger = logger;
+
+        if (_options.MaxStoredScreens < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(_options.MaxStoredScreens),
+                _options.MaxStoredScreens,
+                "VisionOptions.MaxStoredScreens must be >= 1 (Codex M-5)");
+        }
+
         _directory = ResolveDirectory(_options);
-        EnsureDirectoryWithAcl();
+        ValidatePath(_directory);
+        EnsureDirectoryWithAclOrThrow();
     }
 
     public async Task<string?> StoreAsync(ScreenBytes screen, CancellationToken ct)
     {
-        if (!Directory.Exists(_directory))
-        {
-            _logger.Warning("EncryptedScreenStore: storage dir missing at {Path}", _directory);
-            return null;
-        }
-
         try
         {
             var id = $"{screen.CapturedAt:yyyyMMddTHHmmssfff}_{Guid.NewGuid():N}";
+            var pngHash = Convert.ToHexString(SHA256.HashData(screen.Png)).ToLowerInvariant();
+
             var envelope = JsonSerializer.SerializeToUtf8Bytes(new ScreenEnvelope
             {
                 Id = id,
+                PngSha256 = pngHash,
                 Width = screen.Width,
                 Height = screen.Height,
                 CapturedAt = screen.CapturedAt,
                 PngBase64 = Convert.ToBase64String(screen.Png),
             });
 
-            byte[] encrypted;
-            if (OperatingSystem.IsWindows())
-            {
-                encrypted = ProtectedData.Protect(envelope, null, DataProtectionScope.LocalMachine);
-            }
-            else
-            {
-                // Non-Windows: no DPAPI available. Store plaintext in DEV only
-                // — production is Windows-only. Log a strong warning.
-                _logger.Warning("EncryptedScreenStore: DPAPI unavailable, storing UNENCRYPTED (dev only)");
-                encrypted = envelope;
-            }
+            // CurrentUser scope: file is readable only by the user that wrote it.
+            var encrypted = ProtectedData.Protect(envelope, null, DataProtectionScope.CurrentUser);
 
             var path = Path.Combine(_directory, $"{id}.scn");
             await File.WriteAllBytesAsync(path, encrypted, ct);
@@ -89,33 +106,70 @@ public sealed class EncryptedScreenStore : IScreenStore
     {
         try
         {
+            // Sanitize id against path traversal BEFORE using as a filename.
+            if (string.IsNullOrWhiteSpace(id) || id.Contains('/') || id.Contains('\\') || id.Contains(".."))
+            {
+                _logger.Warning("EncryptedScreenStore: rejected load for id {Id} (unsafe chars)", id);
+                return null;
+            }
+
             var path = Path.Combine(_directory, $"{id}.scn");
             if (!File.Exists(path)) return null;
 
             var encrypted = await File.ReadAllBytesAsync(path, ct);
-            byte[] envelope;
-            if (OperatingSystem.IsWindows())
-            {
-                envelope = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.LocalMachine);
-            }
-            else
-            {
-                envelope = encrypted;
-            }
+            var envelope = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
 
             var parsed = JsonSerializer.Deserialize<ScreenEnvelope>(envelope);
             if (parsed == null) return null;
 
-            return new ScreenBytes(
-                Convert.FromBase64String(parsed.PngBase64),
-                parsed.Width,
-                parsed.Height,
-                parsed.CapturedAt);
+            // Codex C-2: verify id matches the filename so a swapped .scn file
+            // under a different id is rejected.
+            if (!string.Equals(parsed.Id, id, StringComparison.Ordinal))
+            {
+                _logger.Warning(
+                    "EncryptedScreenStore: envelope id mismatch — filename '{FileId}' vs envelope '{EnvId}'; refusing load",
+                    id, parsed.Id);
+                return null;
+            }
+
+            var png = Convert.FromBase64String(parsed.PngBase64);
+
+            // Verify payload hash matches what was stored.
+            var actualHash = Convert.ToHexString(SHA256.HashData(png)).ToLowerInvariant();
+            if (!string.Equals(actualHash, parsed.PngSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.Warning(
+                    "EncryptedScreenStore: payload hash mismatch for {Id}; refusing load", id);
+                return null;
+            }
+
+            return new ScreenBytes(png, parsed.Width, parsed.Height, parsed.CapturedAt);
         }
         catch (Exception ex)
         {
             _logger.Warning(ex, "EncryptedScreenStore: load failed for {Id}", id);
             return null;
+        }
+    }
+
+    public async Task<bool> DeleteAsync(string id, CancellationToken ct)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(id) || id.Contains('/') || id.Contains('\\') || id.Contains(".."))
+                return false;
+
+            var path = Path.Combine(_directory, $"{id}.scn");
+            if (!File.Exists(path)) return false;
+
+            File.Delete(path);
+            await Task.CompletedTask;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "EncryptedScreenStore: delete failed for {Id}", id);
+            return false;
         }
     }
 
@@ -135,7 +189,6 @@ public sealed class EncryptedScreenStore : IScreenStore
                 .OrderBy(f => f.CreationTimeUtc)
                 .ToList();
 
-            // TTL purge
             if (cutoff.HasValue)
             {
                 foreach (var f in files.ToList())
@@ -152,8 +205,7 @@ public sealed class EncryptedScreenStore : IScreenStore
                 }
             }
 
-            // Cap purge (oldest-first until under MaxStoredScreens)
-            var max = Math.Max(0, _options.MaxStoredScreens);
+            var max = _options.MaxStoredScreens;
             while (files.Count > max)
             {
                 if (ct.IsCancellationRequested) break;
@@ -168,7 +220,7 @@ public sealed class EncryptedScreenStore : IScreenStore
 
             await Task.CompletedTask;
             if (removed > 0)
-                _logger.Information("EncryptedScreenStore: purged {Count} expired screen(s)", removed);
+                _logger.Information("EncryptedScreenStore: purged {Count} screen(s)", removed);
         }
         catch (Exception ex)
         {
@@ -182,66 +234,90 @@ public sealed class EncryptedScreenStore : IScreenStore
         if (!string.IsNullOrWhiteSpace(options.StorageDirectory))
             return options.StorageDirectory!;
 
+        // Per-user default — %LOCALAPPDATA%\SuavoAgent\screens\
         return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "SuavoAgent", "screens");
     }
 
-    private void EnsureDirectoryWithAcl()
+    /// <summary>
+    /// Reject paths that would break our HIPAA model: UNC shares (could be
+    /// monitored by other machines), reparse points (could redirect anywhere).
+    /// </summary>
+    private static void ValidatePath(string directory)
     {
-        try
+        // UNC rejection — no \\server\share paths
+        if (directory.StartsWith(@"\\", StringComparison.Ordinal))
         {
-            Directory.CreateDirectory(_directory);
+            throw new ArgumentException(
+                "Vision StorageDirectory must be a local path (UNC rejected, Codex C-4)");
+        }
 
-            if (OperatingSystem.IsWindows())
+        // Reparse-point check — only valid if the directory exists; if it
+        // doesn't exist yet, we skip this and EnsureDirectoryWithAclOrThrow
+        // creates a normal directory.
+        if (Directory.Exists(directory))
+        {
+            var info = new DirectoryInfo(directory);
+            if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
             {
-                // ACL lockdown — SYSTEM + Administrators + Interactive user.
-                // Mirrors the ProgramData\SuavoAgent root lockdown in Core.
-                var dirInfo = new DirectoryInfo(_directory);
-                var security = dirInfo.GetAccessControl();
-                security.SetAccessRuleProtection(true, false);
-
-                security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(
-                        System.Security.Principal.WellKnownSidType.LocalSystemSid, null),
-                    System.Security.AccessControl.FileSystemRights.FullControl,
-                    System.Security.AccessControl.InheritanceFlags.ContainerInherit |
-                        System.Security.AccessControl.InheritanceFlags.ObjectInherit,
-                    System.Security.AccessControl.PropagationFlags.None,
-                    System.Security.AccessControl.AccessControlType.Allow));
-
-                security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(
-                        System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null),
-                    System.Security.AccessControl.FileSystemRights.FullControl,
-                    System.Security.AccessControl.InheritanceFlags.ContainerInherit |
-                        System.Security.AccessControl.InheritanceFlags.ObjectInherit,
-                    System.Security.AccessControl.PropagationFlags.None,
-                    System.Security.AccessControl.AccessControlType.Allow));
-
-                // Interactive user = the pharmacy operator at the console.
-                // Helper runs as them, needs read+write to its own screens.
-                security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(
-                        System.Security.Principal.WellKnownSidType.InteractiveSid, null),
-                    System.Security.AccessControl.FileSystemRights.Modify,
-                    System.Security.AccessControl.InheritanceFlags.ContainerInherit |
-                        System.Security.AccessControl.InheritanceFlags.ObjectInherit,
-                    System.Security.AccessControl.PropagationFlags.None,
-                    System.Security.AccessControl.AccessControlType.Allow));
-
-                dirInfo.SetAccessControl(security);
+                throw new ArgumentException(
+                    $"Vision StorageDirectory must not be a reparse point: {directory} (Codex C-4)");
             }
         }
-        catch (Exception ex)
-        {
-            _logger.Warning(ex, "EncryptedScreenStore: failed to set ACL on {Path}", _directory);
-        }
+    }
+
+    /// <summary>
+    /// Creates the directory if missing and applies a strict ACL (SYSTEM +
+    /// Administrators + current user SID only). Any failure throws — we
+    /// refuse to run with a wide-open directory (Codex C-4).
+    /// </summary>
+    private void EnsureDirectoryWithAclOrThrow()
+    {
+        Directory.CreateDirectory(_directory);
+
+        var dirInfo = new DirectoryInfo(_directory);
+        var security = dirInfo.GetAccessControl();
+        security.SetAccessRuleProtection(true, false); // remove inherited
+
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+
+        // Current user SID only — not the generic InteractiveSid. That means
+        // user B on the same machine cannot see user A's screen files even if
+        // they somehow gained file-system read (Codex C-1).
+        var currentUser = WindowsIdentity.GetCurrent();
+        if (currentUser.User is null)
+            throw new InvalidOperationException("Current user SID is unavailable — cannot lock ACL");
+
+        security.AddAccessRule(new FileSystemAccessRule(
+            currentUser.User,
+            FileSystemRights.Modify,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+
+        dirInfo.SetAccessControl(security);
+        _logger.Information(
+            "EncryptedScreenStore: directory {Path} locked to SYSTEM + Admins + {User}",
+            _directory, currentUser.Name);
     }
 
     private sealed class ScreenEnvelope
     {
         public string Id { get; set; } = "";
+        public string PngSha256 { get; set; } = "";
         public int Width { get; set; }
         public int Height { get; set; }
         public DateTimeOffset CapturedAt { get; set; }

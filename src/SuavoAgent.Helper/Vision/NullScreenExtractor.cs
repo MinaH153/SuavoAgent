@@ -8,8 +8,12 @@ namespace SuavoAgent.Helper.Vision;
 /// Returns a ScreenFrame with empty TextRegions and Elements so the pipeline
 /// end-to-end is exercisable without a real extractor. IsReady is always
 /// true — the "extractor" is literally a no-op.
+///
+/// Internal by design: callers should obtain scrubbed extractors via
+/// <see cref="ScrubbedExtractorFactory"/> so PHI scrubbing is enforced by
+/// construction (Codex suggestion).
 /// </summary>
-public sealed class NullScreenExtractor : IScreenExtractor
+internal sealed class NullScreenExtractor : IScreenExtractor
 {
     public string ExtractorId => "null";
     public bool IsReady => true;
