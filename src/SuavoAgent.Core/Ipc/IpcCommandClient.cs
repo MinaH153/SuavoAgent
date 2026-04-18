@@ -58,17 +58,25 @@ public sealed class IpcCommandClient : IAsyncDisposable
             await IpcFraming.WriteFrameAsync(_pipe, json, cts.Token);
 
             var responseJson = await IpcFraming.ReadFrameAsync(_pipe, cts.Token);
-            if (responseJson == null) return null;
+            if (responseJson == null)
+            {
+                // [C-2] Teardown on partial/missing read so stale data can't poison next request
+                TeardownPipe();
+                return null;
+            }
 
             return JsonSerializer.Deserialize<IpcResponse>(responseJson);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
+            // [C-2] Timeout — teardown so next request doesn't read stale response
+            TeardownPipe();
             _logger.LogWarning("IpcCommandClient timeout for {Command}", request.Command);
             return null;
         }
         catch (Exception ex)
         {
+            TeardownPipe();
             _logger.LogWarning(ex, "IpcCommandClient send error for {Command}", request.Command);
             return null;
         }
@@ -76,6 +84,12 @@ public sealed class IpcCommandClient : IAsyncDisposable
         {
             _lock.Release();
         }
+    }
+
+    private void TeardownPipe()
+    {
+        try { _pipe?.Close(); } catch { }
+        _pipe = null;
     }
 
     public async ValueTask DisposeAsync()

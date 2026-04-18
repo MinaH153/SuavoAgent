@@ -29,6 +29,7 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly Intelligence.FleetDataChannels? _fleetChannels;
     private readonly PricingJobRunner? _pricingJobRunner;
     private readonly IpcCommandClient? _ipcCommandClient;
+    private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
@@ -968,26 +969,58 @@ public sealed class HeartbeatWorker : BackgroundService
             return;
         }
 
-        var jobId = Guid.NewGuid().ToString("N");
-        var spec = new PricingJobSpec(jobId, excelPath, ndcColumn, supplierColumn, costColumn);
-
-        _logger.LogInformation("Pricing job {JobId} starting: {Path}", jobId, excelPath);
-
-        // Connect to Helper's command pipe — connect once per job
-        if (!_ipcCommandClient.IsConnected)
+        // [C-1] Validate path safety: must be local absolute .xlsx, no UNC/traversal
+        var ext = Path.GetExtension(excelPath);
+        if (!string.Equals(ext, ".xlsx", StringComparison.OrdinalIgnoreCase))
         {
-            var connected = await _ipcCommandClient.ConnectAsync(TimeSpan.FromSeconds(10), ct);
-            if (!connected)
-            {
-                _logger.LogError("run_pricing_job: cannot connect to Helper command pipe");
-                _stateDb.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
-                return;
-            }
+            _logger.LogWarning("run_pricing_job: excelPath rejected — must be .xlsx");
+            return;
+        }
+        if (excelPath.StartsWith(@"\\") || !Path.IsPathRooted(excelPath))
+        {
+            _logger.LogWarning("run_pricing_job: excelPath rejected — must be local absolute path");
+            return;
+        }
+        var canonicalPath = Path.GetFullPath(excelPath);
+        if (!string.Equals(canonicalPath, excelPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("run_pricing_job: excelPath rejected — canonicalization changed path");
+            return;
         }
 
-        var progress = await _pricingJobRunner.RunAsync(spec, _ipcCommandClient, ct);
+        // [M-3] Only one pricing job at a time — reject concurrent commands
+        if (!await _pricingJobSemaphore.WaitAsync(TimeSpan.Zero, ct))
+        {
+            _logger.LogWarning("run_pricing_job: another job is already running, command ignored");
+            return;
+        }
 
-        _logger.LogInformation("Pricing job {JobId} finished: {Status} — {Completed}/{Total}",
-            jobId, progress.Status, progress.CompletedItems, progress.TotalItems);
+        try
+        {
+            var jobId = Guid.NewGuid().ToString("N");
+            var spec = new PricingJobSpec(jobId, canonicalPath, ndcColumn, supplierColumn, costColumn);
+
+            _logger.LogInformation("Pricing job {JobId} starting: {Path}", jobId, canonicalPath);
+
+            if (!_ipcCommandClient.IsConnected)
+            {
+                var connected = await _ipcCommandClient.ConnectAsync(TimeSpan.FromSeconds(10), ct);
+                if (!connected)
+                {
+                    _logger.LogError("run_pricing_job: cannot connect to Helper command pipe");
+                    _stateDb.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+                    return;
+                }
+            }
+
+            var progress = await _pricingJobRunner.RunAsync(spec, _ipcCommandClient, ct);
+
+            _logger.LogInformation("Pricing job {JobId} finished: {Status} — {Completed}/{Total}",
+                jobId, progress.Status, progress.CompletedItems, progress.TotalItems);
+        }
+        finally
+        {
+            _pricingJobSemaphore.Release();
+        }
     }
 }

@@ -112,6 +112,10 @@ public sealed class PricingJobRunner
             if (response == null)
                 return Fail(jobId, row, "No response from Helper");
 
+            // [C-2] Reject mismatched response IDs to prevent pipe desync data corruption
+            if (response.Id != request.Id)
+                return Fail(jobId, row, $"Response ID mismatch: expected {request.Id}, got {response.Id}");
+
             if (response.Status != IpcStatus.Ok)
                 return Fail(jobId, row, response.Error?.Message ?? $"Status {response.Status}");
 

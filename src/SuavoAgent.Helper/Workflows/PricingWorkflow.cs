@@ -70,6 +70,12 @@ public sealed class PricingWorkflow
                 if (!SearchByNdc(editWindow, cf, request.Ndc))
                     return Fail(request, $"Could not enter NDC {request.Ndc} in Quick Search");
 
+                // [C-3] Verify the loaded item's NDC matches the requested NDC before reading pricing.
+                // Prevents returning pricing data for the previously-selected item when Quick Search
+                // is slow or finds no match.
+                if (!VerifyLoadedNdc(editWindow, cf, request.Ndc))
+                    return Fail(request, $"Loaded item NDC does not match {request.Ndc} — item may not exist or search timed out");
+
                 // Step 4: Navigate to Pricing tab
                 if (!ClickPricingTab(editWindow, cf))
                     return Fail(request, "Could not click Pricing tab");
@@ -194,6 +200,42 @@ public sealed class PricingWorkflow
             _logger.Debug(ex, "PricingWorkflow: SearchByNdc failed for {Ndc}", ndc);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Verifies that the Edit Rx Item window contains the expected NDC after Quick Search loads.
+    /// Scans all text-bearing elements for the normalized NDC (hyphens removed, 11 digits).
+    /// Returns false if the NDC is not found within the element timeout, indicating the wrong
+    /// item was loaded or no result was returned.
+    /// </summary>
+    private bool VerifyLoadedNdc(Window editWindow, ConditionFactory cf, string ndc)
+    {
+        // Normalize for comparison: strip hyphens, pad to 11
+        var normalizedNdc = ndc.Replace("-", "").PadLeft(11, '0');
+
+        var deadline = DateTime.UtcNow + ElementTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                // Scan all Edit and Text elements for any that contain the NDC
+                var candidates = editWindow.FindAllDescendants(cf.ByControlType(ControlType.Edit))
+                    .Concat(editWindow.FindAllDescendants(cf.ByControlType(ControlType.Text)));
+
+                foreach (var el in candidates)
+                {
+                    var val = el.AsTextBox()?.Text?.Replace("-", "") ?? el.Name?.Replace("-", "") ?? "";
+                    if (val.Contains(normalizedNdc, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            catch { }
+            Thread.Sleep(300);
+        }
+
+        _logger.Warning("PricingWorkflow: NDC {Ndc} not found in loaded item after {Timeout}s",
+            ndc, ElementTimeout.TotalSeconds);
+        return false;
     }
 
     private bool ClickPricingTab(Window editWindow, ConditionFactory cf)
