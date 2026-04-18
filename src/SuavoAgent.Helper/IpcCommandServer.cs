@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Serilog;
 using SuavoAgent.Contracts.Ipc;
@@ -10,6 +11,13 @@ namespace SuavoAgent.Helper;
 /// <summary>
 /// Helper-side command server. Core connects to this pipe to push commands
 /// (e.g. pricing_lookup) and receive results. Reverse direction of the main IPC pipe.
+///
+/// Security hardening mirrors <see cref="SuavoAgent.Core.Ipc.IpcPipeServer"/>:
+///   - ACL restricts pipe to SYSTEM + LocalService + Interactive
+///   - Client process name must be SuavoAgent.Core
+///   - Client MainModule path must be under the Helper install root
+/// Without this, any local process running as the same user could drive UIA
+/// automation of PioneerRx.
 /// </summary>
 public sealed class IpcCommandServer : IDisposable
 {
@@ -39,12 +47,17 @@ public sealed class IpcCommandServer : IDisposable
             NamedPipeServerStream? pipe = null;
             try
             {
-                pipe = new NamedPipeServerStream(
-                    _pipeName, PipeDirection.InOut, 1,
-                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                pipe = CreateSecurePipe(_pipeName);
 
                 _logger.Debug("IpcCommandServer: waiting for Core on pipe {Name}", _pipeName);
                 await pipe.WaitForConnectionAsync(ct);
+
+                if (!VerifyClientIsCore(pipe))
+                {
+                    pipe.Disconnect();
+                    continue;
+                }
+
                 _logger.Information("IpcCommandServer: Core connected on pipe {Name}", _pipeName);
 
                 await HandleConnection(pipe, ct);
@@ -141,6 +154,111 @@ public sealed class IpcCommandServer : IDisposable
     private static IpcResponse Error(string id, string command, string code, string message) =>
         new(id, IpcStatus.InternalError, command, null,
             new IpcError(code, message, false, 1));
+
+    /// <summary>
+    /// Creates a named pipe restricted to SYSTEM + LocalService + Interactive user.
+    /// Falls back to default security on non-Windows platforms (for build/test).
+    /// </summary>
+    private static NamedPipeServerStream CreateSecurePipe(string pipeName)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var security = new PipeSecurity();
+            security.AddAccessRule(new PipeAccessRule(
+                new System.Security.Principal.SecurityIdentifier(
+                    System.Security.Principal.WellKnownSidType.LocalSystemSid, null),
+                PipeAccessRights.FullControl,
+                System.Security.AccessControl.AccessControlType.Allow));
+            security.AddAccessRule(new PipeAccessRule(
+                new System.Security.Principal.SecurityIdentifier(
+                    System.Security.Principal.WellKnownSidType.LocalServiceSid, null),
+                PipeAccessRights.FullControl,
+                System.Security.AccessControl.AccessControlType.Allow));
+            // Helper runs as the interactive user — needs read/write to operate its own pipe.
+            // Core (SYSTEM) connects in, so SYSTEM must also have access (granted above).
+            security.AddAccessRule(new PipeAccessRule(
+                new System.Security.Principal.SecurityIdentifier(
+                    System.Security.Principal.WellKnownSidType.InteractiveSid, null),
+                PipeAccessRights.ReadWrite,
+                System.Security.AccessControl.AccessControlType.Allow));
+
+            return NamedPipeServerStreamAcl.Create(
+                pipeName, PipeDirection.InOut, 1,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
+                0, 0, security);
+        }
+
+        return new NamedPipeServerStream(
+            pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+    }
+
+    /// <summary>
+    /// Verifies the connecting client is SuavoAgent.Core and its executable lives under
+    /// the SuavoAgent install root. Fail-closed on any read error.
+    /// </summary>
+    private bool VerifyClientIsCore(NamedPipeServerStream pipe)
+    {
+        if (!OperatingSystem.IsWindows()) return true;
+
+        try
+        {
+            if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var clientPid))
+            {
+                _logger.Warning("IpcCommandServer: GetNamedPipeClientProcessId failed — rejecting");
+                return false;
+            }
+
+            var clientProc = System.Diagnostics.Process.GetProcessById((int)clientPid);
+            if (clientProc.ProcessName != "SuavoAgent.Core")
+            {
+                _logger.Warning("IpcCommandServer: rejected connection from {Name} (PID {Pid}) — not SuavoAgent.Core",
+                    clientProc.ProcessName, clientPid);
+                return false;
+            }
+
+            string? clientPath;
+            try
+            {
+                clientPath = clientProc.MainModule?.FileName;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(ex, "IpcCommandServer: MainModule unreadable for PID {Pid} — rejecting", clientPid);
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(clientPath))
+            {
+                _logger.Warning("IpcCommandServer: empty client path for PID {Pid} — rejecting", clientPid);
+                return false;
+            }
+
+            // Helper's AppContext.BaseDirectory is the install dir for this binary.
+            // Core lives as a sibling subdir under the same install root.
+            var installRoot = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
+                ?? AppContext.BaseDirectory;
+            var installDir = installRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!clientPath.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.Warning("IpcCommandServer: rejected connection from outside install dir: {Path} (expected under {Dir})",
+                    clientPath, installDir);
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: client verification error — rejecting");
+            return false;
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static extern bool GetNamedPipeClientProcessId(
+        Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint clientProcessId);
 
     public void Dispose()
     {

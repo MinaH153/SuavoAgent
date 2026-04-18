@@ -27,13 +27,23 @@ try
     var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-    // H-10: resolve pipe name from --pipe arg (written by Core, passed by Broker)
-    var pipeName = "SuavoAgent";
-    var cmdPipeName = "SuavoAgent-cmd";
+    // H-10: resolve pipe name from --pipe arg (written by Core, passed by Broker).
+    // Fail-closed if either arg is missing — a literal default name would be squat-able
+    // by any local process before Helper starts.
+    string? pipeName = null;
+    string? cmdPipeName = null;
     for (var i = 0; i < args.Length - 1; i++)
     {
         if (args[i] == "--pipe") { pipeName = args[i + 1]; }
         if (args[i] == "--cmd-pipe") { cmdPipeName = args[i + 1]; }
+    }
+
+    if (string.IsNullOrEmpty(pipeName) || string.IsNullOrEmpty(cmdPipeName))
+    {
+        Log.Fatal("Helper: missing --pipe or --cmd-pipe arg (both required, no defaults). " +
+                  "Broker must pass nonce-scoped pipe names — exiting.");
+        Environment.Exit(2);
+        return;
     }
 
     using var pioneer = new PioneerRxUiaEngine(Log.Logger);
