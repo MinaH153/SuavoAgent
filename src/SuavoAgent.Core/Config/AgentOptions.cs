@@ -68,6 +68,12 @@ public sealed class AgentOptions
     public ReasoningOptions Reasoning { get; set; } = new();
 
     /// <summary>
+    /// Vision pipeline configuration (screenshot capture + extraction). Off by
+    /// default — enabling adds a new HIPAA surface (encrypted screens on disk).
+    /// </summary>
+    public VisionOptions Vision { get; set; } = new();
+
+    /// <summary>
     /// Multi-pharmacy config. When populated, each entry gets its own detection worker.
     /// Backwards-compatible: if empty, falls back to the top-level SqlServer/PharmacyId fields.
     /// </summary>
