@@ -266,13 +266,14 @@ try
             return new NullLocalInference();
         }
 
-        // Model is present and verified. Real LLamaSharp wiring goes here in
-        // Week 2c — today we still return Null and log that a real model
-        // would have loaded. This keeps the config surface honest without
-        // forcing operators to roll back when they upgrade.
-        Log.Warning("Tier-2 model verified at {Path} but LLamaSharp wiring not yet shipped " +
-                    "(Week 2c). Falling back to NullLocalInference.", verify.Path);
-        return new NullLocalInference();
+        // Model verified — construct the real LLamaSharp-backed inference.
+        // The model itself loads lazily on first ProposeAsync call to keep
+        // startup fast; loading takes 2–5 s for Llama-3.2-1B on CPU.
+        Log.Information("Tier-2 LocalInference ENABLED — model '{Id}' at {Path}",
+            opts.ModelId, verify.Path);
+        var agentOpts = sp.GetRequiredService<IOptions<AgentOptions>>();
+        var llmLog = sp.GetRequiredService<ILogger<LLamaLocalInference>>();
+        return new LLamaLocalInference(agentOpts, verify.Path!, llmLog);
     });
 
     builder.Services.AddSingleton<TieredBrain>();
