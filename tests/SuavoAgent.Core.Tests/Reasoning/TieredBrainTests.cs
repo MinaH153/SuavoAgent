@@ -1,0 +1,212 @@
+using Microsoft.Extensions.Logging.Abstractions;
+using SuavoAgent.Contracts.Reasoning;
+using SuavoAgent.Core.Reasoning;
+using Xunit;
+
+namespace SuavoAgent.Core.Tests.Reasoning;
+
+public class TieredBrainTests
+{
+    // --- Tier 1 happy path --------------------------------------------------
+
+    [Fact]
+    public async Task Decide_RuleMatches_ReturnsTier1()
+    {
+        var brain = Brain(
+            rules: new[] { ClickRule("r1", "s1", name: "Save") },
+            mock: new MockLocalInference());
+
+        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
+
+        Assert.Equal(MatchOutcome.Matched, decision.Outcome);
+        Assert.Equal(DecisionTier.Rules, decision.Tier);
+        Assert.Equal("r1", decision.MatchedRule!.Id);
+    }
+
+    // --- Tier 1 → Tier 2 escalation -----------------------------------------
+
+    [Fact]
+    public async Task Decide_NoRuleMatches_EscalatesToLocalInference()
+    {
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.Click, 0.97, ("name", "Save"));
+
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+
+        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
+
+        Assert.Equal(MatchOutcome.Matched, decision.Outcome);
+        Assert.Equal(DecisionTier.LocalInference, decision.Tier);
+        Assert.Equal(1, mock.CallCount);
+        Assert.Equal(RuleActionType.Click, decision.Actions[0].Type);
+    }
+
+    [Fact]
+    public async Task Decide_LocalInferenceNotReady_OperatorRequired()
+    {
+        var mock = new MockLocalInference { IsReady = false };
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+
+        var decision = await brain.DecideAsync(Ctx("s1"));
+
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.Equal(0, mock.CallCount);
+    }
+
+    [Fact]
+    public async Task Decide_InferenceReturnsNull_OperatorRequired()
+    {
+        var mock = new MockLocalInference();
+        mock.Responses.Enqueue(null);
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+
+        var decision = await brain.DecideAsync(Ctx("s1"));
+
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.Contains("no proposal", decision.Reason);
+    }
+
+    [Fact]
+    public async Task Decide_InferenceThrows_OperatorRequired()
+    {
+        var mock = new MockLocalInference { ThrowOnPropose = true };
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+
+        var decision = await brain.DecideAsync(Ctx("s1"));
+
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.Contains("error", decision.Reason.ToLowerInvariant());
+    }
+
+    // --- Verifier integration -----------------------------------------------
+
+    [Fact]
+    public async Task Decide_ProposalRejectedByVerifier_OperatorRequired()
+    {
+        // LLM proposes Click on an element that ISN'T visible — should reject.
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.Click, 0.99, ("name", "GhostButton"));
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+
+        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "OtherButton" }));
+
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.NotNull(decision.Verification);
+        Assert.Equal(VerificationOutcome.Rejected, decision.Verification!.Outcome);
+    }
+
+    [Fact]
+    public async Task Decide_ProposalLowConfidence_OperatorApprovalRequired()
+    {
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.Click, 0.80, ("name", "Save"));
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+
+        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
+
+        Assert.Equal(MatchOutcome.Blocked, decision.Outcome);
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.Equal(VerificationOutcome.OperatorApprovalRequired, decision.Verification!.Outcome);
+    }
+
+    // --- Precondition short-circuit -----------------------------------------
+
+    [Fact]
+    public async Task Decide_PreconditionBlocks_DoesNotCallTier2()
+    {
+        var gate = new Rule
+        {
+            Id = "gate",
+            SkillId = RuleEngine.PreconditionsSkill,
+            Priority = 1000,
+            AutonomousOk = false,
+            When = new RulePredicate
+            {
+                StateFlags = new Dictionary<string, string> { ["active_call"] = "true" },
+            },
+            Then = new[] { new RuleActionSpec { Type = RuleActionType.AskOperator } },
+        };
+        var mock = new MockLocalInference();
+
+        var brain = Brain(rules: new[] { gate }, mock: mock);
+
+        var decision = await brain.DecideAsync(new RuleContext
+        {
+            SkillId = "pricing-lookup",
+            Flags = new Dictionary<string, string> { ["active_call"] = "true" },
+        });
+
+        Assert.Equal(MatchOutcome.Blocked, decision.Outcome);
+        Assert.Equal(DecisionTier.Precondition, decision.Tier);
+        Assert.Equal(0, mock.CallCount);
+    }
+
+    // --- Shadow mode --------------------------------------------------------
+
+    [Fact]
+    public async Task Decide_ShadowMode_DoesNotExecuteApprovedTier2()
+    {
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.Click, 0.99, ("name", "Save"));
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+
+        var decision = await brain.DecideAsync(
+            Ctx("s1", visible: new[] { "Save" }),
+            shadowMode: true);
+
+        Assert.Equal(MatchOutcome.NoMatch, decision.Outcome);
+        Assert.Equal(DecisionTier.LocalInference, decision.Tier);
+        Assert.NotNull(decision.Proposal);
+        Assert.Contains("Shadow", decision.Reason);
+    }
+
+    // --- Allowed-actions narrowing passes through ----------------------------
+
+    [Fact]
+    public async Task Decide_AllowedActionsRestrictsVerifier()
+    {
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.Click, 0.99, ("name", "Save"));
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+
+        var decision = await brain.DecideAsync(
+            Ctx("s1", visible: new[] { "Save" }),
+            allowedTier2Actions: new HashSet<RuleActionType> { RuleActionType.Log });
+
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.Equal(VerificationOutcome.Rejected, decision.Verification!.Outcome);
+        Assert.Contains("not allowed", string.Join(" ", decision.Verification.FailedChecks));
+    }
+
+    // --- helpers ------------------------------------------------------------
+
+    private static TieredBrain Brain(IEnumerable<Rule> rules, MockLocalInference mock)
+    {
+        var engine = new RuleEngine(rules, NullLogger<RuleEngine>.Instance);
+        var verifier = new ActionVerifier();
+        return new TieredBrain(engine, mock, verifier, NullLogger<TieredBrain>.Instance);
+    }
+
+    private static Rule ClickRule(string id, string skillId, string name) =>
+        new()
+        {
+            Id = id,
+            SkillId = skillId,
+            When = new RulePredicate { VisibleElements = new[] { name } },
+            Then = new[]
+            {
+                new RuleActionSpec
+                {
+                    Type = RuleActionType.Click,
+                    Parameters = new Dictionary<string, string> { ["name"] = name },
+                },
+            },
+        };
+
+    private static RuleContext Ctx(string skillId, IEnumerable<string>? visible = null) =>
+        new()
+        {
+            SkillId = skillId,
+            VisibleElements = new HashSet<string>(visible ?? Array.Empty<string>()),
+        };
+}
