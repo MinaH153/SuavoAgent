@@ -4,11 +4,13 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Contracts.Models;
+using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
+using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.Receipts;
 using SuavoAgent.Core.State;
 
@@ -25,6 +27,8 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly Intelligence.ContextAssembler? _contextAssembler;
     private readonly Intelligence.EfficiencyCalculator? _efficiencyCalc;
     private readonly Intelligence.FleetDataChannels? _fleetChannels;
+    private readonly PricingJobRunner? _pricingJobRunner;
+    private readonly IpcCommandClient? _ipcCommandClient;
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
@@ -53,6 +57,8 @@ public sealed class HeartbeatWorker : BackgroundService
         _contextAssembler = new Intelligence.ContextAssembler(stateDb);
         _efficiencyCalc = new Intelligence.EfficiencyCalculator(stateDb);
         _fleetChannels = new Intelligence.FleetDataChannels(stateDb);
+        _pricingJobRunner = serviceProvider.GetService<PricingJobRunner>();
+        _ipcCommandClient = serviceProvider.GetService<IpcCommandClient>();
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -416,6 +422,9 @@ public sealed class HeartbeatWorker : BackgroundService
                     break;
                 case "acknowledge_stale":
                     HandleFeedbackCommand(scEl, cmd, DirectiveType.Prune);
+                    break;
+                case "run_pricing_job":
+                    _ = Task.Run(() => HandleRunPricingJobAsync(scEl, ct), ct);
                     break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
@@ -937,5 +946,48 @@ public sealed class HeartbeatWorker : BackgroundService
         }
 
         await Task.CompletedTask;
+    }
+
+    private async Task HandleRunPricingJobAsync(JsonElement scEl, CancellationToken ct)
+    {
+        if (_pricingJobRunner == null || _ipcCommandClient == null)
+        {
+            _logger.LogWarning("run_pricing_job: PricingJobRunner or IpcCommandClient not registered");
+            return;
+        }
+
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var excelPath = dataEl.TryGetProperty("excelPath", out var ep) ? ep.GetString() : null;
+        var ndcColumn = dataEl.TryGetProperty("ndcColumn", out var nc) ? nc.GetString() ?? "NDC" : "NDC";
+        var supplierColumn = dataEl.TryGetProperty("supplierColumn", out var sc2) ? sc2.GetString() ?? "Supplier" : "Supplier";
+        var costColumn = dataEl.TryGetProperty("costColumn", out var cc) ? cc.GetString() ?? "Cost (per unit)" : "Cost (per unit)";
+
+        if (string.IsNullOrEmpty(excelPath))
+        {
+            _logger.LogWarning("run_pricing_job: missing excelPath");
+            return;
+        }
+
+        var jobId = Guid.NewGuid().ToString("N");
+        var spec = new PricingJobSpec(jobId, excelPath, ndcColumn, supplierColumn, costColumn);
+
+        _logger.LogInformation("Pricing job {JobId} starting: {Path}", jobId, excelPath);
+
+        // Connect to Helper's command pipe — connect once per job
+        if (!_ipcCommandClient.IsConnected)
+        {
+            var connected = await _ipcCommandClient.ConnectAsync(TimeSpan.FromSeconds(10), ct);
+            if (!connected)
+            {
+                _logger.LogError("run_pricing_job: cannot connect to Helper command pipe");
+                _stateDb.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+                return;
+            }
+        }
+
+        var progress = await _pricingJobRunner.RunAsync(spec, _ipcCommandClient, ct);
+
+        _logger.LogInformation("Pricing job {JobId} finished: {Status} — {Completed}/{Total}",
+            jobId, progress.Status, progress.CompletedItems, progress.TotalItems);
     }
 }

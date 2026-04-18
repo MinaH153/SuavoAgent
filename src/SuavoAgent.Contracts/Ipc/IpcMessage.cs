@@ -21,6 +21,10 @@ public static class IpcCommands
     public const string BehavioralEvents = "behavioral_events";
     public const string GetPharmacySalt = "get_pharmacy_salt";
     public const string SystemEvents = "system_events";
+
+    // Pricing intelligence — Core→Helper command channel
+    public const string PricingLookup = "pricing_lookup";
+    public const string PricingJobProgress = "pricing_job_progress";
 }
 
 public static class IpcStatus

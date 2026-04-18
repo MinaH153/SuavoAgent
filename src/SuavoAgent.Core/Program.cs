@@ -6,6 +6,7 @@ using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
+using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Workers;
@@ -199,12 +200,20 @@ try
     // An attacker without knowledge of the nonce cannot pre-create a squatting pipe server.
     var pipeNonce = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8));
     var pipeName = $"SuavoAgent-{pipeNonce}";
+    var cmdPipeName = $"SuavoAgent-cmd-{pipeNonce}";
     {
         var nonceDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SuavoAgent");
         Directory.CreateDirectory(nonceDir);
         File.WriteAllText(Path.Combine(nonceDir, "pipe.nonce"), pipeNonce);
     }
+
+    // Pricing intelligence — Core→Helper command channel
+    builder.Services.AddSingleton<IpcCommandClient>(sp =>
+        new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()));
+    builder.Services.AddSingleton<ExcelPricingReader>();
+    builder.Services.AddSingleton<ExcelPricingWriter>();
+    builder.Services.AddSingleton<PricingJobRunner>();
 
     builder.Services.AddSingleton<IpcPipeServer>(sp =>
     {

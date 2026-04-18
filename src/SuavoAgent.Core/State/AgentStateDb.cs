@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using SuavoAgent.Contracts.Canary;
+using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Learning;
 
@@ -579,6 +580,38 @@ public sealed class AgentStateDb : IDisposable
         Execute("CREATE INDEX IF NOT EXISTS idx_ub_status ON unsynced_batches(status)");
         Execute("CREATE INDEX IF NOT EXISTS idx_audit_id ON audit_entries(id)");
         Execute("CREATE INDEX IF NOT EXISTS idx_canary_incidents_resolved ON schema_canary_incidents(resolved_at)");
+
+        // Pricing intelligence jobs
+        Execute("""
+            CREATE TABLE IF NOT EXISTS pricing_jobs (
+                job_id TEXT PRIMARY KEY,
+                excel_path TEXT NOT NULL,
+                ndc_column TEXT NOT NULL DEFAULT 'NDC',
+                supplier_column TEXT NOT NULL DEFAULT 'Supplier',
+                cost_column TEXT NOT NULL DEFAULT 'Cost (per unit)',
+                status TEXT NOT NULL DEFAULT 'pending',
+                total_items INTEGER NOT NULL DEFAULT 0,
+                completed_items INTEGER NOT NULL DEFAULT 0,
+                failed_items INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """);
+        Execute("""
+            CREATE TABLE IF NOT EXISTS pricing_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                row_index INTEGER NOT NULL,
+                ndc TEXT NOT NULL,
+                found INTEGER NOT NULL DEFAULT 0,
+                supplier_name TEXT,
+                cost_per_unit REAL,
+                error_message TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (job_id) REFERENCES pricing_jobs(job_id)
+            )
+        """);
+        Execute("CREATE INDEX IF NOT EXISTS idx_pricing_results_job ON pricing_results(job_id)");
     }
 
     private void Execute(string sql)
@@ -2953,5 +2986,83 @@ public sealed class AgentStateDb : IDisposable
             return Encoding.UTF8.GetString(plain);
         }
         catch { return null; }
+    }
+
+    // ── Pricing jobs ──────────────────────────────────────────────────────────
+
+    public void UpsertPricingJob(PricingJobSpec spec, string status, int total, int completed, int failed)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO pricing_jobs (job_id, excel_path, ndc_column, supplier_column, cost_column,
+                status, total_items, completed_items, failed_items, updated_at)
+            VALUES (@id, @path, @ndc, @supplier, @cost, @status, @total, @completed, @failed, datetime('now'))
+            ON CONFLICT(job_id) DO UPDATE SET
+                status = excluded.status,
+                total_items = excluded.total_items,
+                completed_items = excluded.completed_items,
+                failed_items = excluded.failed_items,
+                updated_at = excluded.updated_at
+            """;
+        cmd.Parameters.AddWithValue("@id", spec.JobId);
+        cmd.Parameters.AddWithValue("@path", spec.ExcelPath);
+        cmd.Parameters.AddWithValue("@ndc", spec.NdcColumn);
+        cmd.Parameters.AddWithValue("@supplier", spec.SupplierColumn);
+        cmd.Parameters.AddWithValue("@cost", spec.CostColumn);
+        cmd.Parameters.AddWithValue("@status", status);
+        cmd.Parameters.AddWithValue("@total", total);
+        cmd.Parameters.AddWithValue("@completed", completed);
+        cmd.Parameters.AddWithValue("@failed", failed);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void SavePricingResult(SupplierPriceResult result)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO pricing_results
+                (job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message)
+            VALUES (@job, @row, @ndc, @found, @supplier, @cost, @error)
+            """;
+        cmd.Parameters.AddWithValue("@job", result.JobId);
+        cmd.Parameters.AddWithValue("@row", result.RowIndex);
+        cmd.Parameters.AddWithValue("@ndc", result.Ndc);
+        cmd.Parameters.AddWithValue("@found", result.Found ? 1 : 0);
+        cmd.Parameters.AddWithValue("@supplier", (object?)result.SupplierName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@cost", (object?)result.CostPerUnit ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@error", (object?)result.ErrorMessage ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    public List<SupplierPriceResult> GetPricingResults(string jobId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message FROM pricing_results WHERE job_id = @job ORDER BY row_index";
+        cmd.Parameters.AddWithValue("@job", jobId);
+        using var reader = cmd.ExecuteReader();
+        var results = new List<SupplierPriceResult>();
+        while (reader.Read())
+        {
+            results.Add(new SupplierPriceResult(
+                JobId: reader.GetString(0),
+                RowIndex: reader.GetInt32(1),
+                Ndc: reader.GetString(2),
+                Found: reader.GetInt32(3) == 1,
+                SupplierName: reader.IsDBNull(4) ? null : reader.GetString(4),
+                CostPerUnit: reader.IsDBNull(5) ? null : (decimal)reader.GetDouble(5),
+                ErrorMessage: reader.IsDBNull(6) ? null : reader.GetString(6)));
+        }
+        return results;
+    }
+
+    public HashSet<int> GetCompletedPricingRows(string jobId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT row_index FROM pricing_results WHERE job_id = @job";
+        cmd.Parameters.AddWithValue("@job", jobId);
+        using var reader = cmd.ExecuteReader();
+        var rows = new HashSet<int>();
+        while (reader.Read()) rows.Add(reader.GetInt32(0));
+        return rows;
     }
 }

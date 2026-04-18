@@ -5,6 +5,7 @@ using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Helper;
 using SuavoAgent.Helper.Behavioral;
 using SuavoAgent.Helper.SystemObservers;
+using SuavoAgent.Helper.Workflows;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(Environment.GetEnvironmentVariable("SUAVO_DEBUG") == "1"
@@ -28,13 +29,18 @@ try
 
     // H-10: resolve pipe name from --pipe arg (written by Core, passed by Broker)
     var pipeName = "SuavoAgent";
+    var cmdPipeName = "SuavoAgent-cmd";
     for (var i = 0; i < args.Length - 1; i++)
     {
-        if (args[i] == "--pipe") { pipeName = args[i + 1]; break; }
+        if (args[i] == "--pipe") { pipeName = args[i + 1]; }
+        if (args[i] == "--cmd-pipe") { cmdPipeName = args[i + 1]; }
     }
 
     using var pioneer = new PioneerRxUiaEngine(Log.Logger);
     using var ipcClient = new IpcPipeClient(pipeName, Log.Logger);
+    var pricingWorkflow = new PricingWorkflow(pioneer, Log.Logger);
+    using var cmdServer = new IpcCommandServer(cmdPipeName, pricingWorkflow, Log.Logger);
+    cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
     int attachFailures = 0;
