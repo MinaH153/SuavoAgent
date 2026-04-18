@@ -4,6 +4,7 @@ using System.Text.Json;
 using Serilog;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Helper.Vision;
 using SuavoAgent.Helper.Workflows;
 
 namespace SuavoAgent.Helper;
@@ -23,14 +24,20 @@ public sealed class IpcCommandServer : IDisposable
 {
     private readonly string _pipeName;
     private readonly PricingWorkflow _pricing;
+    private readonly ScreenCaptureController? _vision;
     private readonly ILogger _logger;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
 
-    public IpcCommandServer(string pipeName, PricingWorkflow pricing, ILogger logger)
+    public IpcCommandServer(
+        string pipeName,
+        PricingWorkflow pricing,
+        ILogger logger,
+        ScreenCaptureController? vision = null)
     {
         _pipeName = pipeName;
         _pricing = pricing;
+        _vision = vision;
         _logger = logger;
     }
 
@@ -117,9 +124,44 @@ public sealed class IpcCommandServer : IDisposable
         return request.Command switch
         {
             IpcCommands.PricingLookup => HandlePricingLookupAsync(request, ct),
+            IpcCommands.CaptureScreen => HandleCaptureScreenAsync(request, ct),
             IpcCommands.Ping => Task.FromResult(Ok(request.Id, request.Command, null)),
             _ => Task.FromResult(Error(request.Id, request.Command, "unknown_command", $"Unknown command: {request.Command}"))
         };
+    }
+
+    private async Task<IpcResponse> HandleCaptureScreenAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (_vision == null)
+        {
+            return Error(request.Id, request.Command, "vision_unavailable",
+                "Vision not configured in this Helper instance");
+        }
+
+        try
+        {
+            var result = await _vision.CaptureAndExtractAsync(ct);
+            if (result == null)
+            {
+                return Error(request.Id, request.Command, "capture_failed",
+                    "Capture returned null — vision disabled, rate-limited, or capture error");
+            }
+
+            // Only the scrubbed ScreenFrame + storage id cross the IPC boundary.
+            // Raw PNG bytes stayed inside the Helper and are already encrypted
+            // on disk.
+            var payload = JsonSerializer.SerializeToElement(new
+            {
+                storageId = result.StorageId,
+                frame = result.Frame,
+            });
+            return Ok(request.Id, request.Command, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: capture_screen dispatch error");
+            return Error(request.Id, request.Command, "capture_error", ex.Message);
+        }
     }
 
     private Task<IpcResponse> HandlePricingLookupAsync(IpcRequest request, CancellationToken ct)

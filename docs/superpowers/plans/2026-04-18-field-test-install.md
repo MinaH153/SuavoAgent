@@ -167,6 +167,63 @@ If the probe line shows `tier=LocalInference` or `tier=Rules`, Tier-2 is wired. 
 
 ---
 
+## Step 4.5 (optional) — Enable Vision pipeline
+
+Separate opt-in from Tier-2 LLM. Enables encrypted screenshot capture that
+extracts PHI-scrubbed text regions. Screen pixels are DPAPI-encrypted at rest
+and NEVER transit to the cloud.
+
+### 4.5a. Drop vision config
+
+Create `C:\ProgramData\SuavoAgent\vision.json`:
+
+```json
+{
+  "Enabled": true,
+  "RetentionHours": 24,
+  "MaxStoredScreens": 500,
+  "MinIntervalMs": 1000
+}
+```
+
+### 4.5b. Restart the Helper service
+
+```powershell
+Restart-Service SuavoAgent.Core
+```
+
+(Broker respawns Helper when Core restarts.)
+
+Check `C:\ProgramData\SuavoAgent\logs\helper-<date>.log`:
+
+```
+[INF] Vision ENABLED — capture=True, retention=24h, cap=500, extractor=null
+```
+
+### 4.5c. Trigger a test capture via IPC
+
+From the dashboard or a Core-side tool, send an `IpcCommands.CaptureScreen`
+request. Helper will:
+1. Capture primary monitor via GDI BitBlt (100-300 ms)
+2. Encrypt with DPAPI(LocalMachine)
+3. Write to `C:\ProgramData\SuavoAgent\screens\` (ACL-locked to SYSTEM + Admins + Interactive)
+4. Run through NullScreenExtractor (Week 3b swaps in Tesseract)
+5. Scrub through PhiScrubbingExtractor
+6. Return `{ storageId, frame }` with PHI-safe ScreenFrame
+
+You should see under `C:\ProgramData\SuavoAgent\screens\`:
+```
+20260418T153045123_abc123...scn    (encrypted, ~400 KB for 1920x1080)
+```
+
+### 4.5d. Week 3a limitations
+
+- `NullScreenExtractor` returns an empty frame — no OCR or VLM yet. Week 3b
+  adds Tesseract. Week 3c adds Phi-3.5-vision.
+- Screens stay local forever (until TTL). No transmission path to cloud.
+- No Core-side consumer yet — the IPC handler exists but nothing calls it
+  automatically. Integration with TieredBrain happens in a later week.
+
 ## Step 5 — Field test the signed command pipeline (no PioneerRx required)
 
 From the dashboard, `Mina Test Rig → Agent → Commands` tab, click **Send Test Command**. This queues a `run_pricing_job` with a dummy Excel path.

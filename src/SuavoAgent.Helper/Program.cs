@@ -49,7 +49,12 @@ try
     using var pioneer = new PioneerRxUiaEngine(Log.Logger);
     using var ipcClient = new IpcPipeClient(pipeName, Log.Logger);
     var pricingWorkflow = new PricingWorkflow(pioneer, Log.Logger);
-    using var cmdServer = new IpcCommandServer(cmdPipeName, pricingWorkflow, Log.Logger);
+
+    // Vision pipeline — operator opt-in via ProgramData\SuavoAgent\vision.json.
+    // Returns null (no vision) when disabled, which is the default.
+    var visionController = SuavoAgent.Helper.Vision.VisionBootstrap.TryBuild(Log.Logger);
+
+    using var cmdServer = new IpcCommandServer(cmdPipeName, pricingWorkflow, Log.Logger, visionController);
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying

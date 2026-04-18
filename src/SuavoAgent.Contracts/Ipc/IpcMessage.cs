@@ -25,6 +25,10 @@ public static class IpcCommands
     // Pricing intelligence — Core→Helper command channel
     public const string PricingLookup = "pricing_lookup";
     public const string PricingJobProgress = "pricing_job_progress";
+
+    // Vision — Core→Helper command channel.
+    // Response payload: { storageId: string|null, frame: ScreenFrame }
+    public const string CaptureScreen = "capture_screen";
 }
 
 public static class IpcStatus
