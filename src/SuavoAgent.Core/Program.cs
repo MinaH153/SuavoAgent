@@ -7,6 +7,7 @@ using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.Pricing;
+using SuavoAgent.Core.Reasoning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Workers;
@@ -214,6 +215,30 @@ try
     builder.Services.AddSingleton<ExcelPricingReader>();
     builder.Services.AddSingleton<ExcelPricingWriter>();
     builder.Services.AddSingleton<PricingJobRunner>();
+
+    // Tier-1 Reasoning — rule engine. Loaded from bundled Reasoning/Rules
+    // alongside optional operator overrides in ProgramData. Fail-closed: a
+    // malformed rule file prevents the agent from starting.
+    builder.Services.AddSingleton<YamlRuleLoader>();
+    builder.Services.AddSingleton<RuleEngine>(sp =>
+    {
+        var loader = sp.GetRequiredService<YamlRuleLoader>();
+        var log = sp.GetRequiredService<ILogger<RuleEngine>>();
+
+        var bundledDir = Path.Combine(AppContext.BaseDirectory, "Reasoning", "Rules");
+        var overrideDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "rules");
+
+        var rules = new List<SuavoAgent.Contracts.Reasoning.Rule>();
+        rules.AddRange(loader.LoadFromDirectory(bundledDir));
+        rules.AddRange(loader.LoadFromDirectory(overrideDir));
+
+        var engine = new RuleEngine(rules, log);
+        Log.Information("RuleEngine loaded {Count} rules across {Skills} skill(s): {SkillList}",
+            engine.RuleCount, engine.KnownSkills.Count, string.Join(", ", engine.KnownSkills));
+        return engine;
+    });
 
     builder.Services.AddSingleton<IpcPipeServer>(sp =>
     {

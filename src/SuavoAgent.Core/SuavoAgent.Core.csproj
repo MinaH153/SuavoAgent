@@ -23,6 +23,7 @@
     <PackageReference Include="Stateless" Version="5.20.1" />
     <PackageReference Include="EPPlus" Version="7.6.1" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.4" />
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -32,6 +33,9 @@
 
   <ItemGroup>
     <None Include="Config\adapters\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Reasoning\Rules\*.yaml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

@@ -1,0 +1,128 @@
+# Pricing lookup skill — navigate PioneerRx Item → Rx Item → Pricing tab.
+#
+# Each rule represents ONE step of the workflow with pre+post conditions.
+# Rules are keyed by SkillId + state signature. The executor walks them in
+# order, falling back to Tier 2 only if no rule matches the current state.
+#
+# Maintenance: when PioneerRx changes a control name, update the single
+# matching rule here. No C# recompile needed.
+
+rules:
+  - id: pricing-lookup.require-main-window
+    skillId: pricing-lookup
+    priority: 200
+    description: "Precondition — PioneerRx main window must be visible"
+    autonomousOk: true
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Item"]   # top menu bar entry
+      stateFlags:
+        main_window_focused: "true"
+    then:
+      - type: Log
+        description: "PioneerRx ready for pricing workflow"
+
+  - id: pricing-lookup.open-item-menu
+    skillId: pricing-lookup
+    priority: 190
+    description: "Click the Item menu in the top menu bar"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Item"]
+      stateFlags:
+        operator_idle_at_least_ms: "500"
+    then:
+      - type: Click
+        description: "Open Item menu"
+        parameters:
+          controlType: "MenuItem"
+          name: "Item"
+        verifyAfter:
+          visibleElements: ["Rx Item"]
+
+  - id: pricing-lookup.open-rx-item
+    skillId: pricing-lookup
+    priority: 180
+    description: "Click Rx Item under Item menu"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Rx Item"]
+    then:
+      - type: Click
+        description: "Open Rx Item submenu"
+        parameters:
+          controlType: "MenuItem"
+          name: "Rx Item"
+        verifyAfter:
+          visibleElements: ["Edit Rx Item"]
+
+  - id: pricing-lookup.search-ndc
+    skillId: pricing-lookup
+    priority: 170
+    description: "Type NDC into Quick Search and press Enter"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Edit Rx Item", "Quick Search"]
+    then:
+      - type: Click
+        description: "Focus Quick Search field"
+        parameters:
+          controlType: "Edit"
+          helpText: "Quick Search"
+      - type: Type
+        description: "Type normalized NDC"
+        parameters:
+          source: "context.ndc"       # resolved at exec time
+      - type: PressKey
+        parameters:
+          key: "Enter"
+      - type: WaitForElement
+        description: "Wait for item to load"
+        parameters:
+          controlType: "Edit"
+          timeoutMs: "2000"
+
+  - id: pricing-lookup.verify-ndc-loaded
+    skillId: pricing-lookup
+    priority: 165
+    description: "Verify the loaded item's NDC matches what we searched for"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Edit Rx Item"]
+    then:
+      - type: VerifyElement
+        description: "Loaded item NDC must contain request.Ndc"
+        parameters:
+          controlType: "Edit"
+          containsFromContext: "ndc"
+
+  - id: pricing-lookup.open-pricing-tab
+    skillId: pricing-lookup
+    priority: 160
+    description: "Click the Pricing tab within Edit Rx Item"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Edit Rx Item", "Pricing"]
+    then:
+      - type: Click
+        description: "Open Pricing tab"
+        parameters:
+          controlType: "TabItem"
+          name: "Pricing"
+        verifyAfter:
+          visibleElements: ["Supplier", "Cost Per Unit"]
+
+  - id: pricing-lookup.close-edit-window
+    skillId: pricing-lookup
+    priority: 10
+    description: "Rollback — close Edit Rx Item dialog"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Edit Rx Item"]
+    then:
+      - type: PressKey
+        parameters:
+          key: "Escape"
+      - type: PressKey
+        parameters:
+          key: "Escape"
