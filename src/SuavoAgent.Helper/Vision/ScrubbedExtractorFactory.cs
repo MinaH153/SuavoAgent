@@ -50,13 +50,20 @@ public static class ScrubbedExtractorFactory
         }
 
         // --- UIA element tier (only on Windows; Helper runs in user session) ----
-        IUiaElementExtractor uiaInner = OperatingSystem.IsWindows()
-            ? new FlaUiElementExtractor(logger)
-            : new NullUiaElementExtractor();
-
-        IScreenExtractor combined = OperatingSystem.IsWindows()
-            ? new CompositeScreenExtractor(textInner, uiaInner)
-            : textInner;
+        // FlaUI.UIA2 would throw at construction on non-Windows hosts — guard
+        // at the factory so tests on macOS CI never attempt to instantiate it.
+        IUiaElementExtractor uiaInner;
+        IScreenExtractor combined;
+        if (OperatingSystem.IsWindows())
+        {
+            uiaInner = new FlaUiElementExtractor(logger);
+            combined = new CompositeScreenExtractor(textInner, uiaInner);
+        }
+        else
+        {
+            uiaInner = new NullUiaElementExtractor();
+            combined = textInner;
+        }
 
         logger.Information(
             "ScrubbedExtractorFactory: final extractor = {Id}", combined.ExtractorId);

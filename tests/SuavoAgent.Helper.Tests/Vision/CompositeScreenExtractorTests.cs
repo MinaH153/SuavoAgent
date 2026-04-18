@@ -102,6 +102,19 @@ public class CompositeScreenExtractorTests
         Assert.Equal(42, uia.RequestedMax);
     }
 
+    [Fact]
+    public async Task Extract_PropagatesHwnd_ToUia()
+    {
+        // Codex C-2: UIA must bind to the same hwnd the capture recorded.
+        var bound = new ScreenBytes(new byte[] { 1 }, 100, 100, DateTimeOffset.UtcNow, Hwnd: 0xDEADBEEF);
+        var text = new FakeText { Output = Frame(Array.Empty<TextRegion>(), Array.Empty<VisualElement>()) };
+        var uia = new FakeUia();
+
+        await new CompositeScreenExtractor(text, uia).ExtractAsync(bound, default);
+
+        Assert.Equal(0xDEADBEEF, uia.ReceivedHwnd);
+    }
+
     // --- helpers -------------------------------------------------------------
 
     private static TextRegion TextRegion(string text, int x, int y, int w, int h, double conf) =>
@@ -156,10 +169,13 @@ public class CompositeScreenExtractorTests
         public IReadOnlyList<VisualElement> Output { get; set; } = Array.Empty<VisualElement>();
         public int DelayMs { get; set; }
         public int RequestedMax { get; private set; }
+        public long ReceivedHwnd { get; private set; }
 
-        public async Task<IReadOnlyList<VisualElement>> ExtractAsync(int maxElements, CancellationToken ct)
+        public async Task<IReadOnlyList<VisualElement>> ExtractAsync(
+            ScreenBytes screen, int maxElements, CancellationToken ct)
         {
             RequestedMax = maxElements;
+            ReceivedHwnd = screen.Hwnd;
             if (DelayMs > 0) await Task.Delay(DelayMs, ct);
             return Output;
         }

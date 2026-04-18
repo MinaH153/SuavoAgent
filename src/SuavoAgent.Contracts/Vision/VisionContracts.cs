@@ -72,5 +72,14 @@ public readonly record struct Rect(int X, int Y, int Width, int Height)
 /// Raw screen bytes — lives only inside the Helper process, never serialized
 /// to anything that crosses the HIPAA boundary. Callers should hand this
 /// directly to IScreenStore and then drop the reference.
+///
+/// <para>
+/// <paramref name="Hwnd"/> is the Win32 HWND of the foreground window AT
+/// THE MOMENT of capture. Downstream UIA extraction must bind to THIS hwnd
+/// rather than re-querying <c>GetForegroundWindow()</c>, otherwise a
+/// fast alt-tab between capture and UIA walk can target the wrong process
+/// (Codex C-2). Default 0 = not captured (legacy tests).
+/// </para>
 /// </summary>
-public readonly record struct ScreenBytes(byte[] Png, int Width, int Height, DateTimeOffset CapturedAt);
+public readonly record struct ScreenBytes(
+    byte[] Png, int Width, int Height, DateTimeOffset CapturedAt, long Hwnd = 0);

@@ -3,19 +3,26 @@ using SuavoAgent.Contracts.Vision;
 namespace SuavoAgent.Helper.Vision;
 
 /// <summary>
-/// Extracts visible UI elements (buttons, inputs, labels) from the current
-/// foreground window via UI Automation. Produces exact pixel-space bounding
-/// boxes and element roles — complementary to Tesseract OCR which extracts
-/// pixel-rendered text regions.
+/// Extracts visible UI elements (buttons, inputs, labels) from a captured
+/// window via UI Automation. Binds to the EXACT hwnd that was foreground
+/// at capture time (via <see cref="ScreenBytes.Hwnd"/>), not the current
+/// foreground — this prevents alt-tab races (Codex C-2).
 ///
-/// Lives in the Helper (interactive user session) because UIA queries require
-/// desktop access. Returns empty list on any failure.
+/// Implementation contract:
+///   - MUST dispose every AutomationElement retrieved from the UIA tree
+///     (they hold COM references; undisposed = handle leak). (Codex C-1)
+///   - MUST enforce a wall-clock budget so a pathological tree can't block
+///     the vision pipeline (Codex M-2).
+///   - MUST NOT throw for extraction failures — return empty list.
 /// </summary>
 internal interface IUiaElementExtractor
 {
     /// <summary>
-    /// Walks the UIA tree of the currently foreground top-level window and
-    /// returns up to <paramref name="maxElements"/> visible UI elements.
+    /// Walks the UIA tree of the window identified by <paramref name="screen"/>.Hwnd
+    /// and returns up to <paramref name="maxElements"/> visible UI elements.
     /// </summary>
-    Task<IReadOnlyList<VisualElement>> ExtractAsync(int maxElements, CancellationToken ct);
+    Task<IReadOnlyList<VisualElement>> ExtractAsync(
+        ScreenBytes screen,
+        int maxElements,
+        CancellationToken ct);
 }

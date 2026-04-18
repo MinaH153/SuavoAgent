@@ -47,6 +47,35 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
     {
         _options = options.Value.Vision.Tesseract;
         _logger = logger;
+
+        // Codex M-1: configure native library path at construction time, BEFORE
+        // any TesseractEngine constructor can execute. This guarantees the
+        // Windows DLL search order knows about the operator-provided native
+        // dir when llama.dll / leptonica / tesseract P/Invokes resolve.
+        ConfigureNativeLibraryOnce();
+    }
+
+    private void ConfigureNativeLibraryOnce()
+    {
+        if (Interlocked.CompareExchange(ref s_nativeConfigured, 1, 0) != 0) return;
+
+        if (string.IsNullOrEmpty(_options.NativeLibraryPath)) return;
+        if (!OperatingSystem.IsWindows()) return;
+
+        try
+        {
+            AddDllDirectory(_options.NativeLibraryPath);
+            _logger.Information(
+                "TesseractScreenExtractor: added native dir to DLL search: {Path}",
+                _options.NativeLibraryPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(
+                "TesseractScreenExtractor: failed to register native path ({Type}: {Msg})",
+                ex.GetType().FullName, ex.Message);
+            Interlocked.Exchange(ref s_nativeConfigured, 0);
+        }
     }
 
     public async Task<ScreenFrame?> ExtractAsync(ScreenBytes screen, CancellationToken ct)
@@ -77,6 +106,8 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
 
         var sw = Stopwatch.StartNew();
         var regions = new List<TextRegion>();
+        // Codex M-4: use try/finally so _activeCalls ALWAYS decrements,
+        // regardless of which exception path fires.
         try
         {
             await Task.Run(() =>
@@ -108,20 +139,24 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            Interlocked.Decrement(ref _activeCalls);
+            // Caller cancellation — propagate. finally still runs.
             throw;
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "TesseractScreenExtractor: OCR failed");
-            Interlocked.Decrement(ref _activeCalls);
+            // Codex M-5: include type name so COM / RCW failures are spotable.
+            _logger.Warning(
+                "TesseractScreenExtractor: OCR failed ({Type}: {Msg})",
+                ex.GetType().FullName, ex.Message);
             return null;
         }
-
-        sw.Stop();
-        _lastUseTicks = Environment.TickCount64;
-        Interlocked.Decrement(ref _activeCalls);
-        RestartIdleWatcher();
+        finally
+        {
+            sw.Stop();
+            _lastUseTicks = Environment.TickCount64;
+            Interlocked.Decrement(ref _activeCalls);
+            RestartIdleWatcher();
+        }
 
         _logger.Debug(
             "TesseractScreenExtractor: extracted {Count} regions in {Ms}ms",
@@ -171,31 +206,7 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
             return false;
         }
 
-        // Configure native library path once per process. Mirrors the LLamaSharp
-        // pattern — we don't bundle binaries, operator provides them.
-        if (Interlocked.CompareExchange(ref s_nativeConfigured, 1, 0) == 0)
-        {
-            if (!string.IsNullOrEmpty(_options.NativeLibraryPath))
-            {
-                try
-                {
-                    // Add the native dir to the DLL search path.
-                    if (OperatingSystem.IsWindows())
-                    {
-                        AddDllDirectory(_options.NativeLibraryPath);
-                        _logger.Information(
-                            "TesseractScreenExtractor: added native dir to DLL search: {Path}",
-                            _options.NativeLibraryPath);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.Warning(ex, "TesseractScreenExtractor: failed to register native path");
-                    Interlocked.Exchange(ref s_nativeConfigured, 0);
-                }
-            }
-        }
-
+        // Native library path was configured in the constructor (Codex M-1).
         try
         {
             _engine = new TesseractEngine(_options.TessdataPath, _options.Language, EngineMode.Default);
@@ -206,7 +217,9 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         }
         catch (Exception ex)
         {
-            _logger.Error(ex, "TesseractScreenExtractor: engine init failed");
+            _logger.Error(
+                "TesseractScreenExtractor: engine init failed ({Type}: {Msg})",
+                ex.GetType().FullName, ex.Message);
             _engine = null;
             return false;
         }

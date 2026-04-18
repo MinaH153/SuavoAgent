@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using FlaUI.Core.AutomationElements;
@@ -10,16 +11,21 @@ using VisionRect = SuavoAgent.Contracts.Vision.Rect;
 namespace SuavoAgent.Helper.Vision;
 
 /// <summary>
-/// FlaUI-backed UIA element extractor. Walks the current foreground window's
-/// UIA tree and emits a VisualElement for each meaningful control (button,
-/// input, menu item, tab, checkbox, etc.).
+/// FlaUI-backed UIA element extractor. Walks the UIA tree of the hwnd that
+/// was foreground AT CAPTURE TIME (from <see cref="ScreenBytes.Hwnd"/>) and
+/// emits a VisualElement per meaningful control.
 ///
 /// UIA is the OS-level accessibility API — same surface screen readers use.
 /// No hooks, no DLL injection, vendor-invisible from a PMS perspective.
 ///
-/// Fail-closed: any error during tree walk returns an empty list rather than
-/// throwing. The vision pipeline still emits a frame, just without UIA
-/// elements for this capture.
+/// Safety:
+///   - Binds to exact capture hwnd, not GetForegroundWindow() — alt-tab race
+///     free (Codex C-2).
+///   - Disposes every AutomationElement after walking past it — no COM
+///     handle leak on deep trees (Codex C-1).
+///   - Wall-clock budget caps walk time even on pathological trees (Codex M-2).
+///   - Fail-closed: any exception returns empty list, logs with exception
+///     type name for diagnostic (Codex M-5).
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal sealed class FlaUiElementExtractor : IUiaElementExtractor
@@ -31,7 +37,7 @@ internal sealed class FlaUiElementExtractor : IUiaElementExtractor
         _logger = logger;
     }
 
-    /// <summary>Control types we keep. Everything else (pure layout containers, static text) is skipped.</summary>
+    /// <summary>Control types we keep. Everything else is skipped.</summary>
     private static readonly HashSet<ControlType> InterestingTypes = new()
     {
         ControlType.Button,
@@ -46,54 +52,74 @@ internal sealed class FlaUiElementExtractor : IUiaElementExtractor
         ControlType.Hyperlink,
     };
 
-    public async Task<IReadOnlyList<VisualElement>> ExtractAsync(int maxElements, CancellationToken ct)
+    /// <summary>Max wall-clock time for one walk (Codex M-2).</summary>
+    private static readonly TimeSpan WalkBudget = TimeSpan.FromMilliseconds(1500);
+
+    public async Task<IReadOnlyList<VisualElement>> ExtractAsync(
+        ScreenBytes screen,
+        int maxElements,
+        CancellationToken ct)
     {
         if (!OperatingSystem.IsWindows()) return Array.Empty<VisualElement>();
         if (maxElements <= 0) return Array.Empty<VisualElement>();
 
-        return await Task.Run<IReadOnlyList<VisualElement>>(() =>
+        var hwnd = (IntPtr)screen.Hwnd;
+        if (hwnd == IntPtr.Zero)
         {
-            try
+            _logger.Debug("FlaUiElementExtractor: screen.Hwnd is 0 (capture didn't record hwnd)");
+            return Array.Empty<VisualElement>();
+        }
+
+        return await Task.Run<IReadOnlyList<VisualElement>>(() => Walk(hwnd, maxElements, ct), ct);
+    }
+
+    private IReadOnlyList<VisualElement> Walk(IntPtr hwnd, int maxElements, CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        UIA2Automation? automation = null;
+        var results = new List<VisualElement>(Math.Min(maxElements, 256));
+
+        try
+        {
+            automation = new UIA2Automation();
+            var window = automation.FromHandle(hwnd);
+            if (window == null)
             {
-                var hwnd = GetForegroundWindow();
-                if (hwnd == IntPtr.Zero)
+                _logger.Debug("FlaUiElementExtractor: UIA FromHandle returned null for 0x{Hwnd:X}", hwnd.ToInt64());
+                return Array.Empty<VisualElement>();
+            }
+
+            // Walk breadth-first. We dispose elements after we've read them AND
+            // enqueued their children so COM handles don't pile up (Codex C-1).
+            var queue = new Queue<AutomationElement>();
+            queue.Enqueue(window);
+
+            while (queue.Count > 0 && results.Count < maxElements)
+            {
+                if (ct.IsCancellationRequested) break;
+                if (sw.Elapsed >= WalkBudget)
                 {
-                    _logger.Debug("FlaUiElementExtractor: no foreground window");
-                    return Array.Empty<VisualElement>();
+                    _logger.Debug(
+                        "FlaUiElementExtractor: wall-clock budget reached at {Ms}ms, stopping walk with {Count}/{Max}",
+                        sw.ElapsedMilliseconds, results.Count, maxElements);
+                    break;
                 }
 
-                using var automation = new UIA2Automation();
-                var window = automation.FromHandle(hwnd);
-                if (window == null)
+                var el = queue.Dequeue();
+                try
                 {
-                    _logger.Debug("FlaUiElementExtractor: automation returned null for hwnd {Handle}", hwnd);
-                    return Array.Empty<VisualElement>();
-                }
-
-                var results = new List<VisualElement>(Math.Min(maxElements, 256));
-                var queue = new Queue<AutomationElement>();
-                queue.Enqueue(window);
-
-                while (queue.Count > 0 && results.Count < maxElements)
-                {
-                    if (ct.IsCancellationRequested) break;
-                    var el = queue.Dequeue();
-
-                    try
+                    if (el.Properties.ControlType.IsSupported)
                     {
-                        if (el.Properties.ControlType.IsSupported)
+                        var ctrlType = el.Properties.ControlType.ValueOrDefault;
+                        if (InterestingTypes.Contains(ctrlType))
                         {
-                            var ctrlType = el.Properties.ControlType.ValueOrDefault;
-                            if (InterestingTypes.Contains(ctrlType))
+                            var role = ctrlType.ToString();
+                            var name = el.Properties.Name.ValueOrDefault;
+                            var bounds = el.Properties.BoundingRectangle.ValueOrDefault;
+
+                            // Skip zero-size or off-screen elements.
+                            if (bounds.Width > 0 && bounds.Height > 0)
                             {
-                                var role = ctrlType.ToString();
-                                var name = el.Properties.Name.ValueOrDefault;
-                                var bounds = el.Properties.BoundingRectangle.ValueOrDefault;
-
-                                // Skip zero-size or off-screen elements — likely
-                                // invisible/clipped, not useful to reasoning.
-                                if (bounds.Width <= 0 || bounds.Height <= 0) continue;
-
                                 results.Add(new VisualElement
                                 {
                                     Role = role,
@@ -101,39 +127,51 @@ internal sealed class FlaUiElementExtractor : IUiaElementExtractor
                                     Bounds = new VisionRect(
                                         (int)bounds.X, (int)bounds.Y,
                                         (int)bounds.Width, (int)bounds.Height),
-                                    Confidence = 1.0, // UIA is deterministic, not probabilistic
+                                    Confidence = 1.0,
                                 });
                             }
                         }
-
-                        // Breadth-first walk through children. Cap depth via queue size.
-                        var children = el.FindAllChildren();
-                        foreach (var c in children)
-                        {
-                            if (queue.Count + results.Count >= maxElements * 4) break;
-                            queue.Enqueue(c);
-                        }
                     }
-                    catch (Exception ex)
+
+                    // Enqueue children. Leaves the children in the queue for
+                    // later processing + disposal.
+                    var children = el.FindAllChildren();
+                    foreach (var c in children)
                     {
-                        // Individual element failures shouldn't abort the whole walk.
-                        _logger.Debug(ex, "FlaUiElementExtractor: element walk skipped one node");
+                        if (queue.Count + results.Count >= maxElements * 4) break;
+                        queue.Enqueue(c);
                     }
                 }
+                catch (Exception ex)
+                {
+                    // Individual element walk failures shouldn't abort the
+                    // whole walk. Log with type name for COM diagnosis.
+                    _logger.Debug(
+                        "FlaUiElementExtractor: skipped node (exception {Type}: {Msg})",
+                        ex.GetType().FullName, ex.Message);
+                }
+                // No per-element Dispose — FlaUI AutomationElement's UIA native
+                // handle is owned by the UIA2Automation instance. Disposing
+                // UIA2Automation (in the outer finally) releases all derived
+                // elements together.
+            }
 
-                _logger.Debug(
-                    "FlaUiElementExtractor: extracted {Count} elements (max={Max})",
-                    results.Count, maxElements);
-                return results;
-            }
-            catch (Exception ex)
-            {
-                _logger.Warning(ex, "FlaUiElementExtractor: UIA walk failed");
-                return Array.Empty<VisualElement>();
-            }
-        }, ct);
+            _logger.Debug(
+                "FlaUiElementExtractor: extracted {Count} elements in {Ms}ms (max={Max})",
+                results.Count, sw.ElapsedMilliseconds, maxElements);
+            return results;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(
+                "FlaUiElementExtractor: UIA walk failed ({Type}: {Msg})",
+                ex.GetType().FullName, ex.Message);
+            return Array.Empty<VisualElement>();
+        }
+        finally
+        {
+            automation?.Dispose();
+        }
     }
 
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
 }

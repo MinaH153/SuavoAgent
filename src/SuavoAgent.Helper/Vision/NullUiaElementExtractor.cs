@@ -8,6 +8,9 @@ namespace SuavoAgent.Helper.Vision;
 /// </summary>
 internal sealed class NullUiaElementExtractor : IUiaElementExtractor
 {
-    public Task<IReadOnlyList<VisualElement>> ExtractAsync(int maxElements, CancellationToken ct) =>
+    public Task<IReadOnlyList<VisualElement>> ExtractAsync(
+        ScreenBytes screen,
+        int maxElements,
+        CancellationToken ct) =>
         Task.FromResult<IReadOnlyList<VisualElement>>(Array.Empty<VisualElement>());
 }

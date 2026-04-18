@@ -9,8 +9,9 @@ namespace SuavoAgent.Helper.Vision;
 /// carries both pixel-rendered text regions AND deterministic UIA element
 /// metadata, giving downstream reasoning the richest possible view.
 ///
-/// Lifecycle: each inner extractor manages its own state. This composite is
-/// a pure orchestrator.
+/// Cancellation semantics (Codex M-3): if one inner extractor throws, the
+/// surviving task is immediately cancelled via a linked CTS so we don't leak
+/// CPU on an already-failed compose call.
 /// </summary>
 internal sealed class CompositeScreenExtractor : IScreenExtractor
 {
@@ -36,11 +37,12 @@ internal sealed class CompositeScreenExtractor : IScreenExtractor
     {
         var sw = Stopwatch.StartNew();
 
-        // Parallel: text extraction is CPU-bound on Tesseract, UIA query is
-        // blocking on the UI thread. Running them concurrently reduces total
-        // latency to roughly max(text, uia) instead of their sum.
-        var textTask = _textInner.ExtractAsync(screen, ct);
-        var uiaTask = _uiaInner.ExtractAsync(_maxUiaElements, ct);
+        // Linked CTS so one inner failure cancels the sibling (Codex M-3).
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var token = linked.Token;
+
+        var textTask = _textInner.ExtractAsync(screen, token);
+        var uiaTask = _uiaInner.ExtractAsync(screen, _maxUiaElements, token);
 
         ScreenFrame? textFrame;
         IReadOnlyList<VisualElement> elements;
@@ -53,14 +55,25 @@ internal sealed class CompositeScreenExtractor : IScreenExtractor
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            linked.Cancel();
             throw;
+        }
+        catch
+        {
+            // Cancel the surviving task so it doesn't waste CPU on a
+            // composite we're about to discard.
+            linked.Cancel();
+            // Recover whatever completed — the composite contract is fail-soft:
+            // one branch's failure shouldn't block the other branch's output.
+            textFrame = textTask.IsCompletedSuccessfully ? await textTask : null;
+            elements = uiaTask.IsCompletedSuccessfully
+                ? await uiaTask
+                : Array.Empty<VisualElement>();
         }
 
         sw.Stop();
 
-        // If text extractor failed, still emit a frame with UIA elements only —
-        // UIA is deterministic, we don't need probabilistic text to have useful
-        // structure.
+        // If text extractor failed, still emit a frame with UIA elements only.
         if (textFrame == null)
         {
             return new ScreenFrame

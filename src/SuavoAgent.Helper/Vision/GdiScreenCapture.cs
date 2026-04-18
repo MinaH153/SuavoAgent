@@ -67,10 +67,15 @@ public sealed class GdiScreenCapture : IScreenCapture
                 bitmap.Save(ms, ImageFormat.Png);
                 var png = ms.ToArray();
 
-                _logger.Debug("GdiScreenCapture: captured {W}x{H}, {Bytes} bytes",
-                    width, height, png.Length);
+                // Capture hwnd AT THE SAME TIME as the pixels so downstream UIA
+                // binds to this specific window, not whatever is frontmost a
+                // few milliseconds later (Codex C-2).
+                var hwnd = GetForegroundWindow().ToInt64();
 
-                return new ScreenBytes(png, width, height, DateTimeOffset.UtcNow);
+                _logger.Debug("GdiScreenCapture: captured {W}x{H}, {Bytes} bytes, hwnd=0x{Hwnd:X}",
+                    width, height, png.Length, hwnd);
+
+                return new ScreenBytes(png, width, height, DateTimeOffset.UtcNow, hwnd);
             }
             catch (Exception ex)
             {
@@ -109,4 +114,7 @@ public sealed class GdiScreenCapture : IScreenCapture
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
 }
