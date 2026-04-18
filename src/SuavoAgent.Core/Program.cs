@@ -410,7 +410,13 @@ try
     // (malformed rule catalog, tampered model, etc.) crashes the host
     // immediately rather than surfacing the first time a worker calls in.
     _ = host.Services.GetRequiredService<RuleEngine>();
-    _ = host.Services.GetRequiredService<TieredBrain>();
+    var brain = host.Services.GetRequiredService<TieredBrain>();
+
+    // Startup smoke probe — shadow-mode decision to prove the full brain
+    // wiring is invocable. Logs one line so operators can confirm at a glance.
+    await BrainStartupProbe.RunAsync(
+        brain,
+        host.Services.GetRequiredService<ILogger<Program>>());
 
     var pipeServer = host.Services.GetRequiredService<IpcPipeServer>();
     pipeServer.Start(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
