@@ -275,6 +275,129 @@ public class RuleEngineTests
         Assert.Equal(MatchOutcome.NoMatch, result.Outcome);
     }
 
+    // --- Precondition gating (Codex M-4) -------------------------------------
+
+    [Fact]
+    public void Evaluate_Precondition_AutonomousOkFalse_BlocksOtherSkills()
+    {
+        var gate = new Rule
+        {
+            Id = "gate-active-call",
+            SkillId = RuleEngine.PreconditionsSkill,
+            Priority = 1000,
+            AutonomousOk = false,
+            When = new RulePredicate
+            {
+                StateFlags = new Dictionary<string, string> { ["active_call"] = "true" },
+            },
+            Then = new[] { new RuleActionSpec { Type = RuleActionType.AskOperator } },
+        };
+        var skillRule = Rule("step", "pricing-lookup");
+        var engine = new RuleEngine(new[] { gate, skillRule }, Log);
+
+        var ctx = new RuleContext
+        {
+            SkillId = "pricing-lookup",
+            Flags = new Dictionary<string, string> { ["active_call"] = "true" },
+        };
+
+        var result = engine.Evaluate(ctx);
+
+        Assert.Equal(MatchOutcome.Blocked, result.Outcome);
+        Assert.Equal("gate-active-call", result.MatchedRule!.Id);
+    }
+
+    [Fact]
+    public void Evaluate_Precondition_AutonomousOk_DoesNotBlockSkillEvaluation()
+    {
+        var gate = new Rule
+        {
+            Id = "gate-idle",
+            SkillId = RuleEngine.PreconditionsSkill,
+            Priority = 1000,
+            AutonomousOk = true,
+            When = new RulePredicate { OperatorIdleMsAtLeast = 1000 },
+            Then = new[] { new RuleActionSpec { Type = RuleActionType.Log } },
+        };
+        var skillRule = Rule("step", "pricing-lookup");
+        var engine = new RuleEngine(new[] { gate, skillRule }, Log);
+
+        var ctx = new RuleContext
+        {
+            SkillId = "pricing-lookup",
+            OperatorIdleMs = 5000,
+        };
+
+        var result = engine.Evaluate(ctx);
+
+        Assert.Equal(MatchOutcome.Matched, result.Outcome);
+        Assert.Equal("step", result.MatchedRule!.Id);
+    }
+
+    [Fact]
+    public void Evaluate_PreconditionsSkill_DoesNotRecurse()
+    {
+        // Evaluating the preconditions skill itself must not trigger the
+        // precondition pre-sweep (infinite recursion or double-match).
+        var gate = new Rule
+        {
+            Id = "gate-call",
+            SkillId = RuleEngine.PreconditionsSkill,
+            Priority = 1000,
+            AutonomousOk = false,
+            When = new RulePredicate
+            {
+                StateFlags = new Dictionary<string, string> { ["active_call"] = "true" },
+            },
+            Then = new[] { new RuleActionSpec { Type = RuleActionType.AskOperator } },
+        };
+        var engine = new RuleEngine(new[] { gate }, Log);
+
+        // Asking the preconditions skill with active_call=true — matches the
+        // rule, returns Blocked. That is the normal behavior of Evaluate on
+        // an autonomousOk=false rule, NOT precondition pre-sweep.
+        var result = engine.Evaluate(new RuleContext
+        {
+            SkillId = RuleEngine.PreconditionsSkill,
+            Flags = new Dictionary<string, string> { ["active_call"] = "true" },
+        });
+
+        Assert.Equal(MatchOutcome.Blocked, result.Outcome);
+        Assert.Equal("gate-call", result.MatchedRule!.Id);
+    }
+
+    // --- Glob / regex safety (Codex M-7) -------------------------------------
+
+    [Fact]
+    public void GlobMatch_NoCrashOnEmptyPattern()
+    {
+        Assert.False(RuleEngine.GlobMatch("", "anything"));
+    }
+
+    [Fact]
+    public void ValidatePredicate_EmptyProcessName_Throws()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            RuleEngine.ValidatePredicate(new RulePredicate { ProcessName = "  " }, "r1"));
+    }
+
+    [Fact]
+    public void ValidatePredicate_InvalidWindowTitleRegex_Throws()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            RuleEngine.ValidatePredicate(new RulePredicate { WindowTitlePattern = "(unclosed" }, "r1"));
+    }
+
+    [Fact]
+    public void ValidatePredicate_ValidPatterns_DoNotThrow()
+    {
+        RuleEngine.ValidatePredicate(new RulePredicate
+        {
+            ProcessName = "PioneerPharmacy*",
+            WindowTitlePattern = "Edit .*",
+        }, "r1");
+    }
+
     // --- Thread safety smoke -------------------------------------------------
 
     [Fact]

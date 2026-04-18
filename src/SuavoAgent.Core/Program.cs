@@ -231,8 +231,8 @@ try
             "SuavoAgent", "rules");
 
         var rules = new List<SuavoAgent.Contracts.Reasoning.Rule>();
-        rules.AddRange(loader.LoadFromDirectory(bundledDir));
-        rules.AddRange(loader.LoadFromDirectory(overrideDir));
+        rules.AddRange(loader.LoadFromDirectory(bundledDir, required: true));
+        rules.AddRange(loader.LoadFromDirectory(overrideDir, required: false));
 
         var engine = new RuleEngine(rules, log);
         Log.Information("RuleEngine loaded {Count} rules across {Skills} skill(s): {SkillList}",
@@ -367,6 +367,10 @@ try
         foreach (var ph in runtimeOpts.Pharmacies)
             ph.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(ph.SqlPassword);
     }
+
+    // Eager-resolve RuleEngine so a malformed rule catalog crashes the host
+    // at startup instead of deferring until the first evaluation.
+    _ = host.Services.GetRequiredService<RuleEngine>();
 
     var pipeServer = host.Services.GetRequiredService<IpcPipeServer>();
     pipeServer.Start(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);

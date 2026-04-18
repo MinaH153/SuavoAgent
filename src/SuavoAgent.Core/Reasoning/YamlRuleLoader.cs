@@ -34,21 +34,31 @@ public sealed class YamlRuleLoader
     public YamlRuleLoader(ILogger<YamlRuleLoader> logger)
     {
         _logger = logger;
+        // Do NOT ignore unmatched properties — a typoed key in the shipped
+        // catalog is a bug we want to surface at startup, not silently drop.
         _yaml = new DeserializerBuilder()
             .WithNamingConvention(CamelCaseNamingConvention.Instance)
-            .IgnoreUnmatchedProperties()
             .Build();
     }
 
     /// <summary>
     /// Parses every *.yaml file under the given directory into a Rule catalog.
-    /// Missing directory returns empty catalog. Any parse/validation error throws.
+    /// <para>
+    /// When <paramref name="required"/> is true, a missing directory throws —
+    /// used for the bundled catalog. When false, a missing directory returns
+    /// empty — used for the operator-override directory on ProgramData.
+    /// </para>
     /// </summary>
-    public IReadOnlyList<Rule> LoadFromDirectory(string directory)
+    public IReadOnlyList<Rule> LoadFromDirectory(string directory, bool required = false)
     {
         if (!Directory.Exists(directory))
         {
-            _logger.LogWarning("RuleLoader: directory {Dir} does not exist — loading empty catalog", directory);
+            if (required)
+            {
+                throw new InvalidOperationException(
+                    $"RuleLoader: required rules directory missing: {directory}");
+            }
+            _logger.LogDebug("RuleLoader: optional directory {Dir} not present", directory);
             return Array.Empty<Rule>();
         }
 
@@ -83,6 +93,12 @@ public sealed class YamlRuleLoader
     /// </summary>
     public IReadOnlyList<Rule> ParseYaml(string yamlText, string? source = null)
     {
+        // Empty document = empty catalog, only acceptable for an explicit
+        // operator-supplied override file. Bundled shipped files must always
+        // contain rules; the loader is invoked once per file.
+        if (string.IsNullOrWhiteSpace(yamlText))
+            return Array.Empty<Rule>();
+
         RuleFile? doc;
         try
         {
@@ -94,7 +110,15 @@ public sealed class YamlRuleLoader
                 $"RuleLoader: malformed YAML in {source ?? "input"} — {ex.Message}", ex);
         }
 
-        if (doc?.Rules == null || doc.Rules.Count == 0)
+        if (doc == null)
+            throw new InvalidOperationException(
+                $"RuleLoader: YAML root is not a mapping in {source ?? "input"}");
+
+        if (doc.Rules == null)
+            throw new InvalidOperationException(
+                $"RuleLoader: YAML in {source ?? "input"} has no 'rules' field");
+
+        if (doc.Rules.Count == 0)
             return Array.Empty<Rule>();
 
         var rules = new List<Rule>(doc.Rules.Count);
@@ -116,6 +140,22 @@ public sealed class YamlRuleLoader
         if (yml.Then == null || yml.Then.Count == 0)
             throw new InvalidOperationException($"Rule '{yml.Id}' has no 'then' actions");
 
+        var when = ToPredicate(yml.When, yml.Id);
+        // [M-7] Validate pattern fields at load so bad regex/glob fail startup.
+        RuleEngine.ValidatePredicate(when, yml.Id);
+
+        var then = yml.Then.Select(a => ToAction(a, yml.Id)).ToList();
+        foreach (var a in then)
+            if (a.VerifyAfter != null)
+                RuleEngine.ValidatePredicate(a.VerifyAfter, yml.Id);
+
+        var rollback = (yml.Rollback ?? new List<YamlAction>())
+            .Select(a => ToAction(a, yml.Id))
+            .ToList();
+        foreach (var a in rollback)
+            if (a.VerifyAfter != null)
+                RuleEngine.ValidatePredicate(a.VerifyAfter, yml.Id);
+
         return new Rule
         {
             Id = yml.Id,
@@ -125,10 +165,9 @@ public sealed class YamlRuleLoader
             AutonomousOk = yml.AutonomousOk ?? true,
             Description = yml.Description,
             MinConfidence = yml.MinConfidence ?? 0.0,
-            When = ToPredicate(yml.When, yml.Id),
-            Then = yml.Then.Select(a => ToAction(a, yml.Id)).ToList(),
-            Rollback = (yml.Rollback ?? new List<YamlAction>())
-                .Select(a => ToAction(a, yml.Id)).ToList(),
+            When = when,
+            Then = then,
+            Rollback = rollback,
         };
     }
 

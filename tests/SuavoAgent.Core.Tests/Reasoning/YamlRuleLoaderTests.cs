@@ -195,10 +195,81 @@ public class YamlRuleLoaderTests
     // --- Directory loading ---------------------------------------------------
 
     [Fact]
-    public void LoadFromDirectory_MissingDirectory_ReturnsEmpty()
+    public void LoadFromDirectory_MissingOptionalDirectory_ReturnsEmpty()
     {
         var rules = NewLoader().LoadFromDirectory("/definitely/does/not/exist");
         Assert.Empty(rules);
+    }
+
+    [Fact]
+    public void LoadFromDirectory_MissingRequiredDirectory_Throws()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            NewLoader().LoadFromDirectory("/definitely/does/not/exist", required: true));
+    }
+
+    // --- Codex M-2 — stricter YAML rejection --------------------------------
+
+    [Fact]
+    public void ParseYaml_RootIsScalar_Throws()
+    {
+        // A raw string as the document root is NOT a mapping — reject.
+        Assert.Throws<InvalidOperationException>(() => NewLoader().ParseYaml("just a string"));
+    }
+
+    [Fact]
+    public void ParseYaml_MissingRulesField_Throws()
+    {
+        // Document with other keys but no `rules:` = operator typo, fail-closed.
+        Assert.Throws<InvalidOperationException>(() => NewLoader().ParseYaml("other: value"));
+    }
+
+    [Fact]
+    public void ParseYaml_TypoedKey_Throws()
+    {
+        // Unknown property — e.g. "rulz:" typo — must fail because we removed
+        // IgnoreUnmatchedProperties so typos can't silently drop rules.
+        const string yaml = """
+        rules:
+          - id: r1
+            skillId: test
+            priorit: 100    # typo
+            when: {}
+            then:
+              - type: Click
+        """;
+        Assert.Throws<InvalidOperationException>(() => NewLoader().ParseYaml(yaml));
+    }
+
+    [Fact]
+    public void ParseYaml_InvalidRegexAtLoad_Throws()
+    {
+        // Pattern validation (M-7) happens at load, not at first evaluation.
+        const string yaml = """
+        rules:
+          - id: r1
+            skillId: test
+            when:
+              windowTitlePattern: "(unclosed"
+            then:
+              - type: Click
+        """;
+        Assert.Throws<InvalidOperationException>(() => NewLoader().ParseYaml(yaml));
+    }
+
+    [Fact]
+    public void ParseYaml_EmptyProcessName_Throws()
+    {
+        const string yaml = """
+        rules:
+          - id: r1
+            skillId: test
+            when:
+              processName: "   "
+            then:
+              - type: Click
+        """;
+        Assert.Throws<InvalidOperationException>(() => NewLoader().ParseYaml(yaml));
     }
 
     [Fact]

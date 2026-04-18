@@ -4,24 +4,13 @@
 # Rules are keyed by SkillId + state signature. The executor walks them in
 # order, falling back to Tier 2 only if no rule matches the current state.
 #
+# Safety preconditions (operator-idle, call-active, PMS focus) live in
+# preconditions.yaml and run automatically before any rule in this file.
+#
 # Maintenance: when PioneerRx changes a control name, update the single
 # matching rule here. No C# recompile needed.
 
 rules:
-  - id: pricing-lookup.require-main-window
-    skillId: pricing-lookup
-    priority: 200
-    description: "Precondition — PioneerRx main window must be visible"
-    autonomousOk: true
-    when:
-      processName: "PioneerPharmacy*"
-      visibleElements: ["Item"]   # top menu bar entry
-      stateFlags:
-        main_window_focused: "true"
-    then:
-      - type: Log
-        description: "PioneerRx ready for pricing workflow"
-
   - id: pricing-lookup.open-item-menu
     skillId: pricing-lookup
     priority: 190
@@ -29,8 +18,7 @@ rules:
     when:
       processName: "PioneerPharmacy*"
       visibleElements: ["Item"]
-      stateFlags:
-        operator_idle_at_least_ms: "500"
+      operatorIdleMsAtLeast: 500
     then:
       - type: Click
         description: "Open Item menu"
@@ -69,32 +57,11 @@ rules:
         parameters:
           controlType: "Edit"
           helpText: "Quick Search"
-      - type: Type
-        description: "Type normalized NDC"
-        parameters:
-          source: "context.ndc"       # resolved at exec time
-      - type: PressKey
-        parameters:
-          key: "Enter"
-      - type: WaitForElement
-        description: "Wait for item to load"
-        parameters:
-          controlType: "Edit"
-          timeoutMs: "2000"
-
-  - id: pricing-lookup.verify-ndc-loaded
-    skillId: pricing-lookup
-    priority: 165
-    description: "Verify the loaded item's NDC matches what we searched for"
-    when:
-      processName: "PioneerPharmacy*"
-      visibleElements: ["Edit Rx Item"]
-    then:
-      - type: VerifyElement
-        description: "Loaded item NDC must contain request.Ndc"
-        parameters:
-          controlType: "Edit"
-          containsFromContext: "ndc"
+      # Executor contracts (Type source, VerifyElement containsFromContext) are
+      # defined in Week 2 when LocalInference + ActionExecutor land. Until then
+      # this rule escalates by design.
+      - type: Escalate
+        description: "Hand off to Tier 2 for parameterized NDC entry + verify"
 
   - id: pricing-lookup.open-pricing-tab
     skillId: pricing-lookup
