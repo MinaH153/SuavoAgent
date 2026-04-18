@@ -10,8 +10,14 @@ namespace SuavoAgent.Helper.Vision;
 /// so PHI scrubbing is enforced by construction — callers CANNOT accidentally
 /// use an un-scrubbed extractor (Codex suggestion).
 ///
-/// Raw extractor classes (NullScreenExtractor, TesseractScreenExtractor,
-/// future PhiVisionExtractor) are internal to this assembly.
+/// Selection matrix (picks the richest available):
+///
+///   Tesseract reachable  +  Windows UIA  → CompositeScreenExtractor
+///   Tesseract reachable  +  no UIA       → TesseractScreenExtractor
+///   Tesseract missing    +  Windows UIA  → CompositeScreenExtractor (Null+UIA)
+///   Tesseract missing    +  no UIA       → NullScreenExtractor
+///
+/// Every case is wrapped in PhiScrubbingExtractor.
 /// </summary>
 public static class ScrubbedExtractorFactory
 {
@@ -24,26 +30,38 @@ public static class ScrubbedExtractorFactory
         new PhiScrubbingExtractor(new NullScreenExtractor());
 
     /// <summary>
-    /// Picks the best available extractor given the config:
-    ///   - Tesseract when Tesseract.Enabled=true AND tessdata path is valid
-    ///   - Null otherwise
-    ///
-    /// Either way, the returned instance is wrapped in PhiScrubbingExtractor.
+    /// Picks the richest available extractor given the config and platform.
+    /// Always wraps in PhiScrubbingExtractor.
     /// </summary>
     public static IScreenExtractor Create(IOptions<AgentOptions> options, ILogger logger)
     {
         var tess = options.Value.Vision.Tesseract;
 
+        // --- Text extraction tier (Tesseract or Null) ---------------------------
+        IScreenExtractor textInner;
         if (tess.Enabled && TesseractIsReachable(tess, logger))
         {
-            logger.Information(
-                "ScrubbedExtractorFactory: selecting Tesseract (language={Lang})",
-                tess.Language);
-            return new PhiScrubbingExtractor(new TesseractScreenExtractor(options, logger));
+            textInner = new TesseractScreenExtractor(options, logger);
+            logger.Information("ScrubbedExtractorFactory: Tesseract selected ({Lang})", tess.Language);
+        }
+        else
+        {
+            textInner = new NullScreenExtractor();
         }
 
-        logger.Debug("ScrubbedExtractorFactory: selecting Null (Tesseract disabled or unreachable)");
-        return new PhiScrubbingExtractor(new NullScreenExtractor());
+        // --- UIA element tier (only on Windows; Helper runs in user session) ----
+        IUiaElementExtractor uiaInner = OperatingSystem.IsWindows()
+            ? new FlaUiElementExtractor(logger)
+            : new NullUiaElementExtractor();
+
+        IScreenExtractor combined = OperatingSystem.IsWindows()
+            ? new CompositeScreenExtractor(textInner, uiaInner)
+            : textInner;
+
+        logger.Information(
+            "ScrubbedExtractorFactory: final extractor = {Id}", combined.ExtractorId);
+
+        return new PhiScrubbingExtractor(combined);
     }
 
     private static bool TesseractIsReachable(TesseractOptions tess, ILogger logger)
