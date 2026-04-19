@@ -214,7 +214,36 @@ try
         new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()));
     builder.Services.AddSingleton<ExcelPricingReader>();
     builder.Services.AddSingleton<ExcelPricingWriter>();
-    builder.Services.AddSingleton<PricingJobRunner>();
+
+    // PricingJobRunner gets an optional TieredBrain evaluator wired only when
+    // Reasoning.PricingBrainEnabled is true. Default: disabled — behavior is
+    // byte-for-byte identical to pre-brain. Enabling lets the brain Halt jobs
+    // on streak failures (Tier-1 rules) or ambiguous states (Tier-2/3).
+    builder.Services.AddSingleton<PricingJobRunner>(sp =>
+    {
+        var reasoning = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
+        PricingBrainEvaluator? evaluator = null;
+        if (reasoning.PricingBrainEnabled)
+        {
+            evaluator = new PricingBrainEvaluator(
+                sp.GetRequiredService<TieredBrain>(),
+                sp.GetRequiredService<ILogger<PricingBrainEvaluator>>());
+            Log.Information(
+                "Pricing brain ENABLED — PricingJobRunner will consult TieredBrain after each NDC lookup");
+        }
+        else
+        {
+            Log.Information(
+                "Pricing brain disabled (Reasoning.PricingBrainEnabled=false) — runner skips TieredBrain");
+        }
+
+        return new PricingJobRunner(
+            sp.GetRequiredService<ExcelPricingReader>(),
+            sp.GetRequiredService<ExcelPricingWriter>(),
+            sp.GetRequiredService<AgentStateDb>(),
+            sp.GetRequiredService<ILogger<PricingJobRunner>>(),
+            evaluator);
+    });
 
     // Tier-1 Reasoning — rule engine. Loaded from bundled Reasoning/Rules
     // alongside optional operator overrides in ProgramData. Fail-closed: a

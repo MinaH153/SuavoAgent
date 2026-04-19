@@ -46,4 +46,7 @@ public static class PricingJobStatus
     public const string Running = "running";
     public const string Completed = "completed";
     public const string Failed = "failed";
+    /// <summary>Stopped mid-run by the TieredBrain (e.g. consecutive-failure
+    /// rule fired). Partial results are in SQLite; operator may resume.</summary>
+    public const string Halted = "halted";
 }

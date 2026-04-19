@@ -80,4 +80,13 @@ public sealed class ReasoningOptions
     /// because it depends on an active Anthropic BAA.
     /// </summary>
     public bool CloudEnabled { get; set; }
+
+    /// <summary>
+    /// When true, PricingJobRunner consults the TieredBrain after every NDC
+    /// lookup and may Halt the job if the brain returns an Escalate /
+    /// AskOperator decision. Default false — opt-in per pharmacy. Tier-1
+    /// rules work even without Tier-2/3 enabled; Tier-2/3 still gate on
+    /// their own flags.
+    /// </summary>
+    public bool PricingBrainEnabled { get; set; }
 }

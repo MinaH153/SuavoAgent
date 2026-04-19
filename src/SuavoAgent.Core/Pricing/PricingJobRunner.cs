@@ -19,6 +19,7 @@ public sealed class PricingJobRunner
     private readonly ExcelPricingWriter _writer;
     private readonly AgentStateDb _db;
     private readonly ILogger<PricingJobRunner> _logger;
+    private readonly PricingBrainEvaluator? _brainEvaluator;
 
     // Timeout per NDC lookup — UIA navigation can be slow
     private static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(30);
@@ -29,12 +30,14 @@ public sealed class PricingJobRunner
         ExcelPricingReader reader,
         ExcelPricingWriter writer,
         AgentStateDb db,
-        ILogger<PricingJobRunner> logger)
+        ILogger<PricingJobRunner> logger,
+        PricingBrainEvaluator? brainEvaluator = null)
     {
         _reader = reader;
         _writer = writer;
         _db = db;
         _logger = logger;
+        _brainEvaluator = brainEvaluator;
     }
 
     /// <summary>
@@ -64,6 +67,9 @@ public sealed class PricingJobRunner
 
         int completed = alreadyDone.Count;
         int failed = 0;
+        int consecutiveFailures = 0;
+        bool haltedByBrain = false;
+        string? haltReason = null;
 
         foreach (var row in pending)
         {
@@ -72,15 +78,55 @@ public sealed class PricingJobRunner
             var result = await LookupNdcAsync(spec.JobId, row, commandClient, ct);
             _db.SavePricingResult(result);
 
-            if (result.Found) completed++;
-            else failed++;
+            if (result.Found)
+            {
+                completed++;
+                consecutiveFailures = 0;
+            }
+            else
+            {
+                failed++;
+                consecutiveFailures++;
+            }
 
             _db.UpsertPricingJob(spec, PricingJobStatus.Running, rows.Count, completed, failed);
 
             _logger.LogDebug("PricingJobRunner: row {Row} NDC {Ndc} → {Supplier} @ {Cost}",
                 row.RowIndex, row.NdcNormalized, result.SupplierName ?? "N/A", result.CostPerUnit?.ToString("F4") ?? "N/A");
 
+            if (_brainEvaluator != null)
+            {
+                var stats = new PricingRunStats
+                {
+                    TotalItems = rows.Count,
+                    CompletedItems = completed,
+                    FailedItems = failed,
+                    ConsecutiveFailures = consecutiveFailures,
+                };
+                var brainDecision = await _brainEvaluator.EvaluateAsync(row, result, stats, ct);
+                if (brainDecision.ShouldHalt)
+                {
+                    haltedByBrain = true;
+                    haltReason = brainDecision.Reason;
+                    _logger.LogWarning(
+                        "PricingJobRunner: brain halted job {JobId} after row {Row} — tier={Tier} reason=\"{Reason}\"",
+                        spec.JobId, row.RowIndex, brainDecision.Tier, brainDecision.Reason);
+                    break;
+                }
+            }
+
             await Task.Delay(InterLookupDelay, ct);
+        }
+
+        if (haltedByBrain)
+        {
+            // Skip the Excel writeback — the job stopped mid-stream, and a
+            // partial writeback would misrepresent a resumable halt as final.
+            _db.UpsertPricingJob(spec, PricingJobStatus.Halted, rows.Count, completed, failed);
+            _logger.LogInformation(
+                "PricingJobRunner: job {JobId} Halted — {Completed}/{Total} found, {Failed} failed, reason=\"{Reason}\"",
+                spec.JobId, completed, rows.Count, failed, haltReason);
+            return new PricingJobProgress(spec.JobId, rows.Count, completed, failed, PricingJobStatus.Halted);
         }
 
         // Write all results (including previously completed rows) back to Excel
