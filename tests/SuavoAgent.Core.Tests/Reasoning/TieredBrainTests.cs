@@ -203,16 +203,136 @@ public class TieredBrainTests
         Assert.Contains("not allowed", string.Join(" ", decision.Verification.FailedChecks));
     }
 
+    // --- Tier 3 cloud escalation --------------------------------------------
+
+    [Fact]
+    public async Task Decide_Tier2Null_EscalatesToTier3_WhenCloudEnabled()
+    {
+        var mock = new MockLocalInference();
+        mock.Responses.Enqueue(null); // Tier-2 fails
+        var cloud = new MockCloudReasoning();
+        cloud.EnqueueApproved(RuleActionType.VerifyElement, 0.95, ("name", "Save"));
+
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock, cloud: cloud);
+
+        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
+
+        Assert.Equal(MatchOutcome.Matched, decision.Outcome);
+        Assert.Equal(DecisionTier.CloudInference, decision.Tier);
+        Assert.Equal(1, cloud.CallCount);
+        Assert.Equal("mock-cloud", decision.Proposal!.ModelId);
+    }
+
+    [Fact]
+    public async Task Decide_Tier2LowConfidence_EscalatesToTier3()
+    {
+        // Tier-2 returns 0.40 (below 0.5 cloud-escalation threshold).
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.VerifyElement, 0.40, ("name", "Save"));
+        var cloud = new MockCloudReasoning();
+        cloud.EnqueueApproved(RuleActionType.VerifyElement, 0.92, ("name", "Save"));
+
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock, cloud: cloud);
+
+        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
+
+        Assert.Equal(DecisionTier.CloudInference, decision.Tier);
+        Assert.Equal(1, cloud.CallCount);
+        Assert.Equal(0.92, decision.Proposal!.Confidence);
+    }
+
+    [Fact]
+    public async Task Decide_Tier2HighConfidence_DoesNotCallTier3()
+    {
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.VerifyElement, 0.95, ("name", "Save"));
+        var cloud = new MockCloudReasoning();
+
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock, cloud: cloud);
+
+        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
+
+        Assert.Equal(DecisionTier.LocalInference, decision.Tier);
+        Assert.Equal(0, cloud.CallCount);
+    }
+
+    [Fact]
+    public async Task Decide_Tier3DeclinesAfterTier2Null_OperatorRequired()
+    {
+        var mock = new MockLocalInference();
+        mock.Responses.Enqueue(null);
+        var cloud = new MockCloudReasoning();
+        cloud.Responses.Enqueue(null); // cloud also bails
+
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock, cloud: cloud);
+
+        var decision = await brain.DecideAsync(Ctx("s1"));
+
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.Equal(1, cloud.CallCount);
+    }
+
+    [Fact]
+    public async Task Decide_CloudDisabled_SkipsTier3()
+    {
+        var mock = new MockLocalInference();
+        mock.Responses.Enqueue(null);
+        var cloud = new MockCloudReasoning { IsEnabled = false };
+
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock, cloud: cloud);
+
+        var decision = await brain.DecideAsync(Ctx("s1"));
+
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.Equal(0, cloud.CallCount);
+    }
+
+    [Fact]
+    public async Task Decide_Tier2NotReady_StillTriesTier3()
+    {
+        var mock = new MockLocalInference { IsReady = false };
+        var cloud = new MockCloudReasoning();
+        cloud.EnqueueApproved(RuleActionType.VerifyElement, 0.95, ("name", "Save"));
+
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock, cloud: cloud);
+
+        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
+
+        Assert.Equal(DecisionTier.CloudInference, decision.Tier);
+        Assert.Equal(1, cloud.CallCount);
+        Assert.Equal(0, mock.CallCount);
+    }
+
+    [Fact]
+    public async Task Decide_Tier3Throws_FallsBackToTier2Proposal()
+    {
+        // Tier-2 gives a low-confidence proposal; Tier-3 throws; we should
+        // still verify/route the Tier-2 proposal instead of losing it.
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.VerifyElement, 0.40, ("name", "Save"));
+        var cloud = new MockCloudReasoning { ThrowOnPropose = true };
+
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock, cloud: cloud);
+
+        var decision = await brain.DecideAsync(Ctx("s1", visible: new[] { "Save" }));
+
+        // Tier-2's 0.40 is below the verifier's 0.85 spec floor → operator.
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.NotNull(decision.Proposal);
+        Assert.Equal("mock", decision.Proposal!.ModelId);
+    }
+
     // --- helpers ------------------------------------------------------------
 
     private static TieredBrain Brain(
         IEnumerable<Rule> rules,
         MockLocalInference mock,
-        bool autoExecuteDestructive = false)
+        bool autoExecuteDestructive = false,
+        ICloudReasoning? cloud = null)
     {
         var engine = new RuleEngine(rules, NullLogger<RuleEngine>.Instance);
         var verifier = new ActionVerifier(autoExecuteDestructive);
-        return new TieredBrain(engine, mock, verifier, NullLogger<TieredBrain>.Instance);
+        return new TieredBrain(engine, mock, verifier, NullLogger<TieredBrain>.Instance, cloud);
     }
 
     private static Rule ClickRule(string id, string skillId, string name) =>

@@ -72,4 +72,12 @@ public sealed class ReasoningOptions
     /// ~800 MB RAM occupation on pharmacy PCs that may have 8 GB total.
     /// </summary>
     public int IdleUnloadSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Tier-3 (Cloud Claude) escalation. When true and an agent ApiKey is
+    /// present, low-confidence / missing Tier-2 proposals are escalated to
+    /// the cloud reasoning endpoint. Default false — opt-in per pharmacy
+    /// because it depends on an active Anthropic BAA.
+    /// </summary>
+    public bool CloudEnabled { get; set; }
 }

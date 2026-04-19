@@ -291,6 +291,30 @@ try
         return new LLamaLocalInference(agentOpts, verify.Path!, llmLog);
     });
 
+    // Tier-3 Reasoning — cloud Claude via /api/agent/reason. Opt-in via
+    // Reasoning.CloudEnabled + the standard ApiKey (shared with heartbeat/sync).
+    // No ApiKey means NullCloudReasoning, which TieredBrain treats as "skip Tier-3".
+    builder.Services.AddSingleton<ICloudReasoning>(sp =>
+    {
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        if (!opts.Reasoning.CloudEnabled || string.IsNullOrWhiteSpace(opts.ApiKey))
+        {
+            Log.Information("Tier-3 CloudReasoning disabled (CloudEnabled={Enabled}, ApiKey={HasKey})",
+                opts.Reasoning.CloudEnabled, !string.IsNullOrWhiteSpace(opts.ApiKey));
+            return new NullCloudReasoning();
+        }
+
+        var signer = sp.GetService<IPostSigner>();
+        if (signer == null)
+        {
+            Log.Warning("Tier-3 CloudReasoning enabled but IPostSigner not registered — disabling");
+            return new NullCloudReasoning();
+        }
+
+        Log.Information("Tier-3 CloudReasoning ENABLED — will escalate low-confidence Tier-2 proposals");
+        return new ClaudeCloudReasoning(signer, sp.GetRequiredService<ILogger<ClaudeCloudReasoning>>());
+    });
+
     builder.Services.AddSingleton<TieredBrain>();
 
     builder.Services.AddSingleton<IpcPipeServer>(sp =>

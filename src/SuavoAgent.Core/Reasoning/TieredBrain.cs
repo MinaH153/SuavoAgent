@@ -38,6 +38,8 @@ public enum DecisionTier
     Rules,
     /// <summary>Local LLM proposed and verifier approved.</summary>
     LocalInference,
+    /// <summary>Cloud Claude proposed and verifier approved.</summary>
+    CloudInference,
     /// <summary>No tier could decide — operator must act.</summary>
     OperatorRequired,
     /// <summary>Tier 1 blocked by precondition before anything else ran.</summary>
@@ -55,19 +57,31 @@ public sealed class TieredBrain
 {
     private readonly RuleEngine _rules;
     private readonly ILocalInference _localInference;
+    private readonly ICloudReasoning _cloudReasoning;
     private readonly ActionVerifier _verifier;
     private readonly ILogger<TieredBrain> _logger;
+
+    /// <summary>
+    /// Tier-2 proposals below this confidence escalate to Tier-3 instead of
+    /// going straight to the verifier. Keeps Tier-2 autonomy for clear cases
+    /// while letting the cloud (with Claude-grade reasoning) second-guess the
+    /// borderline ones. 0.5 is deliberately soft — the verifier still has
+    /// final say per action class.
+    /// </summary>
+    private const double CloudEscalationConfidence = 0.5;
 
     public TieredBrain(
         RuleEngine rules,
         ILocalInference localInference,
         ActionVerifier verifier,
-        ILogger<TieredBrain> logger)
+        ILogger<TieredBrain> logger,
+        ICloudReasoning? cloudReasoning = null)
     {
         _rules = rules;
         _localInference = localInference;
         _verifier = verifier;
         _logger = logger;
+        _cloudReasoning = cloudReasoning ?? new NullCloudReasoning();
     }
 
     /// <summary>
@@ -112,17 +126,6 @@ public sealed class TieredBrain
         // --- Tier 2: local inference -------------------------------------------
         // Note: IsReady here now means "configured and verified" (Codex M-1),
         // not "already loaded in RAM". Lazy-load happens inside ProposeAsync.
-        if (!_localInference.IsReady)
-        {
-            _logger.LogInformation("TieredBrain: Tier 2 unavailable — escalating to operator");
-            return new BrainDecision
-            {
-                Outcome = MatchOutcome.NoMatch,
-                Tier = DecisionTier.OperatorRequired,
-                Reason = "Local inference not ready; operator must act",
-            };
-        }
-
         var request = new InferenceRequest
         {
             Context = ctx,
@@ -133,39 +136,81 @@ public sealed class TieredBrain
             AllowedActions = allowedTier2Actions ?? InferenceRequest.SafeDefault,
         };
 
-        InferenceProposal? proposal;
-        try
+        InferenceProposal? proposal = null;
+        string tier2Reason = "Local inference disabled";
+        var tier2Source = DecisionTier.LocalInference;
+
+        if (_localInference.IsReady)
         {
-            proposal = await _localInference.ProposeAsync(request, ct);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            // Caller canceled — propagate instead of masking as an escalation
-            // (Codex M-2). Upstream workers need to see cancellation so they
-            // can tear down cleanly.
-            throw;
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogWarning("TieredBrain: Tier 2 timed out");
-            return new BrainDecision
+            try
             {
-                Outcome = MatchOutcome.NoMatch,
-                Tier = DecisionTier.OperatorRequired,
-                Reason = "Local inference timed out",
-            };
-        }
-        catch (Exception ex)
-        {
-            // Defense-in-depth: the interface contract says don't throw, but if
-            // an implementation does, we must not crash the caller.
-            _logger.LogWarning(ex, "TieredBrain: Tier 2 threw unexpectedly");
-            return new BrainDecision
+                proposal = await _localInference.ProposeAsync(request, ct);
+                if (proposal == null)
+                    tier2Reason = "Local inference returned no proposal";
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                Outcome = MatchOutcome.NoMatch,
-                Tier = DecisionTier.OperatorRequired,
-                Reason = "Local inference error",
-            };
+                // Caller canceled — propagate instead of masking as an escalation
+                // (Codex M-2). Upstream workers need to see cancellation so they
+                // can tear down cleanly.
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("TieredBrain: Tier 2 timed out");
+                tier2Reason = "Local inference timed out";
+            }
+            catch (Exception ex)
+            {
+                // Defense-in-depth: the interface contract says don't throw, but if
+                // an implementation does, we must not crash the caller.
+                _logger.LogWarning(ex, "TieredBrain: Tier 2 threw unexpectedly");
+                tier2Reason = "Local inference error";
+            }
+        }
+        else
+        {
+            _logger.LogDebug("TieredBrain: Tier 2 not ready — considering Tier 3");
+        }
+
+        // --- Tier 3: cloud reasoning (Claude) ----------------------------------
+        // Escalate to the cloud whenever Tier-2 couldn't confidently decide:
+        //   • Tier-2 disabled / not ready
+        //   • Tier-2 returned null (timeout, grammar failure, model error)
+        //   • Tier-2 returned a low-confidence proposal
+        // When Tier-3 also declines, we fall back to Tier-2's proposal (if any)
+        // so the verifier can still route it to operator approval.
+        var shouldTryCloud = _cloudReasoning.IsEnabled
+            && (proposal == null || proposal.Confidence < CloudEscalationConfidence);
+
+        if (shouldTryCloud)
+        {
+            try
+            {
+                var cloudProposal = await _cloudReasoning.ProposeAsync(request, tier2Reason, ct);
+                if (cloudProposal != null)
+                {
+                    proposal = cloudProposal;
+                    tier2Source = DecisionTier.CloudInference;
+                    _logger.LogInformation(
+                        "TieredBrain: Tier 3 cloud proposed {Action} (confidence {Conf:F2})",
+                        cloudProposal.Action.Type, cloudProposal.Confidence);
+                }
+                else
+                {
+                    _logger.LogDebug("TieredBrain: Tier 3 declined — no cloud proposal");
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // ICloudReasoning.ProposeAsync is contractually fail-closed;
+                // this catch is defense-in-depth only.
+                _logger.LogWarning(ex, "TieredBrain: Tier 3 threw unexpectedly");
+            }
         }
 
         if (proposal == null)
@@ -174,11 +219,11 @@ public sealed class TieredBrain
             {
                 Outcome = MatchOutcome.NoMatch,
                 Tier = DecisionTier.OperatorRequired,
-                Reason = "Local inference returned no proposal",
+                Reason = tier2Reason,
             };
         }
 
-        // --- Verifier (mandatory for every Tier 2 proposal) --------------------
+        // --- Verifier (mandatory for every Tier 2/3 proposal) ------------------
         var verification = _verifier.Verify(proposal, request);
 
         switch (verification.Outcome)
@@ -187,12 +232,12 @@ public sealed class TieredBrain
                 if (shadowMode)
                 {
                     _logger.LogInformation(
-                        "TieredBrain: [SHADOW] Tier 2 would have executed {Action}",
-                        proposal.Action.Type);
+                        "TieredBrain: [SHADOW] {Tier} would have executed {Action}",
+                        tier2Source, proposal.Action.Type);
                     return new BrainDecision
                     {
                         Outcome = MatchOutcome.NoMatch,
-                        Tier = DecisionTier.LocalInference,
+                        Tier = tier2Source,
                         Proposal = proposal,
                         Verification = verification,
                         Reason = $"Shadow mode — approved proposal not executed",
@@ -200,12 +245,12 @@ public sealed class TieredBrain
                 }
 
                 _logger.LogInformation(
-                    "TieredBrain: Tier 2 approved {Action} (confidence {Conf:F2})",
-                    proposal.Action.Type, proposal.Confidence);
+                    "TieredBrain: {Tier} approved {Action} (confidence {Conf:F2})",
+                    tier2Source, proposal.Action.Type, proposal.Confidence);
                 return new BrainDecision
                 {
                     Outcome = MatchOutcome.Matched,
-                    Tier = DecisionTier.LocalInference,
+                    Tier = tier2Source,
                     Actions = new[] { proposal.Action },
                     Proposal = proposal,
                     Verification = verification,
