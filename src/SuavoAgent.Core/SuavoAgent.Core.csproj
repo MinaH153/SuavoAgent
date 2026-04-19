@@ -6,6 +6,10 @@
     <Nullable>enable</Nullable>
     <RootNamespace>SuavoAgent.Core</RootNamespace>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- LLamaSharp.Backend.Cpu ships multiple AVX variants under runtimes/<rid>/native/{avx,avx2,avx512}.
+         LLamaSharp auto-selects the right one at runtime; we just need the publish step to allow the
+         parallel files. -->
+    <ErrorOnDuplicatePublishOutputFiles>false</ErrorOnDuplicatePublishOutputFiles>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,7 +25,15 @@
     <PackageReference Include="Serilog.Sinks.Console" Version="5.0.1" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />
     <PackageReference Include="Stateless" Version="5.20.1" />
+    <PackageReference Include="EPPlus" Version="7.6.1" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.4" />
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
+    <!-- Managed LLamaSharp binding only. Native llama.cpp backend (llama.dll,
+         ggml.dll) is NOT shipped by default — its presence would be a vendor
+         fingerprint. When Reasoning.Enabled=true the operator provides these
+         binaries at ReasoningOptions.NativeLibraryPath. Default installs
+         contain zero Tier-2 native code. See Codex C-1. -->
+    <PackageReference Include="LLamaSharp" Version="0.19.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -31,6 +43,9 @@
 
   <ItemGroup>
     <None Include="Config\adapters\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Reasoning\Rules\*.yaml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

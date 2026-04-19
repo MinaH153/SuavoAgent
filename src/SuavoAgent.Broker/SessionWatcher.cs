@@ -131,7 +131,8 @@ public sealed class SessionWatcher : BackgroundService
             // H-10: Pass randomised pipe nonce so Helper connects to Core's non-guessable pipe
             var nonce = ReadPipeNonce();
             var pipeArg = nonce != null ? $" --pipe SuavoAgent-{nonce}" : "";
-            var args = $"--session {sessionId}{pipeArg}";
+            var cmdPipeArg = nonce != null ? $" --cmd-pipe SuavoAgent-cmd-{nonce}" : "";
+            var args = $"--session {sessionId}{pipeArg}{cmdPipeArg}";
 
             // Prefer CreateProcessAsUser on Windows — launches Helper in the user's
             // interactive session with their environment and desktop access.
