@@ -11,3 +11,4 @@ publish/**/*.pdb
 publish/**/*.runtimeconfig.json
 publish/**/appsettings.json
 publish/**/Config/
+publish-v3.11.1/
