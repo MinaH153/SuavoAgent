@@ -56,6 +56,17 @@ Log.Logger = new LoggerConfiguration()
 try
 {
     var builder = Host.CreateApplicationBuilder(args);
+
+    // Cloud-pushed config overrides: written by ConfigSyncWorker and layered
+    // on top of appsettings.json so IOptionsMonitor-aware consumers pick up
+    // changes live. File is in ProgramData so it survives upgrades and is
+    // ACL-locked by the state.db lockdown below.
+    var configOverridesPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent",
+        "config-overrides.json");
+    builder.Configuration.AddJsonFile(configOverridesPath, optional: true, reloadOnChange: true);
+
     var startupVersion = builder.Configuration.GetSection("Agent").Get<AgentOptions>()?.Version ?? "unknown";
     Log.Information("SuavoAgent.Core starting v{Version}", startupVersion);
     builder.Services.AddWindowsService(options => options.ServiceName = "SuavoAgent.Core");
@@ -80,6 +91,27 @@ try
         builder.Services.AddSingleton(cloudClient);
         builder.Services.AddSingleton<IPostSigner>(cloudClient);
         builder.Services.AddSingleton<SeedClient>();
+
+        // Cloud config-push: AgentConfigClient polls GET /api/agent/config,
+        // ConfigOverrideStore flattens to config-overrides.json on disk,
+        // ConfigSyncWorker runs the loop. Manual HttpClient instantiation
+        // matches SuavoCloudClient's idiom — the codebase doesn't use
+        // IHttpClientFactory so we don't pull in Microsoft.Extensions.Http.
+        var configHttp = new HttpClient
+        {
+            BaseAddress = new Uri(agentOpts.CloudUrl),
+            Timeout = TimeSpan.FromSeconds(10),
+        };
+        builder.Services.AddSingleton<IAgentConfigClient>(sp =>
+            new AgentConfigClient(
+                configHttp,
+                agentOpts,
+                sp.GetRequiredService<ILogger<AgentConfigClient>>()));
+        builder.Services.AddSingleton(sp => new ConfigOverrideStore(
+            configOverridesPath,
+            sp.GetRequiredService<ILogger<ConfigOverrideStore>>()));
+        builder.Services.AddSingleton(new ConfigSyncOptions());
+        builder.Services.AddHostedService<ConfigSyncWorker>();
     }
     else
     {
