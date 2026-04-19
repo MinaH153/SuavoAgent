@@ -119,8 +119,17 @@ public sealed class PricingBrainEvaluator
         SupplierPriceResult result,
         PricingRunStats stats)
     {
-        var processed = Math.Max(stats.CompletedItems + stats.FailedItems, 1);
-        var failureRatePct = (int)Math.Round(100d * stats.FailedItems / processed);
+        var processed = stats.CompletedItems + stats.FailedItems;
+        var processedForRate = Math.Max(processed, 1);
+        var failureRatePct = (int)Math.Round(100d * stats.FailedItems / processedForRate);
+
+        var streakWarning =
+            stats.ConsecutiveFailures >= PricingBrainThresholds.StreakWarning;
+        var streakSevere =
+            stats.ConsecutiveFailures >= PricingBrainThresholds.StreakSevere;
+        var failureRateHigh =
+            processed >= PricingBrainThresholds.FailureRateMinSample
+            && failureRatePct >= PricingBrainThresholds.FailureRateHighPct;
 
         var flags = new Dictionary<string, string>
         {
@@ -135,6 +144,9 @@ public sealed class PricingBrainEvaluator
                 failureRatePct.ToString(CultureInfo.InvariantCulture),
             [PricingBrainFlags.TotalItems] =
                 stats.TotalItems.ToString(CultureInfo.InvariantCulture),
+            [PricingBrainFlags.StreakWarning] = streakWarning ? "true" : "false",
+            [PricingBrainFlags.StreakSevere] = streakSevere ? "true" : "false",
+            [PricingBrainFlags.FailureRateHigh] = failureRateHigh ? "true" : "false",
         };
 
         return new RuleContext

@@ -65,6 +65,55 @@ public class PricingBrainEvaluatorTests
         Assert.Equal("0", ctx.Flags[PricingBrainFlags.FailureRatePct]);
     }
 
+    // --- Derived threshold flags ---------------------------------------------
+
+    [Theory]
+    [InlineData(2, "false")]
+    [InlineData(3, "true")]  // threshold crossed
+    [InlineData(9, "true")]
+    public void BuildContext_StreakWarning_TogglesAtThreshold(int streak, string expected)
+    {
+        var ctx = PricingBrainEvaluator.BuildContext(Row(), Fail(), Stats(streak: streak));
+        Assert.Equal(expected, ctx.Flags[PricingBrainFlags.StreakWarning]);
+    }
+
+    [Theory]
+    [InlineData(9, "false")]
+    [InlineData(10, "true")]  // threshold crossed
+    [InlineData(20, "true")]
+    public void BuildContext_StreakSevere_TogglesAtThreshold(int streak, string expected)
+    {
+        var ctx = PricingBrainEvaluator.BuildContext(Row(), Fail(), Stats(streak: streak));
+        Assert.Equal(expected, ctx.Flags[PricingBrainFlags.StreakSevere]);
+    }
+
+    [Fact]
+    public void BuildContext_FailureRateHigh_RequiresMinimumSample()
+    {
+        // 5 out of 5 is 100% failure but only 5 samples — below min sample.
+        var ctx = PricingBrainEvaluator.BuildContext(
+            Row(), Fail(), Stats(total: 50, completed: 0, failed: 5, streak: 5));
+        Assert.Equal("false", ctx.Flags[PricingBrainFlags.FailureRateHigh]);
+    }
+
+    [Fact]
+    public void BuildContext_FailureRateHigh_TriggersAt50PctOver10Samples()
+    {
+        // 5 failed of 10 processed = 50% — at threshold with enough samples.
+        var ctx = PricingBrainEvaluator.BuildContext(
+            Row(), Fail(), Stats(total: 50, completed: 5, failed: 5, streak: 5));
+        Assert.Equal("true", ctx.Flags[PricingBrainFlags.FailureRateHigh]);
+    }
+
+    [Fact]
+    public void BuildContext_FailureRateHigh_FalseOnHealthyRun()
+    {
+        // 1 failed of 20 processed = 5% — way below threshold.
+        var ctx = PricingBrainEvaluator.BuildContext(
+            Row(), Success(), Stats(total: 50, completed: 19, failed: 1, streak: 0));
+        Assert.Equal("false", ctx.Flags[PricingBrainFlags.FailureRateHigh]);
+    }
+
     // --- Brain wiring ---------------------------------------------------------
 
     [Fact]
@@ -188,6 +237,67 @@ public class PricingBrainEvaluatorTests
             Row(), Fail(), Stats(), CancellationToken.None);
 
         Assert.False(decision.ShouldHalt);
+    }
+
+    // --- Bundled YAML rules end-to-end ---------------------------------------
+
+    [Fact]
+    public async Task BundledRules_HaltOnPipeDesync()
+    {
+        var evaluator = EvaluatorWithBundledRules();
+
+        var decision = await evaluator.EvaluateAsync(
+            Row(),
+            FailWith("Response ID mismatch: expected X, got Y"),
+            Stats(streak: 1),
+            CancellationToken.None);
+
+        Assert.True(decision.ShouldHalt);
+        Assert.Equal(DecisionTier.Rules, decision.Tier);
+        Assert.Contains("pipe-desync", decision.Reason);
+    }
+
+    [Fact]
+    public async Task BundledRules_HaltOnSevereStreak()
+    {
+        var evaluator = EvaluatorWithBundledRules();
+
+        var decision = await evaluator.EvaluateAsync(
+            Row(), Fail(),
+            Stats(total: 100, completed: 5, failed: 10, streak: 10),
+            CancellationToken.None);
+
+        Assert.True(decision.ShouldHalt);
+        Assert.Equal(DecisionTier.Rules, decision.Tier);
+        Assert.Contains("severe-streak", decision.Reason);
+    }
+
+    [Fact]
+    public async Task BundledRules_ContinueOnHealthyRun()
+    {
+        var evaluator = EvaluatorWithBundledRules();
+
+        var decision = await evaluator.EvaluateAsync(
+            Row(), Success(),
+            Stats(total: 100, completed: 50, failed: 2, streak: 0),
+            CancellationToken.None);
+
+        Assert.False(decision.ShouldHalt);
+    }
+
+    private static PricingBrainEvaluator EvaluatorWithBundledRules()
+    {
+        // Walk up from test bin to repo root. If the path shape changes in CI,
+        // this assertion is the signal to update.
+        var rulesDir = Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+            "src", "SuavoAgent.Core", "Reasoning", "Rules");
+        rulesDir = Path.GetFullPath(rulesDir);
+        Assert.True(Directory.Exists(rulesDir), $"Bundled rules dir missing: {rulesDir}");
+
+        var loader = new YamlRuleLoader(NullLogger<YamlRuleLoader>.Instance);
+        var rules = loader.LoadFromDirectory(rulesDir, required: true);
+        return Evaluator(rules: rules);
     }
 
     // --- Helpers --------------------------------------------------------------

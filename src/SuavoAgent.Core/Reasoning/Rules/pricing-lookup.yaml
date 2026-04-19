@@ -93,3 +93,55 @@ rules:
       - type: PressKey
         parameters:
           key: "Escape"
+
+  # =====================================================================
+  # Core-side orchestration rules (consumed by PricingBrainEvaluator).
+  # These do NOT have processName — they match on Flags emitted by the
+  # Core-side evaluator after each NDC lookup result. They run highest
+  # priority so a halt fires before any UI-side rule is considered.
+  # =====================================================================
+
+  - id: pricing-lookup.halt-on-pipe-desync
+    skillId: pricing-lookup
+    priority: 300
+    description: "Halt job immediately — Helper IPC protocol broke (response id mismatch)"
+    when:
+      stateFlags:
+        error_class: "pipe_desync"
+    then:
+      - type: Escalate
+        description: "Core↔Helper pipe desync — unsafe to keep looking up NDCs"
+
+  - id: pricing-lookup.halt-on-severe-streak
+    skillId: pricing-lookup
+    priority: 250
+    description: "Halt after 10 consecutive failed lookups — something is systemically wrong"
+    when:
+      stateFlags:
+        streak_severe: "true"
+    then:
+      - type: Escalate
+        description: "Severe failure streak — stop and let the operator investigate"
+
+  - id: pricing-lookup.halt-on-high-failure-rate
+    skillId: pricing-lookup
+    priority: 240
+    description: "Halt when >=50% of >=10 processed rows have failed"
+    when:
+      stateFlags:
+        failure_rate_high: "true"
+    then:
+      - type: Escalate
+        description: "High failure rate — job likely degraded, resume after fix"
+
+  - id: pricing-lookup.log-streak-warning
+    skillId: pricing-lookup
+    priority: 150
+    description: "Audit marker — 3+ consecutive failures, not yet halting"
+    when:
+      stateFlags:
+        streak_warning: "true"
+        streak_severe: "false"
+    then:
+      - type: Log
+        description: "pricing streak warning — consecutive failures building up"

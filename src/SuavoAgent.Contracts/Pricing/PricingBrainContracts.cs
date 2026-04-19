@@ -35,6 +35,24 @@ public static class PricingBrainFlags
     public const string ConsecutiveFailures = "consecutive_failures";
     public const string FailureRatePct = "failure_rate_pct";
     public const string TotalItems = "total_items";
+
+    // Derived boolean flags. Tier-1 RuleEngine only supports exact string
+    // equality on StateFlags (no >= operators), so the evaluator bakes the
+    // thresholds into these yes/no flags that YAML rules match with "true".
+    /// <summary>"true" once consecutive_failures ≥ 3.</summary>
+    public const string StreakWarning = "streak_warning";
+    /// <summary>"true" once consecutive_failures ≥ 10 — stop autonomously.</summary>
+    public const string StreakSevere = "streak_severe";
+    /// <summary>"true" when failure_rate_pct ≥ 50 AND ≥ 10 rows processed.</summary>
+    public const string FailureRateHigh = "failure_rate_high";
+}
+
+public static class PricingBrainThresholds
+{
+    public const int StreakWarning = 3;
+    public const int StreakSevere = 10;
+    public const int FailureRateHighPct = 50;
+    public const int FailureRateMinSample = 10;
 }
 
 /// <summary>
