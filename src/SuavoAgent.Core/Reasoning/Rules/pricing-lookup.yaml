@@ -1,0 +1,147 @@
+# Pricing lookup skill — navigate PioneerRx Item → Rx Item → Pricing tab.
+#
+# Each rule represents ONE step of the workflow with pre+post conditions.
+# Rules are keyed by SkillId + state signature. The executor walks them in
+# order, falling back to Tier 2 only if no rule matches the current state.
+#
+# Safety preconditions (operator-idle, call-active, PMS focus) live in
+# preconditions.yaml and run automatically before any rule in this file.
+#
+# Maintenance: when PioneerRx changes a control name, update the single
+# matching rule here. No C# recompile needed.
+
+rules:
+  - id: pricing-lookup.open-item-menu
+    skillId: pricing-lookup
+    priority: 190
+    description: "Click the Item menu in the top menu bar"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Item"]
+      operatorIdleMsAtLeast: 500
+    then:
+      - type: Click
+        description: "Open Item menu"
+        parameters:
+          controlType: "MenuItem"
+          name: "Item"
+        verifyAfter:
+          visibleElements: ["Rx Item"]
+
+  - id: pricing-lookup.open-rx-item
+    skillId: pricing-lookup
+    priority: 180
+    description: "Click Rx Item under Item menu"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Rx Item"]
+    then:
+      - type: Click
+        description: "Open Rx Item submenu"
+        parameters:
+          controlType: "MenuItem"
+          name: "Rx Item"
+        verifyAfter:
+          visibleElements: ["Edit Rx Item"]
+
+  - id: pricing-lookup.search-ndc
+    skillId: pricing-lookup
+    priority: 170
+    description: "Type NDC into Quick Search and press Enter"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Edit Rx Item", "Quick Search"]
+    then:
+      - type: Click
+        description: "Focus Quick Search field"
+        parameters:
+          controlType: "Edit"
+          helpText: "Quick Search"
+      # Executor contracts (Type source, VerifyElement containsFromContext) are
+      # defined in Week 2 when LocalInference + ActionExecutor land. Until then
+      # this rule escalates by design.
+      - type: Escalate
+        description: "Hand off to Tier 2 for parameterized NDC entry + verify"
+
+  - id: pricing-lookup.open-pricing-tab
+    skillId: pricing-lookup
+    priority: 160
+    description: "Click the Pricing tab within Edit Rx Item"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Edit Rx Item", "Pricing"]
+    then:
+      - type: Click
+        description: "Open Pricing tab"
+        parameters:
+          controlType: "TabItem"
+          name: "Pricing"
+        verifyAfter:
+          visibleElements: ["Supplier", "Cost Per Unit"]
+
+  - id: pricing-lookup.close-edit-window
+    skillId: pricing-lookup
+    priority: 10
+    description: "Rollback — close Edit Rx Item dialog"
+    when:
+      processName: "PioneerPharmacy*"
+      visibleElements: ["Edit Rx Item"]
+    then:
+      - type: PressKey
+        parameters:
+          key: "Escape"
+      - type: PressKey
+        parameters:
+          key: "Escape"
+
+  # =====================================================================
+  # Core-side orchestration rules (consumed by PricingBrainEvaluator).
+  # These do NOT have processName — they match on Flags emitted by the
+  # Core-side evaluator after each NDC lookup result. They run highest
+  # priority so a halt fires before any UI-side rule is considered.
+  # =====================================================================
+
+  - id: pricing-lookup.halt-on-pipe-desync
+    skillId: pricing-lookup
+    priority: 300
+    description: "Halt job immediately — Helper IPC protocol broke (response id mismatch)"
+    when:
+      stateFlags:
+        error_class: "pipe_desync"
+    then:
+      - type: Escalate
+        description: "Core↔Helper pipe desync — unsafe to keep looking up NDCs"
+
+  - id: pricing-lookup.halt-on-severe-streak
+    skillId: pricing-lookup
+    priority: 250
+    description: "Halt after 10 consecutive failed lookups — something is systemically wrong"
+    when:
+      stateFlags:
+        streak_severe: "true"
+    then:
+      - type: Escalate
+        description: "Severe failure streak — stop and let the operator investigate"
+
+  - id: pricing-lookup.halt-on-high-failure-rate
+    skillId: pricing-lookup
+    priority: 240
+    description: "Halt when >=50% of >=10 processed rows have failed"
+    when:
+      stateFlags:
+        failure_rate_high: "true"
+    then:
+      - type: Escalate
+        description: "High failure rate — job likely degraded, resume after fix"
+
+  - id: pricing-lookup.log-streak-warning
+    skillId: pricing-lookup
+    priority: 150
+    description: "Audit marker — 3+ consecutive failures, not yet halting"
+    when:
+      stateFlags:
+        streak_warning: "true"
+        streak_severe: "false"
+    then:
+      - type: Log
+        description: "pricing streak warning — consecutive failures building up"

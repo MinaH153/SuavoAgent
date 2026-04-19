@@ -6,6 +6,8 @@ using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
+using SuavoAgent.Core.Pricing;
+using SuavoAgent.Core.Reasoning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Workers;
@@ -199,12 +201,150 @@ try
     // An attacker without knowledge of the nonce cannot pre-create a squatting pipe server.
     var pipeNonce = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8));
     var pipeName = $"SuavoAgent-{pipeNonce}";
+    var cmdPipeName = $"SuavoAgent-cmd-{pipeNonce}";
     {
         var nonceDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SuavoAgent");
         Directory.CreateDirectory(nonceDir);
         File.WriteAllText(Path.Combine(nonceDir, "pipe.nonce"), pipeNonce);
     }
+
+    // Pricing intelligence — Core→Helper command channel
+    builder.Services.AddSingleton<IpcCommandClient>(sp =>
+        new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()));
+    builder.Services.AddSingleton<ExcelPricingReader>();
+    builder.Services.AddSingleton<ExcelPricingWriter>();
+
+    // PricingJobRunner gets an optional TieredBrain evaluator wired only when
+    // Reasoning.PricingBrainEnabled is true. Default: disabled — behavior is
+    // byte-for-byte identical to pre-brain. Enabling lets the brain Halt jobs
+    // on streak failures (Tier-1 rules) or ambiguous states (Tier-2/3).
+    builder.Services.AddSingleton<PricingJobRunner>(sp =>
+    {
+        var reasoning = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
+        PricingBrainEvaluator? evaluator = null;
+        if (reasoning.PricingBrainEnabled)
+        {
+            evaluator = new PricingBrainEvaluator(
+                sp.GetRequiredService<TieredBrain>(),
+                sp.GetRequiredService<ILogger<PricingBrainEvaluator>>());
+            Log.Information(
+                "Pricing brain ENABLED — PricingJobRunner will consult TieredBrain after each NDC lookup");
+        }
+        else
+        {
+            Log.Information(
+                "Pricing brain disabled (Reasoning.PricingBrainEnabled=false) — runner skips TieredBrain");
+        }
+
+        return new PricingJobRunner(
+            sp.GetRequiredService<ExcelPricingReader>(),
+            sp.GetRequiredService<ExcelPricingWriter>(),
+            sp.GetRequiredService<AgentStateDb>(),
+            sp.GetRequiredService<ILogger<PricingJobRunner>>(),
+            evaluator);
+    });
+
+    // Tier-1 Reasoning — rule engine. Loaded from bundled Reasoning/Rules
+    // alongside optional operator overrides in ProgramData. Fail-closed: a
+    // malformed rule file prevents the agent from starting.
+    builder.Services.AddSingleton<YamlRuleLoader>();
+    builder.Services.AddSingleton<RuleEngine>(sp =>
+    {
+        var loader = sp.GetRequiredService<YamlRuleLoader>();
+        var log = sp.GetRequiredService<ILogger<RuleEngine>>();
+
+        var bundledDir = Path.Combine(AppContext.BaseDirectory, "Reasoning", "Rules");
+        var overrideDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "rules");
+
+        var rules = new List<SuavoAgent.Contracts.Reasoning.Rule>();
+        rules.AddRange(loader.LoadFromDirectory(bundledDir, required: true));
+        rules.AddRange(loader.LoadFromDirectory(overrideDir, required: false));
+
+        var engine = new RuleEngine(rules, log);
+        Log.Information("RuleEngine loaded {Count} rules across {Skills} skill(s): {SkillList}",
+            engine.RuleCount, engine.KnownSkills.Count, string.Join(", ", engine.KnownSkills));
+        return engine;
+    });
+
+    // Tier-2 Reasoning — local inference. Selected at startup based on
+    // ReasoningOptions + on-disk model verification. Default: NullLocalInference
+    // so the agent boots useful in rules-only mode. Real LLM wiring lands in
+    // Week 2c once a signed model manifest is shipped to GitHub releases.
+    builder.Services.AddSingleton<ActionVerifier>(sp =>
+        new ActionVerifier(sp.GetRequiredService<IOptions<AgentOptions>>()));
+    builder.Services.AddSingleton<IModelManager, LocalFileModelManager>();
+    builder.Services.AddSingleton<ILocalInference>(sp =>
+    {
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
+        if (!opts.Enabled)
+        {
+            Log.Information("Tier-2 LocalInference disabled (Reasoning.Enabled=false) — running rules-only");
+            return new NullLocalInference();
+        }
+
+        // IModelManager verification with a bounded timeout so SHA-256 of a
+        // 2 GB model cannot stall Windows service start indefinitely (Codex
+        // suggestion). Run as Task.Run so the sync-wait doesn't deadlock on
+        // the startup thread's sync context.
+        var mgr = sp.GetRequiredService<IModelManager>();
+        ModelVerificationResult verify;
+        try
+        {
+            using var verifyCts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            verify = Task.Run(() => mgr.VerifyAsync(verifyCts.Token)).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Tier-2 LocalInference verification threw — falling back to NullLocalInference");
+            return new NullLocalInference();
+        }
+
+        if (!verify.IsValid)
+        {
+            Log.Warning("Tier-2 LocalInference unavailable — {Reason}. Falling back to NullLocalInference",
+                verify.Reason);
+            return new NullLocalInference();
+        }
+
+        // Model verified — construct the real LLamaSharp-backed inference.
+        // Weights load lazily on first ProposeAsync call (2–5 s on CPU).
+        // Native llama.cpp binaries come from ReasoningOptions.NativeLibraryPath
+        // (Codex C-1); they are NOT shipped by the installer.
+        Log.Information("Tier-2 LocalInference ENABLED — model '{Id}' at {Path}",
+            opts.ModelId, verify.Path);
+        var agentOpts = sp.GetRequiredService<IOptions<AgentOptions>>();
+        var llmLog = sp.GetRequiredService<ILogger<LLamaLocalInference>>();
+        return new LLamaLocalInference(agentOpts, verify.Path!, llmLog);
+    });
+
+    // Tier-3 Reasoning — cloud Claude via /api/agent/reason. Opt-in via
+    // Reasoning.CloudEnabled + the standard ApiKey (shared with heartbeat/sync).
+    // No ApiKey means NullCloudReasoning, which TieredBrain treats as "skip Tier-3".
+    builder.Services.AddSingleton<ICloudReasoning>(sp =>
+    {
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        if (!opts.Reasoning.CloudEnabled || string.IsNullOrWhiteSpace(opts.ApiKey))
+        {
+            Log.Information("Tier-3 CloudReasoning disabled (CloudEnabled={Enabled}, ApiKey={HasKey})",
+                opts.Reasoning.CloudEnabled, !string.IsNullOrWhiteSpace(opts.ApiKey));
+            return new NullCloudReasoning();
+        }
+
+        var signer = sp.GetService<IPostSigner>();
+        if (signer == null)
+        {
+            Log.Warning("Tier-3 CloudReasoning enabled but IPostSigner not registered — disabling");
+            return new NullCloudReasoning();
+        }
+
+        Log.Information("Tier-3 CloudReasoning ENABLED — will escalate low-confidence Tier-2 proposals");
+        return new ClaudeCloudReasoning(signer, sp.GetRequiredService<ILogger<ClaudeCloudReasoning>>());
+    });
+
+    builder.Services.AddSingleton<TieredBrain>();
 
     builder.Services.AddSingleton<IpcPipeServer>(sp =>
     {
@@ -333,6 +473,18 @@ try
         foreach (var ph in runtimeOpts.Pharmacies)
             ph.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(ph.SqlPassword);
     }
+
+    // Eager-resolve RuleEngine + TieredBrain so any startup-time config error
+    // (malformed rule catalog, tampered model, etc.) crashes the host
+    // immediately rather than surfacing the first time a worker calls in.
+    _ = host.Services.GetRequiredService<RuleEngine>();
+    var brain = host.Services.GetRequiredService<TieredBrain>();
+
+    // Startup smoke probe — shadow-mode decision to prove the full brain
+    // wiring is invocable. Logs one line so operators can confirm at a glance.
+    await BrainStartupProbe.RunAsync(
+        brain,
+        host.Services.GetRequiredService<ILogger<Program>>());
 
     var pipeServer = host.Services.GetRequiredService<IpcPipeServer>();
     pipeServer.Start(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);

@@ -1,0 +1,37 @@
+# Universal preconditions — gate every autonomous action behind these.
+# Stealth + safety: if any precondition fails, no automation runs.
+
+rules:
+  - id: preconditions.operator-must-be-idle
+    skillId: preconditions
+    priority: 1000
+    description: "Every destructive skill requires 2s of operator inactivity"
+    autonomousOk: true
+    when:
+      operatorIdleMsAtLeast: 2000
+    then:
+      - type: Log
+        description: "Operator idle — automation cleared to proceed"
+
+  - id: preconditions.must-have-focused-pms
+    skillId: preconditions
+    priority: 990
+    description: "PMS window must be the foreground window before we act"
+    when:
+      stateFlags:
+        main_window_focused: "true"
+    then:
+      - type: Log
+        description: "PMS window in foreground — cleared"
+
+  - id: preconditions.never-during-phone-call
+    skillId: preconditions
+    priority: 1100
+    description: "Abort skill if tray indicator shows active phone call"
+    autonomousOk: false   # always ask operator
+    when:
+      stateFlags:
+        active_phone_call: "true"
+    then:
+      - type: AskOperator
+        description: "Call active — confirm before automating"

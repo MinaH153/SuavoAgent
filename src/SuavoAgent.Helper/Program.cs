@@ -5,6 +5,7 @@ using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Helper;
 using SuavoAgent.Helper.Behavioral;
 using SuavoAgent.Helper.SystemObservers;
+using SuavoAgent.Helper.Workflows;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(Environment.GetEnvironmentVariable("SUAVO_DEBUG") == "1"
@@ -26,15 +27,35 @@ try
     var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-    // H-10: resolve pipe name from --pipe arg (written by Core, passed by Broker)
-    var pipeName = "SuavoAgent";
+    // H-10: resolve pipe name from --pipe arg (written by Core, passed by Broker).
+    // Fail-closed if either arg is missing — a literal default name would be squat-able
+    // by any local process before Helper starts.
+    string? pipeName = null;
+    string? cmdPipeName = null;
     for (var i = 0; i < args.Length - 1; i++)
     {
-        if (args[i] == "--pipe") { pipeName = args[i + 1]; break; }
+        if (args[i] == "--pipe") { pipeName = args[i + 1]; }
+        if (args[i] == "--cmd-pipe") { cmdPipeName = args[i + 1]; }
+    }
+
+    if (string.IsNullOrEmpty(pipeName) || string.IsNullOrEmpty(cmdPipeName))
+    {
+        Log.Fatal("Helper: missing --pipe or --cmd-pipe arg (both required, no defaults). " +
+                  "Broker must pass nonce-scoped pipe names — exiting.");
+        Environment.Exit(2);
+        return;
     }
 
     using var pioneer = new PioneerRxUiaEngine(Log.Logger);
     using var ipcClient = new IpcPipeClient(pipeName, Log.Logger);
+    var pricingWorkflow = new PricingWorkflow(pioneer, Log.Logger);
+
+    // Vision pipeline — operator opt-in via ProgramData\SuavoAgent\vision.json.
+    // Returns null (no vision) when disabled, which is the default.
+    var visionController = SuavoAgent.Helper.Vision.VisionBootstrap.TryBuild(Log.Logger);
+
+    using var cmdServer = new IpcCommandServer(cmdPipeName, pricingWorkflow, Log.Logger, visionController);
+    cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
     int attachFailures = 0;
