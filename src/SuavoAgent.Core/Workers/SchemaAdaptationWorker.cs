@@ -107,7 +107,7 @@ public sealed class SchemaAdaptationWorker : BackgroundService
         {
             foreach (var rev in revs)
             {
-                try { _applier.Revoke(rev.TargetAdaptationId, rev.Reason ?? "cloud-revocation"); }
+                try { _applier.RevokeSigned(rev); }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex,

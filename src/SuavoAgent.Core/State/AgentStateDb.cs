@@ -2486,7 +2486,8 @@ public sealed class AgentStateDb : IDisposable
                 template_id = @t,
                 yaml_sha256 = @h,
                 status = CASE
-                    WHEN auto_rule_approvals.status IN ('Approved','Shadow') THEN 'Pending'
+                    WHEN auto_rule_approvals.yaml_sha256 != @h
+                     AND auto_rule_approvals.status IN ('Approved','Shadow') THEN 'Pending'
                     ELSE auto_rule_approvals.status
                 END
             """;

@@ -95,12 +95,20 @@ public class SchemaAdaptationApplierTests : IDisposable
         string id = "adapt-001",
         string fromHash = "from-hash",
         string toHash = "to-hash",
-        DateTimeOffset? expiresAt = null)
+        DateTimeOffset? expiresAt = null,
+        DateTimeOffset? notBefore = null)
     {
         var actualExpiresAt = expiresAt ?? DateTimeOffset.UtcNow.AddDays(30);
-        // notBefore must be before expiresAt (Packager invariant). For the
-        // "expired" test case, set notBefore an hour before the expiry.
-        var notBefore = actualExpiresAt.AddHours(-1);
+        // Default NotBefore to 5 minutes in the past so the receiver's
+        // NotBefore gate passes for happy-path tests. Callers opting into a
+        // future NotBefore (activation-window test) pass it explicitly.
+        // For the "expired" test the entire window sits in the past — that
+        // still passes the NotBefore gate but fails the Expiry gate, which
+        // is the behaviour under test.
+        var actualNotBefore = notBefore
+            ?? (actualExpiresAt <= DateTimeOffset.UtcNow
+                ? actualExpiresAt.AddHours(-1)
+                : DateTimeOffset.UtcNow.AddMinutes(-5));
 
         var packager = new SchemaAdaptationPackager(_cloudKey, "adapt-v1");
         return packager.Pack(
@@ -118,7 +126,7 @@ public class SchemaAdaptationApplierTests : IDisposable
                     "new-shape"),
             },
             originPharmacyId: "hmac-origin",
-            notBefore: notBefore,
+            notBefore: actualNotBefore,
             expiresAt: actualExpiresAt);
     }
 
@@ -180,6 +188,20 @@ public class SchemaAdaptationApplierTests : IDisposable
     }
 
     [Fact]
+    public void Apply_FutureNotBefore_NotYetActive()
+    {
+        // Staged rollout: sign on Saturday, effective Monday. The receiver
+        // must fail closed until NotBefore elapses.
+        var a = SignedSample(
+            notBefore: DateTimeOffset.UtcNow.AddHours(2),
+            expiresAt: DateTimeOffset.UtcNow.AddDays(7));
+        var applier = BuildApplier(localFromHash: "from-hash");
+        var outcome = applier.ApplyIfEligible(a);
+        Assert.Equal(SchemaAdaptationOutcome.NotYetActive, outcome.Status);
+        Assert.Null(_db.GetAppliedSchemaAdaptation(a.AdaptationId));
+    }
+
+    [Fact]
     public void Apply_Revoked_SkippedAndAudited()
     {
         var a = SignedSample();
@@ -233,6 +255,77 @@ public class SchemaAdaptationApplierTests : IDisposable
         Assert.NotNull(after);
         Assert.NotNull(after!.RolledBackAt);
         Assert.Equal("cloud-recall", after.RollbackReason);
+    }
+
+    // ──────────────────────── signed revocation gate ────────────────────────
+
+    [Fact]
+    public void RevokeSigned_ValidSignature_RollsBack()
+    {
+        var a = SignedSample();
+        var applier = BuildApplier(localFromHash: "from-hash");
+        applier.ApplyIfEligible(a);
+        Assert.NotNull(_db.GetAppliedSchemaAdaptation(a.AdaptationId));
+
+        var packager = new SchemaAdaptationPackager(_cloudKey, "adapt-v1");
+        var rev = packager.PackRevocation(
+            revocationId: "rev-legit",
+            targetAdaptationId: a.AdaptationId,
+            reason: "fleet-recall",
+            revokedAt: DateTimeOffset.UtcNow);
+
+        var result = applier.RevokeSigned(rev);
+        Assert.True(result);
+        var after = _db.GetAppliedSchemaAdaptation(a.AdaptationId);
+        Assert.NotNull(after!.RolledBackAt);
+    }
+
+    [Fact]
+    public void RevokeSigned_InvalidSignature_DoesNotMutate()
+    {
+        var a = SignedSample();
+        var applier = BuildApplier(localFromHash: "from-hash");
+        applier.ApplyIfEligible(a);
+        Assert.NotNull(_db.GetAppliedSchemaAdaptation(a.AdaptationId));
+
+        // Forge a revocation with a garbage signature — receiver must drop it.
+        var forged = new AdaptationRevocation(
+            RevocationId: "rev-forged",
+            TargetAdaptationId: a.AdaptationId,
+            Reason: "attacker-recall",
+            RevokedAt: DateTimeOffset.UtcNow.ToString("o"),
+            KeyId: "adapt-v1",
+            Signature: Convert.ToBase64String(new byte[64]));
+
+        var result = applier.RevokeSigned(forged);
+        Assert.False(result);
+
+        var after = _db.GetAppliedSchemaAdaptation(a.AdaptationId);
+        Assert.NotNull(after);
+        Assert.Null(after!.RolledBackAt); // still applied — attack neutralised
+        Assert.False(_db.IsSchemaAdaptationRevoked(a.AdaptationId));
+    }
+
+    [Fact]
+    public void RevokeSigned_TamperedTargetId_Rejected()
+    {
+        var a = SignedSample();
+        var applier = BuildApplier(localFromHash: "from-hash");
+        applier.ApplyIfEligible(a);
+
+        var packager = new SchemaAdaptationPackager(_cloudKey, "adapt-v1");
+        var rev = packager.PackRevocation(
+            revocationId: "rev-honest",
+            targetAdaptationId: "adapt-some-other-id",
+            reason: "legitimate-recall",
+            revokedAt: DateTimeOffset.UtcNow);
+
+        // Tamper: swap target so the signature no longer covers the new payload.
+        var tampered = rev with { TargetAdaptationId = a.AdaptationId };
+
+        var result = applier.RevokeSigned(tampered);
+        Assert.False(result);
+        Assert.False(_db.IsSchemaAdaptationRevoked(a.AdaptationId));
     }
 
     private SchemaAdaptationApplier BuildApplier(string localFromHash) =>

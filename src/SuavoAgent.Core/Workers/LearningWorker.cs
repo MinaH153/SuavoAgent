@@ -601,6 +601,23 @@ public sealed class LearningWorker : BackgroundService
                         result.CorrelationsApplied, result.CorrelationsSkipped, seedResp.SeedDigest);
                 }
             }
+
+            // Spec-D §6 — cross-pharmacy workflow template transfer. Orthogonal
+            // to the pattern/model phase split: templates ride alongside either
+            // payload, and ApplyWorkflowTemplates has its own per-template
+            // idempotency via seed_items. Runs after the phase-specific apply
+            // so query shapes referenced by templates are already resolved.
+            if (seedResp.WorkflowTemplates is { Count: > 0 })
+            {
+                var tplResult = _applicator.ApplyWorkflowTemplates(
+                    _sessionId!, seedResp, BuildLocalPmsVersionFingerprint());
+                if (tplResult.TemplatesApplied > 0 || tplResult.TemplatesSkipped > 0)
+                {
+                    _logger.LogInformation(
+                        "Applied {Applied} template(s), skipped {Skipped} from digest {Digest}",
+                        tplResult.TemplatesApplied, tplResult.TemplatesSkipped, seedResp.SeedDigest);
+                }
+            }
         }
         catch (Exception ex)
         {

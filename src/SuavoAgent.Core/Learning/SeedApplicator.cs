@@ -148,6 +148,18 @@ public sealed class SeedApplicator
         if (response.WorkflowTemplates is null || response.WorkflowTemplates.Count == 0)
             return new(0, 0);
 
+        // Idempotency: if every template in this response already has a
+        // seed_items row for (digest, "template"), treat as already applied.
+        var existingTemplateItems = _db.GetSeedItems(response.SeedDigest)
+            .Where(i => i.ItemType == "template")
+            .Select(i => i.ItemKey)
+            .ToHashSet();
+        if (existingTemplateItems.Count > 0
+            && response.WorkflowTemplates.All(t => existingTemplateItems.Contains(t.TemplateId)))
+        {
+            return new(0, 0);
+        }
+
         // Known query shapes: this session's correlated_actions + seed-applied shapes.
         var knownShapes = new HashSet<string>(
             _db.GetCorrelatedActions(sessionId)
@@ -162,8 +174,12 @@ public sealed class SeedApplicator
         int applied = 0, skipped = 0;
         var now = DateTimeOffset.UtcNow.ToString("o");
 
+        using var txn = _db.BeginTransaction();
         foreach (var tmpl in response.WorkflowTemplates)
         {
+            if (existingTemplateItems.Contains(tmpl.TemplateId))
+                continue; // this specific template already applied on a prior tick
+
             if (!PmsVersionIncluded(tmpl.PmsVersionRange, localFingerprint))
             {
                 _db.RejectSeedItem(response.SeedDigest, "template", tmpl.TemplateId, now);
@@ -176,6 +192,18 @@ public sealed class SeedApplicator
                 _db.RejectSeedItem(response.SeedDigest, "template", tmpl.TemplateId, now);
                 skipped++;
                 continue;
+            }
+
+            // Retire-first to avoid uniq_wt_active_skill_screen collision when
+            // a locally-extracted active template and a seeded template share
+            // (skill_id, screen_signature) but carry different template_ids.
+            // Mirrors WorkflowTemplateExtractor.cs:228 pattern.
+            var existing = _db.GetWorkflowTemplateByScreen(tmpl.SkillId, tmpl.ScreenSignatureV1);
+            if (existing is not null
+                && !string.Equals(existing.TemplateId, tmpl.TemplateId, StringComparison.Ordinal)
+                && existing.RetiredAt is null)
+            {
+                _db.RetireWorkflowTemplate(existing.TemplateId, now, "superseded-by-seed");
             }
 
             var rangeJson = JsonSerializer.Serialize(tmpl.PmsVersionRange);
@@ -198,6 +226,7 @@ public sealed class SeedApplicator
             _db.InsertSeedItem(response.SeedDigest, "template", tmpl.TemplateId, now);
             applied++;
         }
+        _db.CommitTransaction(txn);
 
         return new(applied, skipped);
     }

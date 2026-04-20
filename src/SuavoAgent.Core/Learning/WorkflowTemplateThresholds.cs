@@ -24,10 +24,11 @@ public sealed record WorkflowTemplateThresholds
     public int LowConfidenceRetirementAfter { get; init; } = 5;
 
     /// <summary>
-    /// treeHash the extractor reads to build ExpectedAfter for writeback steps.
-    /// In production this comes from the Helper's post-action UIA capture; in
-    /// tests we inject a known tree_hash. Null = no ExpectedAfter available →
-    /// writeback templates fail closed.
+    /// Fallback treeHash the extractor reads to build ExpectedAfter when a
+    /// writeback step is the routine's last step (no natural next-step anchor).
+    /// Primary per-step post-state is derived from the next step's TreeHash;
+    /// this override only applies when the writeback is terminal. Null = no
+    /// fallback → terminal-writeback templates fail closed.
     /// </summary>
     public string? WritebackPostStateTreeHash { get; init; }
 

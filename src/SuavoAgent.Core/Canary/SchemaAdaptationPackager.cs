@@ -71,4 +71,28 @@ public sealed class SchemaAdaptationPackager
 
         return unsigned with { Signature = sig };
     }
+
+    /// <summary>
+    /// Packages a signed revocation. Uses <see cref="AdaptationRevocationCanonicalV1"/>
+    /// so receivers can verify independently of the envelope transport.
+    /// </summary>
+    public AdaptationRevocation PackRevocation(
+        string revocationId,
+        string targetAdaptationId,
+        string reason,
+        DateTimeOffset revokedAt)
+    {
+        var unsigned = new AdaptationRevocation(
+            RevocationId: revocationId,
+            TargetAdaptationId: targetAdaptationId,
+            Reason: reason,
+            RevokedAt: revokedAt.ToString("o"),
+            KeyId: _keyId,
+            Signature: "");
+
+        var bytes = AdaptationRevocationCanonicalV1.Build(unsigned);
+        var sig = Convert.ToBase64String(_key.SignData(bytes, HashAlgorithmName.SHA256));
+
+        return unsigned with { Signature = sig };
+    }
 }
