@@ -1,0 +1,61 @@
+{
+  "date": "2026-04-19",
+  "window": "7d",
+  "repo": "MinaH153/SuavoAgent",
+  "metrics": {
+    "commits_nonmerge": 244,
+    "commits_total": 272,
+    "contributors": 1,
+    "prs_merged": 13,
+    "insertions": 52834,
+    "deletions": 2237,
+    "net_loc": 50597,
+    "test_loc_insertions": 12933,
+    "test_loc_ratio": 0.245,
+    "active_days": 7,
+    "sessions": 20,
+    "deep_sessions": 7,
+    "medium_sessions": 3,
+    "micro_sessions": 10,
+    "total_active_minutes": 1299,
+    "avg_session_minutes": 65.0,
+    "loc_per_session_hour": 2450,
+    "feat_pct": 0.48,
+    "fix_pct": 0.28,
+    "docs_pct": 0.09,
+    "security_pct": 0.04,
+    "chore_pct": 0.08,
+    "test_pct": 0.03,
+    "peak_hours_pt": [15, 18, 20, 17, 14],
+    "dead_hours_pt": [6, 7, 10, 21]
+  },
+  "authors": {
+    "Mina Joshua Henein": {
+      "commits": 244,
+      "insertions": 52834,
+      "deletions": 2237,
+      "test_ratio": 0.245,
+      "top_areas": [
+        "src/SuavoAgent.Core/",
+        "src/SuavoAgent.Contracts/",
+        "src/SuavoAgent.Helper/"
+      ]
+    }
+  },
+  "version_range": ["3.0.0", "3.11.1", "3.12.0-dev"],
+  "prs_in_window": ["#2", "#3", "#4", "#5", "#6", "#7", "#8", "#11", "#12", "#13", "#14"],
+  "team_streak_days": 7,
+  "personal_streak_days": 7,
+  "tweetable": "Week of Apr 13: 244 commits (solo), 50.6k LOC, 24.5% tests, 11+ PRs, peak: 3pm & 6pm | Streak: 7d",
+  "biggest_ships": [
+    "Spec B — Expanded Behavioral Learning (UiaTreeObserver, ActionCorrelator, RoutineDetector, DmvQueryObserver)",
+    "Tier-1/2/3 tiered brain (RuleEngine, LLamaSharp local inference, Cloud Claude reasoning)",
+    "Schema Canary (contract fingerprinter, classifier, escalation, integration tests)",
+    "PioneerRx writeback (engine, state machine, signed commands, idempotent recovery)",
+    "v3.12 autonomous templates (contracts, extractor, generator, schema adaptation, Spec-D transfer)",
+    "Signed v3.11.1 update manifest (ECDSA P1363 signing, CI lock-in)",
+    "ConfigSyncWorker (cloud config push with atomic override writes)",
+    "Self-Improving Feedback (Spec C — event-sourced dual inline/batch)",
+    "Collective Intelligence (Spec D — dual-gate seeding, phase acceleration)"
+  ]
+}
