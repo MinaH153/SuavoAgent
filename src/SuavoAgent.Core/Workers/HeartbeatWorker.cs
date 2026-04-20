@@ -220,6 +220,28 @@ public sealed class HeartbeatWorker : BackgroundService
                 var pendingWbCount = _stateDb.GetPendingWritebacks().Count;
                 var failedWbCount = _stateDb.GetFailedWritebackCount();
 
+                // v3.12.1.1 — upload local auto-rule approval state so the
+                // pharmacy portal UI (MKM #44) can render real rows. Cloud
+                // upserts on (pharmacy_id, rule_id); retired/deleted local
+                // rows are handled by the cloud-side sync freshness window,
+                // not by sending a delete signal here.
+                var autoRuleApprovals = _stateDb
+                    .GetAllAutoRuleApprovals()
+                    .Select(a => new
+                    {
+                        ruleId = a.RuleId,
+                        templateId = a.TemplateId,
+                        yamlSha256 = a.YamlSha256,
+                        status = a.Status.ToString(),
+                        shadowRuns = a.ShadowRuns,
+                        shadowMatches = a.ShadowMatches,
+                        shadowMismatches = a.ShadowMismatches,
+                        approvedBy = a.ApprovedBy,
+                        approvedAt = a.ApprovedAt,
+                        rejectedReason = a.RejectedReason,
+                    })
+                    .ToArray();
+
                 var payload = new
                 {
                     agentId = _options.AgentId,
@@ -275,7 +297,11 @@ public sealed class HeartbeatWorker : BackgroundService
                     intelligenceContext = intelligenceContext,
                     efficiencyReport = efficiencyReport,
                     fleetSignals = fleetSignals,
-                    consentReceipt = consentReceipt
+                    consentReceipt = consentReceipt,
+                    // v3.12.1.1 auto-rule approval mirror. Empty array when
+                    // Learning:Template:Enabled is off or no templates have
+                    // been extracted yet — safe to emit either way.
+                    autoRuleApprovals = autoRuleApprovals,
                 };
 
                 var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
@@ -426,6 +452,9 @@ public sealed class HeartbeatWorker : BackgroundService
                     break;
                 case "run_pricing_job":
                     _ = Task.Run(() => HandleRunPricingJobAsync(scEl, ct), ct);
+                    break;
+                case "transition_auto_rule_approval":
+                    HandleTransitionAutoRuleApproval(scEl);
                     break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
@@ -910,6 +939,74 @@ public sealed class HeartbeatWorker : BackgroundService
             Trigger: cmd.Command,
             CommandId: cmd.Nonce,
             RequesterId: "operator"));
+    }
+
+    /// <summary>
+    /// v3.12.1.1 — apply a signed auto-rule-approval transition from the
+    /// cloud operator UI. The command envelope shape:
+    ///
+    ///   data: {
+    ///     ruleId: string,
+    ///     toStatus: "Pending" | "Shadow" | "Approved" | "Rejected",
+    ///     approvedBy?: string,   // operator user id when toStatus=Approved
+    ///     approvedAt?: string,   // ISO-8601 when toStatus=Approved
+    ///     reason?: string        // required when toStatus=Rejected
+    ///   }
+    ///
+    /// The cloud enforces the state-machine gate (spec §4.3 evidence gate on
+    /// Shadow→Approved). This handler trusts the inbound transition, flips
+    /// the local SQLite row, and writes an audit entry. A missing ruleId —
+    /// e.g. because the rule was retired locally after the command was
+    /// enqueued — is a silent no-op (fail-soft, not fail-throw).
+    /// </summary>
+    private void HandleTransitionAutoRuleApproval(JsonElement scEl)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+
+        string? ruleId = dataEl.TryGetProperty("ruleId", out var rEl) ? rEl.GetString() : null;
+        string? toStatusStr = dataEl.TryGetProperty("toStatus", out var sEl) ? sEl.GetString() : null;
+        string? approvedBy = dataEl.TryGetProperty("approvedBy", out var abEl) ? abEl.GetString() : null;
+        string? approvedAt = dataEl.TryGetProperty("approvedAt", out var atEl) ? atEl.GetString() : null;
+        string? reason = dataEl.TryGetProperty("reason", out var rsEl) ? rsEl.GetString() : null;
+
+        if (string.IsNullOrEmpty(ruleId) || string.IsNullOrEmpty(toStatusStr))
+        {
+            _logger.LogWarning(
+                "transition_auto_rule_approval: missing ruleId or toStatus; dropping");
+            return;
+        }
+
+        if (!Enum.TryParse<AgentStateDb.AutoRuleStatus>(toStatusStr, ignoreCase: true, out var toStatus))
+        {
+            _logger.LogWarning(
+                "transition_auto_rule_approval: invalid toStatus '{S}'; dropping", toStatusStr);
+            return;
+        }
+
+        var existing = _stateDb.GetAutoRuleApproval(ruleId);
+        var updated = _stateDb.SetAutoRuleApprovalStatus(
+            ruleId, toStatus, approvedBy, approvedAt, reason);
+
+        if (!updated)
+        {
+            _logger.LogInformation(
+                "transition_auto_rule_approval: no row for rule {RuleId} — silent no-op",
+                ruleId);
+            return;
+        }
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: ruleId,
+            EventType: "auto_rule_approval_transition",
+            FromState: existing?.Status.ToString() ?? "unknown",
+            ToState: toStatus.ToString(),
+            Trigger: "cloud_command",
+            CommandId: null,
+            RequesterId: approvedBy ?? "operator"));
+
+        _logger.LogInformation(
+            "Auto-rule approval {RuleId}: {From} -> {To}",
+            ruleId, existing?.Status.ToString() ?? "unknown", toStatus);
     }
 
     private async Task HandleAcknowledgeDriftAsync(JsonElement scEl, CancellationToken ct)
