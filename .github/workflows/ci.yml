@@ -17,11 +17,15 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      # Solution-level restore/build MUST NOT pass -r <RID>.
+      # .NET SDK 8.0.400+ hard-errors on NETSDK1134 ("Building a solution with
+      # a specific RuntimeIdentifier is not supported"). The RID only belongs
+      # at publish time (see cross-compile job below). Tests don't need a RID.
       - name: Restore
-        run: dotnet restore SuavoAgent.sln -r win-x64
+        run: dotnet restore SuavoAgent.sln
 
       - name: Build
-        run: dotnet build SuavoAgent.sln -c Release --no-restore -r win-x64 --no-self-contained
+        run: dotnet build SuavoAgent.sln -c Release --no-restore
 
       - name: Test
         run: dotnet test SuavoAgent.sln -c Release --no-build -v normal --logger "trx;LogFileName=test-results.trx"
