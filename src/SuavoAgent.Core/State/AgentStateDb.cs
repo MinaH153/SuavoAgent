@@ -2486,7 +2486,8 @@ public sealed class AgentStateDb : IDisposable
                 template_id = @t,
                 yaml_sha256 = @h,
                 status = CASE
-                    WHEN auto_rule_approvals.status IN ('Approved','Shadow') THEN 'Pending'
+                    WHEN auto_rule_approvals.yaml_sha256 != @h
+                     AND auto_rule_approvals.status IN ('Approved','Shadow') THEN 'Pending'
                     ELSE auto_rule_approvals.status
                 END
             """;
@@ -2516,6 +2517,73 @@ public sealed class AgentStateDb : IDisposable
             reader.IsDBNull(7) ? null : reader.GetString(7),
             reader.IsDBNull(8) ? null : reader.GetString(8),
             reader.IsDBNull(9) ? null : reader.GetString(9));
+    }
+
+    /// <summary>
+    /// Returns every auto-rule approval row — used by HeartbeatWorker to
+    /// upload the current approval state to the cloud mirror. Ordered by
+    /// <c>rule_id</c> for deterministic heartbeat payloads (makes upstream
+    /// diff detection cheap — same set of rules at rest → identical
+    /// payload bytes → no cloud churn).
+    /// </summary>
+    public IReadOnlyList<AutoRuleApprovalRow> GetAllAutoRuleApprovals()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT rule_id, template_id, yaml_sha256, status,
+                   shadow_runs, shadow_matches, shadow_mismatches,
+                   approved_by, approved_at, rejected_reason
+            FROM auto_rule_approvals
+            ORDER BY rule_id
+            """;
+        var rows = new List<AutoRuleApprovalRow>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add(new AutoRuleApprovalRow(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2),
+                Enum.Parse<AutoRuleStatus>(reader.GetString(3)),
+                reader.GetInt32(4), reader.GetInt32(5), reader.GetInt32(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9)));
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Transitions a local auto-rule approval to a new status in response to a
+    /// signed cloud command. The state-machine gate (Pending→Shadow, Shadow→
+    /// Approved/Rejected, etc.) is enforced at the cloud API layer — this
+    /// call is the agent-side apply, so it trusts the inbound transition and
+    /// records the operator metadata.
+    ///
+    /// Returns true when a row was affected, false when no row existed for the
+    /// rule id (silent no-op rather than exception — makes command replays
+    /// tolerant of cleaned-up rules).
+    /// </summary>
+    public bool SetAutoRuleApprovalStatus(
+        string ruleId,
+        AutoRuleStatus status,
+        string? approvedBy = null,
+        string? approvedAt = null,
+        string? rejectedReason = null)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE auto_rule_approvals
+               SET status = @s,
+                   approved_by = CASE WHEN @s = 'Approved' THEN @by ELSE NULL END,
+                   approved_at = CASE WHEN @s = 'Approved' THEN @at ELSE NULL END,
+                   rejected_reason = CASE WHEN @s = 'Rejected' THEN @reason ELSE NULL END
+             WHERE rule_id = @r
+            """;
+        cmd.Parameters.AddWithValue("@r", ruleId);
+        cmd.Parameters.AddWithValue("@s", status.ToString());
+        cmd.Parameters.AddWithValue("@by", (object?)approvedBy ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@at", (object?)approvedAt ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@reason", (object?)rejectedReason ?? DBNull.Value);
+        return cmd.ExecuteNonQuery() > 0;
     }
 
     // ── Behavioral Events: structural lookups (v3.12 extractor support) ──

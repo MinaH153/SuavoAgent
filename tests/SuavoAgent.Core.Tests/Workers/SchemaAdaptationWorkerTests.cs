@@ -108,13 +108,12 @@ public class SchemaAdaptationWorkerTests : IDisposable
         await worker.TickAsync(CancellationToken.None);
         Assert.NotNull(_db.GetAppliedSchemaAdaptation(a.AdaptationId));
 
-        var revocation = new AdaptationRevocation(
-            RevocationId: "rev-1",
-            TargetAdaptationId: a.AdaptationId,
-            Reason: "cloud-recall",
-            RevokedAt: DateTimeOffset.UtcNow.ToString("o"),
-            KeyId: "adapt-v1",
-            Signature: "unused-by-worker");
+        var revocation = new SchemaAdaptationPackager(_cloudKey, "adapt-v1")
+            .PackRevocation(
+                revocationId: "rev-1",
+                targetAdaptationId: a.AdaptationId,
+                reason: "cloud-recall",
+                revokedAt: DateTimeOffset.UtcNow);
         transport.Response = new AdaptationPullResponse(null, new[] { revocation });
         await worker.TickAsync(CancellationToken.None);
 

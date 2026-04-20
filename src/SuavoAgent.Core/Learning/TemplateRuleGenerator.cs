@@ -210,11 +210,13 @@ public sealed class TemplateRuleGenerator
 
     private YamlOutputPredicate BuildWhen(WorkflowTemplate template)
     {
-        var entry = template.Steps[0].ExpectedVisible;
+        var firstStep = template.Steps[0];
+        var entry = firstStep.ExpectedVisible;
         return new YamlOutputPredicate
         {
             ProcessName = template.ProcessNameGlob,
             ElementFingerprints = entry.Select(ToYamlFp).ToList(),
+            MinRequiredCount = ClampK(firstStep.MinElementsRequired, entry.Count),
         };
     }
 
@@ -245,9 +247,15 @@ public sealed class TemplateRuleGenerator
         YamlOutputPredicate? verifyAfter = null;
         if (step.ExpectedAfter is { Count: > 0 } after)
         {
+            // Mirror the K ratio used for ExpectedVisible so transient post-
+            // state differences (virtualized panels, animations) don't fail
+            // writeback verification on cross-installation runs.
+            int afterMin = Math.Max(1,
+                (int)Math.Ceiling(after.Count * ComputeMatchRatio(step)));
             verifyAfter = new YamlOutputPredicate
             {
                 ElementFingerprints = after.Select(ToYamlFp).ToList(),
+                MinRequiredCount = ClampK(afterMin, after.Count),
             };
         }
 
@@ -268,6 +276,21 @@ public sealed class TemplateRuleGenerator
         AutomationId = s.AutomationId,
         ClassName = s.ClassName,
     };
+
+    private static int ClampK(int k, int m)
+    {
+        if (m <= 0) return 1;
+        if (k < 1) return 1;
+        if (k > m) return m;
+        return k;
+    }
+
+    // Back-derive the extractor's MatchRatio from the step's recorded
+    // K/M so VerifyAfter uses the same tolerance as ExpectedVisible.
+    private static double ComputeMatchRatio(TemplateStep step) =>
+        step.ExpectedVisible.Count == 0
+            ? 1.0
+            : (double)step.MinElementsRequired / step.ExpectedVisible.Count;
 
     // YAML output DTOs — camelCase fields match the loader's private
     // YamlRule/YamlPredicate/YamlAction DTOs exactly.
@@ -297,6 +320,7 @@ public sealed class TemplateRuleGenerator
         public int? OperatorIdleMsAtLeast { get; set; }
         public Dictionary<string, string>? StateFlags { get; set; }
         public List<YamlElementFingerprint>? ElementFingerprints { get; set; }
+        public int? MinRequiredCount { get; set; }
     }
 
     private sealed class YamlOutputAction

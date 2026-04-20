@@ -135,4 +135,58 @@ public class RulePredicateElementFingerprintsTests
         var c = CtxWith(actual);
         Assert.False(PredicateFingerprintMatcher.SatisfiedBy(p, c));
     }
+
+    // ─────────── K-of-M relaxation (spec §2.3 MatchRatio) ───────────
+
+    [Fact]
+    public void MinRequiredCount_KofM_PartialMatchSatisfies()
+    {
+        // Template extracted K=4 on a 5-element screen. Runtime presents 4 of 5.
+        var a = new ElementSignature("Button", "a", null);
+        var b = new ElementSignature("Button", "b", null);
+        var c = new ElementSignature("Button", "c", null);
+        var d = new ElementSignature("Button", "d", null);
+        var e = new ElementSignature("Button", "e", null);
+
+        var p = new RulePredicate
+        {
+            ElementFingerprints = new[] { a, b, c, d, e },
+            MinRequiredCount = 4,
+        };
+        var ctx = CtxWith(a, b, c, d); // only 4 of 5 visible
+        Assert.True(PredicateFingerprintMatcher.SatisfiedBy(p, ctx));
+    }
+
+    [Fact]
+    public void MinRequiredCount_KofM_BelowThresholdFails()
+    {
+        var a = new ElementSignature("Button", "a", null);
+        var b = new ElementSignature("Button", "b", null);
+        var c = new ElementSignature("Button", "c", null);
+        var d = new ElementSignature("Button", "d", null);
+        var e = new ElementSignature("Button", "e", null);
+
+        var p = new RulePredicate
+        {
+            ElementFingerprints = new[] { a, b, c, d, e },
+            MinRequiredCount = 4,
+        };
+        var ctx = CtxWith(a, b, c); // 3 < 4 required
+        Assert.False(PredicateFingerprintMatcher.SatisfiedBy(p, ctx));
+    }
+
+    [Fact]
+    public void MinRequiredCount_Null_PreservesAllOfSemantics()
+    {
+        var a = new ElementSignature("Button", "a", null);
+        var b = new ElementSignature("Button", "b", null);
+
+        var p = new RulePredicate
+        {
+            ElementFingerprints = new[] { a, b },
+            MinRequiredCount = null,
+        };
+        Assert.False(PredicateFingerprintMatcher.SatisfiedBy(p, CtxWith(a)));
+        Assert.True(PredicateFingerprintMatcher.SatisfiedBy(p, CtxWith(a, b)));
+    }
 }

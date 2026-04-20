@@ -90,6 +90,18 @@ public sealed record RulePredicate
     /// </summary>
     public IReadOnlyList<ElementSignature> ElementFingerprints { get; init; } =
         Array.Empty<ElementSignature>();
+
+    /// <summary>
+    /// K-of-M relaxation for <see cref="ElementFingerprints"/>: minimum count of
+    /// the required fingerprints that must match in the context. Null = all must
+    /// match (legacy all-of semantics). When set, must be 1..ElementFingerprints.Count.
+    ///
+    /// WHY: cross-installation UIA trees drift (pagination, hover-only nodes,
+    /// virtualized panels). A 5-element screen extracted from pharmacy A often
+    /// presents 4 at pharmacy B — the template's MinElementsRequired captures
+    /// that tolerance and must survive YAML round-trip.
+    /// </summary>
+    public int? MinRequiredCount { get; init; }
 }
 
 /// <summary>

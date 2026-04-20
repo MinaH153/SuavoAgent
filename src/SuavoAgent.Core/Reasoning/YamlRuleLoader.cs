@@ -194,6 +194,18 @@ public sealed class YamlRuleLoader
             fingerprints = list.ToArray();
         }
 
+        int? minRequired = null;
+        if (yml.MinRequiredCount is int k)
+        {
+            if (fingerprints.Length == 0)
+                throw new InvalidOperationException(
+                    $"Rule '{ruleId}' has minRequiredCount without elementFingerprints");
+            if (k < 1 || k > fingerprints.Length)
+                throw new InvalidOperationException(
+                    $"Rule '{ruleId}' has minRequiredCount={k} outside 1..{fingerprints.Length}");
+            minRequired = k;
+        }
+
         return new()
         {
             ProcessName = yml.ProcessName,
@@ -202,6 +214,7 @@ public sealed class YamlRuleLoader
             OperatorIdleMsAtLeast = yml.OperatorIdleMsAtLeast,
             StateFlags = yml.StateFlags ?? new Dictionary<string, string>(),
             ElementFingerprints = fingerprints,
+            MinRequiredCount = minRequired,
         };
     }
 
@@ -262,6 +275,7 @@ public sealed class YamlRuleLoader
         public int? OperatorIdleMsAtLeast { get; set; }
         public Dictionary<string, string>? StateFlags { get; set; }
         public List<YamlElementFingerprint>? ElementFingerprints { get; set; }
+        public int? MinRequiredCount { get; set; }
     }
 
     private sealed class YamlElementFingerprint

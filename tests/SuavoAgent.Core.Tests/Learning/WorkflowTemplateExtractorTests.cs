@@ -218,6 +218,62 @@ public class WorkflowTemplateExtractorTests : IDisposable
         Assert.Empty(templates);
     }
 
+    [Fact]
+    public void Extract_NonTerminalWriteback_UsesNextStepTreeHashAsPostState()
+    {
+        // A→B→C where B is the writeback (non-terminal). Post-state anchor
+        // for B must be derived from the NEXT step's tree (treeC), not from
+        // any thresholds override. This is the path that unblocks v3.12
+        // writeback templates in production where no override is plumbed.
+        SeedSixRoundTrips("treeA", "btnOpen", "treeB", "btnCommit", "treeC", "btnNext");
+
+        new SuavoAgent.Core.Behavioral.RoutineDetector(_db, _sessionId).DetectAndPersist();
+
+        // Mark step B (treeB/btnCommit) as the writeback.
+        _db.UpsertCorrelatedAction(_sessionId,
+            correlationKey: "treeB:btnCommit:shape1",
+            treeHash: "treeB", elementId: "btnCommit", controlType: "Button",
+            queryShapeHash: "shape1", isWrite: true, tablesReferenced: "Prescription.Rx");
+
+        // No WritebackPostStateTreeHash override — production-equivalent config.
+        var xtor = new WorkflowTemplateExtractor(
+            _db, _sessionId, "learned", "PioneerPharmacy*", Provider,
+            WorkflowTemplateThresholds.Default);
+        var templates = xtor.ExtractAndPersist();
+
+        Assert.NotEmpty(templates);
+        var t = templates[0];
+        Assert.True(t.HasWriteback);
+        var writeStep = t.Steps.First(s => s.IsWrite);
+        Assert.NotNull(writeStep.ExpectedAfter);
+        // ExpectedAfter for step B should reflect treeC's elements (btnNext).
+        Assert.Contains(writeStep.ExpectedAfter!,
+            e => e.AutomationId == "btnNext");
+    }
+
+    [Fact]
+    public void Extract_TerminalWriteback_NoFallback_DropsWithWarning()
+    {
+        // Terminal writeback (step C) with no WritebackPostStateTreeHash.
+        // The extractor must drop the routine (fail closed), not silently
+        // succeed with an unverifiable template.
+        SeedSixRoundTrips("treeA", "btnOpen", "treeB", "txtSearch", "treeC", "btnApprove");
+        new SuavoAgent.Core.Behavioral.RoutineDetector(_db, _sessionId).DetectAndPersist();
+
+        _db.UpsertCorrelatedAction(_sessionId,
+            correlationKey: "treeC:btnApprove:shape1",
+            treeHash: "treeC", elementId: "btnApprove", controlType: "Button",
+            queryShapeHash: "shape1", isWrite: true, tablesReferenced: "Prescription.Rx");
+
+        // No WritebackPostStateTreeHash — production default.
+        var xtor = new WorkflowTemplateExtractor(
+            _db, _sessionId, "learned", "PioneerPharmacy*", Provider,
+            WorkflowTemplateThresholds.Default);
+        var templates = xtor.ExtractAndPersist();
+
+        Assert.Empty(templates);
+    }
+
     // ──────────────────────── cross-installation safety ────────────────────────
 
     [Fact]

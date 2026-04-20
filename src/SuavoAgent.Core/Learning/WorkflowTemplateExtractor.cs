@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Core.State;
@@ -39,6 +41,7 @@ public sealed class WorkflowTemplateExtractor
     private readonly string _processNameGlob;
     private readonly Func<PmsVersionFingerprint> _fingerprint;
     private readonly WorkflowTemplateThresholds _thresholds;
+    private readonly ILogger _logger;
 
     public WorkflowTemplateExtractor(
         AgentStateDb db,
@@ -46,7 +49,8 @@ public sealed class WorkflowTemplateExtractor
         string skillId,
         string processNameGlob,
         Func<PmsVersionFingerprint> fingerprintProvider,
-        WorkflowTemplateThresholds thresholds)
+        WorkflowTemplateThresholds thresholds,
+        ILogger<WorkflowTemplateExtractor>? logger = null)
     {
         _db = db;
         _sessionId = sessionId;
@@ -54,6 +58,7 @@ public sealed class WorkflowTemplateExtractor
         _processNameGlob = processNameGlob;
         _fingerprint = fingerprintProvider;
         _thresholds = thresholds;
+        _logger = logger ?? NullLogger<WorkflowTemplateExtractor>.Instance;
     }
 
     public IReadOnlyList<WorkflowTemplate> ExtractAndPersist()
@@ -172,11 +177,30 @@ public sealed class WorkflowTemplateExtractor
             List<ElementSignature>? expectedAfter = null;
             if (isWrite)
             {
-                if (_thresholds.WritebackPostStateTreeHash is null)
+                // Per-writeback post-state: the tree observed at the start of
+                // the next step is the natural anchor. Only if this writeback
+                // is the routine's terminal step do we fall back to the
+                // threshold-level override (typically Helper-captured).
+                string? postTree = i + 1 < path.Count
+                    ? path[i + 1].TreeHash
+                    : _thresholds.WritebackPostStateTreeHash;
+
+                if (string.IsNullOrWhiteSpace(postTree))
+                {
+                    _logger.LogWarning(
+                        "WorkflowTemplateExtractor: template dropped — writeback step {Ordinal} for routine {Routine} has no post-state anchor (terminal writeback, WritebackPostStateTreeHash unset)",
+                        i, routine.RoutineHash);
                     return null;
-                var postElements = _db.GetDistinctElementsOnTree(
-                    _sessionId, _thresholds.WritebackPostStateTreeHash);
-                if (postElements.Count == 0) return null;
+                }
+
+                var postElements = _db.GetDistinctElementsOnTree(_sessionId, postTree);
+                if (postElements.Count == 0)
+                {
+                    _logger.LogWarning(
+                        "WorkflowTemplateExtractor: template dropped — writeback step {Ordinal} for routine {Routine} has post-state tree {Tree} with zero observed elements",
+                        i, routine.RoutineHash, postTree);
+                    return null;
+                }
                 expectedAfter = postElements
                     .Take(_thresholds.MaxExpectedVisiblePerScreen)
                     .Select(e => new ElementSignature(e.ControlType, e.ElementId, e.ClassName))

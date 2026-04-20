@@ -17,6 +17,7 @@ public enum SchemaAdaptationOutcome
     Expired,
     Revoked,
     TokenizerRejected,
+    NotYetActive,
 }
 
 public sealed record SchemaAdaptationApplyResult(SchemaAdaptationOutcome Status, string? Detail);
@@ -76,6 +77,18 @@ public sealed class SchemaAdaptationApplier
             return new(SchemaAdaptationOutcome.SignatureInvalid, "signature-invalid");
         }
 
+        // NotBefore gate — fail closed on parse failure too. Activation window
+        // semantics match X.509/JWT nbf: an adaptation may be signed + published
+        // ahead of its effective date for staged/maintenance-window rollouts.
+        if (!DateTimeOffset.TryParse(adaptation.NotBefore, out var notBefore)
+            || notBefore > DateTimeOffset.UtcNow)
+        {
+            _logger.LogInformation(
+                "SchemaAdaptationApplier: {Id} not yet active (NotBefore={At})",
+                adaptation.AdaptationId, adaptation.NotBefore);
+            return new(SchemaAdaptationOutcome.NotYetActive, "not-yet-active");
+        }
+
         // Expiry gate.
         if (!DateTimeOffset.TryParse(adaptation.ExpiresAt, out var expiresAt)
             || expiresAt <= DateTimeOffset.UtcNow)
@@ -126,8 +139,10 @@ public sealed class SchemaAdaptationApplier
     }
 
     /// <summary>
-    /// Records a revocation in the denylist. If the adaptation was already
-    /// applied, rolls it back. Returns true if a rollback actually happened.
+    /// In-process revocation path — trusts the caller. Only call this from
+    /// local operator tooling or other in-process code where provenance is
+    /// already established. Cloud-delivered revocations MUST go through
+    /// <see cref="RevokeSigned"/> so the per-record signature is checked.
     /// </summary>
     public bool Revoke(string adaptationId, string reason)
     {
@@ -141,6 +156,48 @@ public sealed class SchemaAdaptationApplier
         _logger.LogInformation(
             "SchemaAdaptationApplier: rolled back {Id} (reason: {Reason})", adaptationId, reason);
         return true;
+    }
+
+    /// <summary>
+    /// Cloud-delivered revocation path. Verifies the per-record ECDSA signature
+    /// against <see cref="AdaptationRevocationCanonicalV1"/> before mutating
+    /// state. Mirrors the defense-in-depth check that
+    /// <see cref="ApplyIfEligible"/> runs on adaptations even though the
+    /// envelope transport already verified the pull response.
+    /// </summary>
+    public bool RevokeSigned(AdaptationRevocation rev)
+    {
+        if (rev is null) throw new ArgumentNullException(nameof(rev));
+        if (!VerifyRevocationSignature(rev))
+        {
+            _logger.LogWarning(
+                "SchemaAdaptationApplier: revocation {Id} (target {Target}) has invalid signature — dropping",
+                rev.RevocationId, rev.TargetAdaptationId);
+            return false;
+        }
+        return Revoke(rev.TargetAdaptationId, rev.Reason ?? "cloud-revocation");
+    }
+
+    private bool VerifyRevocationSignature(AdaptationRevocation rev)
+    {
+        try
+        {
+            byte[] bytes;
+            try { bytes = AdaptationRevocationCanonicalV1.Build(rev); }
+            catch { return false; }
+
+            using var ecdsa = ECDsa.Create();
+            ecdsa.ImportSubjectPublicKeyInfo(
+                Convert.FromBase64String(_publicKeyDer), out _);
+
+            if (string.IsNullOrEmpty(rev.Signature)) return false;
+            var sig = Convert.FromBase64String(rev.Signature);
+            return ecdsa.VerifyData(bytes, sig, HashAlgorithmName.SHA256);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private bool VerifySignature(SchemaAdaptation adaptation)
