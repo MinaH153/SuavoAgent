@@ -612,6 +612,122 @@ public sealed class AgentStateDb : IDisposable
             )
         """);
         Execute("CREATE INDEX IF NOT EXISTS idx_pricing_results_job ON pricing_results(job_id)");
+
+        // v3.12 — numbered transactional migrations (Codex Area 5 fix).
+        // schema_migrations tracks applied versions so new migrations can fail-closed.
+        // Existing TryAlter migrations are left intact for backward compatibility.
+        Execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL,
+                description TEXT NOT NULL
+            )
+        """);
+        ApplyMigrationIfNeeded(1,
+            "v3.12 workflow templates + auto-rule approvals + schema adaptation denylist",
+            """
+            CREATE TABLE IF NOT EXISTS workflow_templates (
+                template_id TEXT PRIMARY KEY,
+                template_version TEXT NOT NULL,
+                skill_id TEXT NOT NULL,
+                process_name_glob TEXT NOT NULL,
+                pms_version_range_json TEXT NOT NULL,
+                screen_signature TEXT NOT NULL,
+                steps_hash TEXT NOT NULL,
+                routine_hash_origin TEXT,
+                steps_json TEXT NOT NULL,
+                aggregate_confidence REAL NOT NULL,
+                observation_count INTEGER NOT NULL,
+                has_writeback INTEGER NOT NULL,
+                extracted_at TEXT NOT NULL,
+                extracted_by TEXT NOT NULL,
+                retired_at TEXT,
+                retirement_reason TEXT,
+                consecutive_low_conf_runs INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_wt_skill ON workflow_templates(skill_id) WHERE retired_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_wt_writeback ON workflow_templates(has_writeback)
+                WHERE retired_at IS NULL AND has_writeback = 1;
+            -- Partial unique index: only ONE active template per (skill, screen). Retired
+            -- rows are exempt so version bumps with same screen_signature can coexist.
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_wt_active_skill_screen
+                ON workflow_templates(skill_id, screen_signature) WHERE retired_at IS NULL;
+
+            CREATE TABLE IF NOT EXISTS auto_rule_approvals (
+                rule_id TEXT PRIMARY KEY,
+                template_id TEXT NOT NULL,
+                yaml_sha256 TEXT NOT NULL,
+                status TEXT NOT NULL,
+                shadow_runs INTEGER NOT NULL DEFAULT 0,
+                shadow_matches INTEGER NOT NULL DEFAULT 0,
+                shadow_mismatches INTEGER NOT NULL DEFAULT 0,
+                approved_by TEXT,
+                approved_at TEXT,
+                rejected_reason TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS schema_adaptation_denylist (
+                target_adaptation_id TEXT PRIMARY KEY,
+                revoked_at TEXT NOT NULL,
+                reason TEXT
+            );
+            """);
+        ApplyMigrationIfNeeded(2,
+            "v3.12 applied schema adaptations (track what each pharmacy has installed)",
+            """
+            CREATE TABLE IF NOT EXISTS applied_schema_adaptations (
+                adaptation_id TEXT PRIMARY KEY,
+                from_schema_hash TEXT NOT NULL,
+                to_schema_hash TEXT NOT NULL,
+                rewrites_json TEXT NOT NULL,
+                applied_at TEXT NOT NULL,
+                rolled_back_at TEXT,
+                rollback_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_asa_from ON applied_schema_adaptations(from_schema_hash);
+            """);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="ddl"/> inside a transaction iff the migration version
+    /// has not already been applied. Fail-closed: any error aborts the transaction
+    /// AND throws, so startup fails instead of silently half-migrating a HIPAA
+    /// surface. DDL with multiple statements is OK — SQLite executes them in
+    /// order within the transaction.
+    /// </summary>
+    private void ApplyMigrationIfNeeded(int version, string description, string ddl)
+    {
+        using var checkCmd = _conn.CreateCommand();
+        checkCmd.CommandText = "SELECT 1 FROM schema_migrations WHERE version = @v LIMIT 1";
+        checkCmd.Parameters.AddWithValue("@v", version);
+        if (checkCmd.ExecuteScalar() is not null) return;
+
+        using var txn = _conn.BeginTransaction();
+        try
+        {
+            using (var ddlCmd = _conn.CreateCommand())
+            {
+                ddlCmd.Transaction = txn;
+                ddlCmd.CommandText = ddl;
+                ddlCmd.ExecuteNonQuery();
+            }
+            using (var markCmd = _conn.CreateCommand())
+            {
+                markCmd.Transaction = txn;
+                markCmd.CommandText =
+                    "INSERT INTO schema_migrations (version, applied_at, description) VALUES (@v, @at, @d)";
+                markCmd.Parameters.AddWithValue("@v", version);
+                markCmd.Parameters.AddWithValue("@at", DateTimeOffset.UtcNow.ToString("o"));
+                markCmd.Parameters.AddWithValue("@d", description);
+                markCmd.ExecuteNonQuery();
+            }
+            txn.Commit();
+        }
+        catch
+        {
+            txn.Rollback();
+            throw;
+        }
     }
 
     private void Execute(string sql)
@@ -2081,6 +2197,392 @@ public sealed class AgentStateDb : IDisposable
                 reader.GetInt32(8) == 1));
         }
         return results;
+    }
+
+    // ── Workflow Templates (v3.12) ──
+
+    /// <summary>
+    /// Upserts a WorkflowTemplate. Idempotency contract: when a template with the
+    /// same <paramref name="templateId"/> already exists, only the observation
+    /// count / aggregate confidence / retirement fields are refreshed — the
+    /// steps_json and steps_hash must match exactly or the caller should have
+    /// picked a different template_id (e.g. via version bump + retire).
+    /// </summary>
+    public void UpsertWorkflowTemplate(
+        string templateId,
+        string templateVersion,
+        string skillId,
+        string processNameGlob,
+        string pmsVersionRangeJson,
+        string screenSignature,
+        string stepsHash,
+        string? routineHashOrigin,
+        string stepsJson,
+        double aggregateConfidence,
+        int observationCount,
+        bool hasWriteback,
+        string extractedAt,
+        string extractedBy)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO workflow_templates
+                (template_id, template_version, skill_id, process_name_glob,
+                 pms_version_range_json, screen_signature, steps_hash,
+                 routine_hash_origin, steps_json, aggregate_confidence,
+                 observation_count, has_writeback, extracted_at, extracted_by)
+            VALUES
+                (@id, @ver, @skill, @glob, @range, @screen, @sh,
+                 @origin, @steps, @conf, @obs, @hw, @at, @by)
+            ON CONFLICT(template_id) DO UPDATE SET
+                observation_count = @obs,
+                aggregate_confidence = @conf,
+                extracted_at = @at,
+                retired_at = NULL,
+                retirement_reason = NULL,
+                consecutive_low_conf_runs = 0
+            """;
+        cmd.Parameters.AddWithValue("@id", templateId);
+        cmd.Parameters.AddWithValue("@ver", templateVersion);
+        cmd.Parameters.AddWithValue("@skill", skillId);
+        cmd.Parameters.AddWithValue("@glob", processNameGlob);
+        cmd.Parameters.AddWithValue("@range", pmsVersionRangeJson);
+        cmd.Parameters.AddWithValue("@screen", screenSignature);
+        cmd.Parameters.AddWithValue("@sh", stepsHash);
+        cmd.Parameters.AddWithValue("@origin", (object?)routineHashOrigin ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@steps", stepsJson);
+        cmd.Parameters.AddWithValue("@conf", aggregateConfidence);
+        cmd.Parameters.AddWithValue("@obs", observationCount);
+        cmd.Parameters.AddWithValue("@hw", hasWriteback ? 1 : 0);
+        cmd.Parameters.AddWithValue("@at", extractedAt);
+        cmd.Parameters.AddWithValue("@by", extractedBy);
+        cmd.ExecuteNonQuery();
+    }
+
+    public record WorkflowTemplateRow(
+        string TemplateId, string TemplateVersion, string SkillId, string ProcessNameGlob,
+        string PmsVersionRangeJson, string ScreenSignature, string StepsHash,
+        string? RoutineHashOrigin, string StepsJson, double AggregateConfidence,
+        int ObservationCount, bool HasWriteback, string ExtractedAt, string ExtractedBy,
+        string? RetiredAt, string? RetirementReason, int ConsecutiveLowConfRuns);
+
+    public WorkflowTemplateRow? GetWorkflowTemplate(string templateId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT template_id, template_version, skill_id, process_name_glob,
+                   pms_version_range_json, screen_signature, steps_hash,
+                   routine_hash_origin, steps_json, aggregate_confidence,
+                   observation_count, has_writeback, extracted_at, extracted_by,
+                   retired_at, retirement_reason, consecutive_low_conf_runs
+            FROM workflow_templates WHERE template_id = @id
+            """;
+        cmd.Parameters.AddWithValue("@id", templateId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return ReadTemplateRow(reader);
+    }
+
+    public WorkflowTemplateRow? GetWorkflowTemplateByScreen(string skillId, string screenSignature)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT template_id, template_version, skill_id, process_name_glob,
+                   pms_version_range_json, screen_signature, steps_hash,
+                   routine_hash_origin, steps_json, aggregate_confidence,
+                   observation_count, has_writeback, extracted_at, extracted_by,
+                   retired_at, retirement_reason, consecutive_low_conf_runs
+            FROM workflow_templates WHERE skill_id = @skill AND screen_signature = @screen
+              AND retired_at IS NULL
+            LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("@skill", skillId);
+        cmd.Parameters.AddWithValue("@screen", screenSignature);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return ReadTemplateRow(reader);
+    }
+
+    public IReadOnlyList<WorkflowTemplateRow> GetActiveWorkflowTemplates(string? skillId = null)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = skillId is null
+            ? """
+              SELECT template_id, template_version, skill_id, process_name_glob,
+                     pms_version_range_json, screen_signature, steps_hash,
+                     routine_hash_origin, steps_json, aggregate_confidence,
+                     observation_count, has_writeback, extracted_at, extracted_by,
+                     retired_at, retirement_reason, consecutive_low_conf_runs
+              FROM workflow_templates WHERE retired_at IS NULL
+              ORDER BY extracted_at
+              """
+            : """
+              SELECT template_id, template_version, skill_id, process_name_glob,
+                     pms_version_range_json, screen_signature, steps_hash,
+                     routine_hash_origin, steps_json, aggregate_confidence,
+                     observation_count, has_writeback, extracted_at, extracted_by,
+                     retired_at, retirement_reason, consecutive_low_conf_runs
+              FROM workflow_templates WHERE retired_at IS NULL AND skill_id = @skill
+              ORDER BY extracted_at
+              """;
+        if (skillId is not null) cmd.Parameters.AddWithValue("@skill", skillId);
+
+        var rows = new List<WorkflowTemplateRow>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) rows.Add(ReadTemplateRow(reader));
+        return rows;
+    }
+
+    public void RetireWorkflowTemplate(string templateId, string retiredAt, string reason)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE workflow_templates
+               SET retired_at = @at, retirement_reason = @reason
+             WHERE template_id = @id
+            """;
+        cmd.Parameters.AddWithValue("@id", templateId);
+        cmd.Parameters.AddWithValue("@at", retiredAt);
+        cmd.Parameters.AddWithValue("@reason", reason);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Increments the low-confidence counter for a template. Returns the new value.
+    /// Extractor uses this to drive auto-retirement at a configured threshold.
+    /// </summary>
+    public int IncrementTemplateLowConfidenceRuns(string templateId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE workflow_templates
+               SET consecutive_low_conf_runs = consecutive_low_conf_runs + 1
+             WHERE template_id = @id
+            RETURNING consecutive_low_conf_runs
+            """;
+        cmd.Parameters.AddWithValue("@id", templateId);
+        var result = cmd.ExecuteScalar();
+        return result is long l ? (int)l : (result is int i ? i : 0);
+    }
+
+    public void ResetTemplateLowConfidenceRuns(string templateId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE workflow_templates SET consecutive_low_conf_runs = 0 WHERE template_id = @id";
+        cmd.Parameters.AddWithValue("@id", templateId);
+        cmd.ExecuteNonQuery();
+    }
+
+    private static WorkflowTemplateRow ReadTemplateRow(SqliteDataReader reader) =>
+        new(
+            reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+            reader.GetString(4), reader.GetString(5), reader.GetString(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7),
+            reader.GetString(8), reader.GetDouble(9),
+            reader.GetInt32(10), reader.GetInt32(11) == 1,
+            reader.GetString(12), reader.GetString(13),
+            reader.IsDBNull(14) ? null : reader.GetString(14),
+            reader.IsDBNull(15) ? null : reader.GetString(15),
+            reader.GetInt32(16));
+
+    // ── Schema Adaptations + Denylist (v3.12) ──
+
+    public record AppliedSchemaAdaptationRow(
+        string AdaptationId, string FromSchemaHash, string ToSchemaHash,
+        string RewritesJson, string AppliedAt,
+        string? RolledBackAt, string? RollbackReason);
+
+    public void InsertAppliedSchemaAdaptation(string adaptationId, string fromHash,
+        string toHash, string rewritesJson, string appliedAt)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO applied_schema_adaptations
+                (adaptation_id, from_schema_hash, to_schema_hash, rewrites_json, applied_at)
+            VALUES (@id, @from, @to, @rw, @at)
+            ON CONFLICT(adaptation_id) DO NOTHING
+            """;
+        cmd.Parameters.AddWithValue("@id", adaptationId);
+        cmd.Parameters.AddWithValue("@from", fromHash);
+        cmd.Parameters.AddWithValue("@to", toHash);
+        cmd.Parameters.AddWithValue("@rw", rewritesJson);
+        cmd.Parameters.AddWithValue("@at", appliedAt);
+        cmd.ExecuteNonQuery();
+    }
+
+    public AppliedSchemaAdaptationRow? GetAppliedSchemaAdaptation(string adaptationId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT adaptation_id, from_schema_hash, to_schema_hash, rewrites_json,
+                   applied_at, rolled_back_at, rollback_reason
+            FROM applied_schema_adaptations WHERE adaptation_id = @id
+            """;
+        cmd.Parameters.AddWithValue("@id", adaptationId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return new AppliedSchemaAdaptationRow(
+            reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+            reader.GetString(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6));
+    }
+
+    public void RollbackAppliedSchemaAdaptation(string adaptationId, string rolledBackAt, string reason)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE applied_schema_adaptations
+               SET rolled_back_at = @at, rollback_reason = @reason
+             WHERE adaptation_id = @id AND rolled_back_at IS NULL
+            """;
+        cmd.Parameters.AddWithValue("@id", adaptationId);
+        cmd.Parameters.AddWithValue("@at", rolledBackAt);
+        cmd.Parameters.AddWithValue("@reason", reason);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void InsertSchemaAdaptationRevocation(string targetAdaptationId, string revokedAt, string? reason)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO schema_adaptation_denylist (target_adaptation_id, revoked_at, reason)
+            VALUES (@id, @at, @r)
+            ON CONFLICT(target_adaptation_id) DO NOTHING
+            """;
+        cmd.Parameters.AddWithValue("@id", targetAdaptationId);
+        cmd.Parameters.AddWithValue("@at", revokedAt);
+        cmd.Parameters.AddWithValue("@r", (object?)reason ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    public bool IsSchemaAdaptationRevoked(string targetAdaptationId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT 1 FROM schema_adaptation_denylist WHERE target_adaptation_id = @id LIMIT 1";
+        cmd.Parameters.AddWithValue("@id", targetAdaptationId);
+        return cmd.ExecuteScalar() is not null;
+    }
+
+    // ── Auto Rule Approvals (v3.12) ──
+
+    public enum AutoRuleStatus { Pending, Shadow, Approved, Rejected }
+
+    public record AutoRuleApprovalRow(
+        string RuleId, string TemplateId, string YamlSha256, AutoRuleStatus Status,
+        int ShadowRuns, int ShadowMatches, int ShadowMismatches,
+        string? ApprovedBy, string? ApprovedAt, string? RejectedReason);
+
+    public void UpsertAutoRuleApproval(string ruleId, string templateId, string yamlSha256,
+        AutoRuleStatus status = AutoRuleStatus.Pending)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO auto_rule_approvals
+                (rule_id, template_id, yaml_sha256, status)
+            VALUES
+                (@r, @t, @h, @s)
+            ON CONFLICT(rule_id) DO UPDATE SET
+                template_id = @t,
+                yaml_sha256 = @h,
+                status = CASE
+                    WHEN auto_rule_approvals.status IN ('Approved','Shadow') THEN 'Pending'
+                    ELSE auto_rule_approvals.status
+                END
+            """;
+        cmd.Parameters.AddWithValue("@r", ruleId);
+        cmd.Parameters.AddWithValue("@t", templateId);
+        cmd.Parameters.AddWithValue("@h", yamlSha256);
+        cmd.Parameters.AddWithValue("@s", status.ToString());
+        cmd.ExecuteNonQuery();
+    }
+
+    public AutoRuleApprovalRow? GetAutoRuleApproval(string ruleId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT rule_id, template_id, yaml_sha256, status,
+                   shadow_runs, shadow_matches, shadow_mismatches,
+                   approved_by, approved_at, rejected_reason
+            FROM auto_rule_approvals WHERE rule_id = @r
+            """;
+        cmd.Parameters.AddWithValue("@r", ruleId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return new AutoRuleApprovalRow(
+            reader.GetString(0), reader.GetString(1), reader.GetString(2),
+            Enum.Parse<AutoRuleStatus>(reader.GetString(3)),
+            reader.GetInt32(4), reader.GetInt32(5), reader.GetInt32(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7),
+            reader.IsDBNull(8) ? null : reader.GetString(8),
+            reader.IsDBNull(9) ? null : reader.GetString(9));
+    }
+
+    // ── Behavioral Events: structural lookups (v3.12 extractor support) ──
+
+    /// <summary>
+    /// Returns the most-recently-observed {ControlType, ClassName} pair for a
+    /// given (treeHash, elementId). Null when the pair has never been seen in
+    /// this session. Extractor uses this to build a
+    /// <see cref="SuavoAgent.Contracts.Behavioral.ElementSignature"/> per step.
+    /// </summary>
+    public (string? ControlType, string? ClassName)? GetElementStructure(
+        string sessionId, string treeHash, string elementId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT element_control_type, element_class_name
+            FROM behavioral_events
+            WHERE session_id = @sid AND tree_hash = @tree AND element_id = @elem
+            ORDER BY id DESC
+            LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@tree", treeHash);
+        cmd.Parameters.AddWithValue("@elem", elementId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return (reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1));
+    }
+
+    /// <summary>
+    /// Distinct {ControlType, AutomationId (element_id), ClassName} triples seen
+    /// on a particular tree_hash — the building block for a screen's
+    /// ExpectedVisible list. Only emits rows where element_id looks like an
+    /// AutomationId (no colon fallback form); anonymous/fallback elements
+    /// cannot cross installations and are excluded from templates.
+    /// </summary>
+    public IReadOnlyList<(string ControlType, string ElementId, string? ClassName, int OccurrenceCount)>
+        GetDistinctElementsOnTree(string sessionId, string treeHash)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT element_control_type, element_id, element_class_name,
+                   SUM(occurrence_count) AS total_occ
+            FROM behavioral_events
+            WHERE session_id = @sid
+              AND tree_hash = @tree
+              AND element_id IS NOT NULL
+              AND element_control_type IS NOT NULL
+              AND instr(element_id, ':') = 0
+            GROUP BY element_control_type, element_id, element_class_name
+            ORDER BY total_occ DESC
+            """;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        cmd.Parameters.AddWithValue("@tree", treeHash);
+
+        var rows = new List<(string, string, string?, int)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add((
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetInt32(3)));
+        }
+        return rows;
     }
 
     // ── Behavioral Telemetry Counts ──

@@ -1,5 +1,6 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Canary;
 using SuavoAgent.Core.Cloud;
@@ -248,6 +249,15 @@ public sealed class LearningWorker : BackgroundService
                 {
                     _logger.LogWarning(ex, "RoutineDetector (pattern phase) failed");
                 }
+
+                // v3.12 — autonomous workflow template extraction + rule emission.
+                // Flag-gated (Learning:Template:Enabled). All emitted rules ship
+                // with autonomousOk=false so operator approval is still required
+                // before any auto-rule fires in production.
+                if (_options.TemplateLearning.Enabled)
+                {
+                    TryExtractAndEmitTemplates();
+                }
             }
 
             // Daily behavioral event prune
@@ -460,6 +470,69 @@ public sealed class LearningWorker : BackgroundService
         }
 
         _logger.LogInformation("LearningWorker stopped");
+    }
+
+    /// <summary>
+    /// v3.12 — runs <see cref="WorkflowTemplateExtractor"/> then
+    /// <see cref="TemplateRuleGenerator"/>. Never throws; a failure is logged
+    /// and the phase loop continues. Flag-gated on
+    /// <c>TemplateLearning.Enabled</c>.
+    /// </summary>
+    private void TryExtractAndEmitTemplates()
+    {
+        try
+        {
+            var opts = _options.TemplateLearning;
+            var thresholds = new WorkflowTemplateThresholds
+            {
+                MinRoutineConfidence = opts.MinRoutineConfidence,
+                MinStepCount = opts.MinStepCount,
+                MaxExpectedVisiblePerScreen = opts.MaxExpectedVisiblePerScreen,
+                MatchRatio = opts.MatchRatio,
+                LowConfidenceRetirementAfter = opts.LowConfidenceRetirementAfter,
+            };
+            var extractor = new WorkflowTemplateExtractor(
+                _db, _sessionId!, opts.SkillId, opts.ProcessNameGlob,
+                () => BuildLocalPmsVersionFingerprint(),
+                thresholds);
+            var extracted = extractor.ExtractAndPersist();
+
+            var rulesRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent", "rules", "auto");
+            var generator = new TemplateRuleGenerator(_db, rulesRoot,
+                _sp.GetRequiredService<ILogger<TemplateRuleGenerator>>());
+            var emitted = generator.EmitPendingRules();
+
+            if (extracted.Count > 0 || emitted > 0)
+            {
+                _logger.LogInformation(
+                    "TemplateLearning: extracted {Extracted} template(s), emitted {Emitted} rule file(s)",
+                    extracted.Count, emitted);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TemplateLearning tick failed — continuing");
+        }
+    }
+
+    /// <summary>
+    /// Builds a best-effort <see cref="PmsVersionFingerprint"/> for the
+    /// current installation. Falls back to sentinel values when the schema
+    /// canary baseline is not yet established — templates with such
+    /// fingerprints will fail cross-installation matching at seed-apply time,
+    /// which is the correct conservative behaviour.
+    /// </summary>
+    private PmsVersionFingerprint BuildLocalPmsVersionFingerprint()
+    {
+        var contractFingerprint = _db.GetLatestContractFingerprint(
+            _options.PharmacyId ?? "unknown") ?? "unestablished";
+        return new PmsVersionFingerprint(
+            PmsType: "PioneerRx",
+            SchemaHash: contractFingerprint,
+            UiaDialectHash: "unestablished",
+            ProductVersionString: null);
     }
 
     /// <summary>

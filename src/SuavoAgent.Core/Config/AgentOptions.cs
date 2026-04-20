@@ -68,6 +68,21 @@ public sealed class AgentOptions
     public ReasoningOptions Reasoning { get; set; } = new();
 
     /// <summary>
+    /// v3.12 — autonomous workflow template extraction. Enabled=false by
+    /// default; pilot pharmacies opt in. When enabled, LearningWorker runs
+    /// WorkflowTemplateExtractor + TemplateRuleGenerator on pattern/model
+    /// phase cadence and emits YAML rules to the auto/ directory with
+    /// autonomousOk=false (operator approval required).
+    /// </summary>
+    public TemplateLearningOptions TemplateLearning { get; set; } = new();
+
+    /// <summary>
+    /// v3.12 — Fleet Schema Canary propagation. Enabled=false by default
+    /// (contract-only in v3.12; cloud endpoint lands v3.12.1).
+    /// </summary>
+    public FleetFeaturesOptions FleetFeatures { get; set; } = new();
+
+    /// <summary>
     /// Vision pipeline configuration (screenshot capture + extraction). Off by
     /// default — enabling adds a new HIPAA surface (encrypted screens on disk).
     /// </summary>

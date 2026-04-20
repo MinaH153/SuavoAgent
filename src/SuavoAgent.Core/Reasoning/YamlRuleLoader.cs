@@ -1,3 +1,4 @@
+using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Reasoning;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -171,15 +172,38 @@ public sealed class YamlRuleLoader
         };
     }
 
-    private static RulePredicate ToPredicate(YamlPredicate yml, string ruleId) =>
-        new()
+    private static RulePredicate ToPredicate(YamlPredicate yml, string ruleId)
+    {
+        var fingerprints = Array.Empty<ElementSignature>();
+        if (yml.ElementFingerprints is { Count: > 0 })
+        {
+            var list = new List<ElementSignature>(yml.ElementFingerprints.Count);
+            foreach (var f in yml.ElementFingerprints)
+            {
+                if (string.IsNullOrWhiteSpace(f.ControlType))
+                    throw new InvalidOperationException(
+                        $"Rule '{ruleId}' has elementFingerprint with empty controlType");
+                if (string.IsNullOrWhiteSpace(f.AutomationId))
+                    throw new InvalidOperationException(
+                        $"Rule '{ruleId}' has elementFingerprint with empty automationId");
+                list.Add(new ElementSignature(
+                    ControlType: f.ControlType!,
+                    AutomationId: f.AutomationId!,
+                    ClassName: string.IsNullOrWhiteSpace(f.ClassName) ? null : f.ClassName));
+            }
+            fingerprints = list.ToArray();
+        }
+
+        return new()
         {
             ProcessName = yml.ProcessName,
             WindowTitlePattern = yml.WindowTitlePattern,
             VisibleElements = yml.VisibleElements ?? new List<string>(),
             OperatorIdleMsAtLeast = yml.OperatorIdleMsAtLeast,
             StateFlags = yml.StateFlags ?? new Dictionary<string, string>(),
+            ElementFingerprints = fingerprints,
         };
+    }
 
     private static RuleActionSpec ToAction(YamlAction yml, string ruleId)
     {
@@ -237,6 +261,14 @@ public sealed class YamlRuleLoader
         public List<string>? VisibleElements { get; set; }
         public int? OperatorIdleMsAtLeast { get; set; }
         public Dictionary<string, string>? StateFlags { get; set; }
+        public List<YamlElementFingerprint>? ElementFingerprints { get; set; }
+    }
+
+    private sealed class YamlElementFingerprint
+    {
+        public string? ControlType { get; set; }
+        public string? AutomationId { get; set; }
+        public string? ClassName { get; set; }
     }
 
     private sealed class YamlAction

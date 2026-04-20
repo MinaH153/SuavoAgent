@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using SuavoAgent.Contracts.Behavioral;
 
 namespace SuavoAgent.Contracts.Reasoning;
 
@@ -74,6 +75,21 @@ public sealed record RulePredicate
     /// </summary>
     public IReadOnlyDictionary<string, string> StateFlags { get; init; } =
         new Dictionary<string, string>();
+
+    /// <summary>
+    /// Structural UIA fingerprints — the v3.12 cross-installation-safe successor
+    /// to <see cref="VisibleElements"/>. Each required signature must be present
+    /// (order-insensitive, via <see cref="ElementSignature.MatchesStructurally"/>)
+    /// in the context's <see cref="RuleContext.ElementFingerprints"/> for the
+    /// predicate to satisfy.
+    ///
+    /// WHY: A flat name list lets a different screen with the same label pass
+    /// the predicate; the triple {ControlType, AutomationId, ClassName} does
+    /// not. Auto-generated rules emit fingerprints; legacy bundled rules
+    /// default to an empty list and behave exactly as before.
+    /// </summary>
+    public IReadOnlyList<ElementSignature> ElementFingerprints { get; init; } =
+        Array.Empty<ElementSignature>();
 }
 
 /// <summary>
@@ -169,6 +185,15 @@ public sealed record RuleContext
     /// <summary>Arbitrary string-keyed state flags (e.g. "main_window_focused": "true").</summary>
     public IReadOnlyDictionary<string, string> Flags { get; init; } =
         new Dictionary<string, string>();
+
+    /// <summary>
+    /// Structural UIA fingerprints captured alongside <see cref="VisibleElements"/>.
+    /// Populated by the caller from live UIA before Evaluate is called; used by
+    /// the rule engine's fingerprint gate (see
+    /// <see cref="PredicateFingerprintMatcher.SatisfiedBy"/>).
+    /// </summary>
+    public IReadOnlyList<ElementSignature> ElementFingerprints { get; init; } =
+        Array.Empty<ElementSignature>();
 
     /// <summary>Timestamp of context capture. Used for audit trails.</summary>
     public DateTimeOffset CapturedAt { get; init; } = DateTimeOffset.UtcNow;

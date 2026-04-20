@@ -1,3 +1,5 @@
+using System.Text.Json;
+using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Learning;
@@ -119,4 +121,105 @@ public sealed class SeedApplicator
             .Where(i => i.ItemType == "query_shape")
             .Select(i => i.ItemKey)
             .ToList();
+
+    // ── v3.12 Workflow Template seeds (Spec-D template transfer) ──
+
+    public record TemplateApplyResult(int TemplatesApplied, int TemplatesSkipped);
+
+    /// <summary>
+    /// Applies <see cref="SeedResponse.WorkflowTemplates"/> under three gates:
+    ///   1. <see cref="PmsVersionFingerprint.Matches"/> against the local
+    ///      installation — if the template's PmsVersionRange doesn't cover
+    ///      the local fingerprint, the template is rejected.
+    ///   2. Every <see cref="TemplateStep.CorrelatedQueryShapeHash"/> must be
+    ///      known locally (either via prior seed apply or via local
+    ///      correlation) — unknown query shapes mean the template would
+    ///      reference a SQL we can't validate, so we refuse.
+    ///   3. Tokenizer re-validation on every transferred query shape (defense
+    ///      in depth — already runs in ApplyPatternSeeds / ApplyModelSeeds).
+    ///
+    /// Every emitted <see cref="WorkflowTemplate"/> carries
+    /// <c>ExtractedBy = "seed:&lt;digest&gt;"</c>. Generated rules downstream
+    /// inherit <c>autonomousOk=false</c> from the generator invariant.
+    /// </summary>
+    public TemplateApplyResult ApplyWorkflowTemplates(
+        string sessionId, SeedResponse response, PmsVersionFingerprint localFingerprint)
+    {
+        if (response.WorkflowTemplates is null || response.WorkflowTemplates.Count == 0)
+            return new(0, 0);
+
+        // Known query shapes: this session's correlated_actions + seed-applied shapes.
+        var knownShapes = new HashSet<string>(
+            _db.GetCorrelatedActions(sessionId)
+                .Where(c => c.QueryShapeHash is not null)
+                .Select(c => c.QueryShapeHash!));
+        foreach (var s in _db.GetSeedItems(response.SeedDigest)
+            .Where(i => i.ItemType == "query_shape"))
+        {
+            knownShapes.Add(s.ItemKey);
+        }
+
+        int applied = 0, skipped = 0;
+        var now = DateTimeOffset.UtcNow.ToString("o");
+
+        foreach (var tmpl in response.WorkflowTemplates)
+        {
+            if (!PmsVersionIncluded(tmpl.PmsVersionRange, localFingerprint))
+            {
+                _db.RejectSeedItem(response.SeedDigest, "template", tmpl.TemplateId, now);
+                skipped++;
+                continue;
+            }
+
+            if (!AllShapesKnown(tmpl.Steps, knownShapes))
+            {
+                _db.RejectSeedItem(response.SeedDigest, "template", tmpl.TemplateId, now);
+                skipped++;
+                continue;
+            }
+
+            var rangeJson = JsonSerializer.Serialize(tmpl.PmsVersionRange);
+            var stepsJson = JsonSerializer.Serialize(tmpl.Steps);
+            _db.UpsertWorkflowTemplate(
+                templateId: tmpl.TemplateId,
+                templateVersion: tmpl.TemplateVersion,
+                skillId: tmpl.SkillId,
+                processNameGlob: tmpl.ProcessNameGlob,
+                pmsVersionRangeJson: rangeJson,
+                screenSignature: tmpl.ScreenSignatureV1,
+                stepsHash: tmpl.StepsHash,
+                routineHashOrigin: null,
+                stepsJson: stepsJson,
+                aggregateConfidence: tmpl.AggregateConfidence,
+                observationCount: tmpl.ContributorCount,
+                hasWriteback: tmpl.HasWriteback,
+                extractedAt: now,
+                extractedBy: $"seed:{response.SeedDigest}");
+            _db.InsertSeedItem(response.SeedDigest, "template", tmpl.TemplateId, now);
+            applied++;
+        }
+
+        return new(applied, skipped);
+    }
+
+    private static bool PmsVersionIncluded(
+        IReadOnlyList<PmsVersionFingerprint> range, PmsVersionFingerprint local)
+    {
+        if (range is null || range.Count == 0) return false;
+        foreach (var fp in range)
+        {
+            if (fp.Matches(local)) return true;
+        }
+        return false;
+    }
+
+    private static bool AllShapesKnown(IReadOnlyList<TemplateStep> steps, HashSet<string> known)
+    {
+        foreach (var s in steps)
+        {
+            if (s.CorrelatedQueryShapeHash is null) continue;
+            if (!known.Contains(s.CorrelatedQueryShapeHash)) return false;
+        }
+        return true;
+    }
 }
