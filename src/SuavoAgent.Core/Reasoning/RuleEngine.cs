@@ -168,6 +168,13 @@ public sealed class RuleEngine
             }
         }
 
+        // v3.12 Codex BLOCK fix: structural fingerprint gate lives alongside the
+        // legacy name list, not in place of it. Empty fingerprint list = no
+        // structural constraint (legacy behaviour); non-empty = every required
+        // triple must be matched by at least one triple in the context.
+        if (!PredicateFingerprintMatcher.SatisfiedBy(p, ctx))
+            return false;
+
         if (p.OperatorIdleMsAtLeast.HasValue &&
             ctx.OperatorIdleMs < p.OperatorIdleMsAtLeast.Value)
         {
