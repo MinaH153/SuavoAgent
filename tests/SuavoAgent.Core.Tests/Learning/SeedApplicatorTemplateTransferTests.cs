@@ -181,6 +181,70 @@ public class SeedApplicatorTemplateTransferTests : IDisposable
         Assert.Equal(0, result.TemplatesSkipped);
     }
 
+    // ──────────────────────── retire-first on screen-signature collision ────────────────────────
+
+    [Fact]
+    public void Apply_SeedCollidesWithLocalActiveTemplate_RetiresLocalFirst()
+    {
+        // Local extractor populated an active template on (skill, screen).
+        // A seeded template arrives with a DIFFERENT template_id on the same
+        // (skill, screen) — the partial unique index uniq_wt_active_skill_screen
+        // would reject the INSERT. Applier must retire the local one first.
+        var btnOpen = Sig("Button", "btnOpen");
+        var txtSearch = Sig("Edit", "txtSearch");
+        var btnApprove = Sig("Button", "btnApprove");
+        var visibleEntry = new[] { btnOpen, txtSearch, btnApprove };
+        var screenSig = WorkflowTemplate.ComputeScreenSignature(visibleEntry);
+
+        // Seed a local-extracted active template on the same screen.
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        _db.UpsertWorkflowTemplate(
+            templateId: "local-123",
+            templateVersion: "1.0.0",
+            skillId: "learned",
+            processNameGlob: "PioneerPharmacy*",
+            pmsVersionRangeJson: System.Text.Json.JsonSerializer.Serialize(new[] { LocalFp }),
+            screenSignature: screenSig,
+            stepsHash: "local-steps-hash",
+            routineHashOrigin: "routine-local",
+            stepsJson: "[]",
+            aggregateConfidence: 0.9,
+            observationCount: 6,
+            hasWriteback: false,
+            extractedAt: now,
+            extractedBy: "local-v3.12");
+
+        var applicator = new SeedApplicator(_db);
+        var tmpl = BuildTemplate(new[] { LocalFp }, id: "seeded-456");
+        var result = applicator.ApplyWorkflowTemplates(
+            _sessionId, BuildResponse(new[] { tmpl }), LocalFp);
+
+        Assert.Equal(1, result.TemplatesApplied);
+        var priorRow = _db.GetWorkflowTemplate("local-123");
+        Assert.NotNull(priorRow);
+        Assert.NotNull(priorRow!.RetiredAt);
+        Assert.Equal("superseded-by-seed", priorRow.RetirementReason);
+
+        var newRow = _db.GetWorkflowTemplate("seeded-456");
+        Assert.NotNull(newRow);
+        Assert.Null(newRow!.RetiredAt);
+    }
+
+    [Fact]
+    public void Apply_Idempotent_ReapplyIsNoOp()
+    {
+        var applicator = new SeedApplicator(_db);
+        var tmpl = BuildTemplate(new[] { LocalFp });
+        var first = applicator.ApplyWorkflowTemplates(
+            _sessionId, BuildResponse(new[] { tmpl }), LocalFp);
+        Assert.Equal(1, first.TemplatesApplied);
+
+        var second = applicator.ApplyWorkflowTemplates(
+            _sessionId, BuildResponse(new[] { tmpl }), LocalFp);
+        Assert.Equal(0, second.TemplatesApplied);
+        Assert.Equal(0, second.TemplatesSkipped);
+    }
+
     // ──────────────────────── provenance / generator interop ────────────────────────
 
     [Fact]

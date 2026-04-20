@@ -139,6 +139,74 @@ public class TemplateRuleGeneratorTests : IDisposable
     }
 
     [Fact]
+    public void Emit_MinRequiredCount_RoundTripsFromTemplate()
+    {
+        // 3-element ExpectedVisible * 0.8 ratio → ceil = 3 (K=M here). To
+        // exercise the K<M path we synthesise a 5-element visible list and
+        // assert MinRequiredCount lands in the YAML at 4.
+        var a = new ElementSignature("Button", "btn-a", null);
+        var b = new ElementSignature("Button", "btn-b", null);
+        var c = new ElementSignature("Button", "btn-c", null);
+        var d = new ElementSignature("Button", "btn-d", null);
+        var e = new ElementSignature("Button", "btn-e", null);
+        var visible = new[] { a, b, c, d, e };
+
+        var step = new TemplateStep(
+            Ordinal: 0, Kind: TemplateStepKind.Click, Target: a,
+            ExpectedVisible: visible,
+            MinElementsRequired: 4,
+            ExpectedAfter: null, IsWrite: false,
+            CorrelatedQueryShapeHash: null, StepConfidence: 0.9, Hint: null);
+        var step2 = new TemplateStep(
+            Ordinal: 1, Kind: TemplateStepKind.Click, Target: b,
+            ExpectedVisible: visible, MinElementsRequired: 4,
+            ExpectedAfter: null, IsWrite: false,
+            CorrelatedQueryShapeHash: null, StepConfidence: 0.9, Hint: null);
+        var steps = new[] { step, step2 };
+        var stepsHash = WorkflowTemplate.ComputeStepsHash(steps);
+        var screenSig = WorkflowTemplate.ComputeScreenSignature(visible);
+        var tmpl = new WorkflowTemplate(
+            TemplateId: WorkflowTemplate.ComputeTemplateId(screenSig, stepsHash),
+            TemplateVersion: "1.0.0", SkillId: "learned",
+            ProcessNameGlob: "PioneerPharmacy*", PmsVersionRange: new[] { Fp },
+            ScreenSignatureV1: screenSig, StepsHash: stepsHash,
+            RoutineHashOrigin: null, Steps: steps,
+            AggregateConfidence: 0.9, ObservationCount: 10, HasWriteback: false,
+            ExtractedAt: "2026-04-20T00:00:00Z", ExtractedBy: "local-v3.12",
+            RetiredAt: null, RetirementReason: null);
+
+        var gen = new TemplateRuleGenerator(_db, _rulesRoot, NullLogger<TemplateRuleGenerator>.Instance);
+        var path = gen.EmitTemplateRule(tmpl);
+        var yamlText = File.ReadAllText(path);
+
+        // The emitted YAML must carry minRequiredCount — without it, cross-
+        // installation UIA drift would defeat the whole template.
+        Assert.Contains("minRequiredCount: 4", yamlText);
+
+        var loader = new YamlRuleLoader(NullLogger<YamlRuleLoader>.Instance);
+        var rule = loader.ParseYaml(yamlText, source: path)[0];
+        Assert.Equal(4, rule.When.MinRequiredCount);
+    }
+
+    [Fact]
+    public void Emit_WritebackVerifyAfter_IncludesMinRequiredCount()
+    {
+        var gen = new TemplateRuleGenerator(_db, _rulesRoot, NullLogger<TemplateRuleGenerator>.Instance);
+        var tmpl = BuildTemplate(writeback: true);
+        var path = gen.EmitTemplateRule(tmpl);
+        var yamlText = File.ReadAllText(path);
+
+        var loader = new YamlRuleLoader(NullLogger<YamlRuleLoader>.Instance);
+        var rule = loader.ParseYaml(yamlText, source: path)[0];
+        var writeAction = rule.Then.Single(a => a.VerifyAfter != null);
+        Assert.NotNull(writeAction.VerifyAfter);
+        Assert.NotNull(writeAction.VerifyAfter!.MinRequiredCount);
+        Assert.True(writeAction.VerifyAfter.MinRequiredCount >= 1);
+        Assert.True(writeAction.VerifyAfter.MinRequiredCount
+            <= writeAction.VerifyAfter.ElementFingerprints.Count);
+    }
+
+    [Fact]
     public void Emit_Writeback_VerifyAfterRequired()
     {
         var gen = new TemplateRuleGenerator(_db, _rulesRoot, NullLogger<TemplateRuleGenerator>.Instance);

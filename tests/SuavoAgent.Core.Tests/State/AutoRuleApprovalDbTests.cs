@@ -120,6 +120,55 @@ public class AutoRuleApprovalDbTests : IDisposable
     }
 
     [Fact]
+    public void UpsertAutoRuleApproval_SameHash_PreservesApprovedStatus()
+    {
+        // Simulates LearningWorker re-emitting byte-identical YAML on every tick.
+        // Before fix: CASE demoted Approved back to Pending every call.
+        _db.UpsertAutoRuleApproval("auto.t.abc", "tmpl-a", "sha-stable");
+        _db.SetAutoRuleApprovalStatus(
+            "auto.t.abc", AgentStateDb.AutoRuleStatus.Approved,
+            approvedBy: "op", approvedAt: "2026-04-20T00:00:00Z");
+
+        // Re-emit with identical hash — content unchanged.
+        _db.UpsertAutoRuleApproval("auto.t.abc", "tmpl-a", "sha-stable");
+
+        var row = _db.GetAutoRuleApproval("auto.t.abc");
+        Assert.NotNull(row);
+        Assert.Equal(AgentStateDb.AutoRuleStatus.Approved, row!.Status);
+        Assert.Equal("op", row.ApprovedBy);
+    }
+
+    [Fact]
+    public void UpsertAutoRuleApproval_SameHash_PreservesShadowStatus()
+    {
+        _db.UpsertAutoRuleApproval("auto.t.abc", "tmpl-a", "sha-stable");
+        _db.SetAutoRuleApprovalStatus("auto.t.abc", AgentStateDb.AutoRuleStatus.Shadow);
+
+        _db.UpsertAutoRuleApproval("auto.t.abc", "tmpl-a", "sha-stable");
+
+        var row = _db.GetAutoRuleApproval("auto.t.abc");
+        Assert.NotNull(row);
+        Assert.Equal(AgentStateDb.AutoRuleStatus.Shadow, row!.Status);
+    }
+
+    [Fact]
+    public void UpsertAutoRuleApproval_ChangedHash_DemotesApprovedToPending()
+    {
+        // Safety property: a genuine YAML content change forces re-approval.
+        _db.UpsertAutoRuleApproval("auto.t.abc", "tmpl-a", "sha-v1");
+        _db.SetAutoRuleApprovalStatus(
+            "auto.t.abc", AgentStateDb.AutoRuleStatus.Approved,
+            approvedBy: "op", approvedAt: "2026-04-20T00:00:00Z");
+
+        _db.UpsertAutoRuleApproval("auto.t.abc", "tmpl-a", "sha-v2");
+
+        var row = _db.GetAutoRuleApproval("auto.t.abc");
+        Assert.NotNull(row);
+        Assert.Equal(AgentStateDb.AutoRuleStatus.Pending, row!.Status);
+        Assert.Equal("sha-v2", row.YamlSha256);
+    }
+
+    [Fact]
     public void SetAutoRuleApprovalStatus_PendingClearsOperatorMetadata()
     {
         // Approved first so approved_by / approved_at are set, then Pending.
