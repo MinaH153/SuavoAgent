@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SuavoAgent.Events</RootNamespace>
+    <AssemblyTitle>SuavoAgent.Events</AssemblyTitle>
+    <Description>Suavo pharmacy agent structured event emission — signed, PHI-redacted, durable.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SuavoAgent.Events.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
+    <ProjectReference Include="..\SuavoAgent.Core\SuavoAgent.Core.csproj" />
+  </ItemGroup>
+
+</Project>
