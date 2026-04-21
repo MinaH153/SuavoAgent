@@ -812,10 +812,106 @@ $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccess
     "NT AUTHORITY\LOCAL SERVICE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
 Set-Acl $installDir $dirAcl
 
-# Start services
-Start-Service SuavoAgent.Core
-Start-Sleep 3
-Start-Service SuavoAgent.Broker -ErrorAction SilentlyContinue
+# Start services. Start-Service's 30s default wait is tight for cold starts
+# on .NET 8 single-file self-extracting exes, so we poll manually up to 90s
+# and — if the service still isn't Running — capture a full post-mortem to
+# the operator's Desktop. That way we don't have to ping-pong PowerShell
+# diagnostic commands through the operator when something breaks.
+function Wait-ServiceRunning {
+    param([string]$Name, [int]$TimeoutSec = 90)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') { return $true }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
+function Save-StartupPostmortem {
+    param([string]$ServiceName, [string]$DumpPath)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("SuavoAgent service start post-mortem")
+    $lines.Add("Service: $ServiceName")
+    $lines.Add("Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')")
+    $lines.Add("Machine: $env:COMPUTERNAME")
+    $lines.Add("Release: $ReleaseTag")
+    $lines.Add("")
+    $lines.Add("=== Get-Service ===")
+    try {
+        $svc = Get-Service -Name $ServiceName -ErrorAction Stop
+        $lines.Add(($svc | Format-List Name,Status,StartType,DisplayName | Out-String).Trim())
+    } catch { $lines.Add("Get-Service failed: $($_.Exception.Message)") }
+    $lines.Add("")
+    $lines.Add("=== sc.exe qc (config) ===")
+    try {
+        $qc = sc.exe qc $ServiceName 2>&1 | Out-String
+        $lines.Add($qc.Trim())
+    } catch { $lines.Add("sc qc failed: $($_.Exception.Message)") }
+    $lines.Add("")
+    $lines.Add("=== sc.exe queryex (state + exit code) ===")
+    try {
+        $qex = sc.exe queryex $ServiceName 2>&1 | Out-String
+        $lines.Add($qex.Trim())
+    } catch { $lines.Add("sc queryex failed: $($_.Exception.Message)") }
+    $lines.Add("")
+    $lines.Add("=== Recent System log (SCM) ===")
+    try {
+        $sys = Get-WinEvent -FilterHashtable @{
+            LogName      = 'System'
+            ProviderName = 'Service Control Manager'
+            StartTime    = (Get-Date).AddMinutes(-10)
+        } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'Suavo' } |
+            Select-Object -First 10
+        if ($sys) { $lines.Add(($sys | Format-List TimeCreated,LevelDisplayName,Id,Message | Out-String).Trim()) }
+        else { $lines.Add("(no SCM events matching 'Suavo' in the last 10 min)") }
+    } catch { $lines.Add("System log query failed: $($_.Exception.Message)") }
+    $lines.Add("")
+    $lines.Add("=== Recent Application log (.NET Runtime + Application Error) ===")
+    try {
+        $app = Get-WinEvent -FilterHashtable @{
+            LogName   = 'Application'
+            StartTime = (Get-Date).AddMinutes(-10)
+        } -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProviderName -match '\.NET Runtime|Application Error|\.NET Host' -or $_.Message -match 'Suavo' } |
+            Select-Object -First 15
+        if ($app) { $lines.Add(($app | Format-List TimeCreated,LevelDisplayName,ProviderName,Id,Message | Out-String).Trim()) }
+        else { $lines.Add("(no matching Application events in the last 10 min)") }
+    } catch { $lines.Add("Application log query failed: $($_.Exception.Message)") }
+    $lines.Add("")
+    $lines.Add("=== Agent install dir listing ===")
+    try {
+        $ls = Get-ChildItem $installDir -Force | Select-Object Name, Length, LastWriteTime | Format-Table | Out-String
+        $lines.Add($ls.Trim())
+    } catch { $lines.Add("install dir listing failed: $($_.Exception.Message)") }
+
+    $text = ($lines -join [Environment]::NewLine)
+    [System.IO.File]::WriteAllText($DumpPath, $text)
+}
+
+Write-Host "  Starting SuavoAgent.Core (up to 90s)..." -ForegroundColor Gray
+try { Start-Service SuavoAgent.Core -ErrorAction Stop } catch {
+    # Start-Service can throw even when the service is in StartPending;
+    # swallow here and let the poll below be the source of truth.
+}
+if (Wait-ServiceRunning -Name 'SuavoAgent.Core' -TimeoutSec 90) {
+    Write-Ok "SuavoAgent.Core is running"
+} else {
+    $dumpPath = Join-Path $env:USERPROFILE "Desktop\suavo-service-postmortem-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+    Save-StartupPostmortem -ServiceName 'SuavoAgent.Core' -DumpPath $dumpPath
+    Write-Fail "SuavoAgent.Core did not reach Running within 90s"
+    Write-Host "  Post-mortem saved to: $dumpPath" -ForegroundColor Yellow
+    Write-Host "  Send that file to whoever is helping and they will have everything needed to diagnose." -ForegroundColor Yellow
+}
+
+Write-Host "  Starting SuavoAgent.Broker..." -ForegroundColor Gray
+try { Start-Service SuavoAgent.Broker -ErrorAction Stop } catch { }
+if (-not (Wait-ServiceRunning -Name 'SuavoAgent.Broker' -TimeoutSec 60)) {
+    $brokerDump = Join-Path $env:USERPROFILE "Desktop\suavo-broker-postmortem-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+    Save-StartupPostmortem -ServiceName 'SuavoAgent.Broker' -DumpPath $brokerDump
+    Write-Host "  Broker did not start within 60s — post-mortem at $brokerDump" -ForegroundColor Yellow
+}
 
 # ============================================
 # PHASE 6: Verify
