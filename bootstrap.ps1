@@ -521,13 +521,47 @@ Write-Host "  Downloading checksums..." -ForegroundColor Gray
 Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath -UseBasicParsing
 Invoke-WebRequest -Uri $checksumSigUrl -OutFile $checksumSigPath -UseBasicParsing
 
-# Verify ECDSA signature of checksums
+# Verify ECDSA signature of checksums — implemented with .NET Framework
+# 4.6.2-compatible primitives so it works on PowerShell 5.1 (the default
+# on most Windows 10/11 pharmacy machines without pwsh 7 preinstalled).
+#
+# The older ImportSubjectPublicKeyInfo / [Convert]::FromHexString APIs
+# are .NET 5+ only. We parse the embedded P-256 SubjectPublicKeyInfo by
+# hand (fixed ~26-byte ASN.1 prefix → uncompressed point marker 0x04 →
+# 32-byte X + 32-byte Y) and feed ECParameters into ImportParameters.
 $publicKeyDer = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA=="
+$derBytes = [System.Convert]::FromBase64String($publicKeyDer)
+if ($derBytes.Length -lt 65 -or $derBytes[$derBytes.Length - 65] -ne 0x04) {
+    Write-Error "Embedded public key is not a valid P-256 uncompressed point"
+    exit 1
+}
+$qx = New-Object byte[] 32
+$qy = New-Object byte[] 32
+[Array]::Copy($derBytes, $derBytes.Length - 64, $qx, 0, 32)
+[Array]::Copy($derBytes, $derBytes.Length - 32, $qy, 0, 32)
+
+$ecParams = New-Object System.Security.Cryptography.ECParameters
+$ecParams.Curve = [System.Security.Cryptography.ECCurve]::NamedCurves.nistP256
+$ecParams.Q = New-Object System.Security.Cryptography.ECPoint
+$ecParams.Q.X = $qx
+$ecParams.Q.Y = $qy
+
 $ecdsa = [System.Security.Cryptography.ECDsa]::Create()
-$ecdsa.ImportSubjectPublicKeyInfo([System.Convert]::FromBase64String($publicKeyDer), [ref]$null)
+$ecdsa.ImportParameters($ecParams)
+
 $checksumBytes = [System.IO.File]::ReadAllBytes($checksumPath)
 $sigHex = (Get-Content $checksumSigPath -Raw).Trim()
-$sigBytes = [System.Convert]::FromHexString($sigHex)
+
+# Manual hex → bytes (no [Convert]::FromHexString on .NET Framework).
+if ($sigHex.Length % 2 -ne 0) {
+    Write-Error "Signature hex length is not even"
+    exit 1
+}
+$sigBytes = New-Object byte[] ($sigHex.Length / 2)
+for ($i = 0; $i -lt $sigBytes.Length; $i++) {
+    $sigBytes[$i] = [Convert]::ToByte($sigHex.Substring($i * 2, 2), 16)
+}
+
 $valid = $ecdsa.VerifyData($checksumBytes, $sigBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
 
 if (-not $valid) {
