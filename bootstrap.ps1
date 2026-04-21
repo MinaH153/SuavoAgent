@@ -825,7 +825,9 @@ sc.exe failureflag SuavoAgent.Broker 1 | Out-Null
 sc.exe config SuavoAgent.Broker depend= SuavoAgent.Core | Out-Null
 Write-Ok "SuavoAgent.Broker service registered"
 
-# Lock down install directory
+# Lock down install directory. NetworkService needs ReadAndExecute to load
+# and launch SuavoAgent.Broker.exe — omitting it causes SCM error 7000
+# ("system cannot find the file specified") when Broker tries to start.
 $dirAcl = Get-Acl $installDir
 $dirAcl.SetAccessRuleProtection($true, $false)
 $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
@@ -834,6 +836,8 @@ $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccess
     "NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
 $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
     "NT AUTHORITY\LOCAL SERVICE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
+$dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    "NT AUTHORITY\NETWORK SERVICE", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
 Set-Acl $installDir $dirAcl
 
 # Start services. Start-Service's 30s default wait is tight for cold starts
