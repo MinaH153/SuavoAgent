@@ -974,6 +974,28 @@ function Save-StartupPostmortem {
         $lines.Add("(startup-crash.log not present — process died before crash sink ran)")
     }
     $lines.Add("")
+    $lines.Add("=== Broker broker-crash.log (written by last-resort crash sink) ===")
+    $brokerCrashLog = Join-Path $env:ProgramData "SuavoAgent\logs\broker-crash.log"
+    if (Test-Path $brokerCrashLog) {
+        try { $lines.Add((Get-Content $brokerCrashLog -Raw).Trim()) }
+        catch { $lines.Add("broker crash log read failed: $($_.Exception.Message)") }
+    } else {
+        $lines.Add("(broker-crash.log not present)")
+    }
+    $lines.Add("")
+    $lines.Add("=== Broker Serilog broker-*.log (last 80 lines) ===")
+    $brokerLogDir = Join-Path $env:ProgramData "SuavoAgent\logs"
+    if (Test-Path $brokerLogDir) {
+        $brokerLatest = Get-ChildItem $brokerLogDir -Filter 'broker-*.log' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($brokerLatest) {
+            try { $lines.Add((Get-Content $brokerLatest.FullName -Tail 80 | Out-String).Trim()) }
+            catch { $lines.Add("broker log read failed: $($_.Exception.Message)") }
+        } else {
+            $lines.Add("(no broker-*.log found — Broker never reached Serilog init)")
+        }
+    }
+    $lines.Add("")
     $lines.Add("=== Core Serilog startup-YYYYMMDD.log (last 80 lines) ===")
     $startupLogDir = Join-Path $env:ProgramData "SuavoAgent\logs"
     if (Test-Path $startupLogDir) {
