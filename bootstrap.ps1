@@ -306,12 +306,12 @@ if (-not $pmsType) {
     Write-Step "Phase 2: Discovering SQL Server credentials"
 }
 
-$sqlServer = if (-not $pmsType) { "" } else { $null }
+if ($pmsType) {
+$sqlServer = $null
 $sqlDatabase = "PioneerPharmacySystem"
 $sqlUser = $null
 $sqlPassword = $null
 
-if ($pmsType) {
 # Step 2a: Read config for host
 $configXml = [xml](Get-Content $pioneerConfig)
 $pioneerHost = $null
@@ -497,11 +497,18 @@ if (-not $sqlUser -and -not $discoveredConnStr) {
 try { Start-Transcript -Path $transcriptPath -Append -ErrorAction SilentlyContinue | Out-Null } catch { }
 
 Write-Host ""
-Write-Host "  +-------------------------------------+" -ForegroundColor White
-Write-Host "  | Server:   $sqlServer" -ForegroundColor White
-Write-Host "  | Database: $sqlDatabase" -ForegroundColor White
-Write-Host "  | Auth:     $(if ($sqlUser) { "SQL ($sqlUser)" } else { 'Windows' })" -ForegroundColor White
-Write-Host "  +-------------------------------------+" -ForegroundColor White
+if ($pmsType) {
+    Write-Host "  +-------------------------------------+" -ForegroundColor White
+    Write-Host "  | Server:   $sqlServer" -ForegroundColor White
+    Write-Host "  | Database: $sqlDatabase" -ForegroundColor White
+    Write-Host "  | Auth:     $(if ($sqlUser) { "SQL ($sqlUser)" } else { 'Windows' })" -ForegroundColor White
+    Write-Host "  +-------------------------------------+" -ForegroundColor White
+} else {
+    Write-Host "  +-------------------------------------+" -ForegroundColor White
+    Write-Host "  | SQL discovery deferred to agent     |" -ForegroundColor Gray
+    Write-Host "  | (no PMS detected on this machine)   |" -ForegroundColor Gray
+    Write-Host "  +-------------------------------------+" -ForegroundColor White
+}
 
 # ============================================
 # PHASE 3: Download agent binaries
@@ -835,8 +842,12 @@ Write-Host "  Logs:     $dataDir\logs\" -ForegroundColor White
 Write-Host "  Config:   $configPath" -ForegroundColor White
 Write-Host "  Agent ID: $agentId" -ForegroundColor White
 Write-Host ""
-Write-Host "  SQL:      $sqlServer / $sqlDatabase" -ForegroundColor White
-Write-Host "  Auth:     $(if ($sqlUser) { "SQL ($sqlUser)" } else { 'Windows' })" -ForegroundColor White
+if ($sqlServer) {
+    Write-Host "  SQL:      $sqlServer / $sqlDatabase" -ForegroundColor White
+    Write-Host "  Auth:     $(if ($sqlUser) { "SQL ($sqlUser)" } else { 'Windows' })" -ForegroundColor White
+} else {
+    Write-Host "  SQL:      (deferred — agent will auto-discover during learning phase)" -ForegroundColor Gray
+}
 Write-Host ""
 
 Get-ChildItem "$installDir\*.exe" | ForEach-Object {
