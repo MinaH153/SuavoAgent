@@ -247,6 +247,11 @@ try
     builder.Services.AddSingleton<ExcelPricingReader>();
     builder.Services.AddSingleton<ExcelPricingWriter>();
 
+    // File discovery — Core side. Helper runs the actual locator; this client
+    // wraps the find_file IPC call so HeartbeatWorker can dispatch
+    // find_and_run_pricing_job without knowing IPC details.
+    builder.Services.AddSingleton<SuavoAgent.Core.Discovery.DiscoveryClient>();
+
     // PricingJobRunner gets an optional TieredBrain evaluator wired only when
     // Reasoning.PricingBrainEnabled is true. Default: disabled — behavior is
     // byte-for-byte identical to pre-brain. Enabling lets the brain Halt jobs

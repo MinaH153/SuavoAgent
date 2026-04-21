@@ -54,7 +54,16 @@ try
     // Returns null (no vision) when disabled, which is the default.
     var visionController = SuavoAgent.Helper.Vision.VisionBootstrap.TryBuild(Log.Logger);
 
-    using var cmdServer = new IpcCommandServer(cmdPipeName, pricingWorkflow, Log.Logger, visionController);
+    // File discovery — runs in Helper (interactive user session) because
+    // Core runs as LocalSystem and doesn't see the user's Desktop/
+    // Documents. Heuristic-only ranker in v3.13; LLM tier plugs in later.
+    var fileLocator = new SuavoAgent.Core.Discovery.FileLocatorService(
+        enumerator: new SuavoAgent.Core.Discovery.DefaultFileEnumerator(),
+        scorer: new SuavoAgent.Core.Discovery.FilenameHeuristicScorer(),
+        sampler: new SuavoAgent.Core.Discovery.TabularShapeSampler(),
+        ranker: new SuavoAgent.Core.Discovery.HeuristicOnlyRanker());
+
+    using var cmdServer = new IpcCommandServer(cmdPipeName, pricingWorkflow, Log.Logger, visionController, fileLocator);
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
