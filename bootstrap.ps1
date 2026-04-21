@@ -32,7 +32,11 @@ param(
     [string]$ReleaseTag = "",
     [string]$RepoOwner = "MinaH153",
     [string]$RepoName = "SuavoAgent",
-    [switch]$SkipConsent
+    [switch]$SkipConsent,
+    # Re-apply service registration + ACLs without touching operator config,
+    # SQL credentials, or consent receipt. Triggered by SuavoAgent.Watchdog
+    # when Core/Broker fail to recover via sc.exe start alone.
+    [switch]$Repair
 )
 
 # Auto-log everything -- transcript saved to desktop for debugging
@@ -49,7 +53,7 @@ $dataDir = "$env:ProgramData\SuavoAgent"
 # always produces a known-good install, even over a broken one.
 # ============================================
 function Test-PriorInstall {
-    $services = @("SuavoAgent.Core", "SuavoAgent.Broker")
+    $services = @("SuavoAgent.Core", "SuavoAgent.Broker", "SuavoAgent.Watchdog")
     foreach ($s in $services) {
         if (Get-Service -Name $s -ErrorAction SilentlyContinue) { return $true }
     }
@@ -61,7 +65,7 @@ function Test-PriorInstall {
 function Invoke-PriorInstallCleanup {
     Write-Host ""
     Write-Host "  Prior SuavoAgent install detected — cleaning up before reinstall" -ForegroundColor Yellow
-    foreach ($s in @("SuavoAgent.Core", "SuavoAgent.Broker")) {
+    foreach ($s in @("SuavoAgent.Watchdog", "SuavoAgent.Broker", "SuavoAgent.Core")) {
         $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
         if ($svc) {
             if ($svc.Status -eq 'Running' -or $svc.Status -eq 'StartPending') {
@@ -88,6 +92,72 @@ function Invoke-PriorInstallCleanup {
     }
     Write-Host "  Cleanup complete — proceeding with fresh install" -ForegroundColor Green
     Write-Host ""
+}
+
+if ($Repair) {
+    Write-Host ""
+    Write-Host "  SuavoAgent --repair mode" -ForegroundColor Yellow
+    Write-Host "  Re-applying service registration + ACLs (no reinstall, no config touch)" -ForegroundColor DarkGray
+    Write-Host ""
+
+    # Re-assert install dir ACLs. If dir is missing we can't repair — that's an
+    # uninstall-scale problem, not a repair one.
+    if (-not (Test-Path $installDir)) {
+        Write-Error "Install dir missing ($installDir) — full reinstall required, --repair cannot fix this"
+        exit 1
+    }
+    try {
+        $dirAcl = Get-Acl $installDir
+        $dirAcl.SetAccessRuleProtection($true, $false)
+        $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "NT AUTHORITY\LOCAL SERVICE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "NT AUTHORITY\NETWORK SERVICE", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        Set-Acl $installDir $dirAcl
+        Write-Host "  Install dir ACLs re-applied" -ForegroundColor Green
+    } catch {
+        Write-Host "  Install dir ACL repair failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # Re-register any missing services against the existing binaries.
+    $serviceSpecs = @(
+        @{ Name = 'SuavoAgent.Core';     Exe = 'SuavoAgent.Core.exe';     Account = 'NT AUTHORITY\LocalService';   Depends = $null;              Desc = 'Suavo pharmacy agent - SQL polling, cloud sync' },
+        @{ Name = 'SuavoAgent.Broker';   Exe = 'SuavoAgent.Broker.exe';   Account = 'NT AUTHORITY\NetworkService'; Depends = 'SuavoAgent.Core';  Desc = 'Suavo pharmacy agent - session broker' },
+        @{ Name = 'SuavoAgent.Watchdog'; Exe = 'SuavoAgent.Watchdog.exe'; Account = 'LocalSystem';                 Depends = $null;              Desc = 'Suavo pharmacy agent - process watchdog' }
+    )
+    foreach ($spec in $serviceSpecs) {
+        $exePath = Join-Path $installDir $spec.Exe
+        if (-not (Test-Path $exePath)) {
+            Write-Host "  Skipping $($spec.Name) — binary missing at $exePath" -ForegroundColor DarkGray
+            continue
+        }
+        $existing = Get-Service -Name $spec.Name -ErrorAction SilentlyContinue
+        if (-not $existing) {
+            sc.exe create $spec.Name binPath= "`"$exePath`"" start= delayed-auto obj= $spec.Account | Out-Null
+            sc.exe description $spec.Name $spec.Desc | Out-Null
+            sc.exe failure $spec.Name reset= 3600 actions= restart/5000/restart/30000/restart/60000 | Out-Null
+            sc.exe failureflag $spec.Name 1 | Out-Null
+            if ($spec.Depends) { sc.exe config $spec.Name depend= $spec.Depends | Out-Null }
+            Write-Host "  Re-registered $($spec.Name)" -ForegroundColor Green
+        }
+    }
+
+    # Restart services (Core → Broker → Watchdog)
+    foreach ($svcName in @('SuavoAgent.Core', 'SuavoAgent.Broker', 'SuavoAgent.Watchdog')) {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if (-not $svc) { continue }
+        try { Start-Service -Name $svcName -ErrorAction Stop } catch { }
+        Write-Host "  $svcName status after repair: $((Get-Service $svcName -ErrorAction SilentlyContinue).Status)" -ForegroundColor Gray
+    }
+
+    try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
+    Write-Host ""
+    Write-Host "  --repair completed" -ForegroundColor Green
+    exit 0
 }
 
 if (Test-PriorInstall) {
@@ -710,7 +780,7 @@ Get-Content $checksumPath | ForEach-Object {
     if ($parts.Count -eq 2) { $expectedHashes[$parts[1].Trim()] = $parts[0].Trim() }
 }
 
-$binaries = @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe")
+$binaries = @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe", "SuavoAgent.Watchdog.exe")
 
 # Verify ALL expected binaries have checksum entries before downloading anything
 foreach ($bin in $binaries) {
@@ -855,8 +925,8 @@ Write-Ok "Credentials locked down (Admin + SYSTEM + LocalService R + NetworkServ
 # ============================================
 Write-Step "Phase 5: Installing Windows services"
 
-# Stop + remove existing
-foreach ($svc in @("SuavoAgent.Broker", "SuavoAgent.Core")) {
+# Stop + remove existing (watchdog first so it doesn't restart us mid-teardown)
+foreach ($svc in @("SuavoAgent.Watchdog", "SuavoAgent.Broker", "SuavoAgent.Core")) {
     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
     if ($s) {
         if ($s.Status -eq "Running") { Stop-Service $svc -Force; Start-Sleep 2 }
@@ -881,6 +951,16 @@ sc.exe failure SuavoAgent.Broker reset= 3600 actions= restart/5000/restart/30000
 sc.exe failureflag SuavoAgent.Broker 1 | Out-Null
 sc.exe config SuavoAgent.Broker depend= SuavoAgent.Core | Out-Null
 Write-Ok "SuavoAgent.Broker service registered"
+
+# Install Watchdog (runs as LocalSystem -- SCM sc.exe start/query requires it).
+# No service dependency — Watchdog must be able to restart Core/Broker even if
+# one of them is broken, so making it depend on either would defeat its purpose.
+$watchdogPath = Join-Path $installDir "SuavoAgent.Watchdog.exe"
+sc.exe create SuavoAgent.Watchdog binPath= "`"$watchdogPath`"" start= delayed-auto obj= "LocalSystem" | Out-Null
+sc.exe description SuavoAgent.Watchdog "Suavo pharmacy agent - process watchdog (auto-restarts Core/Broker, escalates to bootstrap --repair)" | Out-Null
+sc.exe failure SuavoAgent.Watchdog reset= 3600 actions= restart/10000/restart/60000/restart/300000 | Out-Null
+sc.exe failureflag SuavoAgent.Watchdog 1 | Out-Null
+Write-Ok "SuavoAgent.Watchdog service registered"
 
 # Lock down install directory. NetworkService needs ReadAndExecute to load
 # and launch SuavoAgent.Broker.exe — omitting it causes SCM error 7000
@@ -1044,12 +1124,33 @@ if (-not (Wait-ServiceRunning -Name 'SuavoAgent.Broker' -TimeoutSec 60)) {
     Write-Host "  Broker did not start within 60s — post-mortem at $brokerDump" -ForegroundColor Yellow
 }
 
+# Stash this bootstrap so Watchdog's --repair escalation can invoke it even
+# if the operator installed via `irm|iex` (no on-disk script). Download the
+# pinned release tag from raw.githubusercontent.com so the persisted copy
+# matches the binaries we just installed.
+try {
+    $bootstrapUrl = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$ReleaseTag/bootstrap.ps1"
+    $bootstrapDst = Join-Path $dataDir "bootstrap.ps1"
+    Invoke-WebRequest -Uri $bootstrapUrl -OutFile $bootstrapDst -UseBasicParsing -TimeoutSec 30
+    Write-Ok "Bootstrap script persisted to $bootstrapDst for watchdog --repair escalation"
+} catch {
+    Write-Host "  Bootstrap persistence skipped: $($_.Exception.Message)" -ForegroundColor DarkGray
+}
+
+Write-Host "  Starting SuavoAgent.Watchdog..." -ForegroundColor Gray
+try { Start-Service SuavoAgent.Watchdog -ErrorAction Stop } catch { }
+if (-not (Wait-ServiceRunning -Name 'SuavoAgent.Watchdog' -TimeoutSec 60)) {
+    $wdDump = Join-Path $env:USERPROFILE "Desktop\suavo-watchdog-postmortem-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+    Save-StartupPostmortem -ServiceName 'SuavoAgent.Watchdog' -DumpPath $wdDump
+    Write-Host "  Watchdog did not start within 60s — post-mortem at $wdDump" -ForegroundColor Yellow
+}
+
 # ============================================
 # PHASE 6: Verify
 # ============================================
 Write-Step "Phase 6: Verification"
 
-foreach ($svc in @("SuavoAgent.Core", "SuavoAgent.Broker")) {
+foreach ($svc in @("SuavoAgent.Core", "SuavoAgent.Broker", "SuavoAgent.Watchdog")) {
     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
     if ($s -and $s.Status -eq "Running") {
         Write-Ok "$svc is running"

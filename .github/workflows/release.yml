@@ -50,6 +50,11 @@ jobs:
           VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
         run: dotnet publish src/SuavoAgent.Helper -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
 
+      - name: Publish Watchdog
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
+        run: dotnet publish src/SuavoAgent.Watchdog -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
+
       - name: Publish Setup
         env:
           VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
@@ -58,7 +63,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd release
-          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe > checksums.sha256
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe > checksums.sha256
           cat checksums.sha256
 
       - name: Sign checksums (ECDSA P-256)
@@ -90,6 +95,7 @@ jobs:
             release/SuavoAgent.Core.exe
             release/SuavoAgent.Broker.exe
             release/SuavoAgent.Helper.exe
+            release/SuavoAgent.Watchdog.exe
             release/SuavoSetup.exe
             release/checksums.sha256
             release/checksums.sha256.sig

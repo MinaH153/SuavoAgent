@@ -49,7 +49,7 @@ jobs:
         env:
           VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
         run: |
-          for proj in Core Broker Helper Setup; do
+          for proj in Core Broker Helper Watchdog Setup; do
             dotnet publish src/SuavoAgent.$proj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
           done
 
@@ -58,7 +58,7 @@ jobs:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY_PEM }}
         run: |
           cd release
-          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe > checksums.sha256
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe > checksums.sha256
           openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") -out checksums.sha256.sig checksums.sha256
 
       - name: Create tag
@@ -82,6 +82,7 @@ jobs:
             release/SuavoAgent.Core.exe
             release/SuavoAgent.Broker.exe
             release/SuavoAgent.Helper.exe
+            release/SuavoAgent.Watchdog.exe
             release/SuavoSetup.exe
             release/checksums.sha256
             release/checksums.sha256.sig

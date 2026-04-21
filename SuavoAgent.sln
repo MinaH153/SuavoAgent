@@ -29,6 +29,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SuavoAgent.Helper.Tests", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SuavoAgent.Setup.Tests", "tests\SuavoAgent.Setup.Tests\SuavoAgent.Setup.Tests.csproj", "{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SuavoAgent.Watchdog", "src\SuavoAgent.Watchdog\SuavoAgent.Watchdog.csproj", "{1D17D695-5DAA-4874-9D5E-BB64A847E021}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SuavoAgent.Watchdog.Tests", "tests\SuavoAgent.Watchdog.Tests\SuavoAgent.Watchdog.Tests.csproj", "{D2465AC9-9A9C-4704-BC7E-11C6B7891260}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -79,10 +83,20 @@ Global
 		{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1D17D695-5DAA-4874-9D5E-BB64A847E021}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1D17D695-5DAA-4874-9D5E-BB64A847E021}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1D17D695-5DAA-4874-9D5E-BB64A847E021}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1D17D695-5DAA-4874-9D5E-BB64A847E021}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D2465AC9-9A9C-4704-BC7E-11C6B7891260}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D2465AC9-9A9C-4704-BC7E-11C6B7891260}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D2465AC9-9A9C-4704-BC7E-11C6B7891260}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D2465AC9-9A9C-4704-BC7E-11C6B7891260}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{3F4F7656-F20E-4E50-BDE4-1C3EE8AB5A18} = {6DAB3597-E396-48AA-865A-6F01D958D91B}
 		{68FD1BD2-D7CF-4A33-B639-0AC8A824DF20} = {81E7C2A3-67EE-43EE-963B-5B814870A94E}
 		{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748} = {81E7C2A3-67EE-43EE-963B-5B814870A94E}
+		{1D17D695-5DAA-4874-9D5E-BB64A847E021} = {6DAB3597-E396-48AA-865A-6F01D958D91B}
+		{D2465AC9-9A9C-4704-BC7E-11C6B7891260} = {81E7C2A3-67EE-43EE-963B-5B814870A94E}
 	EndGlobalSection
 EndGlobal
