@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SuavoAgent.Verbs</RootNamespace>
+    <AssemblyTitle>SuavoAgent.Verbs</AssemblyTitle>
+    <Description>Suavo pharmacy agent typed action grammar — signed, audited, rollback-enveloped verbs.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SuavoAgent.Verbs.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
+    <ProjectReference Include="..\SuavoAgent.Events\SuavoAgent.Events.csproj" />
+  </ItemGroup>
+
+</Project>
