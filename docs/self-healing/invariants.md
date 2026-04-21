@@ -5,7 +5,7 @@
 > it MUST be rejected at review. This document is the contract between Suavo,
 > our pharmacy customers, and HIPAA regulators.
 
-**Locked date:** 2026-04-22
+**Locked date:** 2026-04-21
 **Status:** v0.1 draft — locks to v1.0 after Saturday Nadim pilot post-mortem + Codex review
 **Change control:** Breaking changes require PR + Joshua approval + designated Security Officer approval
 
@@ -340,4 +340,4 @@ No violation is "minor." No violation is "just this once."
 
 ## Change log
 
-- **2026-04-22 v0.1** — Initial draft. Locks to v1.0 after Nadim pilot + Codex review.
+- **2026-04-21 v0.1** — Initial draft. Locks to v1.0 after Nadim pilot + Codex review.

@@ -4,7 +4,7 @@
 > makes every action attributable, tamper-evident, and defensible under HIPAA
 > audit, OCR investigation, BAA dispute, or subpoena.
 
-**Locked date:** 2026-04-22
+**Locked date:** 2026-04-21
 **Status:** v0.1 draft
 **Depends on:** `invariants.md` (read first)
 
@@ -294,7 +294,7 @@ Every day at 04:00 UTC per pharmacy:
    ```json
    {
      "pharmacy_id": "<salted>",
-     "date": "2026-04-22",
+     "date": "2026-04-21",
      "first_sequence": 12345,
      "last_sequence": 12678,
      "event_count": 334,
@@ -436,4 +436,4 @@ Ruleset changes require PR + security review. New rules can add coverage
 
 ## Change log
 
-- **2026-04-22 v0.1** — Initial draft. Locks to v1.0 after Nadim pilot + Codex review.
+- **2026-04-21 v0.1** — Initial draft. Locks to v1.0 after Nadim pilot + Codex review.

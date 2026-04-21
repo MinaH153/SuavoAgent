@@ -5,7 +5,7 @@
 > rotation protocol, revocation procedure, and compromise response. Skim this
 > and you will make mistakes that cost us customers and patents.
 
-**Locked date:** 2026-04-22
+**Locked date:** 2026-04-21
 **Status:** v0.1 draft
 **Depends on:** `invariants.md` (§I.3 Authentication, authorization, attribution)
 
@@ -144,7 +144,7 @@ offline key stored on a YubiKey at Joshua's residence).
 Defender + user warnings. Different from release signing — this signs the EXE
 itself, not the checksums file.
 
-**Current state (2026-04-22):** Ordered from SSL.com. Order ref
+**Current state (2026-04-21):** Ordered from SSL.com. Order ref
 `co-861kueeu2a3`. $628 paid. Validation queue. Yubikey ships 2-3 business days
 after validation completes. See `mkm-legal-entity.md` + session-2026-04-21
 memories for full context.
@@ -310,13 +310,13 @@ has an entry:
 
 - Purpose: Cloud→agent command signing for pharmacy <hash>
 - Algorithm: HMAC-SHA256
-- Created: 2026-04-22T12:00:00Z
+- Created: 2026-04-21T12:00:00Z
 - Created by: [ceremony-id]
 - Current state: active
-- Last rotated: 2026-04-22
+- Last rotated: 2026-04-21
 - Next rotation due: 2026-07-21
 - Compromise status: none
-- Rotation history: (initial, 2026-04-22, active)
+- Rotation history: (initial, 2026-04-21, active)
 ```
 
 Updates are append-only. Rotations append a new state entry. The registry
@@ -354,4 +354,4 @@ Post-Phase A:
 
 ## Change log
 
-- **2026-04-22 v0.1** — Initial draft. Locks to v1.0 after Nadim pilot + Codex review.
+- **2026-04-21 v0.1** — Initial draft. Locks to v1.0 after Nadim pilot + Codex review.

@@ -5,7 +5,7 @@
 > path that causes state change on a pharmacy workstation MUST go through a
 > verb defined here.
 
-**Locked date:** 2026-04-22
+**Locked date:** 2026-04-21
 **Status:** v0.1 draft
 **Depends on:** `invariants.md`, `audit-schema.md`, `key-custody.md`
 
@@ -437,7 +437,7 @@ These checks are the pre-merge gates. PRs failing any are blocked by CI.
 
 ## Action grammar evolution path
 
-- **v0.1 (today, 2026-04-22)**: this doc, draft
+- **v0.1 (today, 2026-04-21)**: this doc, draft
 - **v1.0 (post-Nadim pilot, ~2026-04-28)**: lock after Codex review
 - **v1.1 (Phase D, ~2026-08)**: initial 5 universal verbs shipped
 - **v1.2 (Phase D.2, ~2026-09)**: pharmacy-specific verbs added
@@ -454,4 +454,4 @@ Each version bump follows the same pattern:
 
 ## Change log
 
-- **2026-04-22 v0.1** — Initial draft. Locks to v1.0 after Nadim pilot + Codex review.
+- **2026-04-21 v0.1** — Initial draft. Locks to v1.0 after Nadim pilot + Codex review.

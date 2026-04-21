@@ -41,14 +41,14 @@ The strategy and positioning for this work lives in the memory system at
    rule drift. No exceptions.
 6. **Autonomy ladder default = 0% on every new pharmacy.** Earn each notch.
 
-## File status (as of 2026-04-22)
+## File status (as of 2026-04-21)
 
 | Doc | Status | Locked date |
 |---|---|---|
-| `invariants.md` | v0.1 draft | 2026-04-22 |
-| `audit-schema.md` | v0.1 draft | 2026-04-22 |
-| `key-custody.md` | v0.1 draft | 2026-04-22 |
-| `action-grammar-v1.md` | v0.1 draft | 2026-04-22 |
+| `invariants.md` | v0.1 draft | 2026-04-21 |
+| `audit-schema.md` | v0.1 draft | 2026-04-21 |
+| `key-custody.md` | v0.1 draft | 2026-04-21 |
+| `action-grammar-v1.md` | v0.1 draft | 2026-04-21 |
 
 All four are **v0.1 drafts**. They lock to v1.0 after Saturday's Nadim pilot
 post-mortem and a Codex + Joshua sign-off review. Breaking changes post-v1.0
