@@ -26,6 +26,11 @@ public static class IpcCommands
     public const string PricingLookup = "pricing_lookup";
     public const string PricingJobProgress = "pricing_job_progress";
 
+    // File discovery — Core→Helper command channel. Helper runs
+    // FileLocatorService in the user session; Core can't because it
+    // runs as LocalSystem and sees a different filesystem profile.
+    public const string FindFile = "find_file";
+
     // Vision — Core→Helper command channel.
     // Response payload: { storageId: string|null, frame: ScreenFrame }
     public const string CaptureScreen = "capture_screen";

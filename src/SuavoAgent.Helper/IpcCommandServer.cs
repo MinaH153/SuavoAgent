@@ -2,8 +2,10 @@ using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Serilog;
+using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Core.Discovery;
 using SuavoAgent.Helper.Vision;
 using SuavoAgent.Helper.Workflows;
 
@@ -25,6 +27,7 @@ public sealed class IpcCommandServer : IDisposable
     private readonly string _pipeName;
     private readonly PricingWorkflow _pricing;
     private readonly ScreenCaptureController? _vision;
+    private readonly FileLocatorService? _locator;
     private readonly ILogger _logger;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
@@ -33,11 +36,13 @@ public sealed class IpcCommandServer : IDisposable
         string pipeName,
         PricingWorkflow pricing,
         ILogger logger,
-        ScreenCaptureController? vision = null)
+        ScreenCaptureController? vision = null,
+        FileLocatorService? locator = null)
     {
         _pipeName = pipeName;
         _pricing = pricing;
         _vision = vision;
+        _locator = locator;
         _logger = logger;
     }
 
@@ -125,6 +130,7 @@ public sealed class IpcCommandServer : IDisposable
         {
             IpcCommands.PricingLookup => HandlePricingLookupAsync(request, ct),
             IpcCommands.CaptureScreen => HandleCaptureScreenAsync(request, ct),
+            IpcCommands.FindFile => HandleFindFileAsync(request, ct),
             IpcCommands.Ping => Task.FromResult(Ok(request.Id, request.Command, null)),
             _ => Task.FromResult(Error(request.Id, request.Command, "unknown_command", $"Unknown command: {request.Command}"))
         };
@@ -188,6 +194,54 @@ public sealed class IpcCommandServer : IDisposable
         var result = _pricing.Lookup(pricingReq);
         var data = JsonSerializer.SerializeToElement(result);
         return Task.FromResult(Ok(request.Id, request.Command, data));
+    }
+
+    private async Task<IpcResponse> HandleFindFileAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (_locator is null)
+        {
+            return Error(request.Id, request.Command, "locator_unavailable",
+                "File discovery not configured on this agent.");
+        }
+        if (request.Data is null)
+        {
+            return Error(request.Id, request.Command, "bad_request", "Missing data");
+        }
+
+        FindFileRequest? findReq;
+        try
+        {
+            findReq = JsonSerializer.Deserialize<FindFileRequest>(request.Data.Value);
+        }
+        catch (Exception ex)
+        {
+            return Error(request.Id, request.Command, "bad_request", ex.Message);
+        }
+        if (findReq is null)
+        {
+            return Error(request.Id, request.Command, "bad_request",
+                "Could not deserialize FindFileRequest");
+        }
+
+        try
+        {
+            var result = await _locator.LocateAsync(findReq.Spec, DateTimeOffset.UtcNow, ct);
+            // FileDiscoveryResult carries raw FileCandidateSample entries (paths,
+            // filenames) in its Best/Alternatives. That's fine on this side of
+            // the boundary — Core consumes the result locally. The cloud upload
+            // happens at HeartbeatWorker after Core re-scrubs / projects.
+            var payload = JsonSerializer.SerializeToElement(result);
+            return Ok(request.Id, request.Command, payload);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return Error(request.Id, request.Command, "cancelled", "Cancelled");
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: find_file dispatch error");
+            return Error(request.Id, request.Command, "locate_error", ex.Message);
+        }
     }
 
     private static IpcResponse Ok(string id, string command, System.Text.Json.JsonElement? data) =>

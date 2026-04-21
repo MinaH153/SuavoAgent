@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Contracts.Models;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Behavioral;
@@ -29,6 +30,7 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly Intelligence.FleetDataChannels? _fleetChannels;
     private readonly PricingJobRunner? _pricingJobRunner;
     private readonly IpcCommandClient? _ipcCommandClient;
+    private readonly SuavoAgent.Core.Discovery.DiscoveryClient? _discoveryClient;
     private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
@@ -60,6 +62,7 @@ public sealed class HeartbeatWorker : BackgroundService
         _fleetChannels = new Intelligence.FleetDataChannels(stateDb);
         _pricingJobRunner = serviceProvider.GetService<PricingJobRunner>();
         _ipcCommandClient = serviceProvider.GetService<IpcCommandClient>();
+        _discoveryClient = serviceProvider.GetService<SuavoAgent.Core.Discovery.DiscoveryClient>();
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -452,6 +455,9 @@ public sealed class HeartbeatWorker : BackgroundService
                     break;
                 case "run_pricing_job":
                     _ = Task.Run(() => HandleRunPricingJobAsync(scEl, ct), ct);
+                    break;
+                case "find_and_run_pricing_job":
+                    _ = Task.Run(() => HandleFindAndRunPricingJobAsync(scEl, ct), ct);
                     break;
                 case "transition_auto_rule_approval":
                     HandleTransitionAutoRuleApproval(scEl);
@@ -1142,5 +1148,214 @@ public sealed class HeartbeatWorker : BackgroundService
         {
             _pricingJobSemaphore.Release();
         }
+    }
+
+    /// <summary>
+    /// v3.13 discovery-mediated pricing job. Operator clicks "auto-find and
+    /// run" in the portal; agent runs <see cref="SuavoAgent.Core.Discovery.FileLocatorService"/>
+    /// via Helper IPC to locate the file, then:
+    /// <list type="bullet">
+    ///   <item><b>AutoUse</b> — runs the pricing job immediately on the
+    ///     discovered path, ACKs success with progress.</item>
+    ///   <item><b>RequireConfirm / Inconclusive</b> — ACKs with a
+    ///     <c>needs_confirmation</c> payload carrying candidate metadata;
+    ///     portal surfaces the picker and operator triggers a regular
+    ///     <c>run_pricing_job</c> with the chosen path.</item>
+    ///   <item><b>NotFound</b> — ACKs with <c>not_found</c>; portal prompts
+    ///     operator to supply the path manually.</item>
+    /// </list>
+    /// </summary>
+    private async Task HandleFindAndRunPricingJobAsync(JsonElement scEl, CancellationToken ct)
+    {
+        if (_discoveryClient == null || _ipcCommandClient == null || _pricingJobRunner == null)
+        {
+            _logger.LogWarning("find_and_run_pricing_job: discovery/IPC/pricing runner not registered");
+            return;
+        }
+
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var pack = dataEl.TryGetProperty("pack", out var pk) ? pk.GetString() ?? "pharmacy_rx" : "pharmacy_rx";
+        var ndcColumn = dataEl.TryGetProperty("ndcColumn", out var nc) ? nc.GetString() ?? "NDC" : "NDC";
+        var supplierColumn = dataEl.TryGetProperty("supplierColumn", out var sc2) ? sc2.GetString() ?? "Supplier" : "Supplier";
+        var costColumn = dataEl.TryGetProperty("costColumn", out var cc) ? cc.GetString() ?? "Cost (per unit)" : "Cost (per unit)";
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        // Pack selection. v3.13 has only pharmacy_rx; future verticals plug in here.
+        var spec = pack switch
+        {
+            "pharmacy_rx" => SuavoAgent.Core.Verticals.Pharmacy.PharmacyPresets.NdcPricingList(),
+            _ => null,
+        };
+        if (spec is null)
+        {
+            _logger.LogWarning("find_and_run_pricing_job: unknown pack {Pack}", pack);
+            await AckAsync(false, null, $"unknown pack: {pack}");
+            return;
+        }
+
+        // Connect to Helper IPC.
+        if (!_ipcCommandClient.IsConnected)
+        {
+            var connected = await _ipcCommandClient.ConnectAsync(TimeSpan.FromSeconds(10), ct);
+            if (!connected)
+            {
+                _logger.LogError("find_and_run_pricing_job: cannot connect to Helper command pipe");
+                await AckAsync(false, null, "Helper command pipe unreachable");
+                return;
+            }
+        }
+
+        // Run discovery.
+        var discoveryJobId = Guid.NewGuid().ToString("N");
+        var discoveryResult = await _discoveryClient.FindAsync(_ipcCommandClient, discoveryJobId, spec, ct);
+        if (discoveryResult is null)
+        {
+            _logger.LogError("find_and_run_pricing_job: discovery returned null");
+            await AckAsync(false, null, "discovery failed — see agent logs");
+            return;
+        }
+
+        _logger.LogInformation(
+            "find_and_run_pricing_job: discovery resolution={Resolution} best={File} confidence={Conf}",
+            discoveryResult.Resolution,
+            discoveryResult.Best?.Candidate.Candidate.FileName ?? "(none)",
+            discoveryResult.Best?.Confidence.ToString("F2") ?? "-");
+
+        // ---- Decision: auto-run, confirm, or ask operator ---------------------
+        if (discoveryResult.Resolution == FileDiscoveryResolution.AutoUse && discoveryResult.Best is not null)
+        {
+            var chosenPath = discoveryResult.Best.Candidate.Candidate.AbsolutePath;
+
+            // Same safety gates as run_pricing_job: .xlsx only, local absolute,
+            // canonical path matches.
+            if (!IsExcelPathSafe(chosenPath, out var canonical, out var unsafeReason))
+            {
+                _logger.LogWarning("find_and_run_pricing_job: rejected discovered path — {Reason}", unsafeReason);
+                await AckAsync(false, new
+                {
+                    status = "path_rejected",
+                    reason = unsafeReason,
+                    discoveryResolution = discoveryResult.Resolution.ToString(),
+                }, unsafeReason);
+                return;
+            }
+
+            if (!await _pricingJobSemaphore.WaitAsync(TimeSpan.Zero, ct))
+            {
+                _logger.LogWarning("find_and_run_pricing_job: another pricing job is already running");
+                await AckAsync(false, null, "another pricing job is already running");
+                return;
+            }
+
+            try
+            {
+                var jobId = Guid.NewGuid().ToString("N");
+                var jobSpec = new PricingJobSpec(jobId, canonical, ndcColumn, supplierColumn, costColumn);
+                _logger.LogInformation("find_and_run_pricing_job: auto-running pricing job {JobId} on {Path}",
+                    jobId, canonical);
+
+                _stateDb.UpsertPricingJob(jobSpec, PricingJobStatus.Pending, 0, 0, 0);
+                var progress = await _pricingJobRunner.RunAsync(jobSpec, _ipcCommandClient, ct);
+
+                var ok = progress.Status == PricingJobStatus.Completed;
+                await AckAsync(ok, new
+                {
+                    status = "auto_ran",
+                    jobId,
+                    discoveredPath = canonical,
+                    discoveryConfidence = discoveryResult.Best.Confidence,
+                    discoveryReason = discoveryResult.Best.Reason,
+                    discoveryTier = discoveryResult.Best.Tier.ToString(),
+                    totalItems = progress.TotalItems,
+                    completedItems = progress.CompletedItems,
+                    failedItems = progress.FailedItems,
+                    pricingStatus = progress.Status.ToString(),
+                }, ok ? null : "pricing job failed — see agent logs");
+            }
+            finally
+            {
+                _pricingJobSemaphore.Release();
+            }
+            return;
+        }
+
+        // Not confident enough to auto-run — surface candidates for operator pick.
+        if (discoveryResult.Resolution == FileDiscoveryResolution.NotFound)
+        {
+            await AckAsync(true, new
+            {
+                status = "not_found",
+                discoveryResolution = discoveryResult.Resolution.ToString(),
+            }, null);
+            return;
+        }
+
+        var candidatesPayload = BuildCandidatesPayload(discoveryResult);
+        await AckAsync(true, new
+        {
+            status = "needs_confirmation",
+            discoveryResolution = discoveryResult.Resolution.ToString(),
+            candidates = candidatesPayload,
+            suggestedColumns = new
+            {
+                ndcColumn,
+                supplierColumn,
+                costColumn,
+            },
+        }, null);
+    }
+
+    private static bool IsExcelPathSafe(string path, out string canonical, out string reason)
+    {
+        canonical = "";
+        reason = "";
+        var ext = Path.GetExtension(path);
+        if (!string.Equals(ext, ".xlsx", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "path must be .xlsx";
+            return false;
+        }
+        if (path.StartsWith(@"\\") || !Path.IsPathRooted(path))
+        {
+            reason = "path must be local absolute";
+            return false;
+        }
+        canonical = Path.GetFullPath(path);
+        if (!string.Equals(canonical, path, StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "path canonicalization mismatch";
+            return false;
+        }
+        return true;
+    }
+
+    private static object[] BuildCandidatesPayload(FileDiscoveryResult result)
+    {
+        var list = new List<CandidateRanking>();
+        if (result.Best is not null) list.Add(result.Best);
+        list.AddRange(result.Alternatives);
+
+        return list.Select(c => new
+        {
+            path = c.Candidate.Candidate.AbsolutePath,
+            fileName = c.Candidate.Candidate.FileName,
+            sizeBytes = c.Candidate.Candidate.SizeBytes,
+            lastModifiedUtc = c.Candidate.Candidate.LastModifiedUtc,
+            bucket = c.Candidate.Candidate.Bucket.ToString(),
+            confidence = c.Confidence,
+            reason = c.Reason,
+            tier = c.Tier.ToString(),
+            hasErrorFromSampler = c.Candidate.ErrorMessage is not null,
+            samplerError = c.Candidate.ErrorMessage,
+            columnHeaders = (c.Candidate.Shape as TabularShapeSample)?.ColumnHeaders,
+            rowCount = (c.Candidate.Shape as TabularShapeSample)?.RowCount ?? 0,
+            primaryKeyColumnIndex = (c.Candidate.Shape as TabularShapeSample)?.PrimaryKeyColumnIndex ?? -1,
+        }).ToArray();
     }
 }
