@@ -26,11 +26,21 @@ internal static class SqlCredentialDiscovery
     private const string DefaultDatabase = "PioneerPharmacySystem";
 
     /// <summary>
-    /// Full discovery pipeline. Returns null only if everything fails and user declines manual entry.
+    /// Full discovery pipeline including the interactive console manual fallback.
+    /// The GUI path must NOT call this — it blocks on <see cref="Console.ReadLine"/>.
+    /// GUIs should call <see cref="TryAutoDiscover"/> and render their own manual
+    /// entry form when the result is null.
     /// </summary>
     public static SqlCredentials? Discover(string pioneerConfigPath)
+        => TryAutoDiscover(pioneerConfigPath) ?? PromptManual();
+
+    /// <summary>
+    /// Non-interactive half of <see cref="Discover"/>. Returns null when every
+    /// automatic strategy (config host → ConnectionStringServer → SQL Browser)
+    /// fails. Safe for GUI callers.
+    /// </summary>
+    public static SqlCredentials? TryAutoDiscover(string pioneerConfigPath)
     {
-        // Step 1: Extract host from PioneerPharmacy.exe.config
         var host = ExtractHostFromConfig(pioneerConfigPath);
         if (host != null)
         {
@@ -42,7 +52,6 @@ internal static class SqlCredentialDiscovery
             host = "localhost";
         }
 
-        // Step 2: Try ConnectionStringServer on TCP port 12345
         var connStr = TryConnectionStringServer(host);
         if (connStr != null)
         {
@@ -56,7 +65,6 @@ internal static class SqlCredentialDiscovery
             }
         }
 
-        // Step 3: Try SQL Browser for instance discovery
         var browserResult = TrySqlBrowser(host);
         if (browserResult != null)
         {
@@ -64,8 +72,7 @@ internal static class SqlCredentialDiscovery
             return new SqlCredentials(browserResult, DefaultDatabase, null, null);
         }
 
-        // Step 4: Manual fallback
-        return PromptManual();
+        return null;
     }
 
     /// <summary>

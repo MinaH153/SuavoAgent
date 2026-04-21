@@ -1,0 +1,87 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="540"
+             x:Class="SuavoAgent.Setup.Gui.Views.ProgressView"
+             x:DataType="vm:ProgressViewModel">
+
+    <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="80,32,80,32">
+
+        <StackPanel Grid.Row="0" Spacing="6">
+            <TextBlock Text="Installing SuavoAgent"
+                       Foreground="{DynamicResource SuavoTextBrush}"
+                       FontSize="28" FontWeight="Light"/>
+            <TextBlock Text="{Binding ActivePhase}"
+                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                       FontSize="14"/>
+        </StackPanel>
+
+        <ItemsControl Grid.Row="1" ItemsSource="{Binding Phases}" Margin="0,20,0,16">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:PhaseItem">
+                    <Grid ColumnDefinitions="28,*,Auto" Margin="0,6">
+                        <TextBlock Grid.Column="0"
+                                   Text="{Binding Icon}"
+                                   FontSize="16" FontWeight="Bold"
+                                   Foreground="{DynamicResource SuavoAccentBrush}"
+                                   VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding Title}"
+                                   Foreground="{DynamicResource SuavoTextBrush}"
+                                   FontSize="14" FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                        <ProgressBar Grid.Column="2"
+                                     Width="160"
+                                     Height="6"
+                                     Minimum="0" Maximum="100"
+                                     Value="{Binding Percent}"
+                                     IsVisible="{Binding IsActive}"
+                                     Foreground="{DynamicResource SuavoAccentBrush}"
+                                     Background="{DynamicResource SuavoBorderBrush}"/>
+                    </Grid>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <Border Grid.Row="2"
+                Background="#080808"
+                BorderBrush="{DynamicResource SuavoBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="{DynamicResource SuavoRadiusMedium}">
+            <ScrollViewer Padding="12">
+                <ItemsControl ItemsSource="{Binding LogLines}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:LogLine">
+                            <TextBlock Text="{Binding Text}"
+                                       Foreground="{Binding Brush}"
+                                       FontFamily="Consolas,Menlo,monospace"
+                                       FontSize="11"
+                                       TextWrapping="Wrap"
+                                       Margin="0,1"/>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <DockPanel Grid.Row="3" Margin="0,16,0,0" LastChildFill="False">
+            <TextBlock DockPanel.Dock="Left"
+                       Text="Cancel aborts before services start. Already-downloaded binaries stay on disk until retry."
+                       Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                       FontSize="11"
+                       VerticalAlignment="Center"/>
+            <Button DockPanel.Dock="Right"
+                    Content="Cancel"
+                    Command="{Binding CancelCommand}"
+                    Padding="18,10"
+                    Background="Transparent"
+                    Foreground="{DynamicResource SuavoTextMutedBrush}"
+                    BorderBrush="{DynamicResource SuavoBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"/>
+        </DockPanel>
+
+    </Grid>
+</UserControl>

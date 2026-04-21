@@ -27,6 +27,7 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Validate version format
+        id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
@@ -34,16 +35,22 @@ jobs:
             echo "Invalid version format: $INPUT_VERSION"
             exit 1
           fi
+          VERSION_NUMERIC="${INPUT_VERSION#v}"
+          echo "VERSION_NUMERIC=$VERSION_NUMERIC" >> "$GITHUB_OUTPUT"
 
       - name: Build + Test
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
         run: |
-          dotnet build SuavoAgent.sln -c Release
+          dotnet build SuavoAgent.sln -c Release -p:Version="$VERSION_NUMERIC"
           dotnet test SuavoAgent.sln -c Release --no-build -v normal
 
       - name: Publish all binaries
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
         run: |
           for proj in Core Broker Helper Setup; do
-            dotnet publish src/SuavoAgent.$proj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+            dotnet publish src/SuavoAgent.$proj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
           done
 
       - name: Generate + sign checksums

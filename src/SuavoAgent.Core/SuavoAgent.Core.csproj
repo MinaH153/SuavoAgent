@@ -5,6 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>SuavoAgent.Core</RootNamespace>
+    <AssemblyTitle>SuavoAgent.Core</AssemblyTitle>
+    <Description>Suavo pharmacy intelligence agent — SQL polling, PMS observation, cloud sync.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <!-- LLamaSharp.Backend.Cpu ships multiple AVX variants under runtimes/<rid>/native/{avx,avx2,avx512}.
          LLamaSharp auto-selects the right one at runtime; we just need the publish step to allow the

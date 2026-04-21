@@ -1,0 +1,65 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="540"
+             x:Class="SuavoAgent.Setup.Gui.Views.ErrorView"
+             x:DataType="vm:ErrorViewModel">
+
+    <Grid RowDefinitions="*,Auto,Auto,Auto,*" Margin="80,32">
+
+        <StackPanel Grid.Row="1" HorizontalAlignment="Center" Spacing="14">
+            <Border Width="64" Height="64"
+                    HorizontalAlignment="Center"
+                    Background="{DynamicResource SuavoDangerBrush}"
+                    CornerRadius="32">
+                <TextBlock Text="!"
+                           Foreground="#F5EEDC"
+                           FontSize="36" FontWeight="Bold"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <TextBlock Text="{Binding Title}"
+                       Foreground="{DynamicResource SuavoTextBrush}"
+                       FontSize="28" FontWeight="Light"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <Border Grid.Row="2" Margin="0,24,0,0"
+                HorizontalAlignment="Center"
+                MaxWidth="680"
+                Background="{DynamicResource SuavoCardBrush}"
+                BorderBrush="{DynamicResource SuavoBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="{DynamicResource SuavoRadiusLarge}"
+                Padding="22,16">
+            <TextBlock Text="{Binding Detail}"
+                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                       FontSize="13"
+                       TextWrapping="Wrap"/>
+        </Border>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="12" Margin="0,24,0,0">
+            <Button Content="Retry"
+                    Command="{Binding RetryCommand}"
+                    IsVisible="{Binding CanRetry}"
+                    Padding="22,12"
+                    Background="{DynamicResource SuavoAccentBrush}"
+                    Foreground="#101010"
+                    BorderThickness="0"
+                    FontWeight="SemiBold"
+                    CornerRadius="10"/>
+            <Button Content="Close"
+                    Command="{Binding CloseCommand}"
+                    Padding="22,12"
+                    Background="Transparent"
+                    Foreground="{DynamicResource SuavoTextMutedBrush}"
+                    BorderBrush="{DynamicResource SuavoBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"/>
+        </StackPanel>
+
+    </Grid>
+</UserControl>

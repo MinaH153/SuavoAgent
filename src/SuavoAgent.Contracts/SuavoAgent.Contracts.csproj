@@ -5,6 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>SuavoAgent.Contracts</RootNamespace>
+    <AssemblyTitle>SuavoAgent.Contracts</AssemblyTitle>
+    <Description>Suavo pharmacy agent shared contracts and DTOs.</Description>
   </PropertyGroup>
 
 </Project>

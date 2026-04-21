@@ -1,0 +1,60 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="540"
+             x:Class="SuavoAgent.Setup.Gui.Views.WelcomeView"
+             x:DataType="vm:WelcomeViewModel">
+
+    <Grid RowDefinitions="*,Auto,Auto,Auto,*" Margin="80,48">
+
+        <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Bottom" Spacing="16">
+            <Border HorizontalAlignment="Center"
+                    Width="72" Height="72"
+                    CornerRadius="16"
+                    Background="{DynamicResource SuavoAccentBrush}">
+                <TextBlock Text="S"
+                           Foreground="#101010"
+                           FontWeight="Bold"
+                           FontSize="36"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"/>
+            </Border>
+            <TextBlock Text="Install SuavoAgent"
+                       Foreground="{DynamicResource SuavoTextBrush}"
+                       FontWeight="Light"
+                       FontSize="44"
+                       HorizontalAlignment="Center"/>
+            <TextBlock Text="Pharmacy intelligence agent for PioneerRx."
+                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                       FontSize="16"
+                       HorizontalAlignment="Center"/>
+        </StackPanel>
+
+        <Button Grid.Row="2"
+                Content="Get started"
+                Command="{Binding ContinueCommand}"
+                HorizontalAlignment="Center"
+                Margin="0,56,0,0"
+                Padding="28,14"
+                Background="{DynamicResource SuavoAccentBrush}"
+                Foreground="#101010"
+                BorderThickness="0"
+                FontWeight="SemiBold"
+                FontSize="16"
+                CornerRadius="10"/>
+
+        <StackPanel Grid.Row="3" Margin="0,28,0,0" Spacing="6" HorizontalAlignment="Center">
+            <TextBlock Text="By continuing you acknowledge this install is HIPAA-covered."
+                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                       FontSize="12"
+                       HorizontalAlignment="Center"/>
+            <TextBlock Text="A Business Associate Agreement will be required before data flows."
+                       Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                       FontSize="12"
+                       HorizontalAlignment="Center"/>
+        </StackPanel>
+
+    </Grid>
+</UserControl>

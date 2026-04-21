@@ -27,6 +27,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{81E7C2A3
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SuavoAgent.Helper.Tests", "tests\SuavoAgent.Helper.Tests\SuavoAgent.Helper.Tests.csproj", "{68FD1BD2-D7CF-4A33-B639-0AC8A824DF20}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SuavoAgent.Setup.Tests", "tests\SuavoAgent.Setup.Tests\SuavoAgent.Setup.Tests.csproj", "{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -73,9 +75,14 @@ Global
 		{68FD1BD2-D7CF-4A33-B639-0AC8A824DF20}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{68FD1BD2-D7CF-4A33-B639-0AC8A824DF20}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{68FD1BD2-D7CF-4A33-B639-0AC8A824DF20}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{3F4F7656-F20E-4E50-BDE4-1C3EE8AB5A18} = {6DAB3597-E396-48AA-865A-6F01D958D91B}
 		{68FD1BD2-D7CF-4A33-B639-0AC8A824DF20} = {81E7C2A3-67EE-43EE-963B-5B814870A94E}
+		{CD69FF32-3DB3-4D3F-B1E5-1D13EFAAA748} = {81E7C2A3-67EE-43EE-963B-5B814870A94E}
 	EndGlobalSection
 EndGlobal

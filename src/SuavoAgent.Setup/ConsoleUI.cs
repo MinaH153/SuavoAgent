@@ -1,10 +1,27 @@
 namespace SuavoAgent.Setup;
 
 /// <summary>
-/// Colored console output helpers for non-technical pharmacy staff.
+/// Phase-level logging surface used by every install step. Routes through
+/// <see cref="IInstallReporter"/> so the same phase code drives either the
+/// PowerShell-style console path (default) or the Avalonia progress view
+/// when the GUI installs a custom reporter via <see cref="SetReporter"/>.
+/// The <see cref="Banner"/>, <see cref="CompletionSummary"/>, and
+/// <see cref="WaitForExit"/> / <see cref="FatalError"/> helpers remain
+/// console-only; the GUI has its own welcome/success surfaces.
 /// </summary>
 internal static class ConsoleUI
 {
+    private static IInstallReporter _reporter = new DefaultConsoleReporter();
+
+    public static void SetReporter(IInstallReporter reporter) => _reporter = reporter;
+
+    public static void WriteStep(string msg) => _reporter.Step(msg);
+    public static void WriteOk(string msg) => _reporter.Ok(msg);
+    public static void WriteWarn(string msg) => _reporter.Warn(msg);
+    public static void WriteFail(string msg) => _reporter.Fail(msg);
+    public static void WriteInfo(string msg) => _reporter.Info(msg);
+    public static void WriteProgress(string label, long current, long total) => _reporter.Progress(label, current, total);
+
     public static void Banner(string pharmacyId, string releaseTag)
     {
         Console.ForegroundColor = ConsoleColor.Cyan;
@@ -17,50 +34,6 @@ internal static class ConsoleUI
         Console.WriteLine($"  Pharmacy: {pharmacyId}");
         Console.WriteLine($"  Release:  {releaseTag}");
         Console.WriteLine();
-    }
-
-    public static void WriteStep(string msg)
-    {
-        Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine($"\n[{DateTime.Now:HH:mm:ss}] {msg}");
-        Console.ResetColor();
-    }
-
-    public static void WriteOk(string msg)
-    {
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"  [OK] {msg}");
-        Console.ResetColor();
-    }
-
-    public static void WriteWarn(string msg)
-    {
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine($"  [WARN] {msg}");
-        Console.ResetColor();
-    }
-
-    public static void WriteFail(string msg)
-    {
-        Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine($"  [FAIL] {msg}");
-        Console.ResetColor();
-    }
-
-    public static void WriteInfo(string msg)
-    {
-        Console.ForegroundColor = ConsoleColor.Gray;
-        Console.WriteLine($"  {msg}");
-        Console.ResetColor();
-    }
-
-    public static void WriteProgress(string label, long current, long total)
-    {
-        if (total <= 0) return;
-        var pct = (int)(current * 100 / total);
-        var bar = new string('#', pct / 5) + new string('-', 20 - pct / 5);
-        Console.Write($"\r  [{bar}] {pct,3}% {label}");
-        if (current >= total) Console.WriteLine();
     }
 
     public static void CompletionSummary(string installDir, string dataDir, string agentId,

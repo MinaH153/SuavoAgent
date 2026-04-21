@@ -5,6 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>SuavoAgent.Adapters.PioneerRx</RootNamespace>
+    <AssemblyTitle>SuavoAgent.Adapters.PioneerRx</AssemblyTitle>
+    <Description>Suavo PMS adapter for PioneerRx pharmacy management system.</Description>
   </PropertyGroup>
 
   <ItemGroup>

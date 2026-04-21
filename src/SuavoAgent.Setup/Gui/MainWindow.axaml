@@ -1,0 +1,75 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
+        xmlns:views="using:SuavoAgent.Setup.Gui.Views"
+        mc:Ignorable="d"
+        d:DesignWidth="960" d:DesignHeight="640"
+        x:Class="SuavoAgent.Setup.Gui.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="SuavoAgent Setup"
+        Width="960" Height="640"
+        MinWidth="820" MinHeight="560"
+        Background="{DynamicResource SuavoBackgroundBrush}"
+        WindowStartupLocation="CenterScreen"
+        CanResize="True">
+
+    <Window.DataContext>
+        <vm:MainWindowViewModel />
+    </Window.DataContext>
+
+    <Grid RowDefinitions="Auto,*,Auto">
+
+        <!-- Title strip -->
+        <Border Grid.Row="0"
+                Background="{DynamicResource SuavoSurfaceBrush}"
+                BorderBrush="{DynamicResource SuavoBorderBrush}"
+                BorderThickness="0,0,0,1"
+                Height="56">
+            <DockPanel LastChildFill="False" Margin="24,0">
+                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                    <Border Width="28" Height="28"
+                            Background="{DynamicResource SuavoAccentBrush}"
+                            CornerRadius="{DynamicResource SuavoRadiusSmall}">
+                        <TextBlock Text="S"
+                                   Foreground="#101010"
+                                   FontWeight="Bold"
+                                   FontSize="16"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                    </Border>
+                    <TextBlock Text="SuavoAgent Setup"
+                               Foreground="{DynamicResource SuavoTextBrush}"
+                               FontWeight="SemiBold"
+                               FontSize="15"
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+                <TextBlock DockPanel.Dock="Right"
+                           Text="{Binding StepLabel}"
+                           Foreground="{DynamicResource SuavoTextMutedBrush}"
+                           FontSize="12"
+                           VerticalAlignment="Center"/>
+            </DockPanel>
+        </Border>
+
+        <!-- Step content -->
+        <ContentControl Grid.Row="1"
+                        Content="{Binding CurrentView}"
+                        Background="{DynamicResource SuavoBackgroundBrush}"/>
+
+        <!-- Footer trust line -->
+        <Border Grid.Row="2"
+                Background="{DynamicResource SuavoSurfaceBrush}"
+                BorderBrush="{DynamicResource SuavoBorderBrush}"
+                BorderThickness="0,1,0,0"
+                Height="36">
+            <TextBlock Text="Suavo LLC · HIPAA-compliant pharmacy intelligence"
+                       Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                       FontSize="11"
+                       VerticalAlignment="Center"
+                       HorizontalAlignment="Center"/>
+        </Border>
+
+    </Grid>
+</Window>

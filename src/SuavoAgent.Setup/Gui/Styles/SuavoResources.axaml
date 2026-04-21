@@ -1,0 +1,51 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+        Suavo palette — per ~/.claude/rules/design-principles.md.
+        Foundation: deep charcoal (not blue-navy).
+        Accent: warm gold / amber.
+        Text: warm cream / ivory.
+        Animations: spring-based (added at view layer).
+    -->
+
+    <Color x:Key="SuavoBackground">#0A0A0A</Color>
+    <Color x:Key="SuavoSurface">#141414</Color>
+    <Color x:Key="SuavoCard">#1A1A1A</Color>
+    <Color x:Key="SuavoBorder">#2A2A2A</Color>
+
+    <Color x:Key="SuavoAccent">#D4A24C</Color>
+    <Color x:Key="SuavoAccentHover">#E8B65C</Color>
+    <Color x:Key="SuavoAccentPressed">#B88A3A</Color>
+    <Color x:Key="SuavoAccentMuted">#6A501E</Color>
+
+    <Color x:Key="SuavoText">#F5EEDC</Color>
+    <Color x:Key="SuavoTextMuted">#A8A196</Color>
+    <Color x:Key="SuavoTextSubtle">#6E6A62</Color>
+
+    <Color x:Key="SuavoSuccess">#7A9B6E</Color>
+    <Color x:Key="SuavoWarning">#D4A24C</Color>
+    <Color x:Key="SuavoDanger">#8B2B2B</Color>
+
+    <SolidColorBrush x:Key="SuavoBackgroundBrush" Color="{StaticResource SuavoBackground}" />
+    <SolidColorBrush x:Key="SuavoSurfaceBrush" Color="{StaticResource SuavoSurface}" />
+    <SolidColorBrush x:Key="SuavoCardBrush" Color="{StaticResource SuavoCard}" />
+    <SolidColorBrush x:Key="SuavoBorderBrush" Color="{StaticResource SuavoBorder}" />
+
+    <SolidColorBrush x:Key="SuavoAccentBrush" Color="{StaticResource SuavoAccent}" />
+    <SolidColorBrush x:Key="SuavoAccentHoverBrush" Color="{StaticResource SuavoAccentHover}" />
+    <SolidColorBrush x:Key="SuavoAccentPressedBrush" Color="{StaticResource SuavoAccentPressed}" />
+    <SolidColorBrush x:Key="SuavoAccentMutedBrush" Color="{StaticResource SuavoAccentMuted}" />
+
+    <SolidColorBrush x:Key="SuavoTextBrush" Color="{StaticResource SuavoText}" />
+    <SolidColorBrush x:Key="SuavoTextMutedBrush" Color="{StaticResource SuavoTextMuted}" />
+    <SolidColorBrush x:Key="SuavoTextSubtleBrush" Color="{StaticResource SuavoTextSubtle}" />
+
+    <SolidColorBrush x:Key="SuavoSuccessBrush" Color="{StaticResource SuavoSuccess}" />
+    <SolidColorBrush x:Key="SuavoDangerBrush" Color="{StaticResource SuavoDanger}" />
+
+    <x:Double x:Key="SuavoRadiusSmall">4</x:Double>
+    <x:Double x:Key="SuavoRadiusMedium">8</x:Double>
+    <x:Double x:Key="SuavoRadiusLarge">14</x:Double>
+
+</ResourceDictionary>

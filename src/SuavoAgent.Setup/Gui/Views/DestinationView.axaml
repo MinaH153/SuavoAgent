@@ -1,0 +1,108 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="540"
+             x:Class="SuavoAgent.Setup.Gui.Views.DestinationView"
+             x:DataType="vm:DestinationViewModel">
+
+    <Grid RowDefinitions="Auto,*,Auto" Margin="80,32,80,32">
+
+        <StackPanel Grid.Row="0" Spacing="6">
+            <TextBlock Text="Install destination"
+                       Foreground="{DynamicResource SuavoTextBrush}"
+                       FontSize="28" FontWeight="Light"/>
+            <TextBlock Text="Confirm where SuavoAgent installs and verify the SQL Server we will connect to."
+                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                       FontSize="14"
+                       TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <Border Grid.Row="1" Margin="0,24"
+                Background="{DynamicResource SuavoCardBrush}"
+                BorderBrush="{DynamicResource SuavoBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="{DynamicResource SuavoRadiusLarge}"
+                Padding="24">
+            <StackPanel Spacing="18">
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Install path"
+                               Foreground="{DynamicResource SuavoAccentBrush}"
+                               FontWeight="SemiBold" FontSize="12"/>
+                    <TextBox Text="{Binding InstallPath, Mode=TwoWay}"
+                             Background="{DynamicResource SuavoSurfaceBrush}"
+                             Foreground="{DynamicResource SuavoTextBrush}"
+                             BorderBrush="{DynamicResource SuavoBorderBrush}"/>
+                    <TextBlock Text="Services read from this folder. Default: C:\Program Files\Suavo\Agent"
+                               Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                               FontSize="11"/>
+                </StackPanel>
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="SQL Server"
+                               Foreground="{DynamicResource SuavoAccentBrush}"
+                               FontWeight="SemiBold" FontSize="12"/>
+                    <Grid ColumnDefinitions="*,*" Margin="0,0,0,0">
+                        <TextBox Grid.Column="0" Margin="0,0,12,0"
+                                 Text="{Binding SqlServer, Mode=TwoWay}"
+                                 Watermark="host\instance,port"
+                                 Background="{DynamicResource SuavoSurfaceBrush}"
+                                 Foreground="{DynamicResource SuavoTextBrush}"
+                                 BorderBrush="{DynamicResource SuavoBorderBrush}"/>
+                        <TextBox Grid.Column="1"
+                                 Text="{Binding SqlDatabase, Mode=TwoWay}"
+                                 Watermark="Database"
+                                 Background="{DynamicResource SuavoSurfaceBrush}"
+                                 Foreground="{DynamicResource SuavoTextBrush}"
+                                 BorderBrush="{DynamicResource SuavoBorderBrush}"/>
+                    </Grid>
+                    <TextBlock Text="Pre-filled from PioneerRx auto-discovery. Override only if you know the value."
+                               Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                               FontSize="11"/>
+                </StackPanel>
+
+                <StackPanel Spacing="6">
+                    <CheckBox IsChecked="{Binding UseSqlAuth, Mode=TwoWay}"
+                              Foreground="{DynamicResource SuavoTextBrush}"
+                              Content="Use SQL authentication (instead of Windows pass-through)"/>
+                    <Grid ColumnDefinitions="*,*" IsVisible="{Binding UseSqlAuth}">
+                        <TextBox Grid.Column="0" Margin="0,6,12,0"
+                                 Text="{Binding SqlUser, Mode=TwoWay}"
+                                 Watermark="SQL username"
+                                 Background="{DynamicResource SuavoSurfaceBrush}"
+                                 Foreground="{DynamicResource SuavoTextBrush}"
+                                 BorderBrush="{DynamicResource SuavoBorderBrush}"/>
+                        <TextBox Grid.Column="1" Margin="0,6,0,0"
+                                 Text="{Binding SqlPassword, Mode=TwoWay}"
+                                 Watermark="SQL password"
+                                 PasswordChar="●"
+                                 Background="{DynamicResource SuavoSurfaceBrush}"
+                                 Foreground="{DynamicResource SuavoTextBrush}"
+                                 BorderBrush="{DynamicResource SuavoBorderBrush}"/>
+                    </Grid>
+                </StackPanel>
+
+            </StackPanel>
+        </Border>
+
+        <DockPanel Grid.Row="2" LastChildFill="False">
+            <TextBlock DockPanel.Dock="Left"
+                       Text="Install starts when you click Install. It takes about 60 seconds."
+                       Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                       FontSize="11"
+                       VerticalAlignment="Center"/>
+            <Button DockPanel.Dock="Right"
+                    Content="Install"
+                    Command="{Binding InstallCommand}"
+                    Padding="28,12"
+                    Background="{DynamicResource SuavoAccentBrush}"
+                    Foreground="#101010"
+                    BorderThickness="0"
+                    FontWeight="SemiBold"
+                    CornerRadius="10"/>
+        </DockPanel>
+
+    </Grid>
+</UserControl>

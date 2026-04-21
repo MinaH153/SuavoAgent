@@ -1,0 +1,134 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="540"
+             x:Class="SuavoAgent.Setup.Gui.Views.ConsentView"
+             x:DataType="vm:ConsentViewModel">
+
+    <Grid RowDefinitions="Auto,*,Auto,Auto" Margin="80,32,80,32">
+
+        <StackPanel Grid.Row="0" Spacing="6">
+            <TextBlock Text="Terms &amp; consent"
+                       Foreground="{DynamicResource SuavoTextBrush}"
+                       FontSize="28" FontWeight="Light"/>
+            <TextBlock Text="SuavoAgent observes workstation activity to optimize pharmacy delivery. Nothing uploads until you agree."
+                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                       FontSize="14"
+                       TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <Border Grid.Row="1" Margin="0,20,0,16"
+                Background="{DynamicResource SuavoCardBrush}"
+                BorderBrush="{DynamicResource SuavoBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="{DynamicResource SuavoRadiusLarge}">
+            <ScrollViewer Padding="24">
+                <StackPanel Spacing="14">
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="What it collects"
+                                   Foreground="{DynamicResource SuavoAccentBrush}"
+                                   FontWeight="SemiBold" FontSize="13"/>
+                        <TextBlock Text="Application usage patterns and durations; workstation hardware profile; shift timing from login / logout; website domain categories (not URLs); print event counts (not document content)."
+                                   Foreground="{DynamicResource SuavoTextBrush}"
+                                   FontSize="13"
+                                   TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="What it never collects"
+                                   Foreground="{DynamicResource SuavoSuccessBrush}"
+                                   FontWeight="SemiBold" FontSize="13"/>
+                        <TextBlock Text="Keystrokes, passwords, or typed text; screen captures or screenshots; email / chat / message content; personal browsing history or specific URLs; file contents or document data."
+                                   Foreground="{DynamicResource SuavoTextBrush}"
+                                   FontSize="13"
+                                   TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Legal requirements"
+                                   Foreground="{DynamicResource SuavoDangerBrush}"
+                                   FontWeight="SemiBold" FontSize="13"/>
+                        <TextBlock Text="CT, DE, NY require written employee notice before monitoring. CA requires CCPA notice at collection. Employee notification is recommended best practice in every state."
+                                   Foreground="{DynamicResource SuavoTextBrush}"
+                                   FontSize="13"
+                                   TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <Grid ColumnDefinitions="*,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" Margin="0,8,0,0">
+                        <TextBlock Grid.Row="0" Grid.ColumnSpan="3"
+                                   Text="Authorizing party"
+                                   Foreground="{DynamicResource SuavoTextMutedBrush}"
+                                   FontSize="12"/>
+                        <TextBox Grid.Row="1" Grid.Column="0" Margin="0,6,12,0"
+                                 Text="{Binding Name, Mode=TwoWay}"
+                                 Watermark="Full name"
+                                 Background="{DynamicResource SuavoSurfaceBrush}"
+                                 Foreground="{DynamicResource SuavoTextBrush}"
+                                 BorderBrush="{DynamicResource SuavoBorderBrush}"/>
+                        <TextBox Grid.Row="1" Grid.Column="1" Margin="0,6,12,0"
+                                 Text="{Binding Title, Mode=TwoWay}"
+                                 Watermark="Title (Owner, Manager, …)"
+                                 Background="{DynamicResource SuavoSurfaceBrush}"
+                                 Foreground="{DynamicResource SuavoTextBrush}"
+                                 BorderBrush="{DynamicResource SuavoBorderBrush}"/>
+                        <TextBox Grid.Row="1" Grid.Column="2" Margin="0,6,0,0"
+                                 Width="80"
+                                 Text="{Binding StateCode, Mode=TwoWay}"
+                                 Watermark="State"
+                                 MaxLength="2"
+                                 Background="{DynamicResource SuavoSurfaceBrush}"
+                                 Foreground="{DynamicResource SuavoTextBrush}"
+                                 BorderBrush="{DynamicResource SuavoBorderBrush}"/>
+
+                        <Border Grid.Row="2" Grid.ColumnSpan="3" Margin="0,12,0,0"
+                                IsVisible="{Binding NoticeBannerText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                                Background="#2A1E0E"
+                                BorderBrush="{DynamicResource SuavoWarning}"
+                                BorderThickness="1"
+                                CornerRadius="{DynamicResource SuavoRadiusSmall}"
+                                Padding="12,8">
+                            <TextBlock Text="{Binding NoticeBannerText}"
+                                       Foreground="{DynamicResource SuavoWarning}"
+                                       FontSize="12"
+                                       TextWrapping="Wrap"/>
+                        </Border>
+                    </Grid>
+
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <StackPanel Grid.Row="2" Spacing="8" Margin="0,0,0,12">
+            <CheckBox IsChecked="{Binding AgreedToTerms, Mode=TwoWay}"
+                      Foreground="{DynamicResource SuavoTextBrush}"
+                      FontSize="13"
+                      Content="I authorize SuavoAgent to monitor this workstation and accept Suavo's Terms and Privacy Policy."/>
+            <CheckBox IsChecked="{Binding AgreedToNotice, Mode=TwoWay}"
+                      IsVisible="{Binding RequiresEmployeeNotice}"
+                      Foreground="{DynamicResource SuavoTextBrush}"
+                      FontSize="13"
+                      Content="I have distributed the employee notice template to all staff at this workstation."/>
+        </StackPanel>
+
+        <DockPanel Grid.Row="3" LastChildFill="False">
+            <TextBlock DockPanel.Dock="Left"
+                       Text="Consent is recorded digitally and uploaded on first heartbeat."
+                       Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                       FontSize="11"
+                       VerticalAlignment="Center"/>
+            <Button DockPanel.Dock="Right"
+                    Content="Agree &amp; continue"
+                    Command="{Binding AgreeCommand}"
+                    Padding="24,12"
+                    Background="{DynamicResource SuavoAccentBrush}"
+                    Foreground="#101010"
+                    BorderThickness="0"
+                    FontWeight="SemiBold"
+                    CornerRadius="10"/>
+        </DockPanel>
+
+    </Grid>
+</UserControl>

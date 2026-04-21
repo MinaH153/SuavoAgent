@@ -1,0 +1,74 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="540"
+             x:Class="SuavoAgent.Setup.Gui.Views.SystemCheckView"
+             x:DataType="vm:SystemCheckViewModel">
+
+    <Grid RowDefinitions="Auto,*,Auto" Margin="80,40,80,32">
+
+        <StackPanel Grid.Row="0" Spacing="6">
+            <TextBlock Text="System check"
+                       Foreground="{DynamicResource SuavoTextBrush}"
+                       FontSize="28" FontWeight="Light"/>
+            <TextBlock Text="Confirming this workstation is ready for SuavoAgent."
+                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                       FontSize="14"/>
+        </StackPanel>
+
+        <Border Grid.Row="1" Margin="0,24"
+                Background="{DynamicResource SuavoCardBrush}"
+                BorderBrush="{DynamicResource SuavoBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="{DynamicResource SuavoRadiusLarge}"
+                Padding="24">
+            <ItemsControl ItemsSource="{Binding Items}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:CheckItem">
+                        <Grid ColumnDefinitions="28,*,Auto" Margin="0,8">
+                            <TextBlock Grid.Column="0"
+                                       Text="{Binding Icon}"
+                                       FontWeight="Bold"
+                                       FontSize="16"
+                                       VerticalAlignment="Center">
+                                <TextBlock.Foreground>
+                                    <SolidColorBrush Color="{Binding ColorHex}" />
+                                </TextBlock.Foreground>
+                            </TextBlock>
+                            <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding Title}"
+                                           Foreground="{DynamicResource SuavoTextBrush}"
+                                           FontSize="14" FontWeight="SemiBold"/>
+                                <TextBlock Text="{Binding Detail}"
+                                           Foreground="{DynamicResource SuavoTextMutedBrush}"
+                                           FontSize="12"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </Border>
+
+        <DockPanel Grid.Row="2" LastChildFill="False">
+            <TextBlock DockPanel.Dock="Left"
+                       Text="Checks run locally. Nothing is uploaded until consent is captured."
+                       Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                       FontSize="11"
+                       VerticalAlignment="Center"/>
+            <Button DockPanel.Dock="Right"
+                    Content="Continue"
+                    Command="{Binding ContinueCommand}"
+                    IsEnabled="{Binding IsReady}"
+                    Padding="24,12"
+                    Background="{DynamicResource SuavoAccentBrush}"
+                    Foreground="#101010"
+                    BorderThickness="0"
+                    FontWeight="SemiBold"
+                    CornerRadius="10"/>
+        </DockPanel>
+
+    </Grid>
+</UserControl>

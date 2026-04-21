@@ -1,0 +1,35 @@
+<Project>
+
+  <!--
+    Shared PE / assembly metadata applied to every SuavoAgent project.
+    Company / Product / Copyright / Authors are identical across the fleet.
+    AssemblyTitle + Description are set per-project in each .csproj.
+
+    Version defaults to 0.0.0 for local developer builds; the release workflow
+    overrides via `-p:Version=<tag-without-v-prefix>` so the signed, shipped
+    binaries carry the real release number in their PE header.
+  -->
+
+  <PropertyGroup>
+    <!--
+      Legal entity on CA SOS filing B20260126045 (file date 2026-03-23) is
+      MKM TECHNOLOGIES LLC. "Suavo" is a trade name used for the agent product
+      but has no DBA/FBN on file yet, so the EV code-signing cert — which is
+      vetted against the CA SOS record — will be issued to MKM Technologies LLC.
+      Keep Company + Copyright aligned with the cert so the signed binary's
+      Properties dialog and the UAC publisher string match the signature.
+    -->
+    <Company>MKM Technologies LLC</Company>
+    <Authors>MKM Technologies LLC</Authors>
+    <Product>SuavoAgent</Product>
+    <Copyright>© 2026 MKM Technologies LLC</Copyright>
+    <NeutralLanguage>en-US</NeutralLanguage>
+    <Trademark>SuavoAgent™ is a trademark of MKM Technologies LLC.</Trademark>
+
+    <Version Condition="'$(Version)' == ''">0.0.0</Version>
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+  </PropertyGroup>
+
+</Project>

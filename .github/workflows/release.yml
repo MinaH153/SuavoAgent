@@ -21,25 +21,39 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION_NUMERIC="${TAG#v}"
+          echo "VERSION=$TAG" >> "$GITHUB_OUTPUT"
+          echo "VERSION_NUMERIC=$VERSION_NUMERIC" >> "$GITHUB_OUTPUT"
 
       - name: Restore + Build
-        run: dotnet build SuavoAgent.sln -c Release
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
+        run: dotnet build SuavoAgent.sln -c Release -p:Version="$VERSION_NUMERIC"
 
       - name: Test
         run: dotnet test SuavoAgent.sln -c Release --no-build -v normal
 
       - name: Publish Core
-        run: dotnet publish src/SuavoAgent.Core -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
+        run: dotnet publish src/SuavoAgent.Core -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
 
       - name: Publish Broker
-        run: dotnet publish src/SuavoAgent.Broker -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
+        run: dotnet publish src/SuavoAgent.Broker -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
 
       - name: Publish Helper
-        run: dotnet publish src/SuavoAgent.Helper -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
+        run: dotnet publish src/SuavoAgent.Helper -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
 
       - name: Publish Setup
-        run: dotnet publish src/SuavoAgent.Setup -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o release/
+        env:
+          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
+        run: dotnet publish src/SuavoAgent.Setup -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
 
       - name: Generate checksums
         run: |

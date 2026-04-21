@@ -1,0 +1,30 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="540"
+             x:Class="SuavoAgent.Setup.Gui.Views.PlaceholderView"
+             x:DataType="vm:PlaceholderViewModel">
+
+    <Grid RowDefinitions="*,Auto,*" Margin="80,48">
+        <Border Grid.Row="1"
+                Background="{DynamicResource SuavoCardBrush}"
+                BorderBrush="{DynamicResource SuavoBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="{DynamicResource SuavoRadiusLarge}"
+                Padding="32,24"
+                MaxWidth="560">
+            <StackPanel Spacing="12">
+                <TextBlock Text="Next steps wiring in progress"
+                           Foreground="{DynamicResource SuavoTextBrush}"
+                           FontWeight="SemiBold"
+                           FontSize="18"/>
+                <TextBlock Text="{Binding Message}"
+                           Foreground="{DynamicResource SuavoTextMutedBrush}"
+                           FontSize="13"
+                           TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>

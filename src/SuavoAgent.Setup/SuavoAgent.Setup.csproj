@@ -1,20 +1,44 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>SuavoSetup</AssemblyName>
+    <AssemblyTitle>SuavoAgent Setup</AssemblyTitle>
+    <Description>Suavo pharmacy agent installer — signed one-click setup with HIPAA BAA consent.</Description>
+    <RootNamespace>SuavoAgent.Setup</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <SupportedOSPlatformVersion>10.0</SupportedOSPlatformVersion>
+    <NoWarn>CA1416</NoWarn>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <!--
+    Publish-only properties. `dotnet publish -r win-x64` activates this group
+    so the release workflow keeps emitting a self-contained, compressed single-
+    file Windows binary. `dotnet build` (no -r) produces a portable assembly,
+    which lets the test project reference SuavoAgent.Setup without activating
+    the single-file + SelfContained constraints.
+  -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'win-x64'">
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
-    <AssemblyName>SuavoSetup</AssemblyName>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <InvariantGlobalization>true</InvariantGlobalization>
-    <SupportedOSPlatformVersion>10.0</SupportedOSPlatformVersion>
-    <NoWarn>CA1416</NoWarn>
-      <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SuavoAgent.Setup.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.2.0" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.2.0" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.0" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.2.0" />
+    <PackageReference Include="Avalonia.Diagnostics" Version="11.2.0" Condition="'$(Configuration)' == 'Debug'" />
+  </ItemGroup>
 
 </Project>
