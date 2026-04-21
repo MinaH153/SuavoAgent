@@ -48,6 +48,88 @@ $installDir = "C:\Program Files\Suavo\Agent"
 $dataDir = "$env:ProgramData\SuavoAgent"
 
 # ============================================
+# INSTALL TELEMETRY — phone home on failure so we see it in the
+# dashboard without the pharmacy emailing screenshots.
+# Auth: the install token that brought us here. No token = no phone home.
+# ============================================
+$script:CurrentInstallStage = "init"
+$script:InstallStartTicks = [DateTime]::UtcNow.Ticks
+
+function Set-InstallStage([string]$stage) { $script:CurrentInstallStage = $stage }
+
+function Invoke-InstallPhiRedact([string]$text) {
+    if (-not $text) { return "" }
+    $t = $text
+    # Windows / Unix user paths
+    $t = [regex]::Replace($t, '[\\/]Users[\\/][\w\.\-]+', '\Users\[REDACTED_USER]')
+    $t = [regex]::Replace($t, '[\\/]home[\\/][\w\.\-]+', '/home/[REDACTED_USER]')
+    # SSN
+    $t = [regex]::Replace($t, '\b\d{3}-\d{2}-\d{4}\b', '[REDACTED_SSN]')
+    # Rx number shape
+    $t = [regex]::Replace($t, '\bRx#?\s*\d{7,12}\b', '[REDACTED_RX]', 'IgnoreCase')
+    # Phone
+    $t = [regex]::Replace($t, '\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b', '[REDACTED_PHONE]')
+    # Email
+    $t = [regex]::Replace($t, '[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', '[REDACTED_EMAIL]')
+    # SQL password fragments
+    $t = [regex]::Replace($t, '(?i)(password|pwd)\s*=\s*[^;""\s]+', '$1=[REDACTED]')
+    return $t
+}
+
+function Send-InstallTelemetry {
+    param(
+        [Parameter(Mandatory=$true)][string]$Level,   # info, warn, error, fatal
+        [Parameter(Mandatory=$true)][string]$Message,
+        [string]$Stage = $script:CurrentInstallStage,
+        [string]$StdoutTail = "",
+        [string]$StderrTail = "",
+        [int]$ExitCode = 0
+    )
+    # No token = can't authenticate. Silent no-op (valid for standalone installs).
+    if (-not $InstallToken) { return }
+    try {
+        $durationMs = [int]([TimeSpan]::FromTicks([DateTime]::UtcNow.Ticks - $script:InstallStartTicks).TotalMilliseconds)
+        $redactedMessage = Invoke-InstallPhiRedact $Message
+        if ($redactedMessage.Length -gt 2000) { $redactedMessage = $redactedMessage.Substring(0, 2000) }
+        $redactedStdout = if ($StdoutTail) { Invoke-InstallPhiRedact $StdoutTail } else { $null }
+        if ($redactedStdout -and $redactedStdout.Length -gt 30000) { $redactedStdout = $redactedStdout.Substring($redactedStdout.Length - 30000) }
+        $redactedStderr = if ($StderrTail) { Invoke-InstallPhiRedact $StderrTail } else { $null }
+        if ($redactedStderr -and $redactedStderr.Length -gt 30000) { $redactedStderr = $redactedStderr.Substring($redactedStderr.Length - 30000) }
+        $payload = @{
+            install_token        = $InstallToken
+            stage                = $Stage
+            level                = $Level
+            message              = $redactedMessage
+            stdout_tail          = $redactedStdout
+            stderr_tail          = $redactedStderr
+            exit_code            = $ExitCode
+            machine_name         = $env:COMPUTERNAME
+            os_version           = "$([System.Environment]::OSVersion.VersionString)"
+            agent_version_target = $ReleaseTag
+            duration_ms          = $durationMs
+        } | ConvertTo-Json -Depth 4 -Compress
+        $uri = "$CloudUrl/api/agent/install-telemetry"
+        Invoke-RestMethod -Uri $uri -Method Post -Body $payload -ContentType "application/json" -TimeoutSec 15 -UserAgent "SuavoAgent-Bootstrap" | Out-Null
+    } catch {
+        # Telemetry is best-effort. Never let a phone-home error mask the real one.
+    }
+}
+
+# Global trap: any uncaught error triggers a fatal telemetry ping before exit.
+trap {
+    $errMsg = $_.Exception.Message
+    $errTrace = ($_.ScriptStackTrace -as [string])
+    $stdoutTail = ""
+    try {
+        if ($transcriptPath -and (Test-Path $transcriptPath)) {
+            $stdoutTail = (Get-Content $transcriptPath -Tail 200 -ErrorAction SilentlyContinue) -join "`n"
+        }
+    } catch { }
+    Send-InstallTelemetry -Level "fatal" -Message "$errMsg" -StdoutTail $stdoutTail -StderrTail $errTrace -ExitCode 1
+    break  # Re-raise so the script exits non-zero as it would have without the trap
+}
+
+# ============================================
 # IDEMPOTENT CLEANUP — runs before consent so a single
 #   irm "https://.../bootstrap.ps1?v=$(Get-Random)" | iex
 # always produces a known-good install, even over a broken one.
@@ -198,7 +280,13 @@ function Resolve-ReleaseTag {
 $ReleaseTag = Resolve-ReleaseTag -TagOrEmpty $ReleaseTag -Owner $RepoOwner -Repo $RepoName
 $base = "https://github.com/$RepoOwner/$RepoName/releases/download/$ReleaseTag"
 
-function Write-Step($msg) { Write-Host "`n[$((Get-Date).ToString('HH:mm:ss'))] $msg" -ForegroundColor Cyan }
+function Write-Step($msg) {
+    # Every phase boundary updates the telemetry stage so a fatal trap knows where we died.
+    $short = ($msg -replace '[^a-zA-Z0-9]+', '_').ToLowerInvariant().Trim('_')
+    if ($short.Length -gt 48) { $short = $short.Substring(0, 48) }
+    Set-InstallStage $short
+    Write-Host "`n[$((Get-Date).ToString('HH:mm:ss'))] $msg" -ForegroundColor Cyan
+}
 function Write-Ok($msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "  [WARN] $msg" -ForegroundColor Yellow }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red }
