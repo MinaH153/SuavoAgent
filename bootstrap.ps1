@@ -521,14 +521,19 @@ Write-Host "  Downloading checksums..." -ForegroundColor Gray
 Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath -UseBasicParsing
 Invoke-WebRequest -Uri $checksumSigUrl -OutFile $checksumSigPath -UseBasicParsing
 
-# Verify ECDSA signature of checksums — implemented with .NET Framework
-# 4.6.2-compatible primitives so it works on PowerShell 5.1 (the default
-# on most Windows 10/11 pharmacy machines without pwsh 7 preinstalled).
+# Verify ECDSA signature of checksums using only .NET Framework 4.6.0-
+# compatible primitives — PowerShell 5.1 ships with .NET Framework 4.6.x
+# on many pharmacy Windows installs, and several newer APIs crash there:
+#   * ImportSubjectPublicKeyInfo          -> .NET 5+ only
+#   * [Convert]::FromHexString            -> .NET 5+ only
+#   * ECCurve.NamedCurves.nistP256        -> .NET Framework 4.7.2+
+#   * VerifyData(bytes,bytes,HashAlgName) -> .NET Framework 4.6.1+, flaky on 4.6
+#   * ECDsaCng.VerifyData(DER signature)  -> expects IEEE P1363 raw r||s
+# openssl dgst -sign emits binary DER, so we also must parse DER ourselves.
 #
-# The older ImportSubjectPublicKeyInfo / [Convert]::FromHexString APIs
-# are .NET 5+ only. We parse the embedded P-256 SubjectPublicKeyInfo by
-# hand (fixed ~26-byte ASN.1 prefix → uncompressed point marker 0x04 →
-# 32-byte X + 32-byte Y) and feed ECParameters into ImportParameters.
+# Strategy: build a BCRYPT_ECCKEY_BLOB (available since .NET 3.5 via CngKey.Import),
+# hand-convert the DER sig to P1363, and verify a pre-computed SHA-256 hash.
+
 $publicKeyDer = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA=="
 $derBytes = [System.Convert]::FromBase64String($publicKeyDer)
 if ($derBytes.Length -lt 65 -or $derBytes[$derBytes.Length - 65] -ne 0x04) {
@@ -540,29 +545,74 @@ $qy = New-Object byte[] 32
 [Array]::Copy($derBytes, $derBytes.Length - 64, $qx, 0, 32)
 [Array]::Copy($derBytes, $derBytes.Length - 32, $qy, 0, 32)
 
-$ecParams = New-Object System.Security.Cryptography.ECParameters
-$ecParams.Curve = [System.Security.Cryptography.ECCurve]::NamedCurves.nistP256
-$ecParams.Q = New-Object System.Security.Cryptography.ECPoint
-$ecParams.Q.X = $qx
-$ecParams.Q.Y = $qy
+# BCRYPT_ECCKEY_BLOB layout for a P-256 public key (72 bytes total):
+#   dwMagic : uint32 LE = 0x31534345 (BCRYPT_ECDSA_PUBLIC_P256_MAGIC, "ECS1")
+#   cbKey   : uint32 LE = 32 (size of each coordinate for P-256)
+#   X[32], Y[32]
+$blob = New-Object byte[] 72
+$blob[0] = 0x45; $blob[1] = 0x43; $blob[2] = 0x53; $blob[3] = 0x31  # "ECS1" LE
+$blob[4] = 0x20; $blob[5] = 0x00; $blob[6] = 0x00; $blob[7] = 0x00  # cbKey=32 LE
+[Array]::Copy($qx, 0, $blob, 8, 32)
+[Array]::Copy($qy, 0, $blob, 40, 32)
 
-$ecdsa = [System.Security.Cryptography.ECDsa]::Create()
-$ecdsa.ImportParameters($ecParams)
+$cngKey = [System.Security.Cryptography.CngKey]::Import(
+    $blob,
+    [System.Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob)
+$ecdsa = New-Object System.Security.Cryptography.ECDsaCng($cngKey)
 
 $checksumBytes = [System.IO.File]::ReadAllBytes($checksumPath)
-$sigHex = (Get-Content $checksumSigPath -Raw).Trim()
+$sigBytes      = [System.IO.File]::ReadAllBytes($checksumSigPath)
 
-# Manual hex → bytes (no [Convert]::FromHexString on .NET Framework).
-if ($sigHex.Length % 2 -ne 0) {
-    Write-Error "Signature hex length is not even"
+# Convert DER ECDSA signature to IEEE P1363 (raw r||s, 64 bytes for P-256).
+# DER layout: 30 <seqLen> 02 <rLen> <r-bytes> 02 <sLen> <s-bytes>
+# r/s each may carry a leading 0x00 sign-bit padding byte from DER encoding.
+if ($sigBytes.Length -lt 8 -or $sigBytes[0] -ne 0x30) {
+    Write-Error "Signature is not a valid DER SEQUENCE"
     exit 1
 }
-$sigBytes = New-Object byte[] ($sigHex.Length / 2)
-for ($i = 0; $i -lt $sigBytes.Length; $i++) {
-    $sigBytes[$i] = [Convert]::ToByte($sigHex.Substring($i * 2, 2), 16)
+$seqHdrLen = 2
+if (($sigBytes[1] -band 0x80) -ne 0) {
+    $seqHdrLen = 2 + ($sigBytes[1] -band 0x7F)
+}
+if ($sigBytes[$seqHdrLen] -ne 0x02) {
+    Write-Error "Signature missing r INTEGER tag"
+    exit 1
+}
+$rLenOrig = [int]$sigBytes[$seqHdrLen + 1]
+$rStart   = $seqHdrLen + 2
+$rEnd     = $rStart + $rLenOrig
+
+if ($sigBytes[$rEnd] -ne 0x02) {
+    Write-Error "Signature missing s INTEGER tag"
+    exit 1
+}
+$sLenOrig = [int]$sigBytes[$rEnd + 1]
+$sStart   = $rEnd + 2
+$sEnd     = $sStart + $sLenOrig
+
+if ($sEnd -ne $sigBytes.Length) {
+    Write-Error "Signature DER length mismatch (expected $($sigBytes.Length), got $sEnd)"
+    exit 1
 }
 
-$valid = $ecdsa.VerifyData($checksumBytes, $sigBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+$rLen = $rLenOrig
+while ($rLen -gt 0 -and $sigBytes[$rStart] -eq 0) { $rStart++; $rLen-- }
+$sLen = $sLenOrig
+while ($sLen -gt 0 -and $sigBytes[$sStart] -eq 0) { $sStart++; $sLen-- }
+if ($rLen -gt 32 -or $sLen -gt 32) {
+    Write-Error "Signature r or s exceeds 32 bytes after stripping padding"
+    exit 1
+}
+
+$p1363 = New-Object byte[] 64
+[Array]::Copy($sigBytes, $rStart, $p1363, 32 - $rLen, $rLen)
+[Array]::Copy($sigBytes, $sStart, $p1363, 64 - $sLen, $sLen)
+
+# VerifyHash is the most portable path — avoids HashAlgorithmName overload
+# differences between 4.6.x point releases.
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+$hash   = $sha256.ComputeHash($checksumBytes)
+$valid  = $ecdsa.VerifyHash($hash, $p1363)
 
 if (-not $valid) {
     Write-Error "CRITICAL: Checksum signature verification FAILED - aborting install"
