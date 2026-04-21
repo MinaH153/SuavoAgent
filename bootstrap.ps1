@@ -885,6 +885,30 @@ function Save-StartupPostmortem {
         $ls = Get-ChildItem $installDir -Force | Select-Object Name, Length, LastWriteTime | Format-Table | Out-String
         $lines.Add($ls.Trim())
     } catch { $lines.Add("install dir listing failed: $($_.Exception.Message)") }
+    $lines.Add("")
+    $lines.Add("=== Core startup-crash.log (written by last-resort crash sink) ===")
+    $crashLog = Join-Path $env:ProgramData "SuavoAgent\logs\startup-crash.log"
+    if (Test-Path $crashLog) {
+        try { $lines.Add((Get-Content $crashLog -Raw).Trim()) }
+        catch { $lines.Add("crash log read failed: $($_.Exception.Message)") }
+    } else {
+        $lines.Add("(startup-crash.log not present — process died before crash sink ran)")
+    }
+    $lines.Add("")
+    $lines.Add("=== Core Serilog startup-YYYYMMDD.log (last 80 lines) ===")
+    $startupLogDir = Join-Path $env:ProgramData "SuavoAgent\logs"
+    if (Test-Path $startupLogDir) {
+        $latest = Get-ChildItem $startupLogDir -Filter 'startup-*.log' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($latest) {
+            try { $lines.Add((Get-Content $latest.FullName -Tail 80 | Out-String).Trim()) }
+            catch { $lines.Add("startup log read failed: $($_.Exception.Message)") }
+        } else {
+            $lines.Add("(no startup-*.log found)")
+        }
+    } else {
+        $lines.Add("(ProgramData\SuavoAgent\logs not present — service never reached Serilog init)")
+    }
 
     $text = ($lines -join [Environment]::NewLine)
     [System.IO.File]::WriteAllText($DumpPath, $text)

@@ -12,10 +12,46 @@ using SuavoAgent.Core.State;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Workers;
 
-// Bootstrap self-update — runs before any DI/config
+// Crash sink: before ANY other code runs, wire a last-resort handler that
+// persists unhandled exceptions to a file under ProgramData (writable by
+// LocalService/NetworkService/SYSTEM). Otherwise early-bootstrap failures
+// die silently under service context — the .NET runtime never gets a
+// chance to emit an Application event, so operators see only Windows
+// error 1067 with no underlying cause.
+//
+// ProgramData is preferred over SpecialFolder.ApplicationData because
+// the latter resolves to the user-scoped profile (which is empty and
+// often unwritable when the service account has no loaded profile yet).
+static string CoreCrashDir()
 {
+    var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+    var dir = Path.Combine(programData, "SuavoAgent", "logs");
+    try { Directory.CreateDirectory(dir); } catch { }
+    return dir;
+}
+static void WriteCrash(string stage, Exception ex)
+{
+    try
+    {
+        var line = $"[{DateTimeOffset.Now:O}] [{stage}] {ex.GetType().FullName}: {ex.Message}"
+                   + Environment.NewLine + ex.ToString() + Environment.NewLine + Environment.NewLine;
+        File.AppendAllText(Path.Combine(CoreCrashDir(), "startup-crash.log"), line);
+    }
+    catch { /* last resort — nothing we can do */ }
+}
+
+AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+    WriteCrash("UnhandledException", e.ExceptionObject as Exception ?? new Exception(e.ExceptionObject?.ToString() ?? "unknown"));
+TaskScheduler.UnobservedTaskException += (_, e) =>
+    WriteCrash("UnobservedTaskException", e.Exception);
+
+// Bootstrap self-update — runs before any DI/config
+try
+{
+    // Prefer ProgramData (machine-scoped, always writable by service accounts)
+    // over SpecialFolder.ApplicationData which depends on a user profile.
     var dataDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "SuavoAgent");
     Directory.CreateDirectory(Path.Combine(dataDir, "logs"));
 
@@ -36,6 +72,11 @@ using SuavoAgent.Core.Workers;
         Environment.Exit(1);
     }
 }
+catch (Exception ex)
+{
+    WriteCrash("EarlyBootstrap", ex);
+    throw;
+}
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(Environment.GetEnvironmentVariable("SUAVO_DEBUG") == "1"
@@ -55,7 +96,18 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    var builder = Host.CreateApplicationBuilder(args);
+    // When launched by SCM the process's CWD is C:\Windows\System32, not
+    // the install dir, so Host.CreateApplicationBuilder's default
+    // appsettings.json resolution (relative to CWD) misses our config.
+    // Pin ContentRootPath to the directory of the running exe so the
+    // default configuration providers find appsettings.json regardless
+    // of how the process was launched.
+    var exeDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
+    var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+    {
+        Args = args,
+        ContentRootPath = exeDir,
+    });
 
     // Cloud-pushed config overrides: written by ConfigSyncWorker and layered
     // on top of appsettings.json so IOptionsMonitor-aware consumers pick up
@@ -532,7 +584,11 @@ try
 }
 catch (Exception ex)
 {
-    Log.Fatal(ex, "SuavoAgent.Core terminated unexpectedly");
+    // Log to both Serilog (for the nominal path) and the last-resort
+    // crash sink (so service contexts still leave evidence even if the
+    // main Serilog sink itself is the thing that failed).
+    try { Log.Fatal(ex, "SuavoAgent.Core terminated unexpectedly"); } catch { }
+    WriteCrash("Main", ex);
     Environment.Exit(1);
 }
 finally
