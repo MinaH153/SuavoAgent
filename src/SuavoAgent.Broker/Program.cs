@@ -3,9 +3,7 @@ using SuavoAgent.Broker;
 
 // Crash sink: wire a last-resort handler that persists unhandled exceptions
 // to C:\ProgramData\SuavoAgent\logs\broker-crash.log even when the process
-// dies before .NET's exception machinery or Serilog are ready. Without
-// this, failures under NetworkService are invisible (no Application event,
-// WIN32_EXIT_CODE reports 0, SCM just times out).
+// dies before .NET's exception machinery or Serilog are ready.
 static string BrokerCrashDir()
 {
     var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
@@ -47,11 +45,14 @@ try
     Log.Information("IsWindowsService={IsService}",
         Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService());
 
-    // Pin ContentRootPath to the exe directory — SCM launches services with
-    // CWD=C:\Windows\System32 otherwise, so any relative file resolution in
-    // the host's default config providers misses the install dir.
+    // Use CreateEmptyApplicationBuilder so the host does NOT auto-load
+    // appsettings.json from the install dir. Broker has no configuration
+    // needs, and the appsettings ACL is restricted to SYSTEM/Admins/
+    // LocalService only (it holds Core's DB credentials) — if we touch it
+    // from the NetworkService account we get an UnauthorizedAccessException
+    // inside the Host ctor before the try/catch/crash-sink can catch it.
     var exeDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
-    var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+    var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings
     {
         Args = args,
         ContentRootPath = exeDir,

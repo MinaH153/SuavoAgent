@@ -841,8 +841,14 @@ $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRul
     "NT AUTHORITY\SYSTEM", "FullControl", "None", "None", "Allow")))
 $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
     "NT AUTHORITY\LOCAL SERVICE", "Read", "None", "None", "Allow")))
+# Defense-in-depth: NetworkService (Broker) doesn't normally load appsettings
+# but we grant Read anyway so a future Broker config binding doesn't silently
+# break. Broker's Host.CreateEmptyApplicationBuilder intentionally bypasses
+# appsettings auto-load; this grant is belt-and-suspenders.
+$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    "NT AUTHORITY\NETWORK SERVICE", "Read", "None", "None", "Allow")))
 Set-Acl $configPath $acl
-Write-Ok "Credentials locked down (Admin + SYSTEM + LocalService only)"
+Write-Ok "Credentials locked down (Admin + SYSTEM + LocalService R + NetworkService R)"
 
 # ============================================
 # PHASE 5: Install Windows services
