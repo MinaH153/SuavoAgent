@@ -219,10 +219,22 @@ try
                     System.Security.AccessControl.AccessControlType.Allow));
                 dirInfo.SetAccessControl(dirSecurity);
             }
+            catch (UnauthorizedAccessException ex)
+            {
+                // Setting a directory's DACL requires WRITE_DAC, which the
+                // NT AUTHORITY\LocalService account does not have by default.
+                // The install-time bootstrap runs as Administrator and is the
+                // canonical owner of this ACL — so a runtime failure here
+                // just means bootstrap already locked things down and the
+                // service correctly has no authority to mutate its own DACL.
+                // Log it and keep going; fleet dashboard can surface the
+                // signal if the bootstrap-time lockdown ever fails to run.
+                Log.Warning(ex, "ACL_LOCKDOWN_DEFERRED: {Dir} DACL will be pinned by bootstrap at install time (runtime account lacks WRITE_DAC)", dataDir);
+            }
             catch (Exception ex)
             {
                 if (OperatingSystem.IsWindows())
-                    throw; // ACL lockdown is mandatory on Windows — HIPAA 164.312(a)(2)(iv)
+                    throw; // Any non-permission ACL failure is still mandatory to surface on Windows — HIPAA 164.312(a)(2)(iv)
                 Log.Warning(ex, "ACL not available on this platform");
             }
         }

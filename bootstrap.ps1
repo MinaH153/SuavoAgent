@@ -518,6 +518,30 @@ Write-Step "Phase 3: Downloading SuavoAgent binaries"
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path "$dataDir\logs" -Force | Out-Null
 
+# HIPAA 164.312(a)(2)(iv) — lock down data dir to SYSTEM + LocalService +
+# NetworkService (Broker) + Administrators. Runtime service account lacks
+# WRITE_DAC so this is the one-and-only place the DACL gets pinned.
+try {
+    $dataAcl = Get-Acl $dataDir
+    $dataAcl.SetAccessRuleProtection($true, $false) # strip inherited rules
+    $rules = @(
+        (New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
+        (New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
+        (New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "NT AUTHORITY\LOCAL SERVICE", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
+        (New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "NT AUTHORITY\NETWORK SERVICE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow"))
+    )
+    foreach ($rule in $rules) { $dataAcl.AddAccessRule($rule) }
+    Set-Acl $dataDir $dataAcl
+    Write-Ok "Data dir ACL locked down ($dataDir)"
+} catch {
+    Write-Fail "Failed to lock data dir ACL: $($_.Exception.Message)"
+    throw
+}
+
 # Download and verify checksums
 $checksumUrl = "$base/checksums.sha256"
 $checksumSigUrl = "$base/checksums.sha256.sig"
