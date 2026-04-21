@@ -74,8 +74,7 @@ public sealed class AttestationWorker : BackgroundService
             case AttestationStatus.Verified:
                 _eventPublisher.Publish(_eventBuilder.AttestationVerified(
                     result.ManifestVersion ?? "unknown",
-                    // file count not tracked in result directly; include best info we have
-                    fileCount: 0,
+                    fileCount: result.FileCount,
                     verifyDurationMs: result.DurationMs));
                 break;
 

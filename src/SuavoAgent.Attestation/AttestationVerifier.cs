@@ -109,12 +109,12 @@ public sealed class AttestationVerifier : IAttestationVerifier
                 string.Join(", ", mismatches.Select(m => m.FileName)));
             _haltSignal.Halt(
                 $"attestation mismatch: {mismatches.Count} file(s) differ from signed manifest v{manifest.Version}");
-            return AttestationResult.Mismatch(manifest.Version, mismatches, stopwatch.ElapsedMilliseconds);
+            return AttestationResult.Mismatch(manifest.Version, manifest.Files.Count, mismatches, stopwatch.ElapsedMilliseconds);
         }
 
         _logger.LogInformation(
             "attestation verified for {Version} — {Count} files, {Duration}ms",
             manifest.Version, manifest.Files.Count, stopwatch.ElapsedMilliseconds);
-        return AttestationResult.Verified(manifest.Version, stopwatch.ElapsedMilliseconds);
+        return AttestationResult.Verified(manifest.Version, manifest.Files.Count, stopwatch.ElapsedMilliseconds);
     }
 }

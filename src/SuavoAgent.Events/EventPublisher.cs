@@ -3,43 +3,62 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 
 namespace SuavoAgent.Events;
 
 /// <summary>
-/// HTTP-based event publisher. Signs each batch with the agent's HMAC-SHA256
-/// key; cloud verifies before ingest. Buffers to <see cref="LocalEventQueue"/>
-/// when network fails.
+/// HTTP-based event publisher. Signs each batch with the agent's API key
+/// using the cloud-side verifyAgentRequest contract (`x-agent-api-key`,
+/// `x-agent-timestamp`, `x-agent-signature` headers; signature =
+/// HMAC-SHA256(apiKey, `${timestamp}:${body}`)). Buffers to
+/// <see cref="LocalEventQueue"/> when network fails.
 /// </summary>
+/// <remarks>
+/// Aligns with src/lib/agent-auth.ts in ~/Code/Suavo. Keep these in lockstep
+/// or every event ingest fails HMAC verification.
+/// </remarks>
 public sealed class EventPublisher : IEventPublisher
 {
+    /// <summary>
+    /// Wire format: snake_case field names (via <c>JsonPropertyName</c> on
+    /// <see cref="StructuredEvent"/>) plus lowercase snake_case enum string
+    /// values (via <see cref="JsonStringEnumConverter"/> with
+    /// <see cref="JsonNamingPolicy.SnakeCaseLower"/>). Cloud Zod schema at
+    /// <c>src/app/api/agent/events/ingest/route.ts</c> expects exactly this shape.
+    /// </summary>
+    internal static readonly JsonSerializerOptions SerializeOptions = new()
+    {
+        Converters =
+        {
+            new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower, allowIntegerValues: false)
+        }
+    };
+
     private readonly HttpClient _http;
     private readonly ILogger<EventPublisher> _logger;
     private readonly LocalEventQueue _queue;
-    private readonly Func<byte[]> _signingKeyProvider;
+    private readonly Func<string> _apiKeyProvider;
     private readonly string _ingestUrl;
-    private readonly string _pharmacyHeaderValue;
 
-    /// <param name="signingKeyProvider">
-    /// Delegate that returns the current HMAC-SHA256 signing key bytes.
-    /// Provider pattern lets rotation invalidate the key without replacing
-    /// the publisher instance.
+    /// <param name="apiKeyProvider">
+    /// Delegate that returns the current agent API key string (same key used
+    /// by HeartbeatWorker). Provider pattern lets rotation invalidate the
+    /// key without replacing the publisher instance.
     /// </param>
     public EventPublisher(
         HttpClient http,
         ILogger<EventPublisher> logger,
         LocalEventQueue queue,
-        Func<byte[]> signingKeyProvider,
-        string ingestUrl,
-        string pharmacyHeaderValue)
+        Func<string> apiKeyProvider,
+        string ingestUrl)
     {
         _http = http;
         _logger = logger;
         _queue = queue;
-        _signingKeyProvider = signingKeyProvider;
+        _apiKeyProvider = apiKeyProvider;
         _ingestUrl = ingestUrl;
-        _pharmacyHeaderValue = pharmacyHeaderValue;
     }
 
     public int QueueDepth => _queue.Count();
@@ -51,22 +70,21 @@ public sealed class EventPublisher : IEventPublisher
         var batch = _queue.PeekBatch();
         if (batch.Count == 0) return 0;
 
-        var bodyJson = JsonSerializer.Serialize(new IngestBatchPayload(batch));
-        var bodyBytes = Encoding.UTF8.GetBytes(bodyJson);
-        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+        var bodyJson = JsonSerializer.Serialize(new IngestBatchPayload(batch), SerializeOptions);
+        var apiKey = _apiKeyProvider();
+        // Epoch-ms timestamp per verifyAgentRequest contract (accepts both
+        // ISO 8601 and epoch-ms; epoch is cheaper on the wire).
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
 
-        var signature = ComputeSignature(bodyBytes, timestamp);
+        var signature = ComputeSignature(apiKey, bodyJson, timestamp);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, _ingestUrl)
         {
-            Content = new ByteArrayContent(bodyBytes)
-            {
-                Headers = { { "Content-Type", "application/json" } }
-            }
+            Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
         };
-        request.Headers.Add("X-Pharmacy-Id", _pharmacyHeaderValue);
-        request.Headers.Add("X-Timestamp", timestamp);
-        request.Headers.Add("X-Signature", signature);
+        request.Headers.Add("x-agent-api-key", apiKey);
+        request.Headers.Add("x-agent-timestamp", timestamp);
+        request.Headers.Add("x-agent-signature", signature);
 
         try
         {
@@ -101,15 +119,17 @@ public sealed class EventPublisher : IEventPublisher
         }
     }
 
-    internal string ComputeSignature(byte[] bodyBytes, string timestamp)
+    /// <summary>
+    /// HMAC-SHA256(apiKey, `${timestamp}:${body}`). Matches
+    /// src/lib/agent-auth.ts in ~/Code/Suavo exactly — any deviation here
+    /// means every event POST fails auth at the cloud.
+    /// </summary>
+    internal static string ComputeSignature(string apiKey, string bodyJson, string timestamp)
     {
-        var keyBytes = _signingKeyProvider();
+        var keyBytes = Encoding.UTF8.GetBytes(apiKey);
         using var hmac = new HMACSHA256(keyBytes);
-        var tsBytes = Encoding.UTF8.GetBytes(timestamp);
-        var buffer = new byte[bodyBytes.Length + tsBytes.Length];
-        Buffer.BlockCopy(bodyBytes, 0, buffer, 0, bodyBytes.Length);
-        Buffer.BlockCopy(tsBytes, 0, buffer, bodyBytes.Length, tsBytes.Length);
-        var mac = hmac.ComputeHash(buffer);
+        var signingInput = $"{timestamp}:{bodyJson}";
+        var mac = hmac.ComputeHash(Encoding.UTF8.GetBytes(signingInput));
         return Convert.ToHexString(mac).ToLowerInvariant();
     }
 

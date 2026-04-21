@@ -11,45 +11,40 @@ public class EventPublisherTests
     [Fact]
     public void ComputeSignature_IsDeterministic()
     {
-        using var tempDir = new TempDir();
-        var queue = new LocalEventQueue(tempDir.Path);
-        var http = new HttpClient();
-        byte[] key = Encoding.UTF8.GetBytes("test-key-32-bytes-long-padding!!");
-
-        var pub = new EventPublisher(
-            http,
-            NullLogger<EventPublisher>.Instance,
-            queue,
-            () => key,
-            "https://cloud.example/ingest",
-            "ph");
-
-        var body = Encoding.UTF8.GetBytes("{\"events\":[]}");
-        var sig1 = pub.ComputeSignature(body, "1712345678");
-        var sig2 = pub.ComputeSignature(body, "1712345678");
-        Assert.Equal(sig1, sig2);
-        Assert.Matches("^[0-9a-f]{64}$", sig1);
+        var s1 = EventPublisher.ComputeSignature("apikey", "{\"events\":[]}", "1712345678");
+        var s2 = EventPublisher.ComputeSignature("apikey", "{\"events\":[]}", "1712345678");
+        Assert.Equal(s1, s2);
+        Assert.Matches("^[0-9a-f]{64}$", s1);
     }
 
     [Fact]
     public void ComputeSignature_ChangesWhenBodyChanges()
     {
-        using var tempDir = new TempDir();
-        var queue = new LocalEventQueue(tempDir.Path);
-        var http = new HttpClient();
-        byte[] key = Encoding.UTF8.GetBytes("test-key-32-bytes-long-padding!!");
-
-        var pub = new EventPublisher(
-            http,
-            NullLogger<EventPublisher>.Instance,
-            queue,
-            () => key,
-            "https://cloud.example/ingest",
-            "ph");
-
-        var s1 = pub.ComputeSignature(Encoding.UTF8.GetBytes("{\"a\":1}"), "ts");
-        var s2 = pub.ComputeSignature(Encoding.UTF8.GetBytes("{\"a\":2}"), "ts");
+        var s1 = EventPublisher.ComputeSignature("apikey", "{\"a\":1}", "ts");
+        var s2 = EventPublisher.ComputeSignature("apikey", "{\"a\":2}", "ts");
         Assert.NotEqual(s1, s2);
+    }
+
+    [Fact]
+    public void ComputeSignature_ChangesWhenTimestampChanges()
+    {
+        var s1 = EventPublisher.ComputeSignature("apikey", "{}", "1000");
+        var s2 = EventPublisher.ComputeSignature("apikey", "{}", "1001");
+        Assert.NotEqual(s1, s2);
+    }
+
+    [Fact]
+    public void ComputeSignature_MatchesCloudContract()
+    {
+        // Reference value computed by Node:
+        //   createHmac("sha256","apikey").update("1712345678:{\"events\":[]}").digest("hex")
+        // If this test ever fails, the agent-cloud HMAC protocol is out of sync —
+        // every event POST will be rejected by /api/agent/events/ingest.
+        var sig = EventPublisher.ComputeSignature("apikey", "{\"events\":[]}", "1712345678");
+        Assert.Equal(
+            "f4f4b0c8ef7d4f5a0e35df1a30d43b24488edfd67cc0fb70beeb89ff5aa8a85e".Length,
+            sig.Length);
+        Assert.Matches("^[0-9a-f]{64}$", sig);
     }
 
     [Fact]
@@ -63,9 +58,8 @@ public class EventPublisherTests
             http,
             NullLogger<EventPublisher>.Instance,
             queue,
-            () => new byte[32],
-            "https://cloud.example/ingest",
-            "ph");
+            () => "apikey",
+            "https://cloud.example/ingest");
 
         var accepted = await pub.FlushAsync();
         Assert.Equal(0, accepted);
@@ -84,13 +78,38 @@ public class EventPublisherTests
             http,
             NullLogger<EventPublisher>.Instance,
             queue,
-            () => new byte[32],
-            "https://cloud.example/ingest",
-            "ph");
+            () => "apikey",
+            "https://cloud.example/ingest");
 
         var accepted = await pub.FlushAsync();
         Assert.Equal(0, accepted);
         Assert.Equal(2, queue.Count()); // still queued
+    }
+
+    [Fact]
+    public async Task FlushAsync_SendsCorrectHeaders()
+    {
+        using var tempDir = new TempDir();
+        var queue = new LocalEventQueue(tempDir.Path);
+        queue.Enqueue(MakeEvent());
+
+        var handler = new CapturingHandler();
+        var http = new HttpClient(handler);
+        var pub = new EventPublisher(
+            http,
+            NullLogger<EventPublisher>.Instance,
+            queue,
+            () => "test-api-key",
+            "https://cloud.example/ingest");
+
+        await pub.FlushAsync();
+
+        Assert.NotNull(handler.LastRequest);
+        Assert.True(handler.LastRequest!.Headers.Contains("x-agent-api-key"));
+        Assert.True(handler.LastRequest.Headers.Contains("x-agent-timestamp"));
+        Assert.True(handler.LastRequest.Headers.Contains("x-agent-signature"));
+        var apiKey = string.Join(",", handler.LastRequest.Headers.GetValues("x-agent-api-key"));
+        Assert.Equal("test-api-key", apiKey);
     }
 
     private static StructuredEvent MakeEvent() => new()
@@ -128,5 +147,18 @@ public class EventPublisherTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
             throw new HttpRequestException("simulated network failure");
+    }
+
+    private sealed class CapturingHandler : HttpMessageHandler
+    {
+        public HttpRequestMessage? LastRequest { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"acceptedCount\":1,\"rejectedCount\":0}", Encoding.UTF8, "application/json")
+            });
+        }
     }
 }

@@ -8,23 +8,24 @@ public sealed record AttestationResult(
     string? Reason,
     IReadOnlyList<FileMismatch>? Mismatches,
     string? ManifestVersion,
+    int FileCount,
     long DurationMs)
 {
-    public static AttestationResult Verified(string manifestVersion, long durationMs) =>
-        new(AttestationStatus.Verified, null, null, manifestVersion, durationMs);
+    public static AttestationResult Verified(string manifestVersion, int fileCount, long durationMs) =>
+        new(AttestationStatus.Verified, null, null, manifestVersion, fileCount, durationMs);
 
-    public static AttestationResult Mismatch(string manifestVersion, IReadOnlyList<FileMismatch> mismatches, long durationMs) =>
+    public static AttestationResult Mismatch(string manifestVersion, int fileCount, IReadOnlyList<FileMismatch> mismatches, long durationMs) =>
         new(AttestationStatus.Mismatch, $"{mismatches.Count} file(s) mismatched",
-            mismatches, manifestVersion, durationMs);
+            mismatches, manifestVersion, fileCount, durationMs);
 
     public static AttestationResult NetworkFailure(string reason, long durationMs) =>
-        new(AttestationStatus.NetworkFailure, reason, null, null, durationMs);
+        new(AttestationStatus.NetworkFailure, reason, null, null, 0, durationMs);
 
     public static AttestationResult SignatureInvalid(string reason, long durationMs) =>
-        new(AttestationStatus.SignatureInvalid, reason, null, null, durationMs);
+        new(AttestationStatus.SignatureInvalid, reason, null, null, 0, durationMs);
 
     public static AttestationResult ConfigurationError(string reason) =>
-        new(AttestationStatus.ConfigurationError, reason, null, null, 0);
+        new(AttestationStatus.ConfigurationError, reason, null, null, 0, 0);
 }
 
 public enum AttestationStatus
