@@ -21,7 +21,17 @@ public static class ComplianceBoundary
         "drugName", "itemName", "medicationDisplay", "ndc", "tradeName",
         "industry", "metric", "appName", "processName", "category",
         "version", "agentVersion", "osVersion", "dayOfWeek", "hourKey",
-        "loadLevel", "periodType", "periodKey", "fileType"
+        "loadLevel", "periodType", "periodKey", "fileType",
+        // Operational numeric fields — bare numbers that happen to be 5
+        // digits must not be mistaken for ZIP codes. Keep in sync with
+        // ~/Code/Suavo/src/lib/phi-redaction.ts SAFE_CONTEXT_KEYS.
+        "uptime_ms", "memory_mb", "cpu_pct", "duration_ms", "ingest_latency_ms",
+        "process_id", "pid", "exit_code", "consecutive_failures", "sequence",
+        "verify_duration_ms", "file_count", "event_count", "accepted_count",
+        "rejected_count", "escalation_tier", "silent_duration_seconds",
+        "max_execution_time_ms", "row_count", "bytes", "size_bytes",
+        "columns_observed", "tasks_completed", "tasks_failed",
+        "rx_ready_count", "rx_total_synced"
     };
 
     private static readonly HashSet<string> MustBeHashedFields = new(StringComparer.OrdinalIgnoreCase)
