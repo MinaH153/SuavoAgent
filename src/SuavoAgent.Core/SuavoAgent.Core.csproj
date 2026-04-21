@@ -45,9 +45,12 @@
     <None Include="Config\adapters\*.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="Reasoning\Rules\*.yaml">
+    <!-- Rules ship embedded in the single-file assembly so the agent is
+         self-contained — no external YAML dependency, no signing gap.
+         Also kept on disk next to the exe for tests and operator overrides. -->
+    <EmbeddedResource Include="Reasoning\Rules\*.yaml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+    </EmbeddedResource>
   </ItemGroup>
 
 </Project>

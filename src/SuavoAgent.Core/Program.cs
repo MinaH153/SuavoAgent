@@ -282,22 +282,24 @@ try
             evaluator);
     });
 
-    // Tier-1 Reasoning — rule engine. Loaded from bundled Reasoning/Rules
-    // alongside optional operator overrides in ProgramData. Fail-closed: a
-    // malformed rule file prevents the agent from starting.
+    // Tier-1 Reasoning — rule engine. The bundled catalog is embedded in this
+    // assembly so it travels inside the signed single-file exe; operator
+    // overrides still load from ProgramData. Fail-closed: a malformed rule
+    // file prevents the agent from starting.
     builder.Services.AddSingleton<YamlRuleLoader>();
     builder.Services.AddSingleton<RuleEngine>(sp =>
     {
         var loader = sp.GetRequiredService<YamlRuleLoader>();
         var log = sp.GetRequiredService<ILogger<RuleEngine>>();
 
-        var bundledDir = Path.Combine(AppContext.BaseDirectory, "Reasoning", "Rules");
         var overrideDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "rules");
 
         var rules = new List<SuavoAgent.Contracts.Reasoning.Rule>();
-        rules.AddRange(loader.LoadFromDirectory(bundledDir, required: true));
+        rules.AddRange(loader.LoadFromEmbeddedResources(
+            typeof(Program).Assembly,
+            "SuavoAgent.Core.Reasoning.Rules."));
         rules.AddRange(loader.LoadFromDirectory(overrideDir, required: false));
 
         var engine = new RuleEngine(rules, log);

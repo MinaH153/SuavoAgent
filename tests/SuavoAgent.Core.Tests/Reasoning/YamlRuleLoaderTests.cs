@@ -334,25 +334,30 @@ public class YamlRuleLoaderTests
     }
 
     [Fact]
-    public void LoadFromDirectory_ShippedCatalog_Valid()
+    public void LoadFromEmbeddedResources_ShippedCatalog_Valid()
     {
-        // Verify the bundled YAML files ship valid. If this test fails, the
-        // agent would fail-closed on startup — catch it in CI.
-        var shippedDir = Path.Combine(AppContext.BaseDirectory, "Reasoning", "Rules");
-        if (!Directory.Exists(shippedDir))
-        {
-            // Build hasn't copied them yet — skip rather than fail the suite.
-            return;
-        }
+        // Verify the bundled YAML files are embedded in the Core assembly and
+        // parse cleanly. If this test fails, the agent would fail-closed on
+        // startup — catch it in CI before anyone cuts a release.
+        var coreAssembly = typeof(SuavoAgent.Core.Reasoning.YamlRuleLoader).Assembly;
+        var rules = NewLoader().LoadFromEmbeddedResources(
+            coreAssembly, "SuavoAgent.Core.Reasoning.Rules.");
 
-        var rules = NewLoader().LoadFromDirectory(shippedDir);
         Assert.NotEmpty(rules);
-        // Every shipped rule has an id, skill, and at least one action.
         Assert.All(rules, r =>
         {
             Assert.False(string.IsNullOrEmpty(r.Id));
             Assert.False(string.IsNullOrEmpty(r.SkillId));
             Assert.NotEmpty(r.Then);
         });
+    }
+
+    [Fact]
+    public void LoadFromEmbeddedResources_NoMatch_Throws()
+    {
+        var coreAssembly = typeof(SuavoAgent.Core.Reasoning.YamlRuleLoader).Assembly;
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            NewLoader().LoadFromEmbeddedResources(coreAssembly, "NoSuch.Prefix."));
+        Assert.Contains("no embedded rule resources matched", ex.Message);
     }
 }

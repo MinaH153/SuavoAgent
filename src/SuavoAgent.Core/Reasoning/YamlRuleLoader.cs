@@ -1,3 +1,4 @@
+using System.Reflection;
 using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Reasoning;
 using YamlDotNet.Serialization;
@@ -86,6 +87,56 @@ public sealed class YamlRuleLoader
         Validate(rules);
         _logger.LogInformation("RuleLoader: loaded {Total} rules across {Files} file(s)",
             rules.Count, files.Length);
+        return rules;
+    }
+
+    /// <summary>
+    /// Loads every YAML rule file embedded in <paramref name="assembly"/> whose
+    /// manifest resource name starts with <paramref name="resourcePrefix"/>.
+    /// Used for the bundled catalog in single-file deployments where the
+    /// rules travel inside the signed exe rather than on disk.
+    /// </summary>
+    public IReadOnlyList<Rule> LoadFromEmbeddedResources(Assembly assembly, string resourcePrefix)
+    {
+        if (assembly is null) throw new ArgumentNullException(nameof(assembly));
+        if (string.IsNullOrEmpty(resourcePrefix))
+            throw new ArgumentException("resourcePrefix must be non-empty", nameof(resourcePrefix));
+
+        var names = assembly.GetManifestResourceNames()
+            .Where(n => n.StartsWith(resourcePrefix, StringComparison.Ordinal)
+                     && n.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        if (names.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"RuleLoader: no embedded rule resources matched '{resourcePrefix}*.yaml' in {assembly.GetName().Name}");
+        }
+
+        var rules = new List<Rule>();
+        foreach (var name in names)
+        {
+            try
+            {
+                using var stream = assembly.GetManifestResourceStream(name)
+                    ?? throw new InvalidOperationException($"resource stream '{name}' could not be opened");
+                using var reader = new StreamReader(stream);
+                var text = reader.ReadToEnd();
+                var parsed = ParseYaml(text, name);
+                rules.AddRange(parsed);
+                _logger.LogDebug("RuleLoader: loaded {Count} rules from embedded {Resource}", parsed.Count, name);
+            }
+            catch (Exception ex) when (ex is not InvalidOperationException)
+            {
+                throw new InvalidOperationException(
+                    $"RuleLoader: failed to read embedded {name} — {ex.Message}", ex);
+            }
+        }
+
+        Validate(rules);
+        _logger.LogInformation("RuleLoader: loaded {Total} rules across {Files} embedded resource(s)",
+            rules.Count, names.Length);
         return rules;
     }
 
