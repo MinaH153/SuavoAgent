@@ -254,8 +254,12 @@ try {
     }
 } catch {}
 foreach ($p in $pioneerPaths) {
-    $exe = Join-Path $p "PioneerPharmacy.exe"
-    $cfg = Join-Path $p "PioneerPharmacy.exe.config"
+    # [hotfix] Use IO.Path.Combine (string concat only) instead of Join-Path
+    # which validates the drive exists and throws on e.g. "D:\..." when D:
+    # isn't mounted. Test-Path handles non-existent drives cleanly (returns
+    # $false) so the loop skips missing candidates without dying.
+    $exe = [System.IO.Path]::Combine($p, "PioneerPharmacy.exe")
+    $cfg = [System.IO.Path]::Combine($p, "PioneerPharmacy.exe.config")
     if ((Test-Path $exe) -and (Test-Path $cfg)) {
         $pioneerDir = $p; $pioneerExe = $exe; $pioneerConfig = $cfg; $pmsType = "PioneerRx"
         break
