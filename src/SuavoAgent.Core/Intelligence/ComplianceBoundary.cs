@@ -30,6 +30,10 @@ public static class ComplianceBoundary
         "schemaFingerprint", "userSidHash", "treeHash"
     };
 
+    private static readonly Regex IsoTimestampValue = new(
+        @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:?\d{2})?$",
+        RegexOptions.Compiled);
+
     public static (bool IsClean, List<string> Violations) Validate(string json)
     {
         var violations = new List<string>();
@@ -39,6 +43,7 @@ public static class ComplianceBoundary
             foreach (Match match in matches)
             {
                 if (IsSafeValue(match.Value)) continue;
+                if (IsInsideIsoTimestampValue(json, match.Index)) continue;
                 // Only exempt if match is a direct JSON value of a safe field name —
                 // require "safeKey": immediately before the value. Bare substring match
                 // within 40 chars was too broad (adjacent-field false-negative).
@@ -52,6 +57,16 @@ public static class ComplianceBoundary
             }
         }
         return (violations.Count == 0, violations);
+    }
+
+    private static bool IsInsideIsoTimestampValue(string json, int matchIndex)
+    {
+        var openQuote = json.LastIndexOf('"', matchIndex);
+        if (openQuote < 0) return false;
+        var closeQuote = json.IndexOf('"', matchIndex);
+        if (closeQuote < 0 || closeQuote <= openQuote) return false;
+        var value = json[(openQuote + 1)..closeQuote];
+        return IsoTimestampValue.IsMatch(value);
     }
 
     public static (bool IsClean, List<string> Violations) ValidateFields(

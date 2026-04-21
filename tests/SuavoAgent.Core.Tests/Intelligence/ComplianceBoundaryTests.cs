@@ -84,4 +84,26 @@ public class ComplianceBoundaryTests
         // IP addresses should be flagged (HIPAA identifier #15)
         Assert.False(isClean);
     }
+
+    [Theory]
+    [InlineData("2026-04-21T18:08:09.12345+00:00")]        // 5-digit fractional, ZIP regex false-positive
+    [InlineData("2026-04-21T18:08:09.98765Z")]             // 5-digit fractional with Z
+    [InlineData("2026-04-21T18:08:09Z")]                    // no fractional
+    [InlineData("2026-04-21T18:08:09.1234567+00:00")]      // 7-digit fractional
+    [InlineData("2026-04-21T18:08:09.63687-07:00")]        // negative offset
+    public void Validate_IsoTimestampValue_NotFlagged(string timestamp)
+    {
+        var json = $$"""{"assembledAt":"{{timestamp}}","industry":"pharmacy"}""";
+        var (isClean, violations) = ComplianceBoundary.Validate(json);
+        Assert.True(isClean, string.Join("; ", violations));
+    }
+
+    [Fact]
+    public void Validate_RealZipInBodyText_StillFlagged()
+    {
+        // Ensure the timestamp exemption doesn't accidentally leak into free text.
+        var json = """{"notes":"Patient from 90210"}""";
+        var (isClean, _) = ComplianceBoundary.Validate(json);
+        Assert.False(isClean);
+    }
 }
