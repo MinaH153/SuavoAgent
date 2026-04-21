@@ -43,6 +43,57 @@ $ErrorActionPreference = "Stop"
 $installDir = "C:\Program Files\Suavo\Agent"
 $dataDir = "$env:ProgramData\SuavoAgent"
 
+# ============================================
+# IDEMPOTENT CLEANUP — runs before consent so a single
+#   irm "https://.../bootstrap.ps1?v=$(Get-Random)" | iex
+# always produces a known-good install, even over a broken one.
+# ============================================
+function Test-PriorInstall {
+    $services = @("SuavoAgent.Core", "SuavoAgent.Broker")
+    foreach ($s in $services) {
+        if (Get-Service -Name $s -ErrorAction SilentlyContinue) { return $true }
+    }
+    if (Test-Path $installDir) { return $true }
+    if (Test-Path $dataDir)    { return $true }
+    return $false
+}
+
+function Invoke-PriorInstallCleanup {
+    Write-Host ""
+    Write-Host "  Prior SuavoAgent install detected — cleaning up before reinstall" -ForegroundColor Yellow
+    foreach ($s in @("SuavoAgent.Core", "SuavoAgent.Broker")) {
+        $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+        if ($svc) {
+            if ($svc.Status -eq 'Running' -or $svc.Status -eq 'StartPending') {
+                try { Stop-Service $s -Force -ErrorAction Stop } catch { }
+                Start-Sleep -Seconds 2
+            }
+            sc.exe delete $s 2>$null | Out-Null
+        }
+    }
+    # Wait a beat for SCM to release handles before removing the binaries.
+    Start-Sleep -Seconds 2
+    if (Test-Path $installDir) {
+        try { Remove-Item $installDir -Recurse -Force -ErrorAction Stop }
+        catch { Write-Host "    (install dir cleanup had a hiccup: $($_.Exception.Message) — continuing)" -ForegroundColor DarkGray }
+    }
+    if (Test-Path $dataDir) {
+        # Preserve logs dir so operators can still see the previous install's
+        # startup-crash.log after a re-run. Everything else goes.
+        Get-ChildItem $dataDir -Force -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -ne 'logs'
+        } | ForEach-Object {
+            try { Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop } catch { }
+        }
+    }
+    Write-Host "  Cleanup complete — proceeding with fresh install" -ForegroundColor Green
+    Write-Host ""
+}
+
+if (Test-PriorInstall) {
+    Invoke-PriorInstallCleanup
+}
+
 function Resolve-ReleaseTag {
     param(
         [string]$TagOrEmpty,
