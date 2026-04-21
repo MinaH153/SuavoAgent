@@ -61,6 +61,22 @@ jobs:
           sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe > checksums.sha256
           openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") -out checksums.sha256.sig checksums.sha256
 
+      - name: Generate + sign OTA update manifest
+        env:
+          VERSION: ${{ inputs.version }}
+          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          cd release
+          CORE_SHA=$(sha256sum SuavoAgent.Core.exe | awk '{print $1}')
+          BROKER_SHA=$(sha256sum SuavoAgent.Broker.exe | awk '{print $1}')
+          HELPER_SHA=$(sha256sum SuavoAgent.Helper.exe | awk '{print $1}')
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}"
+          MANIFEST="${BASE_URL}/SuavoAgent.Core.exe|${CORE_SHA}|${BASE_URL}/SuavoAgent.Broker.exe|${BROKER_SHA}|${BASE_URL}/SuavoAgent.Helper.exe|${HELPER_SHA}|${VERSION_NUMERIC}|net8.0|win-x64"
+          printf '%s' "$MANIFEST" > "update-manifest-${VERSION}.txt"
+          printf '%s' "$MANIFEST" | openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") | xxd -p -c 256 > "update-manifest-${VERSION}.sig"
+
       - name: Create tag
         env:
           INPUT_VERSION: ${{ inputs.version }}
@@ -86,3 +102,5 @@ jobs:
             release/SuavoSetup.exe
             release/checksums.sha256
             release/checksums.sha256.sig
+            release/update-manifest-v*.txt
+            release/update-manifest-v*.sig
