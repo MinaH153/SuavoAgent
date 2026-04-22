@@ -1,0 +1,30 @@
+# Mock PioneerRx SQL for local end-to-end testing of the price-shopper.
+# Not ever run in prod. Lets us exercise PricingSchemaDiscovery + SqlSupplierPriceLookup +
+# SqlPricingJobRunner against a realistic Inventory schema without needing Nadim's PC.
+#
+# Usage:
+#   docker compose --project-directory ./docs/dev/mock-pioneerrx-sql up -d
+#   sqlcmd -S localhost,51433 -U sa -P 'Suavo!MockDev1234' -i ./seed.sql
+#   dotnet test --filter "Integration"   # opt-in integration tests
+#   docker compose --project-directory ./docs/dev/mock-pioneerrx-sql down -v
+
+services:
+  mock-pioneerrx:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: suavo-mock-pioneerrx
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Suavo!MockDev1234"  # local only, not a secret
+      MSSQL_PID: "Developer"
+    ports:
+      - "51433:1433"  # nonstandard host port so it won't collide with a real SQL Server install
+    volumes:
+      - mock-pioneerrx-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Suavo!MockDev1234' -C -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mock-pioneerrx-data:

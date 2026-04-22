@@ -50,3 +50,14 @@ public static class PricingJobStatus
     /// rule fired). Partial results are in SQLite; operator may resume.</summary>
     public const string Halted = "halted";
 }
+
+/// <summary>
+/// Pluggable supplier-price lookup — abstracts "given one NDC, return the cheapest available
+/// supplier + cost". Implementations: SQL (primary, fast), UIA (via IPC to Helper, slower),
+/// fake (in-memory, for tests). Lets <c>SqlPricingJobRunner</c> stay ignorant of data source.
+/// </summary>
+public interface ISupplierPriceLookup
+{
+    Task<SupplierPriceResult> FindCheapestSupplierAsync(
+        string jobId, int rowIndex, string ndc11, CancellationToken ct);
+}
