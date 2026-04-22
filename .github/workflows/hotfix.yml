@@ -16,8 +16,11 @@ permissions:
   contents: write
 
 jobs:
-  hotfix-release:
+  # --- Build unsigned binaries on Linux -----------------------------------
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      version_numeric: ${{ steps.version.outputs.VERSION_NUMERIC }}
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +56,107 @@ jobs:
             dotnet publish src/SuavoAgent.$proj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
           done
 
+      - name: Upload unsigned binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-hotfix-unsigned-${{ inputs.version }}
+          path: release/
+          retention-days: 7
+
+  # --- Authenticode sign (gated by SIGNING_ENABLED) -----------------------
+  sign_windows:
+    if: ${{ vars.SIGNING_ENABLED == 'true' }}
+    needs: build
+    runs-on: [self-hosted, windows, yubikey]
+    steps:
+      - name: Download unsigned binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-hotfix-unsigned-${{ inputs.version }}
+          path: release
+
+      - name: Sign binaries with signtool
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
+          TIMESTAMP_URL: ${{ vars.SIGNING_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:CERT_THUMBPRINT) {
+            throw "Secret SIGNING_CERT_THUMBPRINT is not set. See docs/signing.md."
+          }
+          $ts = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { 'http://ts.ssl.com' }
+
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+            "${env:ProgramFiles}\Windows Kits\10\bin"
+          ) | Where-Object { Test-Path $_ } | ForEach-Object { Get-ChildItem $_ -Directory } | Sort-Object Name -Descending
+          $signtool = $null
+          foreach ($dir in $candidates) {
+            $path = Join-Path $dir 'x64\signtool.exe'
+            if (Test-Path $path) { $signtool = $path; break }
+          }
+          if (-not $signtool) { throw 'signtool.exe not found. Install Windows 10 SDK.' }
+          Write-Host "Using signtool: $signtool"
+
+          $targets = @(
+            'release/SuavoAgent.Core.exe',
+            'release/SuavoAgent.Broker.exe',
+            'release/SuavoAgent.Helper.exe',
+            'release/SuavoAgent.Watchdog.exe',
+            'release/SuavoSetup.exe'
+          )
+          foreach ($t in $targets) {
+            if (-not (Test-Path $t)) { throw "Missing binary: $t" }
+            Write-Host "Signing $t"
+            & $signtool sign /fd SHA256 /tr $ts /td SHA256 /sha1 $env:CERT_THUMBPRINT $t
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $t (exit $LASTEXITCODE)" }
+            & $signtool verify /pa /v $t
+            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed on $t (exit $LASTEXITCODE)" }
+          }
+
+      - name: Upload signed binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-hotfix-final-${{ inputs.version }}
+          path: release/
+          retention-days: 7
+
+  sign_passthrough:
+    if: ${{ vars.SIGNING_ENABLED != 'true' }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download unsigned binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-hotfix-unsigned-${{ inputs.version }}
+          path: release
+
+      - name: Upload as final (unsigned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-hotfix-final-${{ inputs.version }}
+          path: release/
+          retention-days: 7
+
+  # --- Tag + checksums + manifest + release -------------------------------
+  release:
+    needs: [build, sign_windows, sign_passthrough]
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.sign_windows.result == 'success' || needs.sign_passthrough.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download final binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-hotfix-final-${{ inputs.version }}
+          path: release
+
       - name: Generate + sign checksums
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY_PEM }}
@@ -64,7 +168,7 @@ jobs:
       - name: Generate + sign OTA update manifest
         env:
           VERSION: ${{ inputs.version }}
-          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
+          VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
           SIGNING_KEY: ${{ secrets.SIGNING_KEY_PEM }}
         run: |
           set -euo pipefail
@@ -84,6 +188,17 @@ jobs:
           git tag "$INPUT_VERSION"
           git push origin "$INPUT_VERSION"
 
+      - name: Determine release mode
+        id: mode
+        env:
+          SIGN_RESULT: ${{ needs.sign_windows.result }}
+        run: |
+          if [[ "$SIGN_RESULT" == "success" ]]; then
+            echo "MODE=signed" >> "$GITHUB_OUTPUT"
+          else
+            echo "MODE=unsigned" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -94,6 +209,7 @@ jobs:
 
             Emergency release from hotfix pipeline.
             **Tests:** All passing before release.
+            **Authenticode:** ${{ steps.mode.outputs.MODE == 'signed' && 'Signed (Yubikey EV)' || 'Unsigned (SmartScreen warning expected)' }}
           files: |
             release/SuavoAgent.Core.exe
             release/SuavoAgent.Broker.exe
