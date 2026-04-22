@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>SuavoAgent.Recon.Interpret</RootNamespace>
+    <AssemblyName>interpret-recon</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- Not part of the solution build on Windows runners; dev helper only. -->
+    <IsShippingAssembly>false</IsShippingAssembly>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\SuavoAgent.Adapters.PioneerRx\SuavoAgent.Adapters.PioneerRx.csproj" />
+    <ProjectReference Include="..\..\..\src\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

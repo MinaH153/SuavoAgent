@@ -31,6 +31,24 @@ is the main Saturday risk. This folder is the pre-Saturday reconnaissance kit.
 Copy the four queries out of the `.ps1` file and run each one in SSMS. Save the results to CSV/TSV
 with the same four names. Then hand them to Claude in the next session.
 
+## What to do with the output (Joshua, Thursday)
+
+Once the JSON is on your macOS machine, run the bundled interpreter:
+
+```bash
+cd ~/Code/SuavoAgent
+dotnet run --project docs/recon/InterpretRecon -- ~/Downloads/pioneer-pricing-recon-*.json
+```
+
+The tool reads the recon JSON, calls `PricingSchemaResolver.Resolve()`, prints the generated SQL,
+and lists 5 NDCs to paste into SSMS for the 5/5 tripwire check against the live Pricing tab.
+
+Exit codes:
+- `0` — resolver succeeded, confidence ≥ 0.70. Ship Tier 2 after 5/5 NDC match.
+- `1` — resolver failed (schema mismatch). Abort Tier 2; Saturday pivots to UIA-only narrow demo.
+- `2` — resolver succeeded but confidence below tripwire. Manual review required.
+- `3` — usage / I/O error.
+
 ## What Claude will do with the output
 
 Feed the JSON into `PricingSchemaResolver.Resolve(...)` and confirm:
