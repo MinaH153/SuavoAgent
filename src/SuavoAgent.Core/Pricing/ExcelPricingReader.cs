@@ -1,4 +1,4 @@
-using OfficeOpenXml;
+using ClosedXML.Excel;
 using SuavoAgent.Contracts.Pricing;
 
 namespace SuavoAgent.Core.Pricing;
@@ -6,6 +6,8 @@ namespace SuavoAgent.Core.Pricing;
 /// <summary>
 /// Reads an Excel file and returns (rowIndex, ndc) pairs for every data row.
 /// Finds the NDC column by header name (case-insensitive partial match).
+/// Uses ClosedXML (MIT) — EPPlus was removed because its NonCommercial clause
+/// would not survive a paid pilot.
 /// </summary>
 public sealed class ExcelPricingReader
 {
@@ -14,7 +16,6 @@ public sealed class ExcelPricingReader
     public ExcelPricingReader(ILogger<ExcelPricingReader> logger)
     {
         _logger = logger;
-        ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
     }
 
     public ReadResult Read(string path, string ndcColumnHint = "ndc")
@@ -24,27 +25,49 @@ public sealed class ExcelPricingReader
 
         try
         {
-            using var package = new ExcelPackage(new FileInfo(path));
-            var ws = package.Workbook.Worksheets.FirstOrDefault();
+            using var wb = new XLWorkbook(path);
+            var ws = wb.Worksheets.FirstOrDefault();
             if (ws == null)
                 return ReadResult.Fail("Workbook has no worksheets");
 
-            var ndcCol = FindColumn(ws, ndcColumnHint);
+            var lastRow = ws.LastRowUsed()?.RowNumber() ?? 0;
+            var lastCol = ws.LastColumnUsed()?.ColumnNumber() ?? 0;
+            if (lastRow < 2 || lastCol < 1)
+                return ReadResult.Fail("Worksheet has no data rows");
+
+            var ndcCol = FindColumn(ws, ndcColumnHint, lastCol);
             if (ndcCol == -1)
                 return ReadResult.Fail($"Could not find column matching '{ndcColumnHint}' in row 1");
 
             var rows = new List<NdcRow>();
-            for (int r = 2; r <= ws.Dimension?.End.Row; r++)
+            var invalid = new List<InvalidNdcRow>();
+            for (int r = 2; r <= lastRow; r++)
             {
-                var raw = ws.Cells[r, ndcCol].Text?.Trim();
+                var raw = ws.Cell(r, ndcCol).GetString()?.Trim();
                 if (string.IsNullOrEmpty(raw)) continue;
-                // Normalize NDC: strip hyphens, pad to 11 digits
-                var ndc = raw.Replace("-", "").PadLeft(11, '0');
-                rows.Add(new NdcRow(r, ndc, raw));
+
+                var outcome = NdcNormalizer.Normalize(raw);
+                if (outcome.Ok && outcome.Canonical11 is not null)
+                {
+                    rows.Add(new NdcRow(r, outcome.Canonical11, raw));
+                }
+                else
+                {
+                    invalid.Add(new InvalidNdcRow(r, raw, outcome.Reason ?? "Unknown NDC shape"));
+                }
             }
 
-            _logger.LogInformation("ExcelPricingReader: found {Count} NDC rows in {Path}", rows.Count, path);
-            return ReadResult.Ok(rows, ndcCol);
+            _logger.LogInformation(
+                "ExcelPricingReader: {Valid} NDC rows, {Invalid} unparseable in {Path}",
+                rows.Count, invalid.Count, path);
+
+            if (invalid.Count > 0)
+                _logger.LogWarning(
+                    "ExcelPricingReader: {Count} rows had unparseable NDCs (first 5): {Samples}",
+                    invalid.Count,
+                    string.Join("; ", invalid.Take(5).Select(i => $"row {i.RowIndex}='{i.NdcRaw}' ({i.Reason})")));
+
+            return ReadResult.Ok(rows, invalid, ndcCol);
         }
         catch (Exception ex)
         {
@@ -53,12 +76,11 @@ public sealed class ExcelPricingReader
         }
     }
 
-    private static int FindColumn(ExcelWorksheet ws, string hint)
+    private static int FindColumn(IXLWorksheet ws, string hint, int lastCol)
     {
-        if (ws.Dimension == null) return -1;
-        for (int c = 1; c <= ws.Dimension.End.Column; c++)
+        for (int c = 1; c <= lastCol; c++)
         {
-            var header = ws.Cells[1, c].Text?.Trim() ?? "";
+            var header = ws.Cell(1, c).GetString()?.Trim() ?? "";
             if (header.Contains(hint, StringComparison.OrdinalIgnoreCase))
                 return c;
         }
@@ -68,15 +90,18 @@ public sealed class ExcelPricingReader
 
 public record NdcRow(int RowIndex, string NdcNormalized, string NdcRaw);
 
+public record InvalidNdcRow(int RowIndex, string NdcRaw, string Reason);
+
 public sealed class ReadResult
 {
     public bool Success { get; private init; }
     public string? Error { get; private init; }
     public IReadOnlyList<NdcRow> Rows { get; private init; } = [];
+    public IReadOnlyList<InvalidNdcRow> Invalid { get; private init; } = [];
     public int NdcColumnIndex { get; private init; }
 
-    public static ReadResult Ok(List<NdcRow> rows, int ndcCol) =>
-        new() { Success = true, Rows = rows, NdcColumnIndex = ndcCol };
+    public static ReadResult Ok(List<NdcRow> rows, List<InvalidNdcRow> invalid, int ndcCol) =>
+        new() { Success = true, Rows = rows, Invalid = invalid, NdcColumnIndex = ndcCol };
 
     public static ReadResult Fail(string error) =>
         new() { Success = false, Error = error };

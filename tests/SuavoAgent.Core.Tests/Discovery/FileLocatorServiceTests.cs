@@ -1,4 +1,4 @@
-using OfficeOpenXml;
+using ClosedXML.Excel;
 using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Core.Discovery;
 using SuavoAgent.Core.Verticals.Pharmacy;
@@ -19,7 +19,6 @@ public class FileLocatorServiceTests : IDisposable
 
     public FileLocatorServiceTests()
     {
-        ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
         Directory.CreateDirectory(_tempDir);
     }
 
@@ -117,32 +116,32 @@ public class FileLocatorServiceTests : IDisposable
 
     private static void CreateNdcExcel(string path, int dataRows)
     {
-        using var package = new ExcelPackage(new FileInfo(path));
-        var ws = package.Workbook.Worksheets.Add("Sheet1");
-        ws.Cells[1, 1].Value = "Generic Name";
-        ws.Cells[1, 2].Value = "NDC";
-        ws.Cells[1, 3].Value = "Qty";
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        ws.Cell(1, 1).Value = "Generic Name";
+        ws.Cell(1, 2).Value = "NDC";
+        ws.Cell(1, 3).Value = "Qty";
         for (int i = 0; i < dataRows; i++)
         {
-            ws.Cells[i + 2, 1].Value = $"Drug {i}";
-            ws.Cells[i + 2, 2].Value = $"55111-{i:D4}-01";
-            ws.Cells[i + 2, 3].Value = 30;
+            ws.Cell(i + 2, 1).Value = $"Drug {i}";
+            ws.Cell(i + 2, 2).Value = $"55111-{i:D4}-01";
+            ws.Cell(i + 2, 3).Value = 30;
         }
-        package.Save();
+        wb.SaveAs(path);
     }
 
     private static void CreateGenericExcel(string path, int dataRows)
     {
-        using var package = new ExcelPackage(new FileInfo(path));
-        var ws = package.Workbook.Worksheets.Add("Sheet1");
-        ws.Cells[1, 1].Value = "Note";
-        ws.Cells[1, 2].Value = "Amount";
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        ws.Cell(1, 1).Value = "Note";
+        ws.Cell(1, 2).Value = "Amount";
         for (int i = 0; i < dataRows; i++)
         {
-            ws.Cells[i + 2, 1].Value = $"Row {i}";
-            ws.Cells[i + 2, 2].Value = i * 1.5;
+            ws.Cell(i + 2, 1).Value = $"Row {i}";
+            ws.Cell(i + 2, 2).Value = i * 1.5;
         }
-        package.Save();
+        wb.SaveAs(path);
     }
 
     public void Dispose()

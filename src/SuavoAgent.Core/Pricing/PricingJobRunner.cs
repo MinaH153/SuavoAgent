@@ -129,15 +129,18 @@ public sealed class PricingJobRunner
             return new PricingJobProgress(spec.JobId, rows.Count, completed, failed, PricingJobStatus.Halted);
         }
 
-        // Write all results (including previously completed rows) back to Excel
+        // Write all results (including previously completed rows) to a SIBLING file by default.
+        // This avoids the Codex-flagged "file locked by Excel.exe" failure mode where 499 rows
+        // succeed and the final File.Move throws an IOException.
         var allResults = _db.GetPricingResults(spec.JobId);
-        var writeOk = _writer.Write(spec.ExcelPath, allResults, spec.SupplierColumn, spec.CostColumn);
+        var write = _writer.Write(spec.ExcelPath, allResults, spec.SupplierColumn, spec.CostColumn);
 
-        var finalStatus = writeOk ? PricingJobStatus.Completed : PricingJobStatus.Failed;
+        var finalStatus = write.Success ? PricingJobStatus.Completed : PricingJobStatus.Failed;
         _db.UpsertPricingJob(spec, finalStatus, rows.Count, completed, failed);
 
-        _logger.LogInformation("PricingJobRunner: job {JobId} {Status} — {Completed}/{Total} found, {Failed} failed",
-            spec.JobId, finalStatus, completed, rows.Count, failed);
+        _logger.LogInformation(
+            "PricingJobRunner: job {JobId} {Status} — {Completed}/{Total} found, {Failed} failed, output={Out}",
+            spec.JobId, finalStatus, completed, rows.Count, failed, write.OutputPath ?? "(no output)");
 
         return new PricingJobProgress(spec.JobId, rows.Count, completed, failed, finalStatus);
     }

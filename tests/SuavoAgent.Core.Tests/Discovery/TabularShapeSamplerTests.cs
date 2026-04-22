@@ -1,4 +1,4 @@
-using OfficeOpenXml;
+using ClosedXML.Excel;
 using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Core.Discovery;
 using SuavoAgent.Core.Verticals.Pharmacy;
@@ -14,7 +14,6 @@ public class TabularShapeSamplerTests : IDisposable
 
     public TabularShapeSamplerTests()
     {
-        ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
         Directory.CreateDirectory(_tempDir);
     }
 
@@ -125,7 +124,7 @@ public class TabularShapeSamplerTests : IDisposable
     [Fact]
     public async Task Sample_LegacyXlsExtension_ReturnsUnsupportedError()
     {
-        // EPPlus only reads OOXML (.xlsx). Legacy OLE2 (.xls) must surface
+        // ClosedXML only reads OOXML (.xlsx). Legacy OLE2 (.xls) must surface
         // as an unsupported-extension error instead of silently crashing
         // or returning garbage structure. Pack authors are responsible for
         // not advertising .xls in CommonExtensions until we wire a
@@ -210,16 +209,16 @@ public class TabularShapeSamplerTests : IDisposable
     private string CreateExcel(string name, IReadOnlyList<IReadOnlyList<string>> rows)
     {
         var path = Path.Combine(_tempDir, name);
-        using var package = new ExcelPackage(new FileInfo(path));
-        var ws = package.Workbook.Worksheets.Add("Sheet1");
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
         for (int r = 0; r < rows.Count; r++)
         {
             for (int c = 0; c < rows[r].Count; c++)
             {
-                ws.Cells[r + 1, c + 1].Value = rows[r][c];
+                ws.Cell(r + 1, c + 1).Value = rows[r][c];
             }
         }
-        package.Save();
+        wb.SaveAs(path);
         return path;
     }
 

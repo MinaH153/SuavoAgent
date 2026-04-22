@@ -5,6 +5,7 @@ using FlaUI.Core.Input;
 using FlaUI.UIA2;
 using Serilog;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Core.Pricing;
 
 namespace SuavoAgent.Helper.Workflows;
 
@@ -210,22 +211,38 @@ public sealed class PricingWorkflow
     /// </summary>
     private bool VerifyLoadedNdc(Window editWindow, ConditionFactory cf, string ndc)
     {
-        // Normalize for comparison: strip hyphens, pad to 11
-        var normalizedNdc = ndc.Replace("-", "").PadLeft(11, '0');
+        // Caller already normalized to 11-digit canonical form upstream (ExcelPricingReader).
+        // If this invariant breaks we'd silently match shorter substrings, so assert + fall back.
+        var normalizedNdc = NdcNormalizer.TryNormalize(ndc);
+        if (string.IsNullOrEmpty(normalizedNdc))
+        {
+            _logger.Warning("PricingWorkflow: cannot normalize NDC '{Ndc}' for verification", ndc);
+            return false;
+        }
 
         var deadline = DateTime.UtcNow + ElementTimeout;
         while (DateTime.UtcNow < deadline)
         {
             try
             {
-                // Scan all Edit and Text elements for any that contain the NDC
                 var candidates = editWindow.FindAllDescendants(cf.ByControlType(ControlType.Edit))
                     .Concat(editWindow.FindAllDescendants(cf.ByControlType(ControlType.Text)));
 
                 foreach (var el in candidates)
                 {
-                    var val = el.AsTextBox()?.Text?.Replace("-", "") ?? el.Name?.Replace("-", "") ?? "";
-                    if (val.Contains(normalizedNdc, StringComparison.OrdinalIgnoreCase))
+                    var raw = el.AsTextBox()?.Text ?? el.Name ?? "";
+                    if (string.IsNullOrEmpty(raw)) continue;
+
+                    // PioneerRx may display the NDC in any supported shape; normalize before compare
+                    // to avoid false negatives on 4-4-2 / 5-3-2 layouts.
+                    var observed = NdcNormalizer.TryNormalize(raw.Trim());
+                    if (observed == normalizedNdc)
+                        return true;
+
+                    // Fallback: substring check against digit-only form, for cases where the NDC
+                    // is embedded inside a longer descriptor ("NDC 50242-0041-21 — OMEPRAZOLE …")
+                    var digitsOnly = new string(raw.Where(char.IsDigit).ToArray());
+                    if (digitsOnly.Contains(normalizedNdc, StringComparison.Ordinal))
                         return true;
                 }
             }

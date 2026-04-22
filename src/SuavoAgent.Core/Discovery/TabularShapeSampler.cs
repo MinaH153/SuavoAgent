@@ -1,6 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
-using OfficeOpenXml;
+using ClosedXML.Excel;
 using SuavoAgent.Contracts.Discovery;
 
 namespace SuavoAgent.Core.Discovery;
@@ -12,7 +12,7 @@ namespace SuavoAgent.Core.Discovery;
 /// whether headers match the tabular hint list.
 ///
 /// <para>
-/// Note: only the modern OOXML <c>.xlsx</c> path is supported via EPPlus —
+/// Note: only the modern OOXML <c>.xlsx</c> path is supported via ClosedXML —
 /// the legacy binary <c>.xls</c> format is not. Packs must not list
 /// <c>.xls</c> in <c>CommonExtensions</c> until we wire a different
 /// reader (NPOI or similar).
@@ -38,7 +38,6 @@ public sealed class TabularShapeSampler : IFileShapeSampler
     public TabularShapeSampler(ILogger<TabularShapeSampler>? logger = null)
     {
         _logger = logger;
-        ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
     }
 
     public async Task<FileCandidateSample> SampleAsync(
@@ -104,24 +103,30 @@ public sealed class TabularShapeSampler : IFileShapeSampler
 
     private static SheetReadResult ReadExcel(string path, CancellationToken ct)
     {
+        // ClosedXML opens the underlying OPC package read-only here — compatible with Excel.exe
+        // holding a normal editing lock on the workbook.
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        using var package = new ExcelPackage(stream);
-        var ws = package.Workbook.Worksheets.FirstOrDefault();
-        if (ws is null || ws.Dimension is null)
+        using var wb = new XLWorkbook(stream);
+        var ws = wb.Worksheets.FirstOrDefault();
+        var firstRow = ws?.FirstRowUsed();
+        var lastRow = ws?.LastRowUsed();
+        var firstCol = ws?.FirstColumnUsed();
+        var lastCol = ws?.LastColumnUsed();
+        if (ws is null || firstRow is null || lastRow is null || firstCol is null || lastCol is null)
         {
             return new SheetReadResult(
                 Array.Empty<string>(), Array.Empty<IReadOnlyList<string>>(), 0, "Empty workbook");
         }
 
-        int startRow = ws.Dimension.Start.Row;
-        int endRow = ws.Dimension.End.Row;
-        int startCol = ws.Dimension.Start.Column;
-        int endCol = ws.Dimension.End.Column;
+        int startRow = firstRow.RowNumber();
+        int endRow = lastRow.RowNumber();
+        int startCol = firstCol.ColumnNumber();
+        int endCol = lastCol.ColumnNumber();
 
         var headers = new List<string>(endCol - startCol + 1);
         for (int c = startCol; c <= endCol; c++)
         {
-            headers.Add((ws.Cells[startRow, c].Text ?? string.Empty).Trim());
+            headers.Add((ws.Cell(startRow, c).GetString() ?? string.Empty).Trim());
         }
 
         var rows = new List<IReadOnlyList<string>>();
@@ -133,7 +138,7 @@ public sealed class TabularShapeSampler : IFileShapeSampler
             var row = new List<string>(headers.Count);
             for (int c = startCol; c <= endCol; c++)
             {
-                row.Add((ws.Cells[r, c].Text ?? string.Empty).Trim());
+                row.Add((ws.Cell(r, c).GetString() ?? string.Empty).Trim());
             }
             rows.Add(row);
         }

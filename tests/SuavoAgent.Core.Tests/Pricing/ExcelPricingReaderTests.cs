@@ -1,5 +1,5 @@
+using ClosedXML.Excel;
 using Microsoft.Extensions.Logging.Abstractions;
-using OfficeOpenXml;
 using SuavoAgent.Core.Pricing;
 using Xunit;
 
@@ -13,7 +13,6 @@ public class ExcelPricingReaderTests : IDisposable
     public ExcelPricingReaderTests()
     {
         Directory.CreateDirectory(_tempDir);
-        ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
         _reader = new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance);
     }
 
@@ -44,12 +43,13 @@ public class ExcelPricingReaderTests : IDisposable
         var path = CreateExcel(new[]
         {
             ("ndc_number", "Item"),
-            ("12345-678-90", "Drug A"),
+            ("12345-6789-01", "Drug A"), // 5-4-2 real shape
         });
 
         var result = _reader.Read(path, "ndc");
         Assert.True(result.Success);
         Assert.Single(result.Rows);
+        Assert.Equal("12345678901", result.Rows[0].NdcNormalized);
     }
 
     [Fact]
@@ -90,34 +90,58 @@ public class ExcelPricingReaderTests : IDisposable
     }
 
     [Fact]
-    public void Read_NdcNormalization_StripsDashesAndPads()
+    public void Read_NdcNormalization_ExpandsBySegment()
     {
         var path = CreateExcel(new[]
         {
             ("NDC", "Name"),
-            ("1234-567-89", "Drug A"),    // 10 chars → pad to 11
-            ("55111-0645-01", "Drug B"),  // already 11 after strip
+            ("0006-0734-60", "Drug 4-4-2"),       // → prepend '0' to labeler: 00006073460
+            ("50242-041-21", "Drug 5-3-2"),       // → pad product: 50242004121
+            ("55111-0645-01", "Drug 5-4-2"),      // pass-through: 55111064501
+            ("50242004121", "Drug 11-digit"),     // pass-through
         });
 
         var result = _reader.Read(path, "NDC");
         Assert.True(result.Success);
-        Assert.Equal("00123456789", result.Rows[0].NdcNormalized); // "1234-567-89" → strip → "123456789" (9) → pad → "00123456789"
-        Assert.Equal("55111064501", result.Rows[1].NdcNormalized);
+        Assert.Equal(4, result.Rows.Count);
+        Assert.Equal("00006073460", result.Rows[0].NdcNormalized);
+        Assert.Equal("50242004121", result.Rows[1].NdcNormalized);
+        Assert.Equal("55111064501", result.Rows[2].NdcNormalized);
+        Assert.Equal("50242004121", result.Rows[3].NdcNormalized);
+    }
+
+    [Fact]
+    public void Read_InvalidNdcs_LandInInvalidListNotRows()
+    {
+        var path = CreateExcel(new[]
+        {
+            ("NDC", "Name"),
+            ("55111-0645-01", "Valid"),
+            ("not-an-ndc", "Bad shape"),
+            ("5024204121", "Ambiguous 10-digit"),
+            ("12-34-56", "Wrong segment lengths"),
+        });
+
+        var result = _reader.Read(path, "NDC");
+        Assert.True(result.Success);
+        Assert.Single(result.Rows);
+        Assert.Equal(3, result.Invalid.Count);
+        Assert.All(result.Invalid, i => Assert.NotEmpty(i.Reason));
     }
 
     private string CreateExcel(IEnumerable<(string col1, string col2)> rows)
     {
         var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
-        using var pkg = new ExcelPackage();
-        var ws = pkg.Workbook.Worksheets.Add("Sheet1");
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
         int r = 1;
         foreach (var (a, b) in rows)
         {
-            ws.Cells[r, 1].Value = a;
-            ws.Cells[r, 2].Value = b;
+            ws.Cell(r, 1).Value = a;
+            ws.Cell(r, 2).Value = b;
             r++;
         }
-        pkg.SaveAs(new FileInfo(path));
+        wb.SaveAs(path);
         return path;
     }
 
