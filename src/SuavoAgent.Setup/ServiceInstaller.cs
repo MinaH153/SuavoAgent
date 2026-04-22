@@ -10,16 +10,19 @@ internal static class ServiceInstaller
 {
     private const string CoreServiceName = "SuavoAgent.Core";
     private const string BrokerServiceName = "SuavoAgent.Broker";
+    private const string WatchdogServiceName = "SuavoAgent.Watchdog";
 
     /// <summary>
     /// Full service installation pipeline: stop existing -> register -> ACL -> start -> verify.
-    /// Returns true if both services are running.
+    /// Returns true if Core is running. Watchdog + Broker may take a moment to settle.
     /// </summary>
     public static bool InstallAndStart(string installDir, string dataDir)
     {
-        // Step 1: Stop and remove any existing services
-        StopAndRemove(CoreServiceName);
+        // Step 1: Stop and remove any existing services (watchdog first so it
+        // doesn't fight the teardown by auto-restarting Core/Broker).
+        StopAndRemove(WatchdogServiceName);
         StopAndRemove(BrokerServiceName);
+        StopAndRemove(CoreServiceName);
 
         // Step 2: Create directories
         Directory.CreateDirectory(installDir);
@@ -28,6 +31,7 @@ internal static class ServiceInstaller
         // Step 3: Register services
         var corePath = Path.Combine(installDir, "SuavoAgent.Core.exe");
         var brokerPath = Path.Combine(installDir, "SuavoAgent.Broker.exe");
+        var watchdogPath = Path.Combine(installDir, "SuavoAgent.Watchdog.exe");
 
         if (!File.Exists(corePath))
         {
@@ -37,6 +41,11 @@ internal static class ServiceInstaller
         if (!File.Exists(brokerPath))
         {
             ConsoleUI.WriteFail($"Broker binary not found: {brokerPath}");
+            return false;
+        }
+        if (!File.Exists(watchdogPath))
+        {
+            ConsoleUI.WriteFail($"Watchdog binary not found: {watchdogPath}");
             return false;
         }
 
@@ -56,19 +65,34 @@ internal static class ServiceInstaller
         RunSc($"config {BrokerServiceName} depend= {CoreServiceName}");
         ConsoleUI.WriteOk($"{BrokerServiceName} service registered");
 
+        // Watchdog — runs as LocalSystem (needs SCM sc.exe start/query + the
+        // right to invoke bootstrap.ps1 --repair). No service dependency on
+        // Core/Broker because Watchdog must be able to restart them even when
+        // they have failed. Recovery backoff is longer (10s/60s/5min) because
+        // the whole point of Watchdog is that it survives churn.
+        RunSc($"create {WatchdogServiceName} binPath= \"\\\"{watchdogPath}\\\"\" start= delayed-auto obj= \"LocalSystem\"");
+        RunSc($"description {WatchdogServiceName} \"Suavo pharmacy agent - process watchdog (auto-restarts Core/Broker, escalates to bootstrap --repair)\"");
+        RunSc($"failure {WatchdogServiceName} reset= 3600 actions= restart/10000/restart/60000/restart/300000");
+        RunSc($"failureflag {WatchdogServiceName} 1");
+        ConsoleUI.WriteOk($"{WatchdogServiceName} service registered");
+
         // Step 4: Lock down data directory ACL (install dir already locked in Phase 4)
         LockdownDirectoryAcl(dataDir);
 
-        // Step 5: Start services
+        // Step 5: Start services — Core first, then Broker (depends on Core),
+        // then Watchdog last so it doesn't race the fresh Core/Broker starts.
         ConsoleUI.WriteInfo("Starting services...");
         RunSc($"start {CoreServiceName}");
         Thread.Sleep(3000); // Give Core time to initialize before starting Broker
         RunSc($"start {BrokerServiceName}");
+        Thread.Sleep(2000); // Let Broker settle before Watchdog starts observing
+        RunSc($"start {WatchdogServiceName}");
 
         // Step 6: Verify
         Thread.Sleep(2000);
         var coreRunning = IsServiceRunning(CoreServiceName);
         var brokerRunning = IsServiceRunning(BrokerServiceName);
+        var watchdogRunning = IsServiceRunning(WatchdogServiceName);
 
         if (coreRunning)
             ConsoleUI.WriteOk($"{CoreServiceName} is running");
@@ -80,7 +104,12 @@ internal static class ServiceInstaller
         else
             ConsoleUI.WriteWarn($"{BrokerServiceName} may not be running yet");
 
-        return coreRunning; // Broker may take a moment; Core is the critical one
+        if (watchdogRunning)
+            ConsoleUI.WriteOk($"{WatchdogServiceName} is running");
+        else
+            ConsoleUI.WriteWarn($"{WatchdogServiceName} may not be running yet");
+
+        return coreRunning; // Core must be up; Watchdog will repair Broker if needed.
     }
 
     private static void StopAndRemove(string serviceName)
