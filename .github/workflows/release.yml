@@ -9,8 +9,12 @@ permissions:
   contents: write
 
 jobs:
-  build-test-release:
+  # --- Build unsigned binaries on Linux -----------------------------------
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      version_numeric: ${{ steps.version.outputs.VERSION_NUMERIC }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,30 +39,122 @@ jobs:
       - name: Test
         run: dotnet test SuavoAgent.sln -c Release --no-build -v normal
 
-      - name: Publish Core
+      - name: Publish binaries
         env:
           VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
-        run: dotnet publish src/SuavoAgent.Core -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
+        run: |
+          for proj in Core Broker Helper Watchdog Setup; do
+            dotnet publish src/SuavoAgent.$proj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
+          done
 
-      - name: Publish Broker
-        env:
-          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
-        run: dotnet publish src/SuavoAgent.Broker -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
+      - name: Upload unsigned binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-unsigned-${{ steps.version.outputs.VERSION }}
+          path: release/
+          retention-days: 7
 
-      - name: Publish Helper
-        env:
-          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
-        run: dotnet publish src/SuavoAgent.Helper -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
+  # --- Authenticode sign with Yubikey (self-hosted Windows runner) --------
+  # Runs only when repo variable SIGNING_ENABLED=true AND a labeled self-hosted
+  # Windows runner with Yubikey is online. Otherwise the passthrough job below
+  # runs instead. Flip SIGNING_ENABLED to true once the Yubikey has arrived
+  # and the self-hosted runner is registered. See docs/signing.md.
+  sign_windows:
+    if: ${{ vars.SIGNING_ENABLED == 'true' }}
+    needs: build
+    runs-on: [self-hosted, windows, yubikey]
+    steps:
+      - name: Download unsigned binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-unsigned-${{ needs.build.outputs.version }}
+          path: release
 
-      - name: Publish Watchdog
+      - name: Sign binaries with signtool
+        shell: pwsh
         env:
-          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
-        run: dotnet publish src/SuavoAgent.Watchdog -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
+          CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
+          TIMESTAMP_URL: ${{ vars.SIGNING_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:CERT_THUMBPRINT) {
+            throw "Secret SIGNING_CERT_THUMBPRINT is not set. See docs/signing.md."
+          }
+          $ts = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { 'http://ts.ssl.com' }
 
-      - name: Publish Setup
-        env:
-          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
-        run: dotnet publish src/SuavoAgent.Setup -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version="$VERSION_NUMERIC" -o release/
+          # Locate signtool.exe from installed Windows SDKs. Prefer the newest.
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+            "${env:ProgramFiles}\Windows Kits\10\bin"
+          ) | Where-Object { Test-Path $_ } | ForEach-Object { Get-ChildItem $_ -Directory } | Sort-Object Name -Descending
+          $signtool = $null
+          foreach ($dir in $candidates) {
+            $path = Join-Path $dir 'x64\signtool.exe'
+            if (Test-Path $path) { $signtool = $path; break }
+          }
+          if (-not $signtool) { throw 'signtool.exe not found. Install Windows 10 SDK.' }
+          Write-Host "Using signtool: $signtool"
+
+          $targets = @(
+            'release/SuavoAgent.Core.exe',
+            'release/SuavoAgent.Broker.exe',
+            'release/SuavoAgent.Helper.exe',
+            'release/SuavoAgent.Watchdog.exe',
+            'release/SuavoSetup.exe'
+          )
+          foreach ($t in $targets) {
+            if (-not (Test-Path $t)) { throw "Missing binary: $t" }
+            Write-Host "Signing $t"
+            & $signtool sign /fd SHA256 /tr $ts /td SHA256 /sha1 $env:CERT_THUMBPRINT $t
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $t (exit $LASTEXITCODE)" }
+            & $signtool verify /pa /v $t
+            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed on $t (exit $LASTEXITCODE)" }
+          }
+
+      - name: Upload signed binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-final-${{ needs.build.outputs.version }}
+          path: release/
+          retention-days: 7
+
+  # --- Passthrough when signing is disabled -------------------------------
+  # Keeps the release pipeline functional without a Yubikey. Renames the
+  # artifact to the name the release job expects.
+  sign_passthrough:
+    if: ${{ vars.SIGNING_ENABLED != 'true' }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download unsigned binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-unsigned-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Upload as final (unsigned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-final-${{ needs.build.outputs.version }}
+          path: release/
+          retention-days: 7
+
+  # --- Checksums, manifest, GitHub release --------------------------------
+  release:
+    needs: [build, sign_windows, sign_passthrough]
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.sign_windows.result == 'success' || needs.sign_passthrough.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download final binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-final-${{ needs.build.outputs.version }}
+          path: release
 
       - name: Generate checksums
         run: |
@@ -74,8 +170,8 @@ jobs:
 
       - name: Generate + sign OTA update manifest
         env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
-          VERSION_NUMERIC: ${{ steps.version.outputs.VERSION_NUMERIC }}
+          VERSION: ${{ needs.build.outputs.version }}
+          VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
           SIGNING_KEY: ${{ secrets.SIGNING_KEY_PEM }}
         run: |
           set -euo pipefail
@@ -92,17 +188,29 @@ jobs:
           echo "Manifest bytes: $(wc -c < update-manifest-${VERSION}.txt)"
           echo "Signature bytes: $(wc -c < update-manifest-${VERSION}.sig)"
 
+      - name: Determine release mode
+        id: mode
+        env:
+          SIGN_RESULT: ${{ needs.sign_windows.result }}
+        run: |
+          if [[ "$SIGN_RESULT" == "success" ]]; then
+            echo "MODE=signed" >> "$GITHUB_OUTPUT"
+          else
+            echo "MODE=unsigned" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "${{ steps.version.outputs.VERSION }} — Phantom"
+          name: "${{ needs.build.outputs.version }} — Phantom"
           body: |
-            ## SuavoAgent ${{ steps.version.outputs.VERSION }}
+            ## SuavoAgent ${{ needs.build.outputs.version }}
 
             Automated release from CI/CD pipeline.
 
             **Tests:** All passing
             **Checksums:** ECDSA P-256 signed
+            **Authenticode:** ${{ steps.mode.outputs.MODE == 'signed' && 'Signed (Yubikey EV)' || 'Unsigned (SmartScreen warning expected)' }}
 
             ### How to update existing agents
             Push the update command from the fleet dashboard. Agents auto-update on next heartbeat (30s).
