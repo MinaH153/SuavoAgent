@@ -6,6 +6,7 @@ using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
+using SuavoAgent.Core.Mission;
 using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.Reasoning;
 using SuavoAgent.Core.State;
@@ -127,6 +128,27 @@ try
     builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
 
     var agentOpts = builder.Configuration.GetSection("Agent").Get<AgentOptions>() ?? new AgentOptions();
+
+    // Mission Loop Phase 1 — registered behind a config gate so the pilot
+    // flip can open it via ConfigSyncWorker without a service restart.
+    // Default is off in appsettings.json; the pilot-flip skill is the only
+    // approved path to enable this against a real pharmacy.
+    var missionLoopOpts =
+        builder.Configuration.GetSection("MissionLoop").Get<MissionLoopOptions>()
+        ?? new MissionLoopOptions();
+    builder.Services.Configure<MissionLoopOptions>(
+        builder.Configuration.GetSection("MissionLoop"));
+    if (missionLoopOpts.Phase1.Enabled)
+    {
+        builder.Services.AddMissionLoopPhase1();
+        Log.Information(
+            "Mission Loop Phase 1 registered — config gate open (MissionLoop.Phase1.Enabled=true). Caller MUST register an IPharmacyReadAdapter before services resolve.");
+    }
+    else
+    {
+        Log.Information(
+            "Mission Loop Phase 1 dormant — config gate closed (MissionLoop.Phase1.Enabled=false).");
+    }
 
     // H-1: Seal plaintext credentials with DPAPI on first run (Windows only)
     SuavoAgent.Core.Config.CredentialProtector.SealSecretsFile(
