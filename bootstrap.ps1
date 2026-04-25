@@ -917,6 +917,43 @@ if ($installTokenPlain -and -not $ApiKey) {
         $ApiKey = $registerResp.data.apiKey
         $PharmacyId = $registerResp.data.pharmacyId
         Write-Ok "Registered as pharmacy $PharmacyId"
+
+        # Eager bootstrap of cloud config overrides BEFORE Core starts.
+        # ConfigSyncWorker still runs the steady-state poll loop after boot,
+        # but writing the file pre-boot guarantees IOptions consumers see
+        # the right values on FIRST construction (no restart-after-poll
+        # ceremony required, no race window where Core boots with stale config).
+        try {
+            $initialOverrides = $registerResp.data.initialOverrides
+            if ($initialOverrides -and ($initialOverrides | Measure-Object).Count -gt 0) {
+                $root = @{}
+                foreach ($ov in $initialOverrides) {
+                    if (-not $ov.path) { continue }
+                    $segments = $ov.path -split '\.'
+                    $node = $root
+                    for ($i = 0; $i -lt $segments.Length - 1; $i++) {
+                        $seg = $segments[$i]
+                        if (-not $node.ContainsKey($seg) -or -not ($node[$seg] -is [hashtable])) {
+                            $node[$seg] = @{}
+                        }
+                        $node = $node[$seg]
+                    }
+                    $node[$segments[-1]] = $ov.value
+                }
+                $overridesJson = $root | ConvertTo-Json -Depth 10 -Compress:$false
+                $overridesPath = Join-Path $dataDir "config-overrides.json"
+                if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Path $dataDir -Force | Out-Null }
+                $tmpPath = "$overridesPath.tmp"
+                Set-Content -Path $tmpPath -Value $overridesJson -Encoding UTF8 -NoNewline
+                Move-Item -Path $tmpPath -Destination $overridesPath -Force
+                Write-Ok "Initial config overrides written: $($initialOverrides.Count) key(s) to config-overrides.json"
+            } else {
+                Write-Host "    No initial overrides for this agent (cloud has none configured yet)" -ForegroundColor DarkGray
+            }
+        } catch {
+            Write-Host "    Initial overrides write skipped: $($_.Exception.Message)" -ForegroundColor DarkGray
+            Write-Host "    Non-fatal -- ConfigSyncWorker will fetch on first poll instead" -ForegroundColor DarkGray
+        }
     } catch {
         Write-Fail "Registration failed: $($_.Exception.Message)"
         exit 1
