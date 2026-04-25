@@ -1,4 +1,4 @@
-# SuavoAgent -- Zero-Config One-Paste Installer
+﻿# SuavoAgent -- Zero-Config One-Paste Installer
 #
 # INSTALL (paste into Admin PowerShell):
 #   Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/MinaH153/SuavoAgent/main/bootstrap.ps1 -OutFile $env:TEMP\bs.ps1; & $env:TEMP\bs.ps1
@@ -62,7 +62,7 @@ function ConvertTo-PlainTextSecret {
 }
 
 # ============================================
-# IDEMPOTENT CLEANUP — runs before consent so a single
+# IDEMPOTENT CLEANUP -- runs before consent so a single
 #   irm "https://.../bootstrap.ps1?v=$(Get-Random)" | iex
 # always produces a known-good install, even over a broken one.
 # ============================================
@@ -78,7 +78,7 @@ function Test-PriorInstall {
 
 function Invoke-PriorInstallCleanup {
     Write-Host ""
-    Write-Host "  Prior SuavoAgent install detected — cleaning up before reinstall" -ForegroundColor Yellow
+    Write-Host "  Prior SuavoAgent install detected -- cleaning up before reinstall" -ForegroundColor Yellow
     foreach ($s in @("SuavoAgent.Watchdog", "SuavoAgent.Broker", "SuavoAgent.Core")) {
         $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
         if ($svc) {
@@ -93,7 +93,7 @@ function Invoke-PriorInstallCleanup {
     Start-Sleep -Seconds 2
     if (Test-Path $installDir) {
         try { Remove-Item $installDir -Recurse -Force -ErrorAction Stop }
-        catch { Write-Host "    (install dir cleanup had a hiccup: $($_.Exception.Message) — continuing)" -ForegroundColor DarkGray }
+        catch { Write-Host "    (install dir cleanup had a hiccup: $($_.Exception.Message) -- continuing)" -ForegroundColor DarkGray }
     }
     if (Test-Path $dataDir) {
         # Preserve logs dir so operators can still see the previous install's
@@ -104,7 +104,7 @@ function Invoke-PriorInstallCleanup {
             try { Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop } catch { }
         }
     }
-    Write-Host "  Cleanup complete — proceeding with fresh install" -ForegroundColor Green
+    Write-Host "  Cleanup complete -- proceeding with fresh install" -ForegroundColor Green
     Write-Host ""
 }
 
@@ -113,11 +113,11 @@ function Invoke-LegacyNodeAgentQuarantine {
     if (Test-Path $legacyDir) {
         $suffix = Get-Date -Format "yyyyMMdd-HHmmss"
         $target = "C:\SuavoAgent.quarantine-$suffix"
-        Write-Host "  Legacy Node-era install detected at $legacyDir — quarantining to $target" -ForegroundColor Yellow
+        Write-Host "  Legacy Node-era install detected at $legacyDir -- quarantining to $target" -ForegroundColor Yellow
         try {
             Rename-Item -Path $legacyDir -NewName ("SuavoAgent.quarantine-$suffix") -ErrorAction Stop
         } catch {
-            Write-Host "    Could not quarantine $legacyDir: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "    Could not quarantine ${legacyDir}: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
 
@@ -148,10 +148,10 @@ if ($Repair) {
     Write-Host "  Re-applying service registration + ACLs (no reinstall, no config touch)" -ForegroundColor DarkGray
     Write-Host ""
 
-    # Re-assert install dir ACLs. If dir is missing we can't repair — that's an
+    # Re-assert install dir ACLs. If dir is missing we can't repair -- that's an
     # uninstall-scale problem, not a repair one.
     if (-not (Test-Path $installDir)) {
-        Write-Error "Install dir missing ($installDir) — full reinstall required, --repair cannot fix this"
+        Write-Error "Install dir missing ($installDir) -- full reinstall required, --repair cannot fix this"
         exit 1
     }
     try {
@@ -180,7 +180,7 @@ if ($Repair) {
     foreach ($spec in $serviceSpecs) {
         $exePath = Join-Path $installDir $spec.Exe
         if (-not (Test-Path $exePath)) {
-            Write-Host "  Skipping $($spec.Name) — binary missing at $exePath" -ForegroundColor DarkGray
+            Write-Host "  Skipping $($spec.Name) -- binary missing at $exePath" -ForegroundColor DarkGray
             continue
         }
         $existing = Get-Service -Name $spec.Name -ErrorAction SilentlyContinue
@@ -194,7 +194,7 @@ if ($Repair) {
         }
     }
 
-    # Restart services (Core → Broker → Watchdog)
+    # Restart services (Core -> Broker -> Watchdog)
     foreach ($svcName in @('SuavoAgent.Core', 'SuavoAgent.Broker', 'SuavoAgent.Watchdog')) {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
         if (-not $svc) { continue }
@@ -280,9 +280,9 @@ Write-Host ""
 # on first heartbeat. No separate paperwork needed.
 if (-not $SkipConsent) {
 Write-Host ""
-Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║         SUAVOAGENT TERMS & CONSENT                  ║" -ForegroundColor Cyan
-Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "  +======================================================+" -ForegroundColor Cyan
+Write-Host "  |         SUAVOAGENT TERMS & CONSENT                  |" -ForegroundColor Cyan
+Write-Host "  +======================================================+" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  SuavoAgent is workplace monitoring software that observes" -ForegroundColor White
 Write-Host "  business workstation activity to optimize delivery operations." -ForegroundColor White
@@ -313,10 +313,10 @@ Write-Host "    3. Agreement to Suavo's Terms of Service and Privacy Policy" -Fo
 Write-Host "    4. Execution of Business Associate Agreement (if healthcare)" -ForegroundColor White
 Write-Host ""
 
-# Collect authorizing party info — this gets recorded in the consent receipt
+# Collect authorizing party info -- this gets recorded in the consent receipt
 $authName = Read-Host "  Authorizing party full name"
 if ([string]::IsNullOrWhiteSpace($authName)) {
-    Write-Host "  Installation cancelled — authorizing party name required." -ForegroundColor Red
+    Write-Host "  Installation cancelled -- authorizing party name required." -ForegroundColor Red
     exit 0
 }
 $authTitle = Read-Host "  Title (e.g., Owner, Pharmacy Manager)"
@@ -337,7 +337,7 @@ if ($mandatoryNoticeStates -contains $stateUpper) {
     Write-Host ""
     $noticeConfirm = Read-Host "  Type CONFIRMED to acknowledge this legal requirement"
     if ($noticeConfirm -ne "CONFIRMED") {
-        Write-Host "  Installation cancelled — employee notice acknowledgment required in $stateUpper." -ForegroundColor Red
+        Write-Host "  Installation cancelled -- employee notice acknowledgment required in $stateUpper." -ForegroundColor Red
         exit 0
     }
 } elseif ($highRiskStates -contains $stateUpper) {
@@ -354,7 +354,7 @@ if ($finalConfirm -ne "AGREE") {
     exit 0
 }
 
-# Build consent receipt — saved locally and uploaded on first heartbeat
+# Build consent receipt -- saved locally and uploaded on first heartbeat
 $consentTimestamp = (Get-Date).ToString("o")
 $consentReceipt = @{
     consentVersion = "1.0"
@@ -373,7 +373,7 @@ $consentReceipt = @{
 Write-Ok "Consent recorded: $authName ($authTitle) at $consentTimestamp"
 Write-Host ""
 } else {
-    Write-Ok "Consent recorded via web dashboard — skipping terminal prompts"
+    Write-Ok "Consent recorded via web dashboard -- skipping terminal prompts"
     # Set defaults for the consent receipt (already recorded in cloud)
     $authName = "Web Dashboard"
     $authTitle = "Pre-authorized"
@@ -461,7 +461,7 @@ if ($pmsType) {
 # ============================================
 # PHASE 2: Extract SQL credentials
 # ============================================
-# Pause transcript during credential discovery — SQL passwords must not be logged
+# Pause transcript during credential discovery -- SQL passwords must not be logged
 try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
 
 if (-not $pmsType) {
@@ -662,7 +662,7 @@ if (-not $sqlUser -and -not $discoveredConnStr) {
 }
 } # end if ($pmsType)
 
-# Resume transcript — credentials are now in variables, not transcript
+# Resume transcript -- credentials are now in variables, not transcript
 try { Start-Transcript -Path $transcriptPath -Append -ErrorAction SilentlyContinue | Out-Null } catch { }
 
 Write-Host ""
@@ -687,7 +687,7 @@ Write-Step "Phase 3: Downloading SuavoAgent binaries"
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path "$dataDir\logs" -Force | Out-Null
 
-# HIPAA 164.312(a)(2)(iv) — lock down data dir to SYSTEM + LocalService +
+# HIPAA 164.312(a)(2)(iv) -- lock down data dir to SYSTEM + LocalService +
 # NetworkService (Broker) + Administrators. Runtime service account lacks
 # WRITE_DAC so this is the one-and-only place the DACL gets pinned.
 try {
@@ -722,7 +722,7 @@ Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath -UseBasicParsing
 Invoke-WebRequest -Uri $checksumSigUrl -OutFile $checksumSigPath -UseBasicParsing
 
 # Verify ECDSA signature of checksums using only .NET Framework 4.6.0-
-# compatible primitives — PowerShell 5.1 ships with .NET Framework 4.6.x
+# compatible primitives -- PowerShell 5.1 ships with .NET Framework 4.6.x
 # on many pharmacy Windows installs, and several newer APIs crash there:
 #   * ImportSubjectPublicKeyInfo          -> .NET 5+ only
 #   * [Convert]::FromHexString            -> .NET 5+ only
@@ -808,7 +808,7 @@ $p1363 = New-Object byte[] 64
 [Array]::Copy($sigBytes, $rStart, $p1363, 32 - $rLen, $rLen)
 [Array]::Copy($sigBytes, $sStart, $p1363, 64 - $sLen, $sLen)
 
-# VerifyHash is the most portable path — avoids HashAlgorithmName overload
+# VerifyHash is the most portable path -- avoids HashAlgorithmName overload
 # differences between 4.6.x point releases.
 $sha256 = [System.Security.Cryptography.SHA256]::Create()
 $hash   = $sha256.ComputeHash($checksumBytes)
@@ -871,7 +871,7 @@ try {
 } catch { }
 
 if ($bitlockerStatus -and $bitlockerStatus -match "Protection On") {
-    Write-Ok "BitLocker is ENABLED on $env:SystemDrive — HIPAA breach safe harbor active"
+    Write-Ok "BitLocker is ENABLED on $env:SystemDrive -- HIPAA breach safe harbor active"
 } else {
     Write-Warn "BitLocker is NOT enabled on $env:SystemDrive"
     Write-Host "  HIPAA RECOMMENDATION: Enable BitLocker for full-disk encryption" -ForegroundColor Yellow
@@ -970,7 +970,7 @@ $configJson = $config | ConvertTo-Json -Depth 5
 $configPath = Join-Path $installDir "appsettings.json"
 Set-Content -Path $configPath -Value $configJson -Encoding UTF8
 
-# Write consent receipt to ProgramData — uploaded to cloud on first heartbeat
+# Write consent receipt to ProgramData -- uploaded to cloud on first heartbeat
 $consentPath = Join-Path $dataDir "consent-receipt.json"
 $consentReceipt.pharmacyId = $PharmacyId
 $consentReceipt.agentId = $agentId
@@ -1030,7 +1030,7 @@ sc.exe config SuavoAgent.Broker depend= SuavoAgent.Core | Out-Null
 Write-Ok "SuavoAgent.Broker service registered"
 
 # Install Watchdog (runs as LocalSystem -- SCM sc.exe start/query requires it).
-# No service dependency — Watchdog must be able to restart Core/Broker even if
+# No service dependency -- Watchdog must be able to restart Core/Broker even if
 # one of them is broken, so making it depend on either would defeat its purpose.
 $watchdogPath = Join-Path $installDir "SuavoAgent.Watchdog.exe"
 sc.exe create SuavoAgent.Watchdog binPath= "`"$watchdogPath`"" start= delayed-auto obj= "LocalSystem" | Out-Null
@@ -1040,7 +1040,7 @@ sc.exe failureflag SuavoAgent.Watchdog 1 | Out-Null
 Write-Ok "SuavoAgent.Watchdog service registered"
 
 # Lock down install directory. NetworkService needs ReadAndExecute to load
-# and launch SuavoAgent.Broker.exe — omitting it causes SCM error 7000
+# and launch SuavoAgent.Broker.exe -- omitting it causes SCM error 7000
 # ("system cannot find the file specified") when Broker tries to start.
 $dirAcl = Get-Acl $installDir
 $dirAcl.SetAccessRuleProtection($true, $false)
@@ -1056,7 +1056,7 @@ Set-Acl $installDir $dirAcl
 
 # Start services. Start-Service's 30s default wait is tight for cold starts
 # on .NET 8 single-file self-extracting exes, so we poll manually up to 90s
-# and — if the service still isn't Running — capture a full post-mortem to
+# and -- if the service still isn't Running -- capture a full post-mortem to
 # the operator's Desktop. That way we don't have to ping-pong PowerShell
 # diagnostic commands through the operator when something breaks.
 function Wait-ServiceRunning {
@@ -1134,7 +1134,7 @@ function Save-StartupPostmortem {
         try { $lines.Add((Get-Content $crashLog -Raw).Trim()) }
         catch { $lines.Add("crash log read failed: $($_.Exception.Message)") }
     } else {
-        $lines.Add("(startup-crash.log not present — process died before crash sink ran)")
+        $lines.Add("(startup-crash.log not present -- process died before crash sink ran)")
     }
     $lines.Add("")
     $lines.Add("=== Broker broker-crash.log (written by last-resort crash sink) ===")
@@ -1155,7 +1155,7 @@ function Save-StartupPostmortem {
             try { $lines.Add((Get-Content $brokerLatest.FullName -Tail 80 | Out-String).Trim()) }
             catch { $lines.Add("broker log read failed: $($_.Exception.Message)") }
         } else {
-            $lines.Add("(no broker-*.log found — Broker never reached Serilog init)")
+            $lines.Add("(no broker-*.log found -- Broker never reached Serilog init)")
         }
     }
     $lines.Add("")
@@ -1171,7 +1171,7 @@ function Save-StartupPostmortem {
             $lines.Add("(no startup-*.log found)")
         }
     } else {
-        $lines.Add("(ProgramData\SuavoAgent\logs not present — service never reached Serilog init)")
+        $lines.Add("(ProgramData\SuavoAgent\logs not present -- service never reached Serilog init)")
     }
 
     $text = ($lines -join [Environment]::NewLine)
@@ -1198,7 +1198,7 @@ try { Start-Service SuavoAgent.Broker -ErrorAction Stop } catch { }
 if (-not (Wait-ServiceRunning -Name 'SuavoAgent.Broker' -TimeoutSec 60)) {
     $brokerDump = Join-Path $env:USERPROFILE "Desktop\suavo-broker-postmortem-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
     Save-StartupPostmortem -ServiceName 'SuavoAgent.Broker' -DumpPath $brokerDump
-    Write-Host "  Broker did not start within 60s — post-mortem at $brokerDump" -ForegroundColor Yellow
+    Write-Host "  Broker did not start within 60s -- post-mortem at $brokerDump" -ForegroundColor Yellow
 }
 
 # Stash this bootstrap so Watchdog's --repair escalation can invoke it even
@@ -1219,7 +1219,7 @@ try { Start-Service SuavoAgent.Watchdog -ErrorAction Stop } catch { }
 if (-not (Wait-ServiceRunning -Name 'SuavoAgent.Watchdog' -TimeoutSec 60)) {
     $wdDump = Join-Path $env:USERPROFILE "Desktop\suavo-watchdog-postmortem-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
     Save-StartupPostmortem -ServiceName 'SuavoAgent.Watchdog' -DumpPath $wdDump
-    Write-Host "  Watchdog did not start within 60s — post-mortem at $wdDump" -ForegroundColor Yellow
+    Write-Host "  Watchdog did not start within 60s -- post-mortem at $wdDump" -ForegroundColor Yellow
 }
 
 # ============================================
@@ -1251,7 +1251,7 @@ if ($sqlServer) {
     Write-Host "  SQL:      $sqlServer / $sqlDatabase" -ForegroundColor White
     Write-Host "  Auth:     $(if ($sqlUser) { "SQL ($sqlUser)" } else { 'Windows' })" -ForegroundColor White
 } else {
-    Write-Host "  SQL:      (deferred — agent will auto-discover during learning phase)" -ForegroundColor Gray
+    Write-Host "  SQL:      (deferred -- agent will auto-discover during learning phase)" -ForegroundColor Gray
 }
 Write-Host ""
 
