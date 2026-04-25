@@ -1,5 +1,6 @@
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using Serilog;
 using SuavoAgent.Contracts.Discovery;
@@ -10,6 +11,41 @@ using SuavoAgent.Helper.Vision;
 using SuavoAgent.Helper.Workflows;
 
 namespace SuavoAgent.Helper;
+
+internal static class ProcessImageInterop
+{
+    // Same fix as IpcPipeServer.cs — MainModule needs PROCESS_VM_READ which fails
+    // crossing user/SYSTEM security tokens. QueryFullProcessImageNameW only needs
+    // PROCESS_QUERY_LIMITED_INFORMATION and works across boundaries.
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, [Out] StringBuilder lpExeName, ref uint lpdwSize);
+
+    public static string? Get(uint processId)
+    {
+        var hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+        if (hProcess == IntPtr.Zero) return null;
+        try
+        {
+            var sb = new StringBuilder(1024);
+            uint size = (uint)sb.Capacity;
+            return QueryFullProcessImageNameW(hProcess, 0, sb, ref size) ? sb.ToString() : null;
+        }
+        finally
+        {
+            CloseHandle(hProcess);
+        }
+    }
+}
 
 /// <summary>
 /// Helper-side command server. Core connects to this pipe to push commands
@@ -313,15 +349,20 @@ public sealed class IpcCommandServer : IDisposable
                 return false;
             }
 
-            string? clientPath;
-            try
+            // QueryFullProcessImageName works across user/SYSTEM security tokens;
+            // MainModule fallback for non-Windows or quirks.
+            var clientPath = ProcessImageInterop.Get(clientPid);
+            if (string.IsNullOrEmpty(clientPath))
             {
-                clientPath = clientProc.MainModule?.FileName;
-            }
-            catch (Exception ex)
-            {
-                _logger.Warning(ex, "IpcCommandServer: MainModule unreadable for PID {Pid} — rejecting", clientPid);
-                return false;
+                try
+                {
+                    clientPath = clientProc.MainModule?.FileName;
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning(ex, "IpcCommandServer: process image path unreadable for PID {Pid} — rejecting", clientPid);
+                    return false;
+                }
             }
 
             if (string.IsNullOrEmpty(clientPath))

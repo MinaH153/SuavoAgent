@@ -1,5 +1,6 @@
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using SuavoAgent.Contracts.Ipc;
 
@@ -7,6 +8,43 @@ namespace SuavoAgent.Core.Ipc;
 
 public sealed class IpcPipeServer : IDisposable
 {
+    // PROCESS_QUERY_LIMITED_INFORMATION (0x1000) is the minimum-privilege flag
+    // for OpenProcess that allows QueryFullProcessImageName. Critically, it
+    // does NOT require PROCESS_VM_READ (which clientProc.MainModule does), so
+    // Core (running as SYSTEM) can read Helper.exe's image path even when
+    // Helper runs as the interactive user with a restricted process token.
+    // Caught at Nadim's pharmacy 2026-04-25 — Helper observations were being
+    // rejected at IPC peer-validation because MainModule threw Access Denied
+    // crossing SYSTEM->user security boundary, blocking all UIA captures.
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, [Out] StringBuilder lpExeName, ref uint lpdwSize);
+
+    private static string? GetProcessImagePath(uint processId)
+    {
+        var hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+        if (hProcess == IntPtr.Zero) return null;
+        try
+        {
+            var sb = new StringBuilder(1024);
+            uint size = (uint)sb.Capacity;
+            return QueryFullProcessImageNameW(hProcess, 0, sb, ref size) ? sb.ToString() : null;
+        }
+        finally
+        {
+            CloseHandle(hProcess);
+        }
+    }
+
     private readonly string _pipeName;
     private readonly ILogger<IpcPipeServer> _logger;
     private readonly Func<IpcRequest, Task<IpcResponse>> _handler;
@@ -63,18 +101,26 @@ public sealed class IpcPipeServer : IDisposable
                         }
 
                         // Verify executable path is under the SuavoAgent install directory (anti-spoofing).
-                        // Fail-closed: if MainModule cannot be read, reject — a cross-arch or ACL-denied
+                        // Use QueryFullProcessImageName instead of clientProc.MainModule because the
+                        // latter requires PROCESS_VM_READ which SYSTEM->user-context process boundaries
+                        // routinely block. QueryFullProcessImageName only needs PROCESS_QUERY_LIMITED_INFORMATION
+                        // and works the same across security tokens — caught at Nadim's 2026-04-25.
+                        // Fail-closed: if path still cannot be read, reject — a cross-arch or ACL-denied
                         // binary is exactly the shape an attacker would wear.
-                        string? clientPath;
-                        try
+                        var clientPath = GetProcessImagePath(clientPid);
+                        if (string.IsNullOrEmpty(clientPath))
                         {
-                            clientPath = clientProc.MainModule?.FileName;
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning(ex, "IPC: MainModule unreadable for PID {Pid} — rejecting", clientPid);
-                            pipe.Disconnect();
-                            continue;
+                            // Fallback to MainModule for non-Windows or other quirks.
+                            try
+                            {
+                                clientPath = clientProc.MainModule?.FileName;
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "IPC: process image path unreadable for PID {Pid} — rejecting", clientPid);
+                                pipe.Disconnect();
+                                continue;
+                            }
                         }
 
                         if (string.IsNullOrEmpty(clientPath))
