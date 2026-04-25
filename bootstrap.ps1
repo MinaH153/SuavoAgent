@@ -899,7 +899,7 @@ if ($installTokenPlain -and -not $ApiKey) {
     try {
         $machineName = [System.Net.Dns]::GetHostName()
         $registerBody = @{
-            licenseKey = ""  # Install-token flow doesn't need licenseKey
+            licenseKey = "0000000000"  # Token flow ignores NPI; server validates /^\d{10}$/, so use the documented placeholder
             installToken = $installTokenPlain
             machineName = $machineName
             machineFingerprint = $fingerprint
