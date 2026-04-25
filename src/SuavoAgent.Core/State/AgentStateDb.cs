@@ -2743,6 +2743,16 @@ public sealed class AgentStateDb : IDisposable
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
+    public int GetWorkflowTemplateCount(string? skillId = null)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = skillId is null
+            ? "SELECT COUNT(*) FROM workflow_templates WHERE retired_at IS NULL"
+            : "SELECT COUNT(*) FROM workflow_templates WHERE retired_at IS NULL AND skill_id = @skill";
+        if (skillId is not null) cmd.Parameters.AddWithValue("@skill", skillId);
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
     public int GetRoutinesWithWritebackCount(string sessionId)
     {
         using var cmd = _conn.CreateCommand();

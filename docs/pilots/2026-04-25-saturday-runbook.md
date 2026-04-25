@@ -1,118 +1,123 @@
-# Saturday 2026-04-25 — Runbook for Joshua at Nadim's
+# Saturday 2026-04-25 - Trip A Runbook for Nadim
 
-> Pragmatic cheat sheet. Keep open on phone during the pilot.
+Decision: ship `v3.13.9` live observe-only. This is not a demo and not a
+`latest` install. The agent installs on Nadim's workstation, heartbeats to cloud,
+captures encrypted UIA learning counters, and generates no rules, execution, or
+writeback.
 
-Full day-of context: `~/.claude/projects/-Users-joshuahenein/memory/nadim-pilot-flip-saturday-2026-04-25.md`
+## Pre-drive Gates
 
----
+- GitHub release exists: `gh release list --repo MinaH153/SuavoAgent --limit 10`
+  must show `v3.13.9`.
+- Legal: Nadim signs `docs/pilots/nadim-shadow-learning-addendum.md` before
+  `Agent.LearningMode=true` or `Agent.TemplateLearning.Enabled=true`.
+- Cloud migration applied:
+  `supabase/migrations/20260425040000_agent_config_overrides_audit.sql`.
+- Heartbeat cloud view shows these fields after staging smoke:
+  `learning_mode`, `template_learning`, `behavioral_event_count`,
+  `tree_snapshot_count`, `interaction_event_count`, `vision`, `receipt_only_mode`,
+  and `writeback_engine_enabled`.
+- Remote decommission smoke: queue signed `decommission` through
+  `/api/agent/commands`; do not use `config_json.decommission`.
+- Backup laptop demo works before driving, but only as abort path.
 
-## Before leaving Bakersfield (Fri evening or Sat morning)
+## Field Precheck
 
-### Option A: v3.13.7 + Watchdog (recommended if smoke test green)
+Run as elevated PowerShell:
 
-- [ ] On your Windows PC, run the v3.13.7 smoke test:
-      ```powershell
-      Set-ExecutionPolicy Bypass -Scope Process -Force
-      irm "https://raw.githubusercontent.com/MinaH153/SuavoAgent/main/bootstrap.ps1?v=$(Get-Random)" | iex
-      ```
-- [ ] Verify 3 services RUNNING: `sc query SuavoAgent.Core`, `.Broker`, `.Watchdog`
-- [ ] Simulate failure: `taskkill /IM SuavoAgent.Core.exe /F` — verify Watchdog restarts Core within 60-90s (check log at `C:\ProgramData\SuavoAgent\logs\watchdog-*.log`)
-- [ ] If all green → stage `SuavoSetup.exe` from `%USERPROFILE%\Downloads` onto USB
-
-### Option B: v3.13.0 + OTA path (fallback)
-
-- [ ] Download `SuavoSetup-v3.13.0.exe` from https://github.com/MinaH153/SuavoAgent/releases/tag/v3.13.0
-- [ ] Stage on USB
-
-### Generating v3.13.7 OTA manifest (only if Option A + OTA desired)
-
-The v3.13.7 release ships without an OTA manifest. If you want OTA path
-with v3.13.7 (vs USB install), generate + upload:
-
-```bash
-cd ~/Code/SuavoAgent
-./scripts/generate-ota-manifest.sh 3.13.7
-# Uploads update-manifest-v3.13.7.txt + .sig to the GitHub release
+```powershell
+whoami /groups | findstr /i "S-1-5-32-544"
+Test-NetConnection raw.githubusercontent.com -Port 443
+Test-NetConnection github.com -Port 443
+Test-NetConnection suavollc.com -Port 443
+Get-ScheduledTask | ? { $_.TaskName -like "*SuavoAgent*" }
+Test-Path C:\SuavoAgent
 ```
 
-Requires `~/.suavo/update-signing-p256.pem` (signing key) + `gh` CLI auth'd
-as MinaH153 (use `GH_TOKEN=$(security find-internet-password -s github.com -w)`
-prefix if gh is on wrong account).
+Abort before install if admin elevation is unavailable or `suavollc.com:443`
+is blocked. Bootstrap quarantines `C:\SuavoAgent` and legacy scheduled tasks,
+but confirm before it runs.
 
-All future releases auto-generate the manifest via the CI workflow change
-shipped in commit `689c451`.
+## Baseline Metrics
 
----
+Before install, time three PioneerRx actions:
 
-## At Nadim's (PIONEER10)
+- Open Rx queue.
+- Search by NDC.
+- Print label.
 
-Follow `~/.claude/projects/-Users-joshuahenein/memory/nadim-pilot-flip-saturday-2026-04-25.md`
-section-by-section. The verified IDs to use:
+Accept only if post-install p50 latency is less than `+20%`, idle CPU is less
+than `+5pp`, and agent RAM is less than `+200 MB`.
 
-| Field | Value |
-|---|---|
-| agent_id | `959ee574-3f1c-44e4-887e-e9cfed555267` |
-| pharmacy_id (FOR CONFIG OVERRIDE) | `3101283d-cbb5-4667-bc7c-254a4a7f9c88` |
-| machine_name | `PIONEER10` |
-| Operator UUID (for `updated_by`) | `ff71ef3f-8467-4c24-85df-a71cb6a2205d` |
+## Install
 
-### The v3.12 template flip (step 5 of day-of plan)
+Use a pinned release and no token literal in shell history:
 
-Paste-ready SQL for step 5 of the pilot-flip:
-
-```sql
-INSERT INTO agent_config_overrides (pharmacy_id, config_path, config_value, updated_by, updated_at)
-VALUES
-  ('3101283d-cbb5-4667-bc7c-254a4a7f9c88', 'Learning.Template.Enabled',          'true'::jsonb,                 'ff71ef3f-8467-4c24-85df-a71cb6a2205d', now()),
-  ('3101283d-cbb5-4667-bc7c-254a4a7f9c88', 'Learning.Template.SkillId',          '"learned"'::jsonb,            'ff71ef3f-8467-4c24-85df-a71cb6a2205d', now()),
-  ('3101283d-cbb5-4667-bc7c-254a4a7f9c88', 'Learning.Template.ProcessNameGlob',  '"PioneerPharmacy*"'::jsonb,   'ff71ef3f-8467-4c24-85df-a71cb6a2205d', now());
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
+irm "https://raw.githubusercontent.com/MinaH153/SuavoAgent/v3.13.9/bootstrap.ps1" -OutFile $env:TEMP\suavo-bootstrap.ps1
+& $env:TEMP\suavo-bootstrap.ps1 -ReleaseTag v3.13.9
 ```
 
-### Rollback (if trouble)
+Paste the one-time install token only into the hidden prompt.
 
-```sql
--- Path 1: disable template extraction (keep row, flip value)
-UPDATE agent_config_overrides
-SET config_value = 'false'::jsonb,
-    updated_at = now(),
-    updated_by = 'ff71ef3f-8467-4c24-85df-a71cb6a2205d'
-WHERE pharmacy_id = '3101283d-cbb5-4667-bc7c-254a4a7f9c88'
-  AND config_path = 'Learning.Template.Enabled';
+Acceptance:
 
--- Path 2: hard reset — delete all template overrides
-DELETE FROM agent_config_overrides
-WHERE pharmacy_id = '3101283d-cbb5-4667-bc7c-254a4a7f9c88'
-  AND config_path LIKE 'Learning.Template.%';
+- Signed checksum passes.
+- `SuavoAgent.Core`, `SuavoAgent.Broker`, and `SuavoAgent.Watchdog` running.
+- Heartbeat lands within 60 seconds.
+- Cloud version exactly `3.13.9`.
+- `%ProgramData%\SuavoAgent\vision.json` absent or `Enabled=false`.
+- `%ProgramData%\SuavoAgent\state.db` magic header is not `SQLite format 3`.
+- No raw screenshots, OCR text, or screen captures under `%ProgramData%\SuavoAgent`.
+- Watchdog kill test restarts Core within 60-90 seconds.
+
+## Tier 0 Flip
+
+Only after every gate above passes:
+
+1. POST these overrides to `/api/admin/agent-config-overrides` (admin auth + CSRF). The audit trigger rejects writes missing `updated_by` with `23502`:
+
+```text
+Agent.LearningMode = true
+Agent.TemplateLearning.Enabled = true
+Agent.TemplateLearning.Mode = "capture"
+Agent.TemplateLearning.SkillId = "nadim-pioneer-shadow"
+Agent.TemplateLearning.ProcessNameGlob = "PioneerPharmacy*"
+Agent.TemplateLearning.RuleGeneration = false
+Agent.TemplateLearning.AutoApproveOnFingerprintMatch = false
+Agent.AutoExecution.Enabled = false
+Agent.AutoExecution.RequireConfirmation = true
+Agent.AutoExecution.WritebackEnabled = false
+Agent.FleetFeatures.SchemaAdaptation = false
+Agent.ReceiptOnlyMode = true
+MissionLoop.Phase1.Enabled = false
 ```
 
-Next ConfigSyncWorker poll (≤5 min) applies the rollback.
+2. Restart `SuavoAgent.Core`. `LearningWorker`, `WritebackProcessor`, `ActionVerifier`, and `MissionExecutor` consume `IOptions<AgentOptions>` — frozen at DI construction. `ConfigSyncWorker` writes `config-overrides.json` to disk but the workers do not auto-reload. A restart is the only path to apply the new values. Watchdog restarts Core within 60-90s:
 
-### OTA downgrade (if v3.13.x has field regression)
+```powershell
+taskkill /IM SuavoAgent.Core.exe /F
+```
 
-v3.12.0 release artifacts + signed manifest are still live on GitHub:
-https://github.com/MinaH153/SuavoAgent/releases/tag/v3.12.0
+3. Confirm via heartbeat within 60s: cloud agent panel reflects `learning_mode=true`, `template_learning.mode="capture"`. Within 30 minutes of PioneerRx interaction, capture event counters go non-zero. If counters stay at zero, `ProcessNameGlob` isn't matching — debug onsite, do not promote to Tier 1.
 
-Queue signed OTA downgrade command from fleet dashboard or via direct
-`agent_commands` insert pointing at `update-manifest-v3.12.0.txt` + `.sig`.
+## Abort Rules
 
----
+No flip if any of these happen:
 
-## Post-pilot (Sun–Tue)
+- Signed checksum mismatch.
+- No admin elevation.
+- `suavollc.com:443` blocked.
+- Heartbeat missing after 60 seconds.
+- Version not exactly `3.13.9`.
+- Encrypted DB proof fails.
+- Vision enabled or screenshots/OCR artifacts exist.
+- Watchdog kill test fails.
+- PioneerRx slowdown exceeds thresholds.
+- Audit trigger, heartbeat fields, BAA/addendum, or decommission path are not live.
 
-- Check cockpit daily — first WorkflowTemplate expected in 24-72h
-- First Template appears in `/pharmacy/agent/approvals` as Pending
-- Do NOT transition to Shadow until ≥10 shadow-runs with 0 mismatches
-  (UI enforces this, worth knowing)
+Rollback:
 
----
-
-## Non-blocking post-Saturday work ready to kick off
-
-If pilot stable for 72h:
-- Phase 0 invariants → lock v0.1 to v1.0 (Codex review + Joshua sign-off)
-- Phase A code kicks off week of May 5 per `docs/self-healing/phase-a-architecture.md` §Phase A kickoff tasks
-
-If pilot has issues:
-- Execute rollback path
-- Post-mortem in `docs/self-healing/incidents/2026-04-25-nadim-pilot-postmortem.md`
-- Update `action-grammar-v1.md` with whatever the pilot taught us
+- Soft: set Tier 0 flags false, audit row fires, restart Core.
+- Hard: signed two-phase `decommission` command, local archive ACK, then uninstall.

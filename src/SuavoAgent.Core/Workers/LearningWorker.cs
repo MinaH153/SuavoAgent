@@ -473,10 +473,9 @@ public sealed class LearningWorker : BackgroundService
     }
 
     /// <summary>
-    /// v3.12 — runs <see cref="WorkflowTemplateExtractor"/> then
-    /// <see cref="TemplateRuleGenerator"/>. Never throws; a failure is logged
-    /// and the phase loop continues. Flag-gated on
-    /// <c>TemplateLearning.Enabled</c>.
+    /// Runs <see cref="WorkflowTemplateExtractor"/> and, only outside capture
+    /// mode with RuleGeneration explicitly enabled, <see cref="TemplateRuleGenerator"/>.
+    /// Never throws; a failure is logged and the phase loop continues.
     /// </summary>
     private void TryExtractAndEmitTemplates()
     {
@@ -497,12 +496,22 @@ public sealed class LearningWorker : BackgroundService
                 thresholds);
             var extracted = extractor.ExtractAndPersist();
 
-            var rulesRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "SuavoAgent", "rules", "auto");
-            var generator = new TemplateRuleGenerator(_db, rulesRoot,
-                _sp.GetRequiredService<ILogger<TemplateRuleGenerator>>());
-            var emitted = generator.EmitPendingRules();
+            var emitted = 0;
+            if (ShouldEmitTemplateRules(opts))
+            {
+                var rulesRoot = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    "SuavoAgent", "rules", "auto");
+                var generator = new TemplateRuleGenerator(_db, rulesRoot,
+                    _sp.GetRequiredService<ILogger<TemplateRuleGenerator>>());
+                emitted = generator.EmitPendingRules();
+            }
+            else if (extracted.Count > 0)
+            {
+                _logger.LogInformation(
+                    "TemplateLearning: capture-only mode skipped rule emission (mode={Mode}, ruleGeneration={RuleGeneration})",
+                    opts.Mode, opts.RuleGeneration);
+            }
 
             if (extracted.Count > 0 || emitted > 0)
             {
@@ -516,6 +525,11 @@ public sealed class LearningWorker : BackgroundService
             _logger.LogWarning(ex, "TemplateLearning tick failed — continuing");
         }
     }
+
+    internal static bool ShouldEmitTemplateRules(TemplateLearningOptions options) =>
+        options.Enabled
+        && options.RuleGeneration
+        && !string.Equals(options.Mode, "capture", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Builds a best-effort <see cref="PmsVersionFingerprint"/> for the

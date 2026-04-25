@@ -68,13 +68,18 @@ public sealed class AgentOptions
     public ReasoningOptions Reasoning { get; set; } = new();
 
     /// <summary>
-    /// v3.12 — autonomous workflow template extraction. Enabled=false by
-    /// default; pilot pharmacies opt in. When enabled, LearningWorker runs
-    /// WorkflowTemplateExtractor + TemplateRuleGenerator on pattern/model
-    /// phase cadence and emits YAML rules to the auto/ directory with
-    /// autonomousOk=false (operator approval required).
+    /// Autonomous workflow template extraction. Enabled=false by default; pilot
+    /// pharmacies opt in. Enabled capture mode records encrypted observations
+    /// and counters only. Rule emission requires TemplateLearning.RuleGeneration
+    /// plus a non-capture mode.
     /// </summary>
     public TemplateLearningOptions TemplateLearning { get; set; } = new();
+
+    /// <summary>
+    /// Global execution brake. Defaults to observe-only: no autonomous actions,
+    /// confirmations required, and no PMS writeback.
+    /// </summary>
+    public AutoExecutionOptions AutoExecution { get; set; } = new();
 
     /// <summary>
     /// v3.12 — Fleet Schema Canary propagation. Enabled=false by default
@@ -124,4 +129,11 @@ public sealed class PharmacyConfig
     public string? SqlUser { get; set; }
     public string? SqlPassword { get; set; }
     public bool Enabled { get; set; } = true;
+}
+
+public sealed class AutoExecutionOptions
+{
+    public bool Enabled { get; set; } = false;
+    public bool RequireConfirmation { get; set; } = true;
+    public bool WritebackEnabled { get; set; } = false;
 }

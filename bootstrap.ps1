@@ -24,7 +24,7 @@ param(
     # bootstrap calls /api/agent/register to exchange it for a pharmacy-scoped
     # API key + pharmacy id instead of requiring them up-front. This is the
     # path used by the dashboard onboarding flow.
-    [string]$InstallToken,
+    [object]$InstallToken,
     [string]$CloudUrl = "https://suavollc.com",
     [switch]$LearningMode,
     # Empty = auto-resolve the latest published release via the GitHub API.
@@ -46,6 +46,20 @@ Start-Transcript -Path $transcriptPath -Force | Out-Null
 $ErrorActionPreference = "Stop"
 $installDir = "C:\Program Files\Suavo\Agent"
 $dataDir = "$env:ProgramData\SuavoAgent"
+
+function ConvertTo-PlainTextSecret {
+    param([object]$Secret)
+    if ($null -eq $Secret) { return $null }
+    if ($Secret -is [System.Security.SecureString]) {
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secret)
+        try {
+            return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        } finally {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+    }
+    return [string]$Secret
+}
 
 # ============================================
 # IDEMPOTENT CLEANUP — runs before consent so a single
@@ -92,6 +106,40 @@ function Invoke-PriorInstallCleanup {
     }
     Write-Host "  Cleanup complete — proceeding with fresh install" -ForegroundColor Green
     Write-Host ""
+}
+
+function Invoke-LegacyNodeAgentQuarantine {
+    $legacyDir = "C:\SuavoAgent"
+    if (Test-Path $legacyDir) {
+        $suffix = Get-Date -Format "yyyyMMdd-HHmmss"
+        $target = "C:\SuavoAgent.quarantine-$suffix"
+        Write-Host "  Legacy Node-era install detected at $legacyDir — quarantining to $target" -ForegroundColor Yellow
+        try {
+            Rename-Item -Path $legacyDir -NewName ("SuavoAgent.quarantine-$suffix") -ErrorAction Stop
+        } catch {
+            Write-Host "    Could not quarantine $legacyDir: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    try {
+        $tasks = Get-ScheduledTask -ErrorAction Stop | Where-Object {
+            $_.TaskName -like "*SuavoAgent*" -or
+            ($_.Actions | Where-Object {
+                ($_.Execute -match "node|powershell|pwsh") -and
+                (($_.Arguments -match "SuavoAgent") -or ($_.Execute -match "SuavoAgent"))
+            })
+        }
+        foreach ($task in $tasks) {
+            Write-Host "  Quarantining legacy scheduled task $($task.TaskPath)$($task.TaskName)" -ForegroundColor Yellow
+            try {
+                Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop
+            } catch {
+                Write-Host "    Could not remove task $($task.TaskName): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    } catch {
+        Write-Host "  Scheduled task scan skipped: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
 }
 
 if ($Repair) {
@@ -160,6 +208,8 @@ if ($Repair) {
     exit 0
 }
 
+Invoke-LegacyNodeAgentQuarantine
+
 if (Test-PriorInstall) {
     Invoke-PriorInstallCleanup
 }
@@ -211,12 +261,10 @@ if (-not $isAdmin) {
     exit 1
 }
 
-# -- Learning mode prompt (if not explicitly set via flag) --
-if (-not $PSBoundParameters.ContainsKey('LearningMode')) {
-    $lmResponse = Read-Host "Enable learning mode? (30-day observation before automation) [y/N]"
-    if ($lmResponse -eq 'y' -or $lmResponse -eq 'Y') {
-        $LearningMode = [switch]::new($true)
-    }
+# -- Learning mode is never enabled by installer prompt. It is a post-install
+# audited config flip because observing PioneerRx can touch PHI-rendering UI.
+if ($PSBoundParameters.ContainsKey('LearningMode') -and [bool]$LearningMode) {
+    Write-Warn "Learning mode requested at install time. Confirm BAA/addendum is signed before proceeding."
 }
 
 Write-Host ""
@@ -840,13 +888,19 @@ Write-Step "Phase 4: Writing configuration"
 $fingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
 
 # -- Register with cloud via install token (dashboard onboarding path) --
-if ($InstallToken -and -not $ApiKey) {
+if (-not $InstallToken -and -not $ApiKey) {
+    Write-Step "Install token required for cloud registration"
+    $InstallToken = Read-Host "Paste one-time Suavo install token" -AsSecureString
+}
+
+$installTokenPlain = ConvertTo-PlainTextSecret $InstallToken
+if ($installTokenPlain -and -not $ApiKey) {
     Write-Step "Registering agent with cloud using install token..."
     try {
         $machineName = [System.Net.Dns]::GetHostName()
         $registerBody = @{
             licenseKey = ""  # Install-token flow doesn't need licenseKey
-            installToken = $InstallToken
+            installToken = $installTokenPlain
             machineName = $machineName
             machineFingerprint = $fingerprint
             agentVersion = $ReleaseTag.TrimStart('v')
@@ -866,6 +920,9 @@ if ($InstallToken -and -not $ApiKey) {
     } catch {
         Write-Fail "Registration failed: $($_.Exception.Message)"
         exit 1
+    } finally {
+        $installTokenPlain = $null
+        $InstallToken = $null
     }
 }
 
@@ -882,6 +939,26 @@ $config = @{
         SqlServer = $sqlServer
         SqlDatabase = $sqlDatabase
         LearningMode = [bool]$LearningMode
+        ReceiptOnlyMode = $true
+        TemplateLearning = @{
+            Enabled = $false
+            Mode = "capture"
+            SkillId = "learned"
+            ProcessNameGlob = "PioneerPharmacy*"
+            RuleGeneration = $false
+            AutoApproveOnFingerprintMatch = $false
+        }
+        AutoExecution = @{
+            Enabled = $false
+            RequireConfirmation = $true
+            WritebackEnabled = $false
+        }
+        Vision = @{
+            Enabled = $false
+        }
+        FleetFeatures = @{
+            SchemaAdaptation = $false
+        }
     }
 }
 if ($sqlUser) {

@@ -222,6 +222,24 @@ public sealed class HeartbeatWorker : BackgroundService
 
                 var pendingWbCount = _stateDb.GetPendingWritebacks().Count;
                 var failedWbCount = _stateDb.GetFailedWritebackCount();
+                var memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
+                var writebackEngineEnabled = rxWorker?.WritebackEngine?.WritebackEnabled ?? false;
+                var learningSessionId = string.IsNullOrWhiteSpace(_options.PharmacyId)
+                    ? null
+                    : _stateDb.GetActiveSessionId(_options.PharmacyId);
+                var behavioralEventCount = learningSessionId is null
+                    ? 0
+                    : _stateDb.GetBehavioralEventCount(learningSessionId);
+                var treeSnapshotCount = learningSessionId is null
+                    ? 0
+                    : _stateDb.GetBehavioralEventCount(learningSessionId, "treesnapshot");
+                var interactionEventCount = learningSessionId is null
+                    ? 0
+                    : _stateDb.GetBehavioralEventCount(learningSessionId, "interaction");
+                var learnedRoutineCount = learningSessionId is null
+                    ? 0
+                    : _stateDb.GetLearnedRoutineCount(learningSessionId);
+                var workflowTemplateCount = _stateDb.GetWorkflowTemplateCount(_options.TemplateLearning.SkillId);
 
                 // v3.12.1.1 — upload local auto-rule approval state so the
                 // pharmacy portal UI (MKM #44) can render real rows. Cloud
@@ -253,14 +271,44 @@ public sealed class HeartbeatWorker : BackgroundService
                     updateChannel = _lastUpdateChannel ?? "stable",
                     machineFingerprint = _options.MachineFingerprint,
                     uptimeSeconds = (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
-                    memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
+                    memoryMb = memoryMb,
+                    memoryUsageMb = memoryMb,
                     status = "online",
                     pioneerrxStatus = sqlConnected ? "connected" : "not_connected",
                     // Top-level fields for cloud stats extraction
+                    learningMode = _options.LearningMode,
                     sqlConnected = sqlConnected,
                     pendingWritebackCount = pendingWbCount,
                     failedWritebackCount = failedWbCount,
                     rxReadyCount = _lastRxCount,
+                    receiptOnlyMode = _options.ReceiptOnlyMode,
+                    writebackEngineEnabled = writebackEngineEnabled,
+                    templateLearning = new
+                    {
+                        enabled = _options.TemplateLearning.Enabled,
+                        mode = _options.TemplateLearning.Mode,
+                        ruleGeneration = _options.TemplateLearning.RuleGeneration,
+                        skillId = _options.TemplateLearning.SkillId,
+                        processNameGlob = _options.TemplateLearning.ProcessNameGlob,
+                        autoApproveOnFingerprintMatch = _options.TemplateLearning.AutoApproveOnFingerprintMatch,
+                        sessionId = learningSessionId,
+                        behavioralEventCount = behavioralEventCount,
+                        treeSnapshotCount = treeSnapshotCount,
+                        interactionEventCount = interactionEventCount,
+                        learnedRoutineCount = learnedRoutineCount,
+                        workflowTemplateCount = workflowTemplateCount,
+                    },
+                    autoExecution = new
+                    {
+                        enabled = _options.AutoExecution.Enabled,
+                        requireConfirmation = _options.AutoExecution.RequireConfirmation,
+                        writebackEnabled = _options.AutoExecution.WritebackEnabled,
+                    },
+                    vision = new
+                    {
+                        enabled = _options.Vision.Enabled,
+                        tesseractEnabled = _options.Vision.Tesseract.Enabled,
+                    },
                     sql = new
                     {
                         connected = sqlConnected,
@@ -276,7 +324,7 @@ public sealed class HeartbeatWorker : BackgroundService
                         pending = pendingWbCount,
                         failed = failedWbCount,
                         receiptOnlyMode = _options.ReceiptOnlyMode,
-                        writebackEngineEnabled = rxWorker?.WritebackEngine?.WritebackEnabled ?? false,
+                        writebackEngineEnabled = writebackEngineEnabled,
                     },
                     audit = new
                     {
@@ -537,6 +585,14 @@ public sealed class HeartbeatWorker : BackgroundService
         try
         {
             var agentId = _options.AgentId ?? "";
+            var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+            var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+            async Task AckAsync(bool ok, object? result, string? err)
+            {
+                if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+                await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+            }
 
             // Phase 1: first decommission command — enter pending state
             if (_decommissionPendingSince == null)
@@ -552,6 +608,7 @@ public sealed class HeartbeatWorker : BackgroundService
                 _logger.LogInformation("Decommission phase 1: confirmation token generated and stored locally");
 
                 _logger.LogWarning("DECOMMISSION phase 1 — awaiting confirmation (5+ min)");
+                await AckAsync(true, new { phase = "pending_confirmation", minWaitSeconds = 300 }, null);
                 return;
             }
 
@@ -560,6 +617,7 @@ public sealed class HeartbeatWorker : BackgroundService
             if (elapsed < TimeSpan.FromMinutes(5))
             {
                 _logger.LogInformation("Decommission phase 2 too early ({Elapsed}) — waiting", elapsed);
+                await AckAsync(false, new { phase = "pending_confirmation" }, "decommission confirmation window not elapsed");
                 return;
             }
 
@@ -585,21 +643,23 @@ public sealed class HeartbeatWorker : BackgroundService
             {
                 _logger.LogWarning("Decommission BLOCKED — archive upload failed or ACK mismatch");
                 _decommissionPendingSince = null;
+                await AckAsync(false, null, "archive upload failed or ACK mismatch");
                 return;
             }
 
             // Require confirmation token generated during phase 1 (random, locally stored)
-            var dataEl = scEl.TryGetProperty("data", out var d2) ? d2 : scEl;
             var confirmToken = dataEl.TryGetProperty("confirmationToken", out var ctok) ? ctok.GetString() : null;
             if (string.IsNullOrEmpty(confirmToken))
             {
                 _logger.LogWarning("Decommission phase 2 rejected — missing confirmationToken");
+                await AckAsync(false, new { phase = "archive_acknowledged", archiveId = ack.ArchiveId }, "missing confirmationToken");
                 return;
             }
             var expectedToken = _stateDb.GetConfigValue("decommission_confirm_token");
             if (string.IsNullOrEmpty(expectedToken) || !confirmToken.Equals(expectedToken, StringComparison.Ordinal))
             {
                 _logger.LogWarning("Decommission phase 2 rejected — invalid confirmationToken");
+                await AckAsync(false, new { phase = "archive_acknowledged", archiveId = ack.ArchiveId }, "invalid confirmationToken");
                 return;
             }
             _logger.LogInformation("Decommission confirmation token validated");
@@ -607,6 +667,7 @@ public sealed class HeartbeatWorker : BackgroundService
             _stateDb.AppendChainedAuditEntry(new AuditEntry(
                 agentId, "decommission", "DecommissionPending", "Decommissioned", "decommission_phase2"));
             _logger.LogWarning("Audit archived (id={ArchiveId}) — removing agent", ack.ArchiveId);
+            await AckAsync(true, new { phase = "decommissioned", archiveId = ack.ArchiveId }, null);
 
             // Proceed with cleanup
             if (OperatingSystem.IsWindows())

@@ -17,10 +17,12 @@ namespace SuavoAgent.Core.Reasoning;
 /// 3. Parameters for the action type are structurally valid.
 /// 4. Confidence ≥ the class threshold (spec floor: 0.98 destructive, 0.85
 ///    read-only). Model-reported confidence alone doesn't authorize — see #5.
-/// 5. If the proposal is destructive AND ReasoningOptions.AutoExecuteTier2Destructive
+/// 5. Production auto-execution must pass Agent.AutoExecution gates. If
+///    AutoExecution.Enabled=false or RequireConfirmation=true, executable
+///    actions are routed to operator approval.
+/// 6. If the proposal is destructive AND ReasoningOptions.AutoExecuteTier2Destructive
 ///    is false (default), the outcome is OperatorApprovalRequired regardless
-///    of confidence. Model self-reported confidence is not trusted as a
-///    deterministic signal (Codex M-4).
+///    of confidence. Model self-reported confidence is not trusted.
 /// </summary>
 public sealed class ActionVerifier
 {
@@ -56,17 +58,26 @@ public sealed class ActionVerifier
         };
 
     private readonly bool _autoExecuteDestructive;
+    private readonly bool _enforceAutoExecutionGate;
+    private readonly bool _autoExecutionEnabled;
+    private readonly bool _autoExecutionRequiresConfirmation;
 
     public ActionVerifier() : this(autoExecuteDestructive: false) { }
 
     public ActionVerifier(bool autoExecuteDestructive)
     {
         _autoExecuteDestructive = autoExecuteDestructive;
+        _autoExecutionEnabled = true;
+        _autoExecutionRequiresConfirmation = false;
     }
 
     public ActionVerifier(IOptions<AgentOptions> agentOptions)
     {
-        _autoExecuteDestructive = agentOptions.Value.Reasoning.AutoExecuteTier2Destructive;
+        var options = agentOptions.Value;
+        _enforceAutoExecutionGate = true;
+        _autoExecutionEnabled = options.AutoExecution.Enabled;
+        _autoExecutionRequiresConfirmation = options.AutoExecution.RequireConfirmation;
+        _autoExecuteDestructive = options.Reasoning.AutoExecuteTier2Destructive;
     }
 
     public VerificationResult Verify(InferenceProposal proposal, InferenceRequest request)
@@ -129,7 +140,29 @@ public sealed class ActionVerifier
             };
         }
 
-        // --- 5. Destructive policy — no auto-execute by default (Codex M-4) ----
+        // --- 5. Production auto-execution brake -------------------------------
+        if (_enforceAutoExecutionGate && IsExecutableAction(proposal.Action.Type))
+        {
+            if (!_autoExecutionEnabled)
+            {
+                return new VerificationResult
+                {
+                    Outcome = VerificationOutcome.OperatorApprovalRequired,
+                    Reason = "Agent.AutoExecution.Enabled=false",
+                };
+            }
+
+            if (_autoExecutionRequiresConfirmation)
+            {
+                return new VerificationResult
+                {
+                    Outcome = VerificationOutcome.OperatorApprovalRequired,
+                    Reason = "Agent.AutoExecution.RequireConfirmation=true",
+                };
+            }
+        }
+
+        // --- 6. Destructive policy — no auto-execute by default (Codex M-4) ----
         // Model-reported confidence is not a trust signal. Until we have
         // deterministic calibration (pattern miner + observed-outcome feedback),
         // destructive Tier-2 proposals go to the operator queue.
@@ -149,6 +182,16 @@ public sealed class ActionVerifier
             Reason = $"Proposal approved (confidence {proposal.Confidence:F2} ≥ {threshold:F2})",
         };
     }
+
+    private static bool IsExecutableAction(RuleActionType type) => type switch
+    {
+        RuleActionType.Click => true,
+        RuleActionType.Type => true,
+        RuleActionType.PressKey => true,
+        RuleActionType.VerifyElement => true,
+        RuleActionType.WaitForElement => true,
+        _ => false,
+    };
 
     /// <summary>
     /// Extracts the target element name from an action's parameters, if any.

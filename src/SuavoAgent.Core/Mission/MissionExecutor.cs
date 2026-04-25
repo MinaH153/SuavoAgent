@@ -1,6 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using SuavoAgent.Core.ActionGrammarV1;
 using SuavoAgent.Core.Audit;
+using SuavoAgent.Core.Config;
 
 namespace SuavoAgent.Core.Mission;
 
@@ -15,12 +17,18 @@ public sealed class MissionExecutor
 {
     private readonly VerbDispatcher _dispatcher;
     private readonly IReadOnlyDictionary<string, IVerb> _verbsByName;
+    private readonly AutoExecutionOptions _autoExecution;
 
-    public MissionExecutor(VerbDispatcher dispatcher, IEnumerable<IVerb> verbs)
+    public MissionExecutor(
+        VerbDispatcher dispatcher,
+        IEnumerable<IVerb> verbs,
+        IOptions<AgentOptions>? agentOptions = null)
     {
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         ArgumentNullException.ThrowIfNull(verbs);
         _verbsByName = verbs.ToDictionary(v => v.Metadata.Name, StringComparer.Ordinal);
+        _autoExecution = agentOptions?.Value.AutoExecution
+            ?? new AutoExecutionOptions { Enabled = true, RequireConfirmation = false };
     }
 
     public async Task<MissionResult> RunAsync(
@@ -56,6 +64,29 @@ public sealed class MissionExecutor
 
         var stepResults = new List<VerbDispatchResult>(plan.Steps.Count);
         var stepOutputs = new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal);
+
+        if (!_autoExecution.Enabled || _autoExecution.RequireConfirmation)
+        {
+            var reason = !_autoExecution.Enabled
+                ? "Agent.AutoExecution.Enabled=false"
+                : "Agent.AutoExecution.RequireConfirmation=true";
+            audit.Append(
+                eventType: "mission.blocked_auto_execution",
+                actor: goal.RequestedBy,
+                subjectType: "mission",
+                subjectId: missionId,
+                metadata: new Dictionary<string, object?>
+                {
+                    ["goal_id"] = goal.GoalId,
+                    ["plan_id"] = plan.PlanId,
+                    ["reason"] = reason,
+                });
+            var completed = DateTimeOffset.UtcNow;
+            return AuditPlanFailure(
+                audit, goal, plan, missionId, startedAt, completed, stepResults,
+                reason: reason,
+                outcome: MissionOutcome.PlanFailed);
+        }
 
         foreach (var step in plan.Steps)
         {

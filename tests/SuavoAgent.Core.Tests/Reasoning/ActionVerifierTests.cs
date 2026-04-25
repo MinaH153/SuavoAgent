@@ -1,4 +1,6 @@
+using Microsoft.Extensions.Options;
 using SuavoAgent.Contracts.Reasoning;
+using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Reasoning;
 using Xunit;
 
@@ -62,6 +64,30 @@ public class ActionVerifierTests
             Request(visible: new[] { "Save" }));
 
         Assert.Equal(VerificationOutcome.Approved, result.Outcome);
+    }
+
+    [Fact]
+    public void Verify_ProductionAutoExecutionDisabled_RoutesToOperator()
+    {
+        var verifier = new ActionVerifier(Options.Create(new AgentOptions
+        {
+            AutoExecution = new AutoExecutionOptions
+            {
+                Enabled = false,
+                RequireConfirmation = true,
+            },
+            Reasoning = new ReasoningOptions
+            {
+                AutoExecuteTier2Destructive = true,
+            },
+        }));
+
+        var result = verifier.Verify(
+            Proposal(RuleActionType.Click, 0.99, ("name", "Save")),
+            Request(allowed: new[] { RuleActionType.Click }, visible: new[] { "Save" }));
+
+        Assert.Equal(VerificationOutcome.OperatorApprovalRequired, result.Outcome);
+        Assert.Contains("Agent.AutoExecution.Enabled=false", result.Reason);
     }
 
     // --- Destructive target-required (Codex C-3) ----------------------------
