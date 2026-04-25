@@ -89,6 +89,20 @@ function Invoke-PriorInstallCleanup {
             sc.exe delete $s 2>$null | Out-Null
         }
     }
+    # Helper.exe is a child process spawned by Core/Watchdog (NOT a Windows
+    # service), so service stops don't kill it. Without this, Phase 3 binary
+    # downloads fail with "file is being used by another process" because the
+    # running Helper holds a file lock on Helper.exe in $installDir.
+    # Caught at Nadim's pharmacy 2026-04-25 reinstall attempt.
+    try {
+        $orphans = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ProcessName -like "SuavoAgent.*"
+        }
+        foreach ($p in $orphans) {
+            Write-Host "    Killing orphan process $($p.ProcessName) (PID $($p.Id))" -ForegroundColor Yellow
+            try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { }
+        }
+    } catch { }
     # Wait a beat for SCM to release handles before removing the binaries.
     Start-Sleep -Seconds 2
     if (Test-Path $installDir) {
