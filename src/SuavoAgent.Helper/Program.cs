@@ -46,6 +46,16 @@ try
         return;
     }
 
+    // Resource budget guard — Trip A 2026-04-25 hard-reset prevention.
+    // Self-kills Helper if RSS or sustained CPU exceeds budget so the
+    // Watchdog can restart cleanly instead of letting Helper drag the
+    // pharmacy desktop into an unrecoverable load. Started before any
+    // observer or Vision pipeline so the guard is live for the entire
+    // lifetime of Helper, including the most resource-pressure-prone
+    // window (PioneerRx attach + first UIA tree walk + first OCR load).
+    var resourceGuard = new ResourceBudgetGuard(new ResourceBudgetGuard.Budget(), Log.Logger);
+    var resourceGuardTask = Task.Run(() => resourceGuard.RunAsync(cts.Token));
+
     using var pioneer = new PioneerRxUiaEngine(Log.Logger);
     using var ipcClient = new IpcPipeClient(pipeName, Log.Logger);
     var pricingWorkflow = new PricingWorkflow(pioneer, Log.Logger);
