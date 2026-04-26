@@ -76,6 +76,28 @@ public sealed class AgentOptions
     public TemplateLearningOptions TemplateLearning { get; set; } = new();
 
     /// <summary>
+    /// Try UIA3 (modern Windows Accessibility) before UIA2 when attaching to
+    /// the PMS window. Default false — UIA2 has been the production path
+    /// since v3.13.x and UIA3 needs onsite verification on PioneerRx's
+    /// WinForms tree before flip.
+    ///
+    /// Codex 2026-04-26: UIA2 was the likely contributor to Trip A's hard
+    /// reset (slow tree enumeration + COM marshalling on a deep WinForms
+    /// tree). UIA3 is 5-10× faster on most apps but some WinForms custom
+    /// controls only show up in UIA2's interop layer. The PioneerRxUiaEngine
+    /// auto-falls back to UIA2 if a UIA3 attach finds zero useful menu
+    /// items within the attach timeout — so flipping this true at a
+    /// pharmacy where UIA3 doesn't work degrades gracefully back to UIA2,
+    /// it does not break observation.
+    ///
+    /// Recommended flip path: enable per-pharmacy via the cloud
+    /// agent_config_overrides table at first install, watch the dashboard
+    /// IPC rejection chip for any spike, observe captures for a week, then
+    /// raise the default if no regressions.
+    /// </summary>
+    public bool UseUia3 { get; set; }
+
+    /// <summary>
     /// Global execution brake. Defaults to observe-only: no autonomous actions,
     /// confirmations required, and no PMS writeback.
     /// </summary>

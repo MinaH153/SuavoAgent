@@ -365,3 +365,28 @@ finally
 {
     Log.CloseAndFlush();
 }
+
+static bool ReadUiaFlagFromConfig(ILogger logger)
+{
+    try
+    {
+        var path = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "uia.json");
+        if (!File.Exists(path)) return false;
+        var raw = File.ReadAllText(path);
+        var doc = System.Text.Json.JsonDocument.Parse(raw);
+        if (doc.RootElement.TryGetProperty("UseUia3", out var v) &&
+            v.ValueKind == System.Text.Json.JsonValueKind.True)
+        {
+            logger.Information("UIA config: UseUia3=true (operator opt-in via uia.json)");
+            return true;
+        }
+        return false;
+    }
+    catch (Exception ex)
+    {
+        logger.Warning(ex, "Could not read uia.json — defaulting to UIA2");
+        return false;
+    }
+}
