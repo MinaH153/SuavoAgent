@@ -53,7 +53,13 @@ $bootstrapVersion = "3.13.10"
 # Persisted across reinstalls. The cleanup path keeps these so consent +
 # learned-state survive a re-run (Trip A 2026-04-25: pharmacist re-typed
 # consent 4x because state.db AND consent-receipt.json were both wiped).
-$dataDirKeepList = @('logs', 'consent-receipt.json', 'state.db')
+#
+# state.key MUST stay alongside state.db -- AgentStateDb opens state.db with
+# the encryption key from state.key, and Program.cs only generates a new key
+# when state.key is missing. If we keep state.db but wipe state.key, the new
+# key won't decrypt the existing DB and AgentStateDb wipes it as 'unreadable'.
+# Codex flagged this as a CRITICAL state-loss risk on PR #23 review.
+$dataDirKeepList = @('logs', 'consent-receipt.json', 'state.db', 'state.key')
 
 function ConvertTo-PlainTextSecret {
     param([object]$Secret)
@@ -305,11 +311,19 @@ Write-Host ""
 # on first heartbeat. No separate paperwork needed.
 
 # Cache check -- if a recent consent receipt already exists for THIS
-# machine, reuse it and skip the prompts. Trip A 2026-04-25 had Nadim
-# re-type consent four times across re-installs; the cleanup path now
-# preserves consent-receipt.json so subsequent runs find it here.
+# machine AND the SAME OS user that originally accepted it, reuse it and
+# skip the prompts. Trip A 2026-04-25 had Nadim re-type consent four
+# times across re-installs; the cleanup path now preserves
+# consent-receipt.json so subsequent runs find it here.
+#
+# Codex flagged identity binding on PR #23 review: a machine-only check
+# would let a different OS user (e.g. a tech who later RDPs into the same
+# pharmacy box) skip consent under the original authorizing party's
+# name. Bind reuse to {machineFingerprint, originatingUser} so an OS-user
+# change forces a fresh consent prompt.
 $cachedConsent = $null
 $cachedConsentPath = Join-Path $dataDir "consent-receipt.json"
+$currentOsUser = "$env:USERDOMAIN\$env:USERNAME"
 if ((-not $SkipConsent) -and (Test-Path $cachedConsentPath)) {
     try {
         $rawCached = Get-Content $cachedConsentPath -Raw -ErrorAction Stop
@@ -319,8 +333,14 @@ if ((-not $SkipConsent) -and (Test-Path $cachedConsentPath)) {
         try { $cachedTimestamp = [DateTime]::Parse($cached.consentTimestamp) } catch { }
         $consentAgeDays = if ($cachedTimestamp) { ((Get-Date) - $cachedTimestamp).TotalDays } else { 9999 }
         $sameMachine = $cached.machineFingerprint -eq $currentFingerprint
+        # originatingUser may be missing on receipts written by a bootstrap
+        # that pre-dates this commit. Treat that as "no binding recorded" and
+        # require a fresh prompt so the new binding gets written, rather than
+        # letting older receipts silently bypass the OS-user check.
+        $sameOsUser = $cached.PSObject.Properties.Match('originatingUser').Count -gt 0 -and `
+                      $cached.originatingUser -eq $currentOsUser
         $termsOk = $cached.termsAccepted -eq $true
-        if ($sameMachine -and $termsOk -and ($consentAgeDays -lt 90)) {
+        if ($sameMachine -and $sameOsUser -and $termsOk -and ($consentAgeDays -lt 90)) {
             $cachedConsent = $cached
             $ageDisplay = [math]::Round($consentAgeDays, 1)
             Write-Host ""
@@ -423,6 +443,7 @@ $consentReceipt = @{
     employeeNoticeAcknowledged = ($mandatoryNoticeStates -contains $stateUpper)
     installerVersion = $bootstrapVersion
     machineFingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
+    originatingUser = $currentOsUser
 }
 Write-Ok "Consent recorded: $authName ($authTitle) at $consentTimestamp"
 Write-Host ""
@@ -445,6 +466,9 @@ Write-Host ""
         employeeNoticeAcknowledged = $cachedConsent.employeeNoticeAcknowledged
         installerVersion = $bootstrapVersion
         machineFingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
+        # Carry the original binding forward so the next reinstall keeps
+        # validating against the same OS user that first accepted.
+        originatingUser = $cachedConsent.originatingUser
         source = "cached_reinstall"
     }
 } else {
@@ -464,6 +488,7 @@ Write-Host ""
         employeeNoticeAcknowledged = $true
         installerVersion = $bootstrapVersion
         machineFingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
+        originatingUser = $currentOsUser
         source = "web_dashboard"
     }
 }
