@@ -172,6 +172,24 @@ public sealed class IpcCommandServer : IDisposable
         };
     }
 
+    // ------------------------------------------------------------------
+    // capture_screen — Vision capture command exposed to Core.
+    //
+    // AUDIT CONTRACT: the audit chain lives in Core's encrypted state.db,
+    // which Helper cannot reach across the process boundary. Therefore
+    // every CALLER in Core that sends capture_screen MUST first call
+    // _stateDb.AppendChainedAuditEntry with EventType = "vision_capture"
+    // and include the requesterId + reason in the audit row. Helper's job
+    // is just to execute the capture and ship the scrubbed frame back —
+    // never raw PNG bytes (verified at the JsonSerializer call below).
+    //
+    // This handler also logs every dispatch for an in-process audit trail
+    // even when no Core caller is wired (current state — capture_screen
+    // is an unused command path as of 2026-04-26). When Core wires the
+    // first caller, the cited contract MUST land in the same PR.
+    //
+    // Codex Vision/observation review 2026-04-26 flagged this gap.
+    // ------------------------------------------------------------------
     private async Task<IpcResponse> HandleCaptureScreenAsync(IpcRequest request, CancellationToken ct)
     {
         if (_vision == null)
@@ -180,11 +198,20 @@ public sealed class IpcCommandServer : IDisposable
                 "Vision not configured in this Helper instance");
         }
 
+        // Helper-side dispatch log — pairs with Core-side AppendChainedAuditEntry
+        // (which the caller is contractually required to write before sending).
+        _logger.Information(
+            "IpcCommandServer: capture_screen dispatch — requestId={Id} (caller MUST have written chained audit entry)",
+            request.Id);
+
         try
         {
             var result = await _vision.CaptureAndExtractAsync(ct);
             if (result == null)
             {
+                _logger.Information(
+                    "IpcCommandServer: capture_screen returned null — requestId={Id} (vision disabled, rate-limited, or capture error)",
+                    request.Id);
                 return Error(request.Id, request.Command, "capture_failed",
                     "Capture returned null — vision disabled, rate-limited, or capture error");
             }
@@ -192,6 +219,10 @@ public sealed class IpcCommandServer : IDisposable
             // Only the scrubbed ScreenFrame + storage id cross the IPC boundary.
             // Raw PNG bytes stayed inside the Helper and are already encrypted
             // on disk.
+            _logger.Information(
+                "IpcCommandServer: capture_screen success — requestId={Id} storageId={StorageId} elements={Elements}",
+                request.Id, result.StorageId, result.Frame?.Elements?.Count ?? 0);
+
             var payload = JsonSerializer.SerializeToElement(new
             {
                 storageId = result.StorageId,
@@ -201,7 +232,7 @@ public sealed class IpcCommandServer : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "IpcCommandServer: capture_screen dispatch error");
+            _logger.Warning(ex, "IpcCommandServer: capture_screen dispatch error — requestId={Id}", request.Id);
             return Error(request.Id, request.Command, "capture_error", ex.Message);
         }
     }

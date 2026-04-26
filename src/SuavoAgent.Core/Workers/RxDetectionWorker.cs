@@ -115,13 +115,32 @@ public sealed class RxDetectionWorker : BackgroundService
         {
             _logger.LogInformation("Detected {Count} ready prescriptions", readyRxs.Count);
 
-            // Enrich with patient delivery details (HIPAA: minimum necessary for delivery)
+            // Enrich with patient delivery details (HIPAA: minimum necessary for delivery).
+            //
+            // HIPAA §164.312(b) + FDA 21 CFR Part 11 require an audit entry on
+            // every PHI access. PullPatientForRxAsync reads patient name +
+            // address + phone from the PMS — that is PHI. Audit BEFORE the
+            // call so a crash mid-pull still leaves a record of the access
+            // attempt; pre-access auditing is the HIPAA-defensible posture.
+            // Codex flagged the prior "no audit on PHI pull" as a HIPAA gap
+            // on the Vision/observation pipeline review.
+            var hmacSalt = _options.HmacSalt ?? "[no-hmac-salt]";
             Dictionary<string, RxPatientDetails>? patientMap = null;
             try
             {
                 patientMap = new Dictionary<string, RxPatientDetails>();
                 foreach (var rx in readyRxs)
                 {
+                    var rxHash = PhiScrubber.HmacHash(rx.RxNumber, hmacSalt);
+                    _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                        TaskId: rxHash,
+                        EventType: "phi_access",
+                        FromState: "",
+                        ToState: "",
+                        Trigger: "rx_detection_worker.enrich_for_delivery_sync",
+                        RequesterId: "rx_detection_worker",
+                        RxNumber: rxHash));
+
                     var pd = await _sqlEngine!.PullPatientForRxAsync(rx.RxNumber, ct);
                     if (pd != null) patientMap[rx.RxNumber] = pd;
                 }
@@ -134,7 +153,7 @@ public sealed class RxDetectionWorker : BackgroundService
                 patientMap = null;
             }
 
-            var json = SerializeRxBatch(readyRxs, _options.HmacSalt ?? "[no-hmac-salt]", patientMap);
+            var json = SerializeRxBatch(readyRxs, hmacSalt, patientMap);
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
