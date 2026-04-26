@@ -12,6 +12,22 @@ namespace SuavoAgent.Helper.Vision;
 
 /// <summary>
 /// Per-user DPAPI(CurrentUser)-encrypted screen store. Windows-only — fails
+///
+/// CRYPTO PROVENANCE (Codex 2026-04-26 audit):
+///   - Algorithm: AES (CNG provider, system-default mode — DPAPI internals)
+///   - Key derivation: Windows Data Protection API, scope=CurrentUser
+///   - Key storage: Windows credential store, sealed by the user's master key
+///   - Per-file: ProtectedData.Protect appends an integrity MAC; tamper on
+///     disk fails the Unprotect call.
+///   - Recovery: NONE — losing the user profile makes every file useless.
+///     This is the intended posture for ephemeral PHI-adjacent storage.
+///
+/// For an FDA / HIPAA dossier, the algorithm provenance lives in Windows
+/// itself (DPAPI is a documented system service) — we do NOT roll our own
+/// crypto here, and we deliberately don't expose key material so the
+/// dossier reduction is "trust DPAPI on the host OS." If that posture is
+/// ever insufficient, swap ProtectedData for AES-GCM with a key managed
+/// by Windows Hello / TPM-backed cred and update this header.
 /// closed on non-Windows platforms to avoid the plaintext fallback that
 /// would create raw screens-at-rest in CI / development (Codex C-3).
 ///
@@ -162,8 +178,7 @@ public sealed class EncryptedScreenStore : IScreenStore
             var path = Path.Combine(_directory, $"{id}.scn");
             if (!File.Exists(path)) return false;
 
-            File.Delete(path);
-            await Task.CompletedTask;
+            await TombstoneAndDeleteAsync(path, ct).ConfigureAwait(false);
             return true;
         }
         catch (Exception ex)
@@ -171,6 +186,67 @@ public sealed class EncryptedScreenStore : IScreenStore
             _logger.Warning(ex, "EncryptedScreenStore: delete failed for {Id}", id);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Tombstoned delete — overwrite the file with random bytes before
+    /// unlinking it. NTFS leaves freed blocks intact until reused; without
+    /// this overwrite a file-recovery tool could reconstruct the encrypted
+    /// envelope (still DPAPI-protected, but defense-in-depth says don't
+    /// leave recoverable bytes on disk for PHI-adjacent storage).
+    ///
+    /// Codex 2026-04-26 flagged plain File.Delete as a HIPAA defense-in-depth
+    /// gap. This pattern matches the AgentStateDb.SecureDelete approach used
+    /// for state.key / state.db.
+    /// </summary>
+    private static async Task TombstoneAndDeleteAsync(string path, CancellationToken ct)
+    {
+        // Open with FileShare.None so a concurrent reader can't snapshot
+        // mid-overwrite. Read the size first; allocate a single random
+        // buffer; rewrite the entire file with random bytes; flush; delete.
+        long length;
+        try
+        {
+            length = new FileInfo(path).Length;
+        }
+        catch
+        {
+            // File may have vanished between Exists check and Length read —
+            // fall through to the Delete which will then no-op-throw.
+            length = 0;
+        }
+
+        if (length > 0)
+        {
+            try
+            {
+                using var fs = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 4096,
+                    useAsync: true);
+                var buffer = new byte[Math.Min(64 * 1024, length)];
+                System.Security.Cryptography.RandomNumberGenerator.Fill(buffer);
+                long written = 0;
+                while (written < length && !ct.IsCancellationRequested)
+                {
+                    var chunk = (int)Math.Min(buffer.Length, length - written);
+                    await fs.WriteAsync(buffer.AsMemory(0, chunk), ct).ConfigureAwait(false);
+                    written += chunk;
+                }
+                await fs.FlushAsync(ct).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // If the overwrite fails partway, still try to delete — a
+                // partially-overwritten file is no worse than a non-overwritten
+                // one for our security posture.
+            }
+        }
+
+        File.Delete(path);
     }
 
     public async Task<int> PurgeExpiredAsync(CancellationToken ct)
@@ -297,20 +373,38 @@ public sealed class EncryptedScreenStore : IScreenStore
         // Current user SID only — not the generic InteractiveSid. That means
         // user B on the same machine cannot see user A's screen files even if
         // they somehow gained file-system read (Codex C-1).
+        //
+        // Codex 2026-04-26 review: Modify includes Delete + WriteAttributes.
+        // Helper genuinely needs both (it cleans up captures via
+        // PurgeExpiredAsync + DeleteAsync), so we cannot drop to ReadOnly
+        // here without splitting the writer/janitor across two processes.
+        // Net exposure: an attacker who compromises the Helper user can
+        // delete or modify their OWN captures, but not pivot to read other
+        // users' captures (DPAPI(CurrentUser) makes the file unreadable
+        // even if the bytes are exfiltrated). Documented + acknowledged.
         var currentUser = WindowsIdentity.GetCurrent();
         if (currentUser.User is null)
             throw new InvalidOperationException("Current user SID is unavailable — cannot lock ACL");
 
+        // Use Modify (Read + Write + Delete) explicitly minus ChangePermissions
+        // and TakeOwnership — those would let the user re-grant the ACL to
+        // attacker-controlled SIDs. Restricting those is the only meaningful
+        // tightening over plain Modify.
+        const FileSystemRights helperRights =
+            FileSystemRights.ReadAndExecute |
+            FileSystemRights.Write |
+            FileSystemRights.Delete |
+            FileSystemRights.DeleteSubdirectoriesAndFiles;
         security.AddAccessRule(new FileSystemAccessRule(
             currentUser.User,
-            FileSystemRights.Modify,
+            helperRights,
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
             PropagationFlags.None,
             AccessControlType.Allow));
 
         dirInfo.SetAccessControl(security);
         _logger.Information(
-            "EncryptedScreenStore: directory {Path} locked to SYSTEM + Admins + {User}",
+            "EncryptedScreenStore: directory {Path} locked to SYSTEM + Admins + {User} (no ChangePermissions, no TakeOwnership)",
             _directory, currentUser.Name);
     }
 

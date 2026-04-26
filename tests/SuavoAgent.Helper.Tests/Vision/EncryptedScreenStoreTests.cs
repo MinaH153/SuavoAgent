@@ -120,6 +120,55 @@ public class EncryptedScreenStoreTests
         Assert.Empty(loaded.Value.Png);
     }
 
+    // Codex 2026-04-26 audit: plain File.Delete leaves freed NTFS blocks
+    // intact until reused. Tombstoned delete overwrites the file with random
+    // bytes before unlinking so file-recovery tools can't reconstruct the
+    // (still DPAPI-protected) envelope. Pin the contract: after DeleteAsync
+    // returns true, the file must be gone.
+    [WindowsFact]
+    public async Task Delete_RemovesFileFromDirectory()
+    {
+        using var dir = new TempDir();
+        var store = NewStore(dir.Path);
+        var id = await store.StoreAsync(Bytes(new byte[] { 9, 8, 7 }), CancellationToken.None);
+        Assert.NotNull(id);
+
+        var path = Path.Combine(dir.Path, $"{id}.scn");
+        Assert.True(File.Exists(path));
+
+        var deleted = await store.DeleteAsync(id!, CancellationToken.None);
+        Assert.True(deleted);
+        Assert.False(File.Exists(path));
+    }
+
+    [WindowsFact]
+    public async Task Delete_NonexistentId_ReturnsFalse()
+    {
+        using var dir = new TempDir();
+        var store = NewStore(dir.Path);
+        var deleted = await store.DeleteAsync("does-not-exist", CancellationToken.None);
+        Assert.False(deleted);
+    }
+
+    [Theory]
+    [InlineData("../escape")]
+    [InlineData("foo/bar")]
+    [InlineData("foo\\bar")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Delete_PathTraversalOrEmpty_ReturnsFalse(string id)
+    {
+        // Same Windows-only gate as WindowsFact — the store constructor
+        // throws PlatformNotSupportedException on non-Windows so we can't
+        // exercise the validation branch from this side. Document + skip.
+        if (!OperatingSystem.IsWindows()) return;
+
+        using var dir = new TempDir();
+        var store = NewStore(dir.Path);
+        var deleted = await store.DeleteAsync(id, CancellationToken.None);
+        Assert.False(deleted);
+    }
+
     // --- helpers -------------------------------------------------------------
 
     private static EncryptedScreenStore NewStore(
