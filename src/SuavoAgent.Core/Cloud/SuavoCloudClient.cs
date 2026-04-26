@@ -57,7 +57,22 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         return await PostSignedAsync("/api/agent/sync", payload, ct);
     }
 
-    public async Task SendPatientDetailsAsync(string rxNumber, object details, string commandId, CancellationToken ct)
+    /// <summary>
+    /// Ships PHI to /api/agent/patient-details — driver-needed delivery
+    /// fields only. The <see cref="SuavoAgent.Contracts.Models.PatientDetailsPayload"/>
+    /// type is the deliberate compile-time contract: any new PHI field that
+    /// reaches cloud has to land in that record first, which makes the diff
+    /// impossible to miss in code review (Codex 2026-04-26 hardening).
+    ///
+    /// The Rx number itself is NEVER sent in cleartext alongside the hash;
+    /// only <c>rxNumberHash</c> ships, and the payload record deliberately
+    /// omits a RxNumber field.
+    /// </summary>
+    public async Task SendPatientDetailsAsync(
+        string rxNumber,
+        SuavoAgent.Contracts.Models.PatientDetailsPayload details,
+        string commandId,
+        CancellationToken ct)
     {
         var rxNumberHash = Learning.PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "[no-hmac-salt]");
         await PostSignedAsync("/api/agent/patient-details", new { rxNumberHash, details, commandId }, ct);
