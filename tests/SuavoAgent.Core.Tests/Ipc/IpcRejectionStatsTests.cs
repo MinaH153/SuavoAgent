@@ -61,4 +61,37 @@ public class IpcRejectionStatsTests
         Assert.True(reason is null || reason.Length > 0);
         Assert.True(at is null || at.Value.Year >= 2024);
     }
+
+    // Codex adversarial review of PR #24 caught a race: count via Interlocked,
+    // reason via lock — a heartbeat assembling its payload across three
+    // separate reads could ship N+1's count with N's reason. Snapshot() takes
+    // the lock once and returns all three values atomically. These tests pin
+    // the contract: count + reason + timestamp from the same call always
+    // describe the same Record() invocation.
+    [Fact]
+    public void Snapshot_ReturnsAllThreeFieldsAtomically()
+    {
+        IpcRejectionStats.Record("snapshot_test_reason");
+        var (count, reason, at) = IpcRejectionStats.Snapshot();
+        Assert.True(count > 0);
+        Assert.Equal("snapshot_test_reason", reason);
+        Assert.NotNull(at);
+    }
+
+    [Fact]
+    public void Snapshot_AfterConcurrentRecords_ConsistentWithLastRecord()
+    {
+        // After a parallel burst, snapshot's reason+timestamp must match SOME
+        // concrete Record() invocation — not interleave fields from different
+        // calls. We can't determine which call won, but we can assert the
+        // readback shape is internally consistent (reason non-empty when count
+        // increased, timestamp non-null when reason set).
+        var startCount = IpcRejectionStats.Count;
+        Parallel.For(0, 100, i => IpcRejectionStats.Record($"burst_{i % 5}"));
+        var (count, reason, at) = IpcRejectionStats.Snapshot();
+        Assert.Equal(startCount + 100, count);
+        Assert.NotNull(reason);
+        Assert.StartsWith("burst_", reason);
+        Assert.NotNull(at);
+    }
 }

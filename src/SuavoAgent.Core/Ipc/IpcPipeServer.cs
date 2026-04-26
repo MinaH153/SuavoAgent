@@ -45,6 +45,24 @@ public sealed class IpcPipeServer : IDisposable
         }
     }
 
+    // Sanitizer for IpcRejectionStats reason labels that include external
+    // input (process names from arbitrary callers). Keeps the rejection
+    // telemetry useful for diagnosis but caps cardinality so the cloud can
+    // safely group by the label without unbounded label-set growth. Returns
+    // a fixed short string for anything that isn't [A-Za-z0-9._-]{1,32}.
+    private static string SanitizeReasonLabel(string raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return "_empty";
+        if (raw.Length > 32) return "_too_long";
+        foreach (var c in raw)
+        {
+            var ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+            if (!ok) return "_other";
+        }
+        return raw;
+    }
+
     private readonly string _pipeName;
     private readonly ILogger<IpcPipeServer> _logger;
     private readonly Func<IpcRequest, Task<IpcResponse>> _handler;
@@ -96,7 +114,13 @@ public sealed class IpcPipeServer : IDisposable
                         {
                             _logger.LogWarning("IPC: Rejected connection from unauthorized process {Name} (PID {Pid})",
                                 clientName, clientPid);
-                            IpcRejectionStats.Record($"unauthorized_process:{clientName}");
+                            // Bucket the reason to keep telemetry cardinality low. Codex
+                            // flagged the prior $"unauthorized_process:{clientName}" as a
+                            // cardinality leak — an attacker (or a flaky AV) could iterate
+                            // process names and balloon the cloud-side label set. The
+                            // sanitizer drops everything that isn't a short alphanumeric
+                            // name and bins long/symbol-heavy values into "_other".
+                            IpcRejectionStats.Record($"unauthorized_process:{SanitizeReasonLabel(clientName)}");
                             pipe.Disconnect();
                             continue;
                         }

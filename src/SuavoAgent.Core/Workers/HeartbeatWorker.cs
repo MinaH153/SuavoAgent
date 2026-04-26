@@ -314,19 +314,7 @@ public sealed class HeartbeatWorker : BackgroundService
                         connected = sqlConnected,
                         lastRxCount = _lastRxCount
                     },
-                    helper = new
-                    {
-                        attached = ipcServer?.IsConnected ?? false,
-                        consecutiveFailures = _helperConsecutiveFailures,
-                        // Trip A 2026-04-25 silent-IPC-failure metric. The IPC peer-validation
-                        // bug (v3.13.10 fix) rejected every Helper observation while heartbeats
-                        // kept reporting "online". Counter resets on Core restart — a steadily
-                        // growing value between restarts is the signal of interest. Cloud
-                        // surfaces this so silently-broken installs are visible remotely.
-                        ipcRejectionCount = IpcRejectionStats.Count,
-                        lastIpcRejectReason = IpcRejectionStats.LastReason,
-                        lastIpcRejectAt = IpcRejectionStats.LastAt?.ToString("o"),
-                    },
+                    helper = BuildHelperPayload(ipcServer),
                     writeback = new
                     {
                         pending = pendingWbCount,
@@ -421,6 +409,27 @@ public sealed class HeartbeatWorker : BackgroundService
         }
 
         _logger.LogInformation("Heartbeat worker stopped");
+    }
+
+    /// <summary>
+    /// Trip A 2026-04-25 silent-IPC-failure metric. Use the atomic Snapshot()
+    /// so the three telemetry fields ship together — Codex flagged the prior
+    /// three-call read pattern as racy: count from Record() N could ship with
+    /// reason from Record() N-1 if Record() landed between the count read and
+    /// the reason read. Counter resets on Core restart — a steadily growing
+    /// value between restarts is the signal of interest.
+    /// </summary>
+    private object BuildHelperPayload(IpcPipeServer? ipcServer)
+    {
+        var (rejectionCount, lastReason, lastAt) = IpcRejectionStats.Snapshot();
+        return new
+        {
+            attached = ipcServer?.IsConnected ?? false,
+            consecutiveFailures = _helperConsecutiveFailures,
+            ipcRejectionCount = rejectionCount,
+            lastIpcRejectReason = lastReason,
+            lastIpcRejectAt = lastAt?.ToString("o"),
+        };
     }
 
     private async Task ProcessSignedCommandAsync(JsonElement response, CancellationToken ct)

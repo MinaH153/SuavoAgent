@@ -18,12 +18,22 @@ namespace SuavoAgent.Core.Ipc;
 /// </summary>
 public static class IpcRejectionStats
 {
+    // All three fields live under the same lock so the heartbeat snapshot is
+    // atomic. Codex flagged the prior split (count via Interlocked, reason
+    // via lock) as a race: a heartbeat could read N=12 from one Record() and
+    // reason="image_path_unreadable" from a different one. The new pattern
+    // takes the lock for both Record() and Snapshot(), so the three values
+    // ship together every time. Public Count/LastReason/LastAt accessors
+    // remain for backward compat and read through the lock.
     private static long _count;
     private static string? _lastReason;
     private static DateTimeOffset? _lastAt;
     private static readonly object _gate = new();
 
-    public static long Count => Interlocked.Read(ref _count);
+    public static long Count
+    {
+        get { lock (_gate) return _count; }
+    }
 
     public static string? LastReason
     {
@@ -36,16 +46,32 @@ public static class IpcRejectionStats
     }
 
     /// <summary>
+    /// Atomic snapshot of all three telemetry fields. HeartbeatWorker calls
+    /// this once per heartbeat assembly so count + reason + timestamp are
+    /// consistent with each other. Tuple result is value-typed so callers
+    /// can pattern-destructure without extra allocation.
+    /// </summary>
+    public static (long Count, string? LastReason, DateTimeOffset? LastAt) Snapshot()
+    {
+        lock (_gate)
+        {
+            return (_count, _lastReason, _lastAt);
+        }
+    }
+
+    /// <summary>
     /// Increment the counter and capture the most recent rejection reason.
     /// Called from each fail-closed branch in <see cref="IpcPipeServer"/>.
     /// Reasons should be short, stable, low-cardinality strings — they end
-    /// up in heartbeat payloads + dashboard surfaces.
+    /// up in heartbeat payloads + dashboard surfaces. Callers must
+    /// pre-sanitize unbounded inputs (e.g. process names) so the cardinality
+    /// stays low.
     /// </summary>
     public static void Record(string reason)
     {
-        Interlocked.Increment(ref _count);
         lock (_gate)
         {
+            _count++;
             _lastReason = reason;
             _lastAt = DateTimeOffset.UtcNow;
         }
