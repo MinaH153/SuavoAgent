@@ -185,12 +185,20 @@ public sealed class BehavioralEventReceiver
         // ordered-lock-acquisition deadlocks if a future caller flips the
         // order. Snapshot the callback and the events that need it inside
         // the lock, replay outside.
+        //
+        // Codex round-3 H-NEW-1 — guard must mirror IsValid()'s
+        // !string.IsNullOrEmpty check, not just `is not null`. An
+        // Interaction with ElementId="" passes the `is not null` predicate
+        // but fails IsValid + skips persistence; pre-PR the callback was
+        // inside the persist loop so it never fired for empty-id events.
+        // Replicate that semantics outside the lock so ActionCorrelator
+        // never sees phantom empty-id interactions.
         if (onInteractionSnapshot is not null)
         {
             foreach (var evt in events)
             {
                 if (evt.Type == BehavioralEventType.Interaction
-                    && evt.ElementId is not null)
+                    && !string.IsNullOrEmpty(evt.ElementId))
                 {
                     onInteractionSnapshot(evt.TreeHash ?? "", evt.ElementId, evt.ControlType, evt.Timestamp);
                 }

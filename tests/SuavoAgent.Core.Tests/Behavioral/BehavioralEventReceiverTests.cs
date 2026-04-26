@@ -131,6 +131,33 @@ public class BehavioralEventReceiverTests : IDisposable
     }
 
     [Fact]
+    public void OnInteractionCallback_NotFired_ForInvalidInteractionEvents()
+    {
+        // Codex round-3 H-NEW-1: the post-lock callback replay must mirror
+        // IsValid()'s string.IsNullOrEmpty check. An Interaction with
+        // ElementId="" fails IsValid + skips persistence; the callback must
+        // also skip — otherwise ActionCorrelator sees phantom empty-id
+        // events the DB never contains.
+        var hits = new List<string>();
+        var receiver = new BehavioralEventReceiver(_db, SessionId,
+            onInteraction: (_, elementId, _, _) => hits.Add(elementId));
+
+        var validInteraction = BehavioralEvent.Interaction(
+            "click", "tree-1", "elem-real", "Button", null, null);
+        var emptyIdInteraction = BehavioralEvent.Interaction(
+            "click", "tree-2", "", "Button", null, null);
+        var nullIdInteraction = BehavioralEvent.Interaction(
+            "click", "tree-3", null, "Button", null, null);
+
+        receiver.ProcessBatch(
+            new[] { validInteraction, emptyIdInteraction, nullIdInteraction },
+            droppedSinceLast: 0);
+
+        Assert.Single(hits);
+        Assert.Equal("elem-real", hits[0]);
+    }
+
+    [Fact]
     public void SetInteractionCallback_HotSwapsCallback_FutureInteractionsCallNewCallback()
     {
         // ActionCorrelator wiring couples to the active session's interaction
