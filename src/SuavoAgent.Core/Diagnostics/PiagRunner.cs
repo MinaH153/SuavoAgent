@@ -1,6 +1,6 @@
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
@@ -37,6 +37,11 @@ public sealed class PiagRunner
     private readonly SuavoCloudClient _cloudClient;
     private readonly ILogger<PiagRunner> _logger;
     private readonly IServiceProvider _services;
+    // Singleton DI lifetime + multiple trigger paths (signed run_piag command,
+    // bootstrap.ps1 -RunPiag, future heartbeat-anomaly trigger) means
+    // concurrent RunAsync calls are possible. Serialize them so two PIAG
+    // posts don't race on shared counters or POST the same evidence twice.
+    private readonly SemaphoreSlim _runGate = new(1, 1);
 
     public PiagRunner(
         IOptions<AgentOptions> options,
@@ -52,101 +57,145 @@ public sealed class PiagRunner
 
     /// <summary>
     /// Runs the local-side checks, POSTs to cloud, returns the cloud's
-    /// pass/degraded/fail verdict. Returns null on transport failure —
-    /// caller distinguishes that from a "fail" verdict.
+    /// pass/degraded/fail verdict. The Outcome property of the result
+    /// distinguishes transport-fail / cloud-rejected / verdict — callers
+    /// can react accordingly (bootstrap exits non-zero on cloud-rejected,
+    /// retries on transport-fail).
     /// </summary>
-    public async Task<PiagResult?> RunAsync(
+    public async Task<PiagResult> RunAsync(
         string trigger,
         bool includeWatchdogKillTest,
         CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(_options.AgentId))
+        // Snapshot config at entry — singleton lifetime + ConfigSyncWorker
+        // can mutate AgentOptions mid-run, so we'd otherwise gate on one
+        // value at the top and ship a different one in the payload (TOCTOU).
+        var agentId = _options.AgentId;
+        var machineFingerprint = _options.MachineFingerprint;
+        if (string.IsNullOrEmpty(agentId))
         {
             _logger.LogWarning("PIAG run skipped — AgentId not configured");
-            return null;
+            return PiagResult.Skipped("agent_id_unconfigured");
         }
-        if (string.IsNullOrEmpty(_options.MachineFingerprint))
+        if (string.IsNullOrEmpty(machineFingerprint))
         {
             _logger.LogWarning("PIAG run skipped — MachineFingerprint not configured");
-            return null;
+            return PiagResult.Skipped("machine_fingerprint_unconfigured");
         }
 
-        _logger.LogInformation(
-            "PIAG-1 run starting (trigger={Trigger}, killTest={KillTest})",
-            trigger, includeWatchdogKillTest);
-
-        var localChecks = new Dictionary<string, object?>();
-
-        // ---- installer_lineage evidence ---------------------------
+        await _runGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var hashes = HashInstalledBinaries();
-            if (hashes.Count > 0)
-            {
-                localChecks["installedBinariesSha256"] = hashes;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "PIAG: installer hash collection failed — installer_lineage will skip");
-        }
-
-        // ---- ipc_peer_validation evidence -------------------------
-        try
-        {
-            var ipcServer = _services.GetService(typeof(IpcPipeServer)) as IpcPipeServer;
-            localChecks["ipcConnected"] = ipcServer?.IsConnected ?? false;
-            localChecks["ipcRejectionCount"] = IpcRejectionStats.Count;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "PIAG: IPC state collection failed");
-        }
-
-        // ---- watchdog_sla evidence (opt-in only) ------------------
-        if (includeWatchdogKillTest)
-        {
-            // The kill-test would shoot Core, wait for Watchdog restart,
-            // measure the latency. Implementing the actual shoot here is
-            // dangerous: this code IS Core. The runner can't kill itself
-            // and observe its own restart. Real implementation belongs
-            // in the Watchdog process (or in bootstrap.ps1 -RunPiag),
-            // which can supervise the kill from outside. For now, mark
-            // skipped with an explicit reason so cloud knows why.
-            localChecks["watchdogRestartSec"] = null;
             _logger.LogInformation(
-                "PIAG: kill-test requested but not yet wired — Core can't kill itself + observe own restart. " +
-                "Real measurement lives in bootstrap.ps1 -RunPiag (PR C) or Watchdog supervisor.");
-        }
+                "PIAG-1 run starting (trigger={Trigger}, killTest={KillTest})",
+                trigger, includeWatchdogKillTest);
 
-        // ---- POST to cloud ----------------------------------------
-        var payload = new
-        {
-            agentId = _options.AgentId,
-            machineFingerprint = _options.MachineFingerprint,
-            trigger,
-            localChecks,
-        };
+            var localChecks = new Dictionary<string, object?>();
 
-        try
-        {
-            var response = await _cloudClient.PostSignedAsync("/api/agent/piag-verify", payload, ct);
+            // ---- installer_lineage evidence ---------------------------
+            try
+            {
+                var hashes = HashInstalledBinaries();
+                if (hashes.Count > 0)
+                {
+                    localChecks["installedBinariesSha256"] = hashes;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PIAG: installer hash collection failed — installer_lineage will skip");
+            }
+
+            // ---- ipc_peer_validation evidence -------------------------
+            try
+            {
+                var ipcServer = _services.GetService<IpcPipeServer>();
+                if (ipcServer is null)
+                {
+                    _logger.LogWarning("PIAG: IpcPipeServer not registered in DI — IPC evidence will be missing");
+                }
+                localChecks["ipcConnected"] = ipcServer?.IsConnected ?? false;
+                // Atomic snapshot — IpcRejectionStats.Snapshot() takes its
+                // internal lock once for count + reason + timestamp. The bare
+                // .Count accessor is safe but inconsistent across multiple
+                // reads if Record() runs between them.
+                var ipcStats = IpcRejectionStats.Snapshot();
+                localChecks["ipcRejectionCount"] = ipcStats.Count;
+                if (ipcStats.LastReason is not null)
+                {
+                    localChecks["ipcLastRejectionReason"] = ipcStats.LastReason;
+                }
+                if (ipcStats.LastAt is { } at)
+                {
+                    localChecks["ipcLastRejectionAt"] = at.ToString("o");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PIAG: IPC state collection failed");
+            }
+
+            // ---- watchdog_sla evidence (opt-in only) ------------------
+            // When kill-test is requested but Core can't supervise its own
+            // restart, OMIT the field entirely. Sending null risks the
+            // cloud check function misinterpreting it as zero-instant
+            // restart = pass. The cloud's watchdog_sla check correctly
+            // returns 'skipped' when the field is missing. Real kill-test
+            // measurement lives in bootstrap.ps1 -RunPiag (PR C) or in a
+            // Watchdog-supervised path (PR follow-up).
+            if (includeWatchdogKillTest)
+            {
+                _logger.LogInformation(
+                    "PIAG: kill-test requested but Core can't kill itself + observe own restart. " +
+                    "Real measurement requires bootstrap.ps1 -RunPiag (PR C) or Watchdog supervisor. " +
+                    "Field will be omitted from payload so cloud check skips correctly.");
+            }
+
+            // ---- POST to cloud ----------------------------------------
+            var payload = new
+            {
+                agentId,
+                machineFingerprint,
+                trigger,
+                localChecks,
+            };
+
+            JsonElement? response;
+            try
+            {
+                response = await _cloudClient
+                    .PostSignedAsync("/api/agent/piag-verify", payload, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Caller cancelled — propagate, don't disguise as transport
+                // failure (signed-command handler relies on cancellation
+                // to honor stop signals).
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PIAG: POST to cloud threw");
+                return PiagResult.TransportError(ex.GetType().Name);
+            }
+
             if (response is null)
             {
                 _logger.LogWarning("PIAG: cloud returned null — transport failure or unsigned response");
-                return null;
+                return PiagResult.TransportError("null_response");
             }
             if (!response.Value.TryGetProperty("success", out var successProp) ||
                 !successProp.GetBoolean())
             {
                 var error = response.Value.TryGetProperty("error", out var errorProp)
-                    ? errorProp.GetString()
+                    ? errorProp.GetString() ?? "unknown"
                     : "unknown";
                 _logger.LogWarning("PIAG: cloud rejected request — {Error}", error);
-                return null;
+                return PiagResult.CloudRejected(error);
             }
 
-            var result = response.Value.TryGetProperty("result", out var resultProp)
+            var verdict = response.Value.TryGetProperty("result", out var resultProp)
                 ? resultProp.GetString() ?? "unknown"
                 : "unknown";
             var overallReason = response.Value.TryGetProperty("overallReason", out var orProp)
@@ -154,15 +203,14 @@ public sealed class PiagRunner
                 : null;
 
             _logger.LogInformation(
-                "PIAG-1 result: {Result} (reason: {Reason})",
-                result, overallReason ?? "all checks passed");
+                "PIAG-1 result: {Verdict} (reason: {Reason})",
+                verdict, overallReason ?? "all checks passed");
 
-            return new PiagResult(result, overallReason, response.Value);
+            return PiagResult.Verdict(verdict, overallReason);
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogWarning(ex, "PIAG: POST to cloud failed");
-            return null;
+            _runGate.Release();
         }
     }
 
@@ -171,34 +219,78 @@ public sealed class PiagRunner
     /// compares against the release manifest to detect tamper or wrong-
     /// version installs (Trip A's PR #179 was exactly this — dashboard
     /// "Reinstall" button delivered Node v1.x agent).
+    ///
+    /// CAVEAT — agent self-reports its own hashes. A tampered binary can
+    /// lie about hashes. The cloud's installer_lineage check still depends
+    /// on a release-pipeline-signed manifest as the trust root. Until that
+    /// manifest exists, this evidence is honest-when-honest only.
+    /// Documented in piag-1 spec.
     /// </summary>
     private Dictionary<string, string> HashInstalledBinaries()
     {
-        var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
         // Resolve install dir from current process — same pattern as
         // IpcPipeServer's anti-spoofing check. Works across install layouts.
         var installRoot = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
             ?? AppContext.BaseDirectory;
+        return HashAgentBinariesIn(installRoot, _logger);
+    }
+
+    /// <summary>
+    /// Internal-visible helper for unit tests — hash every SuavoAgent.*.exe
+    /// in the provided dir, with the same reparse-point + filehandle-share
+    /// hardening the production path uses.
+    /// </summary>
+    internal static Dictionary<string, string> HashAgentBinariesIn(
+        string installRoot,
+        ILogger logger)
+    {
+        var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         if (!Directory.Exists(installRoot))
         {
-            _logger.LogDebug("PIAG: install root {Path} does not exist — skipping hash", installRoot);
+            logger.LogDebug("PIAG: install root not found — skipping hash");
             return hashes;
         }
 
-        foreach (var path in Directory.EnumerateFiles(installRoot, "SuavoAgent.*.exe", SearchOption.TopDirectoryOnly))
+        // Enumerate with reparse-point skip. Without this, an attacker who
+        // plants a junction in the install dir could redirect SHA-256 reads
+        // to legit signed binaries elsewhere, defeating tamper detection.
+        var enumOpts = new EnumerationOptions
+        {
+            AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
+            IgnoreInaccessible = true,
+            RecurseSubdirectories = false,
+        };
+
+        foreach (var path in Directory.EnumerateFiles(installRoot, "SuavoAgent.*.exe", enumOpts))
         {
             try
             {
+                // Defense in depth — even with EnumerationOptions filter,
+                // re-check the resolved file's attributes before opening.
+                var attrs = File.GetAttributes(path);
+                if (attrs.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    logger.LogWarning(
+                        "PIAG: skipping reparse-point in install dir — possible tamper attempt");
+                    continue;
+                }
                 var name = Path.GetFileName(path);
-                using var fs = File.OpenRead(path);
+                using var fs = File.Open(path, new FileStreamOptions
+                {
+                    Mode = FileMode.Open,
+                    Access = FileAccess.Read,
+                    Share = FileShare.Read | FileShare.Delete,
+                    Options = FileOptions.SequentialScan,
+                });
                 var hashBytes = SHA256.HashData(fs);
                 hashes[name] = Convert.ToHexString(hashBytes).ToLowerInvariant();
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "PIAG: hash failed for {Path}", path);
+                // No path in info-level logs — install layout is operational
+                // fingerprint. Filename only.
+                logger.LogDebug(ex, "PIAG: hash failed for {File}", Path.GetFileName(path));
             }
         }
         return hashes;
@@ -206,7 +298,33 @@ public sealed class PiagRunner
 }
 
 /// <summary>
-/// Cloud response shape. result is one of "pass" | "degraded" | "fail".
-/// rawResponse is kept for ack flows that want to forward the full body.
+/// Cloud response wrapper. Outcome distinguishes the 4 paths so callers
+/// (bootstrap, signed-command handler) can react correctly:
+///   - Verdict: cloud actually ran the checks; Result holds pass/degraded/fail
+///   - CloudRejected: cloud said success=false (HMAC/zod/auth)
+///   - TransportError: network / timeout / null response
+///   - Skipped: pre-flight failed locally (config not ready)
 /// </summary>
-public sealed record PiagResult(string Result, string? OverallReason, JsonElement RawResponse);
+public sealed record PiagResult(
+    PiagOutcome Outcome,
+    string? Result,
+    string? OverallReason,
+    string? ErrorCode)
+{
+    public static PiagResult Verdict(string result, string? overallReason) =>
+        new(PiagOutcome.Verdict, result, overallReason, null);
+    public static PiagResult CloudRejected(string error) =>
+        new(PiagOutcome.CloudRejected, null, null, error);
+    public static PiagResult TransportError(string error) =>
+        new(PiagOutcome.TransportError, null, null, error);
+    public static PiagResult Skipped(string reason) =>
+        new(PiagOutcome.Skipped, null, null, reason);
+}
+
+public enum PiagOutcome
+{
+    Verdict,
+    CloudRejected,
+    TransportError,
+    Skipped,
+}
