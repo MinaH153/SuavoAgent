@@ -585,7 +585,14 @@ public sealed class HeartbeatWorker : BackgroundService
 
         if (_cloudClient is not null)
         {
-            await _cloudClient.SendPatientDetailsAsync(rxNumber, details, cmd.Nonce, ct);
+            // Project to PatientDetailsPayload — driver-needed delivery fields
+            // only, RxNumber dropped (cloud receives it as rxNumberHash via
+            // the separate argument). Codex 2026-04-26 fixed the prior
+            // 'object details' opaque shipping which silently leaked the
+            // raw RxNumber inside the record alongside the hashed key.
+            var payload = SuavoAgent.Contracts.Models.PatientDetailsPayload
+                .FromRxPatientDetails(details);
+            await _cloudClient.SendPatientDetailsAsync(rxNumber, payload, cmd.Nonce, ct);
             _logger.LogInformation("fetch_patient: sent details for Rx {RxHash}", hashedRx[..12]);
         }
     }
