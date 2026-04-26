@@ -102,4 +102,14 @@ public sealed class TesseractOptions
     /// headroom check.
     /// </summary>
     public long MemoryHeadroomBytes { get; set; } = 350L * 1024 * 1024;
+
+    /// <summary>
+    /// Per-extraction wall-clock timeout. Default 10 seconds — a single OCR
+    /// call on a complex screen should finish in 1-3s. Anything past 10s is
+    /// stuck on a hostile image / GDI lock / native-lib deadlock and must
+    /// be cancelled to free the worker for the next call. Set 0 to disable
+    /// the timeout (NOT recommended — Codex 2026-04-26 flagged the absence
+    /// of a per-extraction budget as a Vision-On stall risk).
+    /// </summary>
+    public int ExtractionTimeoutSeconds { get; set; } = 10;
 }

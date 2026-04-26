@@ -106,6 +106,17 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
 
         var sw = Stopwatch.StartNew();
         var regions = new List<TextRegion>();
+        // Codex 2026-04-26: per-extraction wall-clock timeout. A single OCR
+        // call on a complex screen should finish in 1-3s; anything past
+        // ExtractionTimeoutSeconds is stuck on a hostile image, GDI lock,
+        // or native-lib deadlock and must be cancelled to free the worker.
+        // Linked CTS so caller cancellation still propagates.
+        var timeoutSec = _options.ExtractionTimeoutSeconds;
+        using var timeoutCts = timeoutSec > 0
+            ? CancellationTokenSource.CreateLinkedTokenSource(ct)
+            : null;
+        if (timeoutCts != null) timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+        var effectiveCt = timeoutCts?.Token ?? ct;
         // Codex M-4: use try/finally so _activeCalls ALWAYS decrements,
         // regardless of which exception path fires.
         try
@@ -118,7 +129,7 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
                 iter.Begin();
                 do
                 {
-                    if (ct.IsCancellationRequested) break;
+                    if (effectiveCt.IsCancellationRequested) break;
                     if (!iter.TryGetBoundingBox(PageIteratorLevel.TextLine, out var bounds))
                         continue;
 
@@ -135,12 +146,21 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
                         Confidence = confidence / 100.0, // Tesseract reports 0–100
                     });
                 } while (iter.Next(PageIteratorLevel.TextLine));
-            }, ct);
+            }, effectiveCt);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             // Caller cancellation — propagate. finally still runs.
             throw;
+        }
+        catch (OperationCanceledException) when (timeoutCts?.IsCancellationRequested == true)
+        {
+            // Timeout-driven cancellation — log + return null so the caller
+            // can degrade gracefully. Don't propagate as an exception.
+            _logger.Warning(
+                "TesseractScreenExtractor: extraction timed out after {Sec}s ({Bytes} bytes) — returning null",
+                timeoutSec, screen.Png.Length);
+            return null;
         }
         catch (Exception ex)
         {
