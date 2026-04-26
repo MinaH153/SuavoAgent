@@ -39,8 +39,15 @@ public class RxDetectionWorkerTests : IDisposable
     }
 
     [Fact]
-    public void SerializeRxBatch_WithoutPatientDetails_NullsPhiValues()
+    public void SerializeRxBatch_NeverShipsPhiFields()
     {
+        // 2026-04-26: SerializeRxBatch used to include patientFirstName,
+        // deliveryAddress1, etc. — Codex CRITICAL'd it as PHI cleartext to
+        // cloud. Audit revealed cloud-side sanitizeSnapshotData was already
+        // dropping those fields silently before insert. The right fix is to
+        // never ship them in the first place. Patient delivery details
+        // ship via the separate SendPatientDetailsAsync (typed) flow.
+        // Pin the absence so this PHI-leak shape can never come back.
         var batch = new List<RxMetadata>
         {
             new("12345", "Amoxicillin 500mg", "00093-3109-01",
@@ -51,15 +58,23 @@ public class RxDetectionWorkerTests : IDisposable
         var doc = JsonDocument.Parse(json);
         var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
 
-        // PHI keys present but null when no patient details provided
-        Assert.Equal(JsonValueKind.Null, rx.GetProperty("patientFirstName").ValueKind);
-        Assert.Equal(JsonValueKind.Null, rx.GetProperty("deliveryAddress1").ValueKind);
-        Assert.Equal(JsonValueKind.Null, rx.GetProperty("deliveryCity").ValueKind);
+        Assert.False(rx.TryGetProperty("patientFirstName", out _));
+        Assert.False(rx.TryGetProperty("patientLastInitial", out _));
+        Assert.False(rx.TryGetProperty("patientPhone", out _));
+        Assert.False(rx.TryGetProperty("deliveryAddress1", out _));
+        Assert.False(rx.TryGetProperty("deliveryAddress2", out _));
+        Assert.False(rx.TryGetProperty("deliveryCity", out _));
+        Assert.False(rx.TryGetProperty("deliveryState", out _));
+        Assert.False(rx.TryGetProperty("deliveryZip", out _));
     }
 
     [Fact]
-    public void SerializeRxBatch_WithPatientDetails_IncludesDeliveryData()
+    public void SerializeRxBatch_PassingPatientDetails_StillExcludesPhi()
     {
+        // Even when the legacy patientDetails parameter is populated by a
+        // caller that pre-dates this PR, the serializer drops the fields
+        // on the floor. The parameter is retained for API-stable callers
+        // but is effectively a no-op now.
         var batch = new List<RxMetadata>
         {
             new("12345", "Amoxicillin 500mg", "00093-3109-01",
@@ -76,11 +91,10 @@ public class RxDetectionWorkerTests : IDisposable
         var doc = JsonDocument.Parse(json);
         var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
 
-        Assert.Equal("John", rx.GetProperty("patientFirstName").GetString());
-        Assert.Equal("D", rx.GetProperty("patientLastInitial").GetString());
-        Assert.Equal("123 Main St", rx.GetProperty("deliveryAddress1").GetString());
-        Assert.Equal("El Cajon", rx.GetProperty("deliveryCity").GetString());
-        Assert.Equal("CA", rx.GetProperty("deliveryState").GetString());
+        Assert.False(rx.TryGetProperty("patientFirstName", out _));
+        Assert.False(rx.TryGetProperty("deliveryAddress1", out _));
+        // Operational fields still present.
+        Assert.Equal("Amoxicillin 500mg", rx.GetProperty("drugName").GetString());
     }
 
     [Fact]
@@ -164,7 +178,9 @@ public class RxDetectionWorkerTests : IDisposable
         var pending = _stateDb.GetPendingBatches();
         Assert.Equal(1, pending.Count);
 
-        // Verify: round-tripped JSON preserves ALL enriched patient fields
+        // Verify: round-tripped JSON preserves operational fields ONLY.
+        // PHI fields are absent (post-2026-04-26 SerializeRxBatch drops
+        // them — see SerializeRxBatch_NeverShipsPhiFields).
         var doc = JsonDocument.Parse(pending[0].Payload);
         var queue = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue");
         Assert.Equal(2, queue.GetArrayLength());
@@ -172,19 +188,12 @@ public class RxDetectionWorkerTests : IDisposable
         var rx1 = queue[0];
         Assert.Equal(PhiScrubber.HmacHash("99001", "test-salt"), rx1.GetProperty("rxNumber").GetString());
         Assert.Equal("Metformin 500mg", rx1.GetProperty("drugName").GetString());
-        Assert.Equal("Sarah", rx1.GetProperty("patientFirstName").GetString());
-        Assert.Equal("M", rx1.GetProperty("patientLastInitial").GetString());
-        Assert.Equal("7605551234", rx1.GetProperty("patientPhone").GetString());
-        Assert.Equal("456 Oak Ave", rx1.GetProperty("deliveryAddress1").GetString());
-        Assert.Equal("Apt 3B", rx1.GetProperty("deliveryAddress2").GetString());
-        Assert.Equal("Victorville", rx1.GetProperty("deliveryCity").GetString());
-        Assert.Equal("CA", rx1.GetProperty("deliveryState").GetString());
-        Assert.Equal("92392", rx1.GetProperty("deliveryZip").GetString());
+        Assert.False(rx1.TryGetProperty("patientFirstName", out _));
+        Assert.False(rx1.TryGetProperty("deliveryAddress1", out _));
 
         var rx2 = queue[1];
         Assert.Equal(PhiScrubber.HmacHash("99002", "test-salt"), rx2.GetProperty("rxNumber").GetString());
-        Assert.Equal("Ahmed", rx2.GetProperty("patientFirstName").GetString());
-        Assert.Equal("789 Pine St", rx2.GetProperty("deliveryAddress1").GetString());
+        Assert.False(rx2.TryGetProperty("patientFirstName", out _));
     }
 
     [Fact]

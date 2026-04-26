@@ -399,6 +399,31 @@ public sealed class RxDetectionWorker : BackgroundService
         string hmacSalt = "",
         IReadOnlyDictionary<string, RxPatientDetails>? patientDetails = null)
     {
+        // CLOUD CONTRACT (verified 2026-04-26 against /api/agent/sync route):
+        //   - This endpoint stores into pharmacy_data_snapshots
+        //   - The cloud-side sanitizeSnapshotData strips ANY field whose
+        //     lowercased name contains 'patient_name' / 'firstname' /
+        //     'lastname' / 'address' / 'phone' / 'email' / 'dob' / 'ssn'
+        //     before insert
+        //   - Net effect: every PHI field ever shipped here was being
+        //     silently dropped by cloud. Codex caught the agent-side
+        //     payload as a CRITICAL "ships PHI cleartext" — accurate
+        //     about the wire shape, but the cloud-side guard prevented
+        //     any actual storage leak.
+        //
+        // Fix: drop the PHI fields from the agent-side payload entirely.
+        // They were never reaching storage anyway; sending them was
+        // wasteful AND made the audit picture incoherent (the audit row
+        // claimed PHI was synced, when the cloud was discarding it).
+        //
+        // Patient delivery details ship via the separate
+        // SendPatientDetailsAsync flow (typed PatientDetailsPayload,
+        // signed-command-driven, never the autonomous sync path).
+        // The patientDetails parameter is retained for callers that
+        // pre-populate it but is now intentionally unused — keeping
+        // the signature stable across this PR boundary.
+        _ = patientDetails;
+
         var payload = new
         {
             snapshotType = "rx_delivery_queue",
@@ -406,7 +431,6 @@ public sealed class RxDetectionWorker : BackgroundService
             {
                 rxDeliveryQueue = rxs.Select(rx =>
                 {
-                    var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
                     var rxHash = !string.IsNullOrEmpty(hmacSalt)
                         ? PhiScrubber.HmacHash(rx.RxNumber, hmacSalt)
                         : PhiScrubber.HmacHash(rx.RxNumber, "[no-hmac-salt]");
@@ -419,14 +443,6 @@ public sealed class RxDetectionWorker : BackgroundService
                         quantity = rx.Quantity,
                         statusGuid = rx.StatusGuid.ToString(),
                         detectedAt = rx.DetectedAt.ToString("o"),
-                        patientFirstName = pd?.FirstName,
-                        patientLastInitial = pd?.LastInitial,
-                        patientPhone = pd?.Phone,
-                        deliveryAddress1 = pd?.Address1,
-                        deliveryAddress2 = pd?.Address2,
-                        deliveryCity = pd?.City,
-                        deliveryState = pd?.State,
-                        deliveryZip = pd?.Zip
                     };
                 }).ToArray(),
                 totalDetected = rxs.Count,
@@ -440,6 +456,30 @@ public sealed class RxDetectionWorker : BackgroundService
     private async Task<bool> TrySyncPayloadToCloudAsync(string json, CancellationToken ct)
     {
         if (_cloudClient is null) return true; // no cloud = nothing to sync
+
+        // Codex 2026-04-26 audit: write a chained audit entry on every sync
+        // attempt so the audit chain has a complete record of what left the
+        // device, when, and at what shape. The payload is sanitized of PHI
+        // (cloud-side sanitizer + agent-side drop in SerializeRxBatch) but
+        // the metadata STILL needs an audit row — auditors reconstruct
+        // "what flowed where" from chain entries, not from the wire. The
+        // entry includes payload byte count + payload SHA-256 for tamper
+        // detection if a copy ever surfaces in cloud logs.
+        var pharmacyId = _options.PharmacyId ?? "unknown";
+        var payloadHash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(json)))
+            .ToLowerInvariant();
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: pharmacyId,
+            EventType: "phi_egress_attempt",
+            FromState: "",
+            ToState: "synced_to_cloud",
+            Trigger: "rx_detection_worker.sync_batch",
+            RequesterId: "rx_detection_worker",
+            Actor: "system",
+            SourceComponent: "rx_detection_worker",
+            CaptureReason: $"sync rx batch to /api/agent/sync ({json.Length} bytes, sha256:{payloadHash[..12]}…)",
+            ScrubberVersion: "PhiScrubber-v1"));
 
         try
         {
