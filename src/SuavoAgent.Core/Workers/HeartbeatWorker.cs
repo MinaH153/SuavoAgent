@@ -180,8 +180,21 @@ public sealed class HeartbeatWorker : BackgroundService
                 var rxReadyCount = rxWorker?.LastDetectedCount ?? 0;
                 _lastRxCount = rxReadyCount;
 
-                // Read Helper IPC state
+                // Read Helper IPC state.
+                //
+                // Codex 2026-04-26: track consecutive Helper-disconnect cycles
+                // so the heartbeat payload's helper.consecutiveFailures field
+                // is actually populated (it was always 0 before this — the
+                // _helperConsecutiveFailures field was declared but never
+                // assigned, surfacing as a CS0649 warning at build time).
+                // A growing value indicates Helper has been failing to attach
+                // across multiple heartbeat cycles, distinct from a single
+                // transient failure.
                 var ipcServer = _serviceProvider.GetService<IpcPipeServer>();
+                var helperAttached = ipcServer?.IsConnected ?? false;
+                _helperConsecutiveFailures = helperAttached
+                    ? 0
+                    : _helperConsecutiveFailures + 1;
 
                 canaryHold = _stateDb.GetCanaryHold(_options.PharmacyId ?? "", "pioneerrx");
 

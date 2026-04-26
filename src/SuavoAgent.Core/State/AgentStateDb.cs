@@ -1049,7 +1049,14 @@ public sealed class AgentStateDb : IDisposable
     {
         var states = new List<Dictionary<string, object?>>();
         using var cmd = _conn.CreateCommand();
-        // Exclude rx_number_enc (encrypted PHI) — state export is for operational monitoring only
+        // Exclude rx_number_enc (encrypted PHI) — state export is for operational monitoring only.
+        //
+        // Codex 2026-04-26: the `error` column is a free-text field populated
+        // from native SQL exceptions. Future SQL adapter changes could let
+        // PHI re-enter the archive via that path (e.g. an exception message
+        // containing patient data). Run every error string through
+        // PhiScrubber.ScrubText on export so the archive stays PHI-free
+        // even if a future writer emits unredacted error text.
         cmd.CommandText = """
             SELECT task_id, state, rx_number, retry_count, error, created_at, updated_at, next_retry_at
             FROM writeback_states
@@ -1059,7 +1066,18 @@ public sealed class AgentStateDb : IDisposable
         {
             var row = new Dictionary<string, object?>();
             for (int i = 0; i < reader.FieldCount; i++)
-                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+            {
+                var name = reader.GetName(i);
+                var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                // Defense-in-depth: scrub any free-text error column on the
+                // way out so PHI that might have leaked into an exception
+                // message can't ride into the cloud-uploaded archive.
+                if (name == "error" && value is string errorText)
+                {
+                    value = Learning.PhiScrubber.ScrubText(errorText);
+                }
+                row[name] = value;
+            }
             states.Add(row);
         }
         return System.Text.Json.JsonSerializer.Serialize(states);
