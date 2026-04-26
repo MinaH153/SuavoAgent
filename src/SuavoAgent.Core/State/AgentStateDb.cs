@@ -98,6 +98,18 @@ public sealed class AgentStateDb : IDisposable
         TryAlter("ALTER TABLE audit_entries ADD COLUMN requester_id TEXT");
         TryAlter("ALTER TABLE audit_entries ADD COLUMN rx_number TEXT");
 
+        // Codex 2026-04-26 audit-schema gap closure. Forensic metadata —
+        // does NOT participate in the chained hash (existing rows would
+        // fail to verify if we changed the hash inputs). Recorded for
+        // reconstruction of capture intent at audit time.
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN actor TEXT");
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN source_component TEXT");
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN capture_reason TEXT");
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN window_title_hash TEXT");
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN element_count INTEGER");
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN scrubber_version TEXT");
+        TryAlter("ALTER TABLE audit_entries ADD COLUMN storage_id TEXT");
+
         // Migrate: add next_retry_at for exponential backoff
         TryAlter("ALTER TABLE writeback_states ADD COLUMN next_retry_at TEXT");
 
@@ -935,11 +947,21 @@ public sealed class AgentStateDb : IDisposable
             entry.FromState, entry.ToState, entry.Trigger, timestamp);
 
         using var cmd = _conn.CreateCommand();
+        // Codex 2026-04-26: forensic metadata columns (actor / source_component /
+        // capture_reason / window_title_hash / element_count / scrubber_version /
+        // storage_id) are written alongside the chained columns but do NOT
+        // contribute to the prev_hash chain — that keeps existing rows
+        // verifiable while still recording capture intent for audit dossier
+        // reconstruction.
         cmd.CommandText = """
             INSERT INTO audit_entries (task_id, from_state, to_state, trigger, timestamp, prev_hash,
-                                       event_type, command_id, requester_id, rx_number)
+                                       event_type, command_id, requester_id, rx_number,
+                                       actor, source_component, capture_reason,
+                                       window_title_hash, element_count, scrubber_version, storage_id)
             VALUES (@taskId, @from, @to, @trigger, @timestamp, @prevHash,
-                    @eventType, @commandId, @requesterId, @rxNumber)
+                    @eventType, @commandId, @requesterId, @rxNumber,
+                    @actor, @sourceComponent, @captureReason,
+                    @windowTitleHash, @elementCount, @scrubberVersion, @storageId)
             """;
         cmd.Parameters.AddWithValue("@taskId", entry.TaskId);
         cmd.Parameters.AddWithValue("@from", entry.FromState);
@@ -953,6 +975,13 @@ public sealed class AgentStateDb : IDisposable
         // Store HMAC hash of rx_number — never store raw PHI in audit log
         var rxHash = entry.RxNumber != null ? HmacRxNumber(entry.RxNumber) : null;
         cmd.Parameters.AddWithValue("@rxNumber", (object?)rxHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@actor", (object?)entry.Actor ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@sourceComponent", (object?)entry.SourceComponent ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@captureReason", (object?)entry.CaptureReason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@windowTitleHash", (object?)entry.WindowTitleHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@elementCount", (object?)entry.ElementCount ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@scrubberVersion", (object?)entry.ScrubberVersion ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@storageId", (object?)entry.StorageId ?? DBNull.Value);
         cmd.ExecuteNonQuery();
         return newHash;
     }
