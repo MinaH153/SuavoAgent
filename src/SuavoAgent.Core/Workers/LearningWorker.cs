@@ -110,16 +110,15 @@ public sealed class LearningWorker : BackgroundService
         // Behavioral correlation and learning instances
         _actionCorrelator = new ActionCorrelator(_db, _sessionId,
             clockCalibrated: false);
-        // Codex 2026-04-27 (Trip A root cause) — re-bind the singleton
-        // BehavioralEventReceiver (registered at Program.cs:316 with the
-        // placeholder session "ipc") to the active learning session. This is
-        // the receiver the IPC handler at Program.cs:540 uses, so without
-        // this re-bind every Helper-emitted behavioral event is silently
-        // attributed to "ipc" while heartbeat counters query the active
-        // learning session id and report 0.
+        // Codex 2026-04-27 (Trip A root cause + redesign) — the singleton
+        // BehavioralEventReceiver lazy-resolves the session id per batch
+        // via AgentStateDb.GetActiveSessionId, so events automatically pick
+        // up _sessionId now that this LearningWorker has registered it. We
+        // only need to wire the post-persist interaction callback so
+        // ActionCorrelator sees UI events that arrive over IPC.
         _behavioralReceiver = _sp.GetRequiredService<BehavioralEventReceiver>();
-        _behavioralReceiver.Configure(_sessionId,
-            onInteraction: (treeHash, elementId, controlType, timestamp) =>
+        _behavioralReceiver.SetInteractionCallback(
+            (treeHash, elementId, controlType, timestamp) =>
                 _actionCorrelator.RecordUiEvent(treeHash, elementId, controlType, timestamp));
 
         // Bridge DMV observations → ActionCorrelator for UI↔SQL correlation

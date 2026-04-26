@@ -312,8 +312,19 @@ try
         return db;
     });
 
+    // Codex 2026-04-27 — receiver lazy-resolves the active learning session
+    // per batch via AgentStateDb.GetActiveSessionId, so events arriving
+    // before LearningWorker boots still land under the correct session id
+    // once the worker registers a session in the DB. No more session_id
+    // mismatch (Trip A) and no more pre-Configure window data loss.
     builder.Services.AddSingleton<BehavioralEventReceiver>(sp =>
-        new BehavioralEventReceiver(sp.GetRequiredService<AgentStateDb>(), sessionId: "ipc"));
+    {
+        var db = sp.GetRequiredService<AgentStateDb>();
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        return new BehavioralEventReceiver(
+            db,
+            sessionResolver: () => db.GetActiveSessionId(opts.PharmacyId ?? string.Empty));
+    });
 
     // H-10: Write ephemeral pipe nonce so Broker can pass the randomised pipe name to Helper.
     // An attacker without knowledge of the nonce cannot pre-create a squatting pipe server.
