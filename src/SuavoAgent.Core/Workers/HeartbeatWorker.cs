@@ -89,12 +89,54 @@ public sealed class HeartbeatWorker : BackgroundService
         _lastAuditChainValid = _stateDb.VerifyAuditChain();
         if (!_lastAuditChainValid)
             _logger.LogWarning("HIPAA ALERT: Audit chain integrity verification FAILED");
+        var lastAuditChainCheck = DateTimeOffset.UtcNow;
+        // Codex 2026-04-26 audit posture: re-verify the chain periodically,
+        // not just at startup. Tamper after-start would otherwise sit
+        // undetected for the entire uptime window. 30 min is a reasonable
+        // balance — rebuild cost on a typical day's audit log is sub-second
+        // and detection latency stays well below any HIPAA breach-notice
+        // clock (60 days for 500+ affected; we want to know in minutes).
+        var auditChainCheckInterval = TimeSpan.FromMinutes(30);
 
         _logger.LogInformation("Heartbeat worker started. Interval: {Interval}s", _options.HeartbeatIntervalSeconds);
 
         while (!stoppingToken.IsCancellationRequested)
         {
             _stateDb.PruneOldNonces(TimeSpan.FromMinutes(10));
+
+            // Periodic audit chain re-verification (Codex 2026-04-26 finding).
+            // Runs in the heartbeat loop instead of a separate worker so it
+            // gets the same lifecycle + cancellation handling. A failure
+            // flips _lastAuditChainValid which the heartbeat payload already
+            // ships under audit.chainValid — cloud surface lights up
+            // immediately on the next heartbeat.
+            if (DateTimeOffset.UtcNow - lastAuditChainCheck > auditChainCheckInterval)
+            {
+                try
+                {
+                    var stillValid = _stateDb.VerifyAuditChain();
+                    if (stillValid != _lastAuditChainValid)
+                    {
+                        if (!stillValid)
+                        {
+                            _logger.LogError(
+                                "HIPAA ALERT: Audit chain integrity check FAILED post-startup. " +
+                                "Tamper, corruption, or write race detected. " +
+                                "Cloud heartbeat will surface audit.chainValid=false.");
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Audit chain integrity check recovered to valid");
+                        }
+                        _lastAuditChainValid = stillValid;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Audit chain periodic verify threw — leaving previous state intact");
+                }
+                lastAuditChainCheck = DateTimeOffset.UtcNow;
+            }
 
             // Daily pruning of observation data (30-day retention)
             var today = DateOnly.FromDateTime(DateTimeOffset.UtcNow.DateTime);
