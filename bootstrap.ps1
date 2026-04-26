@@ -44,7 +44,18 @@ param(
     # consent + skips SQL/PMS prompts (sandbox doesn't run PioneerRx).
     # Trusted because the cloud already validated the token bears
     # is_internal_sandbox before passing this flag.
-    [switch]$SandboxBypass
+    [switch]$SandboxBypass,
+    # PIAG-1 (Pilot Install Acceptance Gate). Run-only mode that triggers
+    # the in-process PIAG runner against an existing install — does NOT
+    # reinstall, does NOT touch services, does NOT prompt for consent.
+    # Posts local evidence (binary hashes, IPC state) to /api/agent/piag-
+    # verify and prints the cloud verdict. Skip-friendly exit codes:
+    #   0 = pass
+    #   1 = degraded
+    #   2 = fail (critical check broke; install is NOT acceptance-gated)
+    #   3 = transport / cloud rejected (try again)
+    #   4 = no install detected (run install first)
+    [switch]$RunPiag
 )
 
 # Auto-log everything -- transcript saved to desktop for debugging
@@ -54,6 +65,89 @@ Start-Transcript -Path $transcriptPath -Force | Out-Null
 $ErrorActionPreference = "Stop"
 $installDir = "C:\Program Files\Suavo\Agent"
 $dataDir = "$env:ProgramData\SuavoAgent"
+
+# ============================================
+# PIAG-1 RUN-ONLY MODE
+# Triggered with -RunPiag. Runs against an existing install — invokes
+# the run-piag verb on the installed Core via a one-shot exe so the
+# kill-test path can run from outside the long-lived service. Returns
+# the verdict mapped to a structured exit code (see param doc above).
+# ============================================
+if ($RunPiag) {
+    Write-Host ""
+    Write-Host "  +===================================+" -ForegroundColor Cyan
+    Write-Host "  | SuavoAgent PIAG-1 Verification    |" -ForegroundColor Cyan
+    Write-Host "  +===================================+" -ForegroundColor Cyan
+    Write-Host ""
+
+    $coreExe = Join-Path $installDir "SuavoAgent.Core.exe"
+    if (-not (Test-Path $coreExe)) {
+        Write-Host "  No install detected at $installDir" -ForegroundColor Red
+        Write-Host "  Run bootstrap.ps1 without -RunPiag to install first." -ForegroundColor Gray
+        try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
+        exit 4
+    }
+
+    Write-Host "  Install found at $installDir" -ForegroundColor Green
+
+    # Invoke the Core binary in run-piag mode. Core handles the actual
+    # POST to /api/agent/piag-verify; bootstrap is just the trigger
+    # surface and exit-code translator.
+    Write-Host "  Posting evidence to cloud..." -ForegroundColor White
+
+    $stdoutLog = Join-Path $env:TEMP "piag-run-$(Get-Date -Format 'HHmmss').stdout.log"
+    $stderrLog = Join-Path $env:TEMP "piag-run-$(Get-Date -Format 'HHmmss').stderr.log"
+
+    $proc = Start-Process -FilePath $coreExe `
+        -ArgumentList "--run-piag" `
+        -Wait `
+        -PassThru `
+        -NoNewWindow `
+        -RedirectStandardOutput $stdoutLog `
+        -RedirectStandardError $stderrLog
+
+    # Map Core exit codes (set by run-piag verb in PiagOutcome → int)
+    # to bootstrap-level codes. Core uses:
+    #   0 = verdict=pass, 1 = verdict=degraded, 2 = verdict=fail
+    #   3 = transport / cloud-rejected, 4 = skipped (config missing)
+    $exitCode = $proc.ExitCode
+
+    Write-Host ""
+    if (Test-Path $stdoutLog) {
+        Get-Content $stdoutLog | ForEach-Object { Write-Host "  $_" }
+    }
+    if (Test-Path $stderrLog) {
+        $stderrContent = (Get-Content $stderrLog -ErrorAction SilentlyContinue) -join "`n"
+        if ($stderrContent.Trim()) {
+            Write-Host ""
+            Write-Host "  STDERR:" -ForegroundColor Yellow
+            $stderrContent.Split("`n") | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
+    }
+    Write-Host ""
+
+    switch ($exitCode) {
+        0 { Write-Host "  Result: PASS" -ForegroundColor Green }
+        1 { Write-Host "  Result: DEGRADED" -ForegroundColor Yellow }
+        2 { Write-Host "  Result: FAIL (critical check)" -ForegroundColor Red }
+        3 { Write-Host "  Result: TRANSPORT / CLOUD REJECTED — retry" -ForegroundColor Yellow }
+        4 { Write-Host "  Result: SKIPPED (config missing)" -ForegroundColor Gray }
+        default { Write-Host "  Result: UNKNOWN exit=$exitCode" -ForegroundColor Red }
+    }
+
+    # Cleanup logs (kept on disk only on non-zero exit so operator
+    # can inspect without RDPing back in).
+    if ($exitCode -eq 0) {
+        Remove-Item $stdoutLog -Force -ErrorAction SilentlyContinue
+        Remove-Item $stderrLog -Force -ErrorAction SilentlyContinue
+    }
+
+    try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
+    if ($transcriptPath -and (Test-Path $transcriptPath)) {
+        Remove-Item $transcriptPath -Force -ErrorAction SilentlyContinue
+    }
+    exit $exitCode
+}
 # Single source of truth for installerVersion in the consent receipt. Bump
 # alongside any tag release so the audit trail reflects which bootstrap
 # wrote the receipt. Two prior literals (3.8.0 / 3.9.1) were left stale.

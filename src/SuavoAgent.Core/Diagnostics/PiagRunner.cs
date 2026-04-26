@@ -107,27 +107,35 @@ public sealed class PiagRunner
             }
 
             // ---- ipc_peer_validation evidence -------------------------
+            // When IpcPipeServer is registered (in-service Core) we collect
+            // live state. When it isn't (bootstrap.ps1 -RunPiag launches a
+            // one-shot Core.exe that doesn't host the pipe), we OMIT these
+            // fields so the cloud check uses heartbeat-side counters as the
+            // source of truth instead of misinterpreting "not collected" as
+            // "connection broken."
             try
             {
                 var ipcServer = _services.GetService<IpcPipeServer>();
                 if (ipcServer is null)
                 {
-                    _logger.LogWarning("PIAG: IpcPipeServer not registered in DI — IPC evidence will be missing");
+                    _logger.LogInformation(
+                        "PIAG: IpcPipeServer not registered (run-piag mode) — IPC evidence omitted; " +
+                        "cloud will rely on heartbeat counters from the running service.");
                 }
-                localChecks["ipcConnected"] = ipcServer?.IsConnected ?? false;
-                // Atomic snapshot — IpcRejectionStats.Snapshot() takes its
-                // internal lock once for count + reason + timestamp. The bare
-                // .Count accessor is safe but inconsistent across multiple
-                // reads if Record() runs between them.
-                var ipcStats = IpcRejectionStats.Snapshot();
-                localChecks["ipcRejectionCount"] = ipcStats.Count;
-                if (ipcStats.LastReason is not null)
+                else
                 {
-                    localChecks["ipcLastRejectionReason"] = ipcStats.LastReason;
-                }
-                if (ipcStats.LastAt is { } at)
-                {
-                    localChecks["ipcLastRejectionAt"] = at.ToString("o");
+                    localChecks["ipcConnected"] = ipcServer.IsConnected;
+                    // Atomic snapshot — count + reason + timestamp ship together.
+                    var ipcStats = IpcRejectionStats.Snapshot();
+                    localChecks["ipcRejectionCount"] = ipcStats.Count;
+                    if (ipcStats.LastReason is not null)
+                    {
+                        localChecks["ipcLastRejectionReason"] = ipcStats.LastReason;
+                    }
+                    if (ipcStats.LastAt is { } at)
+                    {
+                        localChecks["ipcLastRejectionAt"] = at.ToString("o");
+                    }
                 }
             }
             catch (Exception ex)

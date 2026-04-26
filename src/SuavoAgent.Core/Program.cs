@@ -49,6 +49,87 @@ AppDomain.CurrentDomain.UnhandledException += (_, e) =>
 TaskScheduler.UnobservedTaskException += (_, e) =>
     WriteCrash("UnobservedTaskException", e.Exception);
 
+// ============================================
+// PIAG-1 RUN-PIAG VERB
+// Triggered by `SuavoAgent.Core.exe --run-piag` (typically launched
+// from bootstrap.ps1 -RunPiag). Spins up a minimal host long enough
+// to resolve PiagRunner + SuavoCloudClient + AgentOptions, runs the
+// gate once, exits with a structured code:
+//   0 = pass, 1 = degraded, 2 = fail (critical),
+//   3 = transport / cloud rejected, 4 = skipped (config missing).
+// IpcPipeServer is intentionally NOT registered — this is a one-shot
+// process that doesn't host the pipe. PiagRunner detects that and
+// omits local IPC evidence; cloud uses heartbeat counters instead.
+// ============================================
+if (args.Any(a => string.Equals(a, "--run-piag", StringComparison.OrdinalIgnoreCase)))
+{
+    try
+    {
+        var exitCode = await RunPiagOneShotAsync(args);
+        Environment.Exit(exitCode);
+    }
+    catch (Exception ex)
+    {
+        WriteCrash("RunPiag", ex);
+        Console.Error.WriteLine($"PIAG run failed: {ex.Message}");
+        Environment.Exit(3);
+    }
+    return; // unreachable; quiets compiler
+}
+
+static async Task<int> RunPiagOneShotAsync(string[] args)
+{
+    var exeDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
+    var builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(
+        new Microsoft.Extensions.Hosting.HostApplicationBuilderSettings
+        {
+            Args = args,
+            ContentRootPath = exeDir,
+        });
+
+    var configOverridesPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent",
+        "config-overrides.json");
+    builder.Configuration.AddJsonFile(configOverridesPath, optional: true, reloadOnChange: false);
+
+    builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
+    builder.Services.AddSingleton<SuavoCloudClient>(sp =>
+        new SuavoCloudClient(sp.GetRequiredService<IOptions<AgentOptions>>().Value));
+    builder.Services.AddSingleton<SuavoAgent.Core.Diagnostics.PiagRunner>();
+
+    builder.Logging.ClearProviders();
+    builder.Logging.AddConsole();
+
+    using var host = builder.Build();
+
+    var runner = host.Services.GetRequiredService<SuavoAgent.Core.Diagnostics.PiagRunner>();
+    var result = await runner.RunAsync(
+        trigger: "manual",
+        includeWatchdogKillTest: false,
+        ct: CancellationToken.None);
+
+    Console.WriteLine($"  Outcome: {result.Outcome}");
+    if (result.Result is not null) Console.WriteLine($"  Result:  {result.Result}");
+    if (result.OverallReason is not null) Console.WriteLine($"  Reason:  {result.OverallReason}");
+    if (result.ErrorCode is not null) Console.WriteLine($"  Error:   {result.ErrorCode}");
+
+    return result.Outcome switch
+    {
+        SuavoAgent.Core.Diagnostics.PiagOutcome.Verdict => result.Result switch
+        {
+            "pass" => 0,
+            "degraded" => 1,
+            "fail" => 2,
+            _ => 3,
+        },
+        SuavoAgent.Core.Diagnostics.PiagOutcome.CloudRejected => 3,
+        SuavoAgent.Core.Diagnostics.PiagOutcome.TransportError => 3,
+        SuavoAgent.Core.Diagnostics.PiagOutcome.Skipped => 4,
+        _ => 3,
+    };
+}
+
 // Bootstrap self-update — runs before any DI/config
 try
 {
