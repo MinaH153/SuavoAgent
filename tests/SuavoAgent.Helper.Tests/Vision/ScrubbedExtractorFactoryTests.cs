@@ -128,6 +128,11 @@ public class ScrubbedExtractorFactoryTests
         Assert.False(opts.Enabled);
         Assert.Equal("eng", opts.Language);
         Assert.Equal(50, opts.MinConfidence);
-        Assert.Equal(120, opts.IdleUnloadSeconds);
+        // PR #27 dropped IdleUnloadSeconds 120 -> 45 per Codex's Vision-On
+        // budget recommendation. PR #28 added the per-extraction timeout.
+        // PR #27 also added MemoryHeadroomBytes (default 350 MB).
+        Assert.Equal(45, opts.IdleUnloadSeconds);
+        Assert.Equal(10, opts.ExtractionTimeoutSeconds);
+        Assert.Equal(350L * 1024 * 1024, opts.MemoryHeadroomBytes);
     }
 }
