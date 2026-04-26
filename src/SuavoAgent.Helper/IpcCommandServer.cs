@@ -64,6 +64,7 @@ public sealed class IpcCommandServer : IDisposable
     private readonly PricingWorkflow _pricing;
     private readonly ScreenCaptureController? _vision;
     private readonly FileLocatorService? _locator;
+    private readonly Func<bool>? _isPmsForeground;
     private readonly ILogger _logger;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
@@ -73,12 +74,19 @@ public sealed class IpcCommandServer : IDisposable
         PricingWorkflow pricing,
         ILogger logger,
         ScreenCaptureController? vision = null,
-        FileLocatorService? locator = null)
+        FileLocatorService? locator = null,
+        Func<bool>? isPmsForeground = null)
     {
         _pipeName = pipeName;
         _pricing = pricing;
         _vision = vision;
         _locator = locator;
+        // When provided, capture_screen returns a not_foreground error if
+        // the predicate is false at dispatch time. Wired from Helper.Program
+        // to () => ForegroundGuard.IsPidForeground(pioneer.ProcessId), so
+        // an alt-tabbed user's Chrome / email / banking window is never
+        // captured even with Vision.Enabled=true.
+        _isPmsForeground = isPmsForeground;
         _logger = logger;
     }
 
@@ -196,6 +204,19 @@ public sealed class IpcCommandServer : IDisposable
         {
             return Error(request.Id, request.Command, "vision_unavailable",
                 "Vision not configured in this Helper instance");
+        }
+
+        // HIPAA gate: refuse capture when PMS is not the foreground window.
+        // Closes the Codex 2026-04-26 review gap that flagged this handler
+        // would otherwise capture whatever the user happened to be looking
+        // at (Chrome, email, banking) when Core's worker fired its cadence.
+        if (_isPmsForeground != null && !_isPmsForeground())
+        {
+            _logger.Information(
+                "IpcCommandServer: capture_screen rejected — PMS not foreground (requestId={Id})",
+                request.Id);
+            return Error(request.Id, request.Command, "not_foreground",
+                "Capture refused — PMS process is not the foreground window");
         }
 
         // Helper-side dispatch log — pairs with Core-side AppendChainedAuditEntry

@@ -5,11 +5,23 @@ using SuavoAgent.Contracts.Ipc;
 namespace SuavoAgent.Core.Ipc;
 
 /// <summary>
+/// Test seam over <see cref="IpcCommandClient"/> so workers can be unit-
+/// tested without a real named pipe. Production wiring uses the concrete
+/// class directly; tests use an in-memory fake.
+/// </summary>
+public interface IIpcCommandClient
+{
+    bool IsConnected { get; }
+    Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct);
+    Task<IpcResponse?> SendAsync(IpcRequest request, TimeSpan timeout, CancellationToken ct);
+}
+
+/// <summary>
 /// Core-side client that connects to Helper's command pipe.
 /// Used to push commands (e.g. pricing lookups) from Core → Helper.
 /// One connection per job; dispose after job completes.
 /// </summary>
-public sealed class IpcCommandClient : IAsyncDisposable
+public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
 {
     private readonly string _pipeName;
     private readonly ILogger<IpcCommandClient> _logger;

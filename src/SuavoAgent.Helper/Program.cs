@@ -73,7 +73,12 @@ try
         sampler: new SuavoAgent.Core.Discovery.TabularShapeSampler(),
         ranker: new SuavoAgent.Core.Discovery.HeuristicOnlyRanker());
 
-    using var cmdServer = new IpcCommandServer(cmdPipeName, pricingWorkflow, Log.Logger, visionController, fileLocator);
+    // Pass a foreground-PID check that always re-reads pioneer.ProcessId so
+    // capture_screen's HIPAA gate stays accurate as PMS detaches/re-attaches.
+    using var cmdServer = new IpcCommandServer(
+        cmdPipeName, pricingWorkflow, Log.Logger, visionController, fileLocator,
+        isPmsForeground: () => SuavoAgent.Helper.SystemObservers.ForegroundGuard
+            .IsPidForeground(pioneer.ProcessId));
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
