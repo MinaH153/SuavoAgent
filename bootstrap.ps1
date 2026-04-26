@@ -46,6 +46,14 @@ Start-Transcript -Path $transcriptPath -Force | Out-Null
 $ErrorActionPreference = "Stop"
 $installDir = "C:\Program Files\Suavo\Agent"
 $dataDir = "$env:ProgramData\SuavoAgent"
+# Single source of truth for installerVersion in the consent receipt. Bump
+# alongside any tag release so the audit trail reflects which bootstrap
+# wrote the receipt. Two prior literals (3.8.0 / 3.9.1) were left stale.
+$bootstrapVersion = "3.13.10"
+# Persisted across reinstalls. The cleanup path keeps these so consent +
+# learned-state survive a re-run (Trip A 2026-04-25: pharmacist re-typed
+# consent 4x because state.db AND consent-receipt.json were both wiped).
+$dataDirKeepList = @('logs', 'consent-receipt.json', 'state.db')
 
 function ConvertTo-PlainTextSecret {
     param([object]$Secret)
@@ -110,10 +118,13 @@ function Invoke-PriorInstallCleanup {
         catch { Write-Host "    (install dir cleanup had a hiccup: $($_.Exception.Message) -- continuing)" -ForegroundColor DarkGray }
     }
     if (Test-Path $dataDir) {
-        # Preserve logs dir so operators can still see the previous install's
-        # startup-crash.log after a re-run. Everything else goes.
+        # Keep the well-known artifacts that should survive a reinstall:
+        #   logs/                 -- previous startup-crash.log for ops
+        #   consent-receipt.json  -- avoids re-typing consent on reinstall
+        #   state.db              -- preserves encrypted learning state
+        # Everything else goes (config-overrides.json, lockfiles, etc.).
         Get-ChildItem $dataDir -Force -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name -ne 'logs'
+            $dataDirKeepList -notcontains $_.Name
         } | ForEach-Object {
             try { Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop } catch { }
         }
@@ -292,7 +303,36 @@ Write-Host ""
 # ============================================
 # This consent is recorded digitally and uploaded to the Suavo cloud
 # on first heartbeat. No separate paperwork needed.
-if (-not $SkipConsent) {
+
+# Cache check -- if a recent consent receipt already exists for THIS
+# machine, reuse it and skip the prompts. Trip A 2026-04-25 had Nadim
+# re-type consent four times across re-installs; the cleanup path now
+# preserves consent-receipt.json so subsequent runs find it here.
+$cachedConsent = $null
+$cachedConsentPath = Join-Path $dataDir "consent-receipt.json"
+if ((-not $SkipConsent) -and (Test-Path $cachedConsentPath)) {
+    try {
+        $rawCached = Get-Content $cachedConsentPath -Raw -ErrorAction Stop
+        $cached = $rawCached | ConvertFrom-Json -ErrorAction Stop
+        $currentFingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
+        $cachedTimestamp = $null
+        try { $cachedTimestamp = [DateTime]::Parse($cached.consentTimestamp) } catch { }
+        $consentAgeDays = if ($cachedTimestamp) { ((Get-Date) - $cachedTimestamp).TotalDays } else { 9999 }
+        $sameMachine = $cached.machineFingerprint -eq $currentFingerprint
+        $termsOk = $cached.termsAccepted -eq $true
+        if ($sameMachine -and $termsOk -and ($consentAgeDays -lt 90)) {
+            $cachedConsent = $cached
+            $ageDisplay = [math]::Round($consentAgeDays, 1)
+            Write-Host ""
+            Write-Ok "Reusing existing consent for this machine ($($cached.authorizingParty.name), recorded $ageDisplay days ago)"
+            Write-Host "  To force a fresh consent prompt: del `"$cachedConsentPath`" before re-running" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host "  Could not read cached consent ($($_.Exception.Message)) -- will re-prompt" -ForegroundColor DarkGray
+    }
+}
+
+if ((-not $SkipConsent) -and (-not $cachedConsent)) {
 Write-Host ""
 Write-Host "  +======================================================+" -ForegroundColor Cyan
 Write-Host "  |         SUAVOAGENT TERMS & CONSENT                  |" -ForegroundColor Cyan
@@ -381,11 +421,32 @@ $consentReceipt = @{
     consentTimestamp = $consentTimestamp
     termsAccepted = $true
     employeeNoticeAcknowledged = ($mandatoryNoticeStates -contains $stateUpper)
-    installerVersion = "3.8.0"
+    installerVersion = $bootstrapVersion
     machineFingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
 }
 Write-Ok "Consent recorded: $authName ($authTitle) at $consentTimestamp"
 Write-Host ""
+} elseif ($cachedConsent) {
+    # Reuse the existing on-disk receipt verbatim. We bump installerVersion
+    # to whatever wrote it THIS time so the audit trail still shows when the
+    # current bootstrap ran -- but the human acknowledgment + machine
+    # binding stay unchanged.
+    $authName = $cachedConsent.authorizingParty.name
+    $authTitle = $cachedConsent.authorizingParty.title
+    $confirmState = $cachedConsent.businessState
+    $consentTimestamp = $cachedConsent.consentTimestamp
+    $consentReceipt = @{
+        consentVersion = $cachedConsent.consentVersion
+        authorizingParty = @{ name = $authName; title = $authTitle }
+        businessState = $confirmState
+        mandatoryNoticeState = $cachedConsent.mandatoryNoticeState
+        consentTimestamp = $consentTimestamp
+        termsAccepted = $true
+        employeeNoticeAcknowledged = $cachedConsent.employeeNoticeAcknowledged
+        installerVersion = $bootstrapVersion
+        machineFingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
+        source = "cached_reinstall"
+    }
 } else {
     Write-Ok "Consent recorded via web dashboard -- skipping terminal prompts"
     # Set defaults for the consent receipt (already recorded in cloud)
@@ -401,7 +462,7 @@ Write-Host ""
         consentTimestamp = $consentTimestamp
         termsAccepted = $true
         employeeNoticeAcknowledged = $true
-        installerVersion = "3.9.1"
+        installerVersion = $bootstrapVersion
         machineFingerprint = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
         source = "web_dashboard"
     }
@@ -463,8 +524,22 @@ if (-not $pmsType) {
 # Each sets $pmsType and relevant config vars
 
 # --- Result ---
+# Derive the runtime ProcessNameGlob from the actual exe basename instead of
+# hardcoding "PioneerPharmacy*". Future PMS detections set $pioneerExe to
+# their own .exe path; this stays correct as new adapters land. Trip A
+# 2026-04-25 surfaced the risk: the hardcoded glob worked at Better Life
+# only because PioneerRx happens to ship as PioneerPharmacy.exe -- a
+# pharmacy with a renamed/repackaged exe would have silently captured zero.
+$pmsProcessName = if ($pioneerExe) {
+    [System.IO.Path]::GetFileNameWithoutExtension($pioneerExe)
+} else {
+    # No exe detected -- fall back to the documented PioneerRx default so
+    # an agent that boots before its PMS does still has a glob to match.
+    "PioneerPharmacy"
+}
+
 if ($pmsType) {
-    Write-Ok "Detected: $pmsType at $pioneerDir"
+    Write-Ok "Detected: $pmsType at $pioneerDir (process: $pmsProcessName)"
 } else {
     Write-Warn "No pharmacy management system detected on this machine"
     Write-Host "  The agent will install and auto-discover the PMS during its learning phase." -ForegroundColor Gray
@@ -485,11 +560,23 @@ if (-not $pmsType) {
     $sqlUser = $null
     $sqlPassword = $null
     Write-Host "  Agent will discover SQL during learning phase" -ForegroundColor Gray
+} elseif ($LearningMode) {
+    # Tier 0 (-LearningMode) is UIA-only -- it never queries SQL. Skipping
+    # the discovery + manual-credential fallback removes a pharmacist-facing
+    # prompt that surfaced four times during Trip A 2026-04-25 (Nadim was
+    # asked "Use SQL Auth? (y/n)" then "SQL Username" / "SQL Password" with
+    # no way to know the right answers).
+    Write-Step "Phase 2: Skipping SQL discovery (-LearningMode is UIA-only)"
+    $sqlServer = ""
+    $sqlDatabase = ""
+    $sqlUser = $null
+    $sqlPassword = $null
+    Write-Host "  Tier 0 observe-only mode does not access SQL Server" -ForegroundColor Gray
 } else {
     Write-Step "Phase 2: Discovering SQL Server credentials"
 }
 
-if ($pmsType) {
+if ($pmsType -and -not $LearningMode) {
 $sqlServer = $null
 $sqlDatabase = "PioneerPharmacySystem"
 $sqlUser = $null
@@ -995,7 +1082,7 @@ $config = @{
             Enabled = $false
             Mode = "capture"
             SkillId = "learned"
-            ProcessNameGlob = "PioneerPharmacy*"
+            ProcessNameGlob = "${pmsProcessName}*"
             RuleGeneration = $false
             AutoApproveOnFingerprintMatch = $false
         }
