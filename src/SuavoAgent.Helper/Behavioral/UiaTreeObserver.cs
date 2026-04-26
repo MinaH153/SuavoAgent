@@ -16,9 +16,19 @@ public sealed class UiaTreeObserver
     private const int MaxDepth = 8;
     private static readonly TimeSpan WalkInterval = TimeSpan.FromSeconds(60);
 
+    // Trip A 2026-04-25 hard-reset prevention. PioneerRx is a deep WinForms
+    // tree; with UIA2 marshalling overhead a single walk on a busy install
+    // can pin a CPU core for 30+ seconds. Bound the walk so a single tree
+    // walk can't dominate the window between walks, and skip the next walk
+    // if the previous one was already that slow — letting the observer
+    // breathe instead of stacking back-to-back walks.
+    private const int MaxElementsPerWalk = 5000;
+    private static readonly TimeSpan SlowWalkSkipThreshold = TimeSpan.FromSeconds(30);
+
     private readonly string _pharmacySalt;
     private readonly BehavioralEventBuffer _buffer;
     private readonly ILogger _logger;
+    private TimeSpan _lastWalkDuration = TimeSpan.Zero;
 
     public UiaTreeObserver(
         string pharmacySalt,
@@ -36,7 +46,9 @@ public sealed class UiaTreeObserver
     /// </summary>
     public async Task RunAsync(Func<Window?> getWindow, CancellationToken ct)
     {
-        _logger.Information("UiaTreeObserver started");
+        _logger.Information(
+            "UiaTreeObserver started (interval={IntervalSec}s, maxElements={MaxElems}, slowSkipThreshold={SkipSec}s)",
+            WalkInterval.TotalSeconds, MaxElementsPerWalk, SlowWalkSkipThreshold.TotalSeconds);
 
         while (!ct.IsCancellationRequested)
         {
@@ -47,6 +59,22 @@ public sealed class UiaTreeObserver
             catch (OperationCanceledException)
             {
                 break;
+            }
+
+            // Back-pressure: if the last walk burned more than the skip
+            // threshold, take this cycle off so we don't stack walks back
+            // to back. A single walk that takes 35s on a 60s cadence
+            // already eats >half the breathing room — two in a row would
+            // saturate the CPU.
+            if (_lastWalkDuration > SlowWalkSkipThreshold)
+            {
+                _logger.Warning(
+                    "UiaTreeObserver: skipping walk — previous walk took {Sec:F1}s (threshold {ThreshSec}s). " +
+                    "PioneerRx tree may be unusually deep or UIA2 marshalling slow.",
+                    _lastWalkDuration.TotalSeconds,
+                    SlowWalkSkipThreshold.TotalSeconds);
+                _lastWalkDuration = TimeSpan.Zero;
+                continue;
             }
 
             try
@@ -70,22 +98,40 @@ public sealed class UiaTreeObserver
     }
 
     /// <summary>
-    /// Walks the window depth-first (max 8 levels), scrubs each element,
-    /// computes a SHA-256 tree hash, and enqueues a TreeSnapshot event.
+    /// Walks the window depth-first (max 8 levels, max 5000 elements),
+    /// scrubs each element, computes a SHA-256 tree hash, and enqueues a
+    /// TreeSnapshot event. Records the wall-clock duration so the next
+    /// cycle can skip if this one was slow.
     /// </summary>
     public void WalkTree(Window window)
     {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         var scrubbedElements = new List<ScrubbedElement>();
         var hashParts = new List<string>();
 
-        // Window inherits AutomationElement — pass directly
+        // Window inherits AutomationElement — pass directly. WalkElement
+        // checks scrubbedElements.Count against MaxElementsPerWalk on every
+        // recursion so a runaway tree truncates rather than stalls.
         WalkElement(window, depth: 0, scrubbedElements, hashParts);
 
         var treeHash = ComputeTreeHash(hashParts);
         _buffer.Enqueue(BehavioralEvent.TreeSnapshot(treeHash));
 
-        _logger.Debug("UiaTreeObserver: walked {Count} elements, hash={Hash}",
-            scrubbedElements.Count, treeHash[..8]);
+        sw.Stop();
+        _lastWalkDuration = sw.Elapsed;
+
+        var truncated = scrubbedElements.Count >= MaxElementsPerWalk;
+        if (truncated || sw.Elapsed > SlowWalkSkipThreshold)
+        {
+            _logger.Warning(
+                "UiaTreeObserver: walk slow — {Count} elements in {Ms}ms (truncated={Trunc})",
+                scrubbedElements.Count, sw.ElapsedMilliseconds, truncated);
+        }
+        else
+        {
+            _logger.Debug("UiaTreeObserver: walked {Count} elements in {Ms}ms, hash={Hash}",
+                scrubbedElements.Count, sw.ElapsedMilliseconds, treeHash[..8]);
+        }
     }
 
     // ── Private ──────────────────────────────────────────────────────────────
@@ -97,6 +143,10 @@ public sealed class UiaTreeObserver
         List<string> hashParts)
     {
         if (depth > MaxDepth) return;
+        // Element budget — prevents UIA enumeration from running unbounded
+        // on a degenerate tree (the kind of failure mode that took 5
+        // hours to diagnose at Nadim's). Truncation is logged in WalkTree.
+        if (output.Count >= MaxElementsPerWalk) return;
 
         try
         {

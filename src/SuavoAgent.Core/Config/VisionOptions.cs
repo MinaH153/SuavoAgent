@@ -87,7 +87,19 @@ public sealed class TesseractOptions
 
     /// <summary>
     /// Unload the engine after this many idle seconds to free RAM (~50-100 MB).
-    /// Default 120. Set 0 to keep loaded forever.
+    /// Default 45 (Codex post-Trip-A recommendation for Vision-On safety —
+    /// the prior 120s let the engine sit resident long enough that the
+    /// resource pressure that caused Nadim's hard reset could rebuild
+    /// before the next idle-unload fired). Set 0 to keep loaded forever.
     /// </summary>
-    public int IdleUnloadSeconds { get; set; } = 120;
+    public int IdleUnloadSeconds { get; set; } = 45;
+
+    /// <summary>
+    /// Refuse to load the Tesseract engine if the Helper process working set
+    /// is already at or above this byte threshold. Default 350 MB — pairs
+    /// with ResourceBudgetGuard's 500 MB soft warn / 800 MB hard kill so
+    /// OCR can't push Helper into the danger zone. Set 0 to disable the
+    /// headroom check.
+    /// </summary>
+    public long MemoryHeadroomBytes { get; set; } = 350L * 1024 * 1024;
 }

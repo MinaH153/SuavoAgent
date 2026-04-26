@@ -183,6 +183,27 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
     {
         if (_engine != null) return true;
 
+        // Trip A 2026-04-25 Vision-On safety: refuse to load the engine if
+        // Helper is already in resource pressure. Tesseract adds ~50-100 MB;
+        // loading on top of an already-stressed Helper is exactly how the
+        // first install at Nadim's hung the OS. Pairs with ResourceBudgetGuard
+        // (500 MB soft warn / 800 MB hard kill) so OCR can't push Helper
+        // into the danger zone.
+        if (_options.MemoryHeadroomBytes > 0)
+        {
+            using var proc = System.Diagnostics.Process.GetCurrentProcess();
+            var rss = proc.WorkingSet64;
+            if (rss >= _options.MemoryHeadroomBytes)
+            {
+                _logger.Warning(
+                    "TesseractScreenExtractor: refusing engine load — Helper RSS={RssMb}MB " +
+                    "is at/above MemoryHeadroomBytes={LimitMb}MB. Set MemoryHeadroomBytes=0 to disable headroom check.",
+                    rss / (1024 * 1024),
+                    _options.MemoryHeadroomBytes / (1024 * 1024));
+                return false;
+            }
+        }
+
         if (string.IsNullOrWhiteSpace(_options.TessdataPath))
         {
             _logger.Warning("TesseractScreenExtractor: TessdataPath not configured");
@@ -211,8 +232,10 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         {
             _engine = new TesseractEngine(_options.TessdataPath, _options.Language, EngineMode.Default);
             _logger.Information(
-                "TesseractScreenExtractor: engine loaded ({Lang}, tessdata={Path})",
-                _options.Language, _options.TessdataPath);
+                "TesseractScreenExtractor: engine loaded ({Lang}, tessdata={Path}, idleUnloadSec={Idle}, headroomMb={HeadroomMb})",
+                _options.Language, _options.TessdataPath,
+                _options.IdleUnloadSeconds,
+                _options.MemoryHeadroomBytes / (1024 * 1024));
             return true;
         }
         catch (Exception ex)

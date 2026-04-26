@@ -33,6 +33,22 @@ public sealed class UiaInteractionObserver : IDisposable
 
     private bool _disposed;
 
+    // Trip A 2026-04-25 hard-reset prevention. Subtree event subscriptions
+    // on PioneerRx (TreeScope.Subtree on FocusChanged + StructureChanged +
+    // InvokePattern.Invoked) can fire dozens-per-sec on a busy pharmacist
+    // session. Each fire walks element properties, scrubs PHI, and enqueues
+    // a buffer event — under UIA2 that adds up fast enough to spike CPU.
+    // Token bucket caps sustained throughput at 5 events/sec with burst
+    // capacity of 25 so a flurry of clicks still records the first 25 but
+    // a runaway loop can't dominate the dispatcher thread. The limiter is
+    // extracted into TokenBucketRateLimiter so the throttle contract is
+    // unit-testable without spinning up UIA2Automation.
+    private const int RateLimitMaxBurst = 25;
+    private static readonly TimeSpan RateLimitRefillInterval = TimeSpan.FromMilliseconds(200); // 5/sec
+    private readonly TokenBucketRateLimiter _throttle = new(RateLimitMaxBurst, RateLimitRefillInterval);
+    private long _droppedEvents;
+    private long _lastDropLogTicks;
+
     public UiaInteractionObserver(
         UIA2Automation automation,
         string pharmacySalt,
@@ -216,6 +232,16 @@ public sealed class UiaInteractionObserver : IDisposable
         int depth,
         int childIndex)
     {
+        // Rate-limit BEFORE doing any UIA RPC work — every property read
+        // here (ControlType, AutomationId, etc.) is a separate UIA2
+        // round-trip that can saturate the dispatcher under burst load.
+        // Drop the event entirely if no token is available so the rest of
+        // the observer + buffer pipeline never feels the back-pressure.
+        if (!TryAcquireToken())
+        {
+            return;
+        }
+
         try
         {
             var controlType = TryGetControlType(element);
@@ -253,6 +279,30 @@ public sealed class UiaInteractionObserver : IDisposable
         {
             _logger.Debug(ex, "UiaInteractionObserver: EmitInteractionEvent error for {Subtype}", subtype);
         }
+    }
+
+    /// <summary>
+    /// Throttle wrapper that handles the periodic-log side effect. Logic
+    /// lives in <see cref="TokenBucketRateLimiter"/>; this method records
+    /// drops and emits a periodic warning so ops can see throttling is
+    /// active versus the agent being silent for other reasons.
+    /// </summary>
+    private bool TryAcquireToken()
+    {
+        if (_throttle.TryAcquire()) return true;
+
+        var now = Environment.TickCount64;
+        var dropped = Interlocked.Increment(ref _droppedEvents);
+        if (now - Interlocked.Read(ref _lastDropLogTicks) > 5000)
+        {
+            _logger.Warning(
+                "UiaInteractionObserver: {Dropped} interaction events dropped by rate limiter " +
+                "(burst={Max}/refill={Hz}Hz). High-frequency UIA event source — review subtree subscription scope.",
+                dropped, RateLimitMaxBurst, 1000.0 / RateLimitRefillInterval.TotalMilliseconds);
+            Interlocked.Exchange(ref _lastDropLogTicks, now);
+            Interlocked.Exchange(ref _droppedEvents, 0);
+        }
+        return false;
     }
 
     private static string? TryGetControlType(AutomationElement el)
