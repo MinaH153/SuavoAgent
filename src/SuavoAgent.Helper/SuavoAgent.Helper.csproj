@@ -17,6 +17,14 @@
 
   <ItemGroup>
     <PackageReference Include="FlaUI.UIA2" Version="5.0.0" />
+    <!-- UIA3 — modern Windows Accessibility framework. Used as the
+         default-OFF feature-flag path in PioneerRxUiaEngine. UIA2 stays
+         as the fallback for WinForms apps where UIA3 returns zero
+         useful elements. Codex 2026-04-26 review flagged UIA2 as the
+         likely contributor to Trip A's hard reset (slow tree
+         enumeration on PioneerRx's deep WinForms tree); UIA3 is
+         5-10× faster but needs onsite verification before flip. -->
+    <PackageReference Include="FlaUI.UIA3" Version="5.0.0" />
     <PackageReference Include="Microsoft.Win32.SystemEvents" Version="10.0.6" />
     <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
