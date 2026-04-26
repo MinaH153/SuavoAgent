@@ -237,4 +237,70 @@ public class PhiScrubberAddressTests
         Assert.DoesNotContain("[ADDRESS]", result);
         Assert.Contains("[REDACTED]", result);
     }
+
+    // ── Codex round-2 review fixes (2026-04-27) ──
+
+    [Theory]
+    [InlineData("Address: 123 State Street")]
+    [InlineData("Address: 456 City Drive")]
+    [InlineData("Address: 789 Insurance Court")]
+    public void ScrubText_StreetNameMatchingStopKeyword_NotTruncated(string input)
+    {
+        // Codex round-2 CRITICAL: AddressContextPattern lookahead used
+        // `[:\s]` which terminated capture at "State Street" / "City Drive"
+        // because "State"/"City" are stop-keywords for adjacent fields.
+        // The fix: require explicit `[:=]` after stop-keywords. The full
+        // address must be scrubbed; the street-name word is not a field.
+        var result = PhiScrubber.ScrubText(input);
+        Assert.NotNull(result);
+        Assert.DoesNotContain("123", result);
+        Assert.DoesNotContain("456", result);
+        Assert.DoesNotContain("789", result);
+        Assert.DoesNotContain("State Street", result);
+        Assert.DoesNotContain("City Drive", result);
+        Assert.DoesNotContain("Insurance Court", result);
+    }
+
+    [Theory]
+    [InlineData("Member ID: ABC123")]
+    [InlineData("Subscriber ID: XYZ789")]
+    [InlineData("Group: 5500")]
+    [InlineData("Policy Number: P-9876")]
+    [InlineData("Insurance: BlueCross")]
+    [InlineData("Plan: Premium-Gold")]
+    public void ScrubText_HealthPlanIdentifier_Scrubbed(string input)
+    {
+        // Codex round-2 HIGH (HIPAA Safe Harbor #5): health-plan beneficiary
+        // numbers must scrub. Member ID, Subscriber ID, Group, Policy,
+        // Insurance, Plan, Beneficiary, Carrier — keyword-anchored.
+        var result = PhiScrubber.ScrubText(input);
+        Assert.NotNull(result);
+        Assert.DoesNotContain("ABC123", result);
+        Assert.DoesNotContain("XYZ789", result);
+        Assert.DoesNotContain("5500", result);
+        Assert.DoesNotContain("P-9876", result);
+        Assert.DoesNotContain("BlueCross", result);
+        Assert.DoesNotContain("Premium-Gold", result);
+    }
+
+    [Fact]
+    public void ScrubText_AdjacentStopKeywords_AllPreserved()
+    {
+        // Round-2 regression: stop-keywords with `[:=]` delimiter must
+        // terminate Address capture so adjacent labels remain readable
+        // for forensic audit, while their VALUES are scrubbed by their
+        // own patterns.
+        var input = "Address: 5678 Forest Drive City: San Diego ZIP: 92101 DOB: 03/15/1980";
+        var result = PhiScrubber.ScrubText(input);
+        Assert.NotNull(result);
+        // Address scrubbed, structural labels preserved.
+        Assert.DoesNotContain("5678", result);
+        Assert.DoesNotContain("Forest Drive", result);
+        Assert.Contains("Address:", result);
+        Assert.Contains("City:", result);
+        Assert.Contains("ZIP:", result);
+        Assert.Contains("DOB:", result);
+        // DOB value scrubbed by DatePattern.
+        Assert.DoesNotContain("03/15/1980", result);
+    }
 }

@@ -122,8 +122,14 @@ public static partial class PhiScrubber
     // consistency with NPI/DEA/SSN/Phone scrubbing (Codex 2026-04-27 review).
     // ──────────────────────────────────────────────────────────────────────
 
+    // Codex 2026-04-27 round-2 review: stop-keywords MUST be followed by a
+    // colon or equals sign, not just any whitespace — otherwise a street
+    // name like "State Street" or "City Drive" terminates the address
+    // capture early and leaks the rest of the value. `\s*[:=]` requires
+    // an explicit field delimiter; pipe / EOL / EOF still terminate
+    // unconditionally as natural delimiters.
     [GeneratedRegex(
-        @"(?<=\b(?:Mailing|Home|Work|Shipping|Billing|Patient|Primary)?\s*Addr(?:ess)?[:\s]+)((?:\d|P\.?\s*O\.?|APO|FPO|DPO|RR|HC).*?)(?=\s*(?:\||$|\r|\n|\b(?:DOB|SSN|Phone|MRN|Patient|Name|Status|ID|Email|Tel|City|State|Zip|Notes|Allergy|Insurance|Caregiver)[:\s]))",
+        @"(?<=\b(?:Mailing|Home|Work|Shipping|Billing|Patient|Primary)?\s*Addr(?:ess)?[:\s]+)((?:\d|P\.?\s*O\.?|APO|FPO|DPO|RR|HC).*?)(?=\s*(?:\||$|\r|\n|\b(?:DOB|SSN|Phone|MRN|Patient|Name|Status|ID|Email|Tel|City|State|Zip|Notes|Allergy|Insurance|Caregiver|Member|Subscriber|Group|Policy|Plan)\s*[:=]))",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Multiline)]
     private static partial Regex AddressContextPattern();
 
@@ -141,6 +147,15 @@ public static partial class PhiScrubber
     [GeneratedRegex(@"\b(?:RR|HC)\s+\d+\s+Box\s+\d+\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
     private static partial Regex RuralRoutePattern();
 
+    // Codex 2026-04-27 round-2 review (HIPAA Safe Harbor #5): health-plan
+    // beneficiary numbers — Member ID / Subscriber ID / Group / Policy /
+    // Insurance / Plan / Beneficiary / Carrier — keyword-anchored,
+    // value-scrubbing pattern. Bound to ≥3 alphanumerics so labels like
+    // "Group: A" don't false-fire on placeholder content.
+    [GeneratedRegex(@"(?<=\b(?:Member|Subscriber|Group|Policy|Insurance|Plan|Beneficiary|Carrier)(?:\s*(?:ID|Number|#|No)\.?)?\s*[:=]\s*)[A-Z0-9-]{3,}",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    private static partial Regex InsuranceIdPattern();
+
     private static readonly Regex[] PhiPatterns =
     [
         // Address patterns first — keyword-anchored AddressContext consumes "Address: 1234 Maple Street, Apt 2"
@@ -149,6 +164,7 @@ public static partial class PhiScrubber
         // doesn't swallow a military/rural pattern that should be reported by its own label.
         MilitaryAddressPattern(), RuralRoutePattern(),
         AddressContextPattern(), StreetSuffixPattern(), PoBoxPattern(),
+        InsuranceIdPattern(),
         SsnPattern(), PhonePattern(), DatePattern(), MrnPattern(),
         NameContextPattern(), LeadingNamePattern(),
         NpiPattern(), DeaPattern(), RxNumberPattern(), ContextualNamePattern(),
