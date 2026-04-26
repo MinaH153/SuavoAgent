@@ -44,6 +44,64 @@ public class BehavioralEventReceiverTests : IDisposable
     }
 
     [Fact]
+    public void Configure_UpdatesSessionId_FutureWritesUseNewSession()
+    {
+        // Trip A root cause: BehavioralEventReceiver registered as singleton
+        // with sessionId="ipc" (Program.cs:316) but heartbeat counters query
+        // for the active learning session. All Helper-emitted events were
+        // invisible to the dashboard. Fix: LearningWorker calls Configure()
+        // when the learning session starts so subsequent events are written
+        // under the correct session.
+        const string preLearningSession = "pre-learning";
+        const string activeLearningSession = "learn-agent-1-202604270000";
+        _db.CreateLearningSession(preLearningSession, "pharm-test");
+        _db.CreateLearningSession(activeLearningSession, "pharm-test");
+
+        var receiver = new BehavioralEventReceiver(_db, preLearningSession);
+
+        // Event before Configure → goes to pre-learning session
+        receiver.ProcessBatch(new[] { BehavioralEvent.TreeSnapshot("tree-pre") }, 0);
+        Assert.Equal(1, _db.GetBehavioralEventCount(preLearningSession, "treesnapshot"));
+        Assert.Equal(0, _db.GetBehavioralEventCount(activeLearningSession, "treesnapshot"));
+
+        // LearningWorker boots, calls Configure with the active session.
+        receiver.Configure(activeLearningSession);
+
+        // Event after Configure → goes to the active learning session
+        receiver.ProcessBatch(new[] { BehavioralEvent.TreeSnapshot("tree-post") }, 0);
+        // Pre-learning event remains attributed to its original session;
+        // post-Configure event goes to the active learning session.
+        Assert.Equal(1, _db.GetBehavioralEventCount(preLearningSession, "treesnapshot"));
+        Assert.Equal(1, _db.GetBehavioralEventCount(activeLearningSession, "treesnapshot"));
+    }
+
+    [Fact]
+    public void Configure_UpdatesOnInteractionCallback_FutureInteractionsCallNewCallback()
+    {
+        // ActionCorrelator wiring (LearningWorker.cs:113-115) couples to the
+        // active learning session's interaction stream. Configure must hot-
+        // swap both the session AND the interaction callback so newly fired
+        // interactions are routed to the active correlator instance.
+        var oldCallbackHits = 0;
+        var newCallbackHits = 0;
+
+        var receiver = new BehavioralEventReceiver(_db, SessionId,
+            onInteraction: (_, _, _, _) => oldCallbackHits++);
+
+        var interaction1 = BehavioralEvent.Interaction("click", "tree-a", "elem-1", "Button", null, null);
+        receiver.ProcessBatch(new[] { interaction1 }, 0);
+        Assert.Equal(1, oldCallbackHits);
+        Assert.Equal(0, newCallbackHits);
+
+        receiver.Configure(SessionId, onInteraction: (_, _, _, _) => newCallbackHits++);
+
+        var interaction2 = BehavioralEvent.Interaction("click", "tree-b", "elem-2", "Button", null, null);
+        receiver.ProcessBatch(new[] { interaction2 }, 0);
+        Assert.Equal(1, oldCallbackHits); // unchanged
+        Assert.Equal(1, newCallbackHits); // new callback fired
+    }
+
+    [Fact]
     public void ProcessBatch_TreeSnapshotDedup_WithinWindow()
     {
         var snapshot1 = BehavioralEvent.TreeSnapshot("tree-dup");

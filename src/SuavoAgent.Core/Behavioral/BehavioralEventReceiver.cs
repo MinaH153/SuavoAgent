@@ -13,8 +13,15 @@ public sealed class BehavioralEventReceiver
     private static readonly TimeSpan DedupPruneWindow = TimeSpan.FromSeconds(120);
 
     private readonly AgentStateDb _db;
-    private readonly string _sessionId;
-    private readonly Action<string, string, string?, DateTimeOffset>? _onInteraction;
+    // Codex 2026-04-27 — sessionId / onInteraction are mutable via Configure().
+    // The receiver is registered as a singleton at startup with sessionId="ipc"
+    // (a placeholder for "no learning session yet"); LearningWorker calls
+    // Configure() once it has resolved the active learning session so all
+    // subsequent IPC-arriving events are attributed correctly. Without this,
+    // events are silently mis-attributed to "ipc" while heartbeat counters
+    // query the live learning-session id and report 0 — the Trip A symptom.
+    private string _sessionId;
+    private Action<string, string, string?, DateTimeOffset>? _onInteraction;
     private readonly Dictionary<string, DateTimeOffset> _recentTreeHashes = new();
     private long _nextSeq = 1;
     private long _totalDroppedEvents;
@@ -38,6 +45,21 @@ public sealed class BehavioralEventReceiver
         Action<string, string, string?, DateTimeOffset>? onInteraction = null)
     {
         _db = db;
+        _sessionId = sessionId;
+        _onInteraction = onInteraction;
+    }
+
+    /// <summary>
+    /// Re-binds the receiver to a new learning session (and optionally a new
+    /// interaction callback). Called by LearningWorker once it has resolved
+    /// or created the active session, so events written by the IPC handler
+    /// land under the same session_id the heartbeat queries.
+    /// </summary>
+    public void Configure(string sessionId,
+        Action<string, string, string?, DateTimeOffset>? onInteraction = null)
+    {
+        if (string.IsNullOrEmpty(sessionId))
+            throw new ArgumentException("sessionId must be non-empty", nameof(sessionId));
         _sessionId = sessionId;
         _onInteraction = onInteraction;
     }
