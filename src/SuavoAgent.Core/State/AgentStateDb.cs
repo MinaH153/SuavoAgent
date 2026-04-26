@@ -13,6 +13,13 @@ public sealed class AgentStateDb : IDisposable
 {
     private readonly SqliteConnection _conn;
 
+    // Codex 2026-04-26 P1.1 — guards every audit-chain mutation. Read-prev-hash +
+    // compute-new-hash + INSERT must execute as one atomic step or two writers can
+    // see the same prev_hash and produce a chain whose stored prev_hash diverges
+    // from the chain's actual tail. SqliteConnection is not thread-safe across
+    // commands either, so this lock also protects the shared connection.
+    private readonly object _auditWriteLock = new();
+
     public AgentStateDb(string dbPath, string? password = null)
     {
         SQLitePCL.Batteries_V2.Init();
@@ -30,6 +37,11 @@ public sealed class AgentStateDb : IDisposable
         _conn.Open();
         InitSchema();
         _auditChainSeed = GetOrCreateGlobalSalt("audit-chain-seed");
+        // Codex 2026-04-26 P1.2 — pre-chain-era rows (legacy AppendAuditEntry
+        // with NULL prev_hash) used to false-fail VerifyAuditChain. Backfill
+        // them once on startup so the chain is consistent before any
+        // verification or new append runs.
+        BackfillNullPrevHashRowsIfAny();
     }
 
     private void InitSchema()
@@ -887,20 +899,23 @@ public sealed class AgentStateDb : IDisposable
     // the expected genesis hash of a forged chain.
     private string _auditChainSeed = "";
 
+    /// <summary>
+    /// Codex 2026-04-26 P1.2 — legacy signature retained for source compatibility
+    /// but every audit write now funnels through <see cref="AppendChainedAuditEntry(AuditEntry)"/>.
+    /// The <paramref name="prevHash"/> argument is intentionally ignored: the
+    /// chained path computes the correct prev_hash from the actual chain tail
+    /// under <see cref="_auditWriteLock"/>, which prevents legacy callers from
+    /// inserting NULL or arbitrary prev_hash rows that would later cause
+    /// <see cref="VerifyAuditChain"/> to false-fail during compliance checks.
+    /// </summary>
     public void AppendAuditEntry(string taskId, WritebackState from, WritebackState to, WritebackTrigger trigger, string? prevHash)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO audit_entries (task_id, from_state, to_state, trigger, timestamp, prev_hash)
-            VALUES (@taskId, @from, @to, @trigger, @timestamp, @prevHash)
-            """;
-        cmd.Parameters.AddWithValue("@taskId", taskId);
-        cmd.Parameters.AddWithValue("@from", from.ToString());
-        cmd.Parameters.AddWithValue("@to", to.ToString());
-        cmd.Parameters.AddWithValue("@trigger", trigger.ToString());
-        cmd.Parameters.AddWithValue("@timestamp", DateTimeOffset.UtcNow.ToString("o"));
-        cmd.Parameters.AddWithValue("@prevHash", (object?)prevHash ?? DBNull.Value);
-        cmd.ExecuteNonQuery();
+        _ = AppendChainedAuditEntry(new AuditEntry(
+            TaskId: taskId,
+            EventType: "writeback_transition",
+            FromState: from.ToString(),
+            ToState: to.ToString(),
+            Trigger: trigger.ToString()));
     }
 
     public int GetAuditEntryCount()
@@ -942,71 +957,231 @@ public sealed class AgentStateDb : IDisposable
 
     internal string AppendChainedAuditEntry(AuditEntry entry, string timestamp)
     {
-        var prevHash = GetLastAuditHash() ?? _auditChainSeed;
-        var newHash = ComputeAuditHash(prevHash, entry.TaskId, entry.EventType,
-            entry.FromState, entry.ToState, entry.Trigger, timestamp);
+        // Codex 2026-04-26 P1.1 — read-prev-hash + compute-new-hash + INSERT must be
+        // atomic. Without serialization, two concurrent writers can both read the
+        // same prev_hash, both insert with that prev_hash, and produce a chain
+        // where row N's stored prev_hash != row N-1's computed hash.
+        // VerifyAuditChain would then false-fail on a chain that is internally
+        // self-consistent for one writer's view but globally broken.
+        //
+        // The C# lock protects both the audit-chain logical invariant AND the
+        // shared SqliteConnection (which is not safe for concurrent commands).
+        // Within the lock we additionally wrap the read+insert in an explicit
+        // SQLite transaction so a crash mid-append cannot leave a partially
+        // applied row.
+        lock (_auditWriteLock)
+        {
+            // Codex 2026-04-27 review: use IsolationLevel.Serializable so
+            // Microsoft.Data.Sqlite issues BEGIN IMMEDIATE — that acquires the
+            // SQLite write lock NOW, blocking any other connection (separate
+            // process or another AgentStateDb instance on the same DB file)
+            // from advancing past its own GetLastAuditHash read until we
+            // commit. Combined with the in-process lock above, this closes
+            // the race even when multiple writers share the DB across
+            // process boundaries (PRAGMA busy_timeout=5000 covers contention).
+            using var tx = _conn.BeginTransaction(System.Data.IsolationLevel.Serializable);
+            var prevHash = GetLastAuditHashLocked() ?? _auditChainSeed;
+            var newHash = ComputeAuditHash(prevHash, entry.TaskId, entry.EventType,
+                entry.FromState, entry.ToState, entry.Trigger, timestamp);
 
+            using var cmd = _conn.CreateCommand();
+            cmd.Transaction = tx;
+            // Codex 2026-04-26: forensic metadata columns (actor / source_component /
+            // capture_reason / window_title_hash / element_count / scrubber_version /
+            // storage_id) are written alongside the chained columns but do NOT
+            // contribute to the prev_hash chain — that keeps existing rows
+            // verifiable while still recording capture intent for audit dossier
+            // reconstruction.
+            cmd.CommandText = """
+                INSERT INTO audit_entries (task_id, from_state, to_state, trigger, timestamp, prev_hash,
+                                           event_type, command_id, requester_id, rx_number,
+                                           actor, source_component, capture_reason,
+                                           window_title_hash, element_count, scrubber_version, storage_id)
+                VALUES (@taskId, @from, @to, @trigger, @timestamp, @prevHash,
+                        @eventType, @commandId, @requesterId, @rxNumber,
+                        @actor, @sourceComponent, @captureReason,
+                        @windowTitleHash, @elementCount, @scrubberVersion, @storageId)
+                """;
+            cmd.Parameters.AddWithValue("@taskId", entry.TaskId);
+            cmd.Parameters.AddWithValue("@from", entry.FromState);
+            cmd.Parameters.AddWithValue("@to", entry.ToState);
+            cmd.Parameters.AddWithValue("@trigger", entry.Trigger);
+            cmd.Parameters.AddWithValue("@timestamp", timestamp);
+            cmd.Parameters.AddWithValue("@prevHash", prevHash);
+            cmd.Parameters.AddWithValue("@eventType", entry.EventType);
+            cmd.Parameters.AddWithValue("@commandId", (object?)entry.CommandId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@requesterId", (object?)entry.RequesterId ?? DBNull.Value);
+            // Store HMAC hash of rx_number — never store raw PHI in audit log
+            var rxHash = entry.RxNumber != null ? HmacRxNumber(entry.RxNumber) : null;
+            cmd.Parameters.AddWithValue("@rxNumber", (object?)rxHash ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@actor", (object?)entry.Actor ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@sourceComponent", (object?)entry.SourceComponent ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@captureReason", (object?)entry.CaptureReason ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@windowTitleHash", (object?)entry.WindowTitleHash ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@elementCount", (object?)entry.ElementCount ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@scrubberVersion", (object?)entry.ScrubberVersion ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@storageId", (object?)entry.StorageId ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+            tx.Commit();
+            return newHash;
+        }
+    }
+
+    // Same query as GetLastAuditHash but assumes the caller already holds
+    // _auditWriteLock — kept private to avoid recursive locking.
+    private string? GetLastAuditHashLocked()
+    {
         using var cmd = _conn.CreateCommand();
-        // Codex 2026-04-26: forensic metadata columns (actor / source_component /
-        // capture_reason / window_title_hash / element_count / scrubber_version /
-        // storage_id) are written alongside the chained columns but do NOT
-        // contribute to the prev_hash chain — that keeps existing rows
-        // verifiable while still recording capture intent for audit dossier
-        // reconstruction.
         cmd.CommandText = """
-            INSERT INTO audit_entries (task_id, from_state, to_state, trigger, timestamp, prev_hash,
-                                       event_type, command_id, requester_id, rx_number,
-                                       actor, source_component, capture_reason,
-                                       window_title_hash, element_count, scrubber_version, storage_id)
-            VALUES (@taskId, @from, @to, @trigger, @timestamp, @prevHash,
-                    @eventType, @commandId, @requesterId, @rxNumber,
-                    @actor, @sourceComponent, @captureReason,
-                    @windowTitleHash, @elementCount, @scrubberVersion, @storageId)
+            SELECT prev_hash, task_id, event_type, from_state, to_state, trigger, timestamp
+            FROM audit_entries ORDER BY id DESC LIMIT 1
             """;
-        cmd.Parameters.AddWithValue("@taskId", entry.TaskId);
-        cmd.Parameters.AddWithValue("@from", entry.FromState);
-        cmd.Parameters.AddWithValue("@to", entry.ToState);
-        cmd.Parameters.AddWithValue("@trigger", entry.Trigger);
-        cmd.Parameters.AddWithValue("@timestamp", timestamp);
-        cmd.Parameters.AddWithValue("@prevHash", prevHash);
-        cmd.Parameters.AddWithValue("@eventType", entry.EventType);
-        cmd.Parameters.AddWithValue("@commandId", (object?)entry.CommandId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@requesterId", (object?)entry.RequesterId ?? DBNull.Value);
-        // Store HMAC hash of rx_number — never store raw PHI in audit log
-        var rxHash = entry.RxNumber != null ? HmacRxNumber(entry.RxNumber) : null;
-        cmd.Parameters.AddWithValue("@rxNumber", (object?)rxHash ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@actor", (object?)entry.Actor ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@sourceComponent", (object?)entry.SourceComponent ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@captureReason", (object?)entry.CaptureReason ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@windowTitleHash", (object?)entry.WindowTitleHash ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@elementCount", (object?)entry.ElementCount ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@scrubberVersion", (object?)entry.ScrubberVersion ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@storageId", (object?)entry.StorageId ?? DBNull.Value);
-        cmd.ExecuteNonQuery();
-        return newHash;
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        var prevHash = reader.IsDBNull(0) ? _auditChainSeed : reader.GetString(0);
+        var taskId = reader.GetString(1);
+        var eventType = reader.IsDBNull(2) ? "writeback_transition" : reader.GetString(2);
+        var from = reader.GetString(3);
+        var to = reader.GetString(4);
+        var trigger = reader.GetString(5);
+        var timestamp = reader.GetString(6);
+        return ComputeAuditHash(prevHash, taskId, eventType, from, to, trigger, timestamp);
+    }
+
+    /// <summary>
+    /// Codex 2026-04-26 P1.2 — pre-chain-era rows (legacy AppendAuditEntry
+    /// callers, agent installs from before chained audits shipped) have
+    /// prev_hash IS NULL. <see cref="VerifyAuditChain"/> requires every row's
+    /// stored prev_hash to equal the running chain tail, so legacy rows
+    /// would false-fail. This method walks the chain in id order, fills in
+    /// any NULL prev_hash with the chain's expected value at that row's
+    /// position, and leaves valid rows untouched. Idempotent: a second run
+    /// finds no NULL rows and exits.
+    /// </summary>
+    private void BackfillNullPrevHashRowsIfAny()
+    {
+        lock (_auditWriteLock)
+        {
+            // Cheap pre-check: skip the walk if no NULL rows exist.
+            using (var probe = _conn.CreateCommand())
+            {
+                probe.CommandText = "SELECT COUNT(*) FROM audit_entries WHERE prev_hash IS NULL";
+                if (Convert.ToInt64(probe.ExecuteScalar()) == 0) return;
+            }
+
+            // Use BEGIN IMMEDIATE so the scan + update is one serialized writer
+            // transaction across processes. The C# lock above prevents
+            // re-entry within this AgentStateDb instance.
+            using var tx = _conn.BeginTransaction(System.Data.IsolationLevel.Serializable);
+
+            var rows = new List<(long Id, string TaskId, string EventType,
+                string FromState, string ToState, string Trigger, string Timestamp, bool IsNullPrev)>();
+            using (var read = _conn.CreateCommand())
+            {
+                read.Transaction = tx;
+                read.CommandText = """
+                    SELECT id, task_id, event_type, from_state, to_state, trigger, timestamp, prev_hash
+                    FROM audit_entries ORDER BY id ASC
+                    """;
+                using var reader = read.ExecuteReader();
+                while (reader.Read())
+                {
+                    rows.Add((
+                        reader.GetInt64(0),
+                        reader.GetString(1),
+                        reader.IsDBNull(2) ? "writeback_transition" : reader.GetString(2),
+                        reader.GetString(3),
+                        reader.GetString(4),
+                        reader.GetString(5),
+                        reader.GetString(6),
+                        reader.IsDBNull(7)));
+                }
+            }
+
+            var expectedPrev = _auditChainSeed;
+            int backfilled = 0;
+            foreach (var row in rows)
+            {
+                if (row.IsNullPrev)
+                {
+                    using var upd = _conn.CreateCommand();
+                    upd.Transaction = tx;
+                    upd.CommandText = "UPDATE audit_entries SET prev_hash = @ph WHERE id = @id";
+                    upd.Parameters.AddWithValue("@ph", expectedPrev);
+                    upd.Parameters.AddWithValue("@id", row.Id);
+                    upd.ExecuteNonQuery();
+                    backfilled++;
+                }
+                expectedPrev = ComputeAuditHash(expectedPrev, row.TaskId, row.EventType,
+                    row.FromState, row.ToState, row.Trigger, row.Timestamp);
+            }
+
+            // Codex 2026-04-27 review (independent BLOCKER): record a
+            // forensic marker so HIPAA auditors can distinguish post-marker
+            // (originally-chained) rows from pre-marker (legacy backfilled)
+            // rows. The marker captures backfilled count + UTC timestamp +
+            // the highest id at backfill time so any chain re-validation
+            // can treat rows with id <= watermark as best-effort historical
+            // and rows after as live-chain authoritative.
+            if (backfilled > 0)
+            {
+                var watermark = rows.Count > 0 ? rows[rows.Count - 1].Id : 0L;
+                var markerValue = $"{{\"backfilled\":{backfilled}," +
+                    $"\"watermark_id\":{watermark}," +
+                    $"\"backfilled_at\":\"{DateTimeOffset.UtcNow:o}\"}}";
+                using var marker = _conn.CreateCommand();
+                marker.Transaction = tx;
+                marker.CommandText = """
+                    INSERT INTO config_kv (key, value) VALUES (@k, @v)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """;
+                marker.Parameters.AddWithValue("@k", "audit_chain_legacy_backfill");
+                marker.Parameters.AddWithValue("@v", markerValue);
+                marker.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+        }
     }
 
     public bool VerifyAuditChain()
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT task_id, event_type, from_state, to_state, trigger, timestamp, prev_hash
-            FROM audit_entries ORDER BY id ASC
-            """;
-        using var reader = cmd.ExecuteReader();
-        var expectedPrev = _auditChainSeed;
-        while (reader.Read())
+        // Codex 2026-04-27 review: take _auditWriteLock so VerifyAuditChain
+        // observes a consistent chain snapshot — without the lock, a
+        // concurrent writer mid-INSERT can cause the verify reader to see
+        // a row that exists but whose prev_hash references a tail that the
+        // verifier already passed (false-fail). Materialize all rows under
+        // lock before doing the per-row hash chain walk so the lock-hold
+        // is bounded by I/O time, not hash compute time.
+        var rows = new List<(string TaskId, string EventType, string FromState,
+            string ToState, string Trigger, string Timestamp, string? StoredHash)>();
+        lock (_auditWriteLock)
         {
-            var taskId = reader.GetString(0);
-            var eventType = reader.IsDBNull(1) ? "writeback_transition" : reader.GetString(1);
-            var from = reader.GetString(2);
-            var to = reader.GetString(3);
-            var trigger = reader.GetString(4);
-            var timestamp = reader.GetString(5);
-            var storedHash = reader.IsDBNull(6) ? null : reader.GetString(6);
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT task_id, event_type, from_state, to_state, trigger, timestamp, prev_hash
+                FROM audit_entries ORDER BY id ASC
+                """;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                rows.Add((
+                    reader.GetString(0),
+                    reader.IsDBNull(1) ? "writeback_transition" : reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetString(3),
+                    reader.GetString(4),
+                    reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6)));
+            }
+        }
 
-            if (storedHash != expectedPrev) return false;
-            expectedPrev = ComputeAuditHash(expectedPrev, taskId, eventType, from, to, trigger, timestamp);
+        var expectedPrev = _auditChainSeed;
+        foreach (var row in rows)
+        {
+            if (row.StoredHash != expectedPrev) return false;
+            expectedPrev = ComputeAuditHash(expectedPrev, row.TaskId, row.EventType,
+                row.FromState, row.ToState, row.Trigger, row.Timestamp);
         }
         return true;
     }
@@ -1432,34 +1607,47 @@ public sealed class AgentStateDb : IDisposable
     public void AppendLearningAudit(string sessionId, string observer, string action,
         string? target, bool phiScrubbed)
     {
-        var now = DateTimeOffset.UtcNow.ToString("o");
-        string? prevHash = null;
-
-        using (var hashCmd = _conn.CreateCommand())
+        // Codex 2026-04-27 review (CRITICAL): same race shape as
+        // AppendChainedAuditEntry. SELECT prev_hash + INSERT must be
+        // serialized or two writers see the same prev and corrupt the
+        // chain. Reuse _auditWriteLock — single audit-chain integrity
+        // primitive guarding both audit_entries and learning_audit on
+        // this connection.
+        lock (_auditWriteLock)
         {
-            hashCmd.CommandText = "SELECT prev_hash FROM learning_audit WHERE session_id = @sid ORDER BY id DESC LIMIT 1";
-            hashCmd.Parameters.AddWithValue("@sid", sessionId);
-            prevHash = hashCmd.ExecuteScalar() as string;
+            using var tx = _conn.BeginTransaction(System.Data.IsolationLevel.Serializable);
+            var now = DateTimeOffset.UtcNow.ToString("o");
+            string? prevHash;
+
+            using (var hashCmd = _conn.CreateCommand())
+            {
+                hashCmd.Transaction = tx;
+                hashCmd.CommandText = "SELECT prev_hash FROM learning_audit WHERE session_id = @sid ORDER BY id DESC LIMIT 1";
+                hashCmd.Parameters.AddWithValue("@sid", sessionId);
+                prevHash = hashCmd.ExecuteScalar() as string;
+            }
+
+            var chainInput = $"{sessionId}|{observer}|{action}|{target}|{now}|{prevHash}";
+            var hash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(chainInput))).ToLowerInvariant();
+
+            using var cmd = _conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = """
+                INSERT INTO learning_audit (session_id, observer, action, target, phi_scrubbed, timestamp, prev_hash)
+                VALUES (@sid, @obs, @act, @target, @phi, @now, @hash)
+                """;
+            cmd.Parameters.AddWithValue("@sid", sessionId);
+            cmd.Parameters.AddWithValue("@obs", observer);
+            cmd.Parameters.AddWithValue("@act", action);
+            cmd.Parameters.AddWithValue("@target", (object?)target ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@phi", phiScrubbed ? 1 : 0);
+            cmd.Parameters.AddWithValue("@now", now);
+            cmd.Parameters.AddWithValue("@hash", hash);
+            cmd.ExecuteNonQuery();
+            tx.Commit();
         }
-
-        var chainInput = $"{sessionId}|{observer}|{action}|{target}|{now}|{prevHash}";
-        var hash = Convert.ToHexString(
-            System.Security.Cryptography.SHA256.HashData(
-                System.Text.Encoding.UTF8.GetBytes(chainInput))).ToLowerInvariant();
-
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO learning_audit (session_id, observer, action, target, phi_scrubbed, timestamp, prev_hash)
-            VALUES (@sid, @obs, @act, @target, @phi, @now, @hash)
-            """;
-        cmd.Parameters.AddWithValue("@sid", sessionId);
-        cmd.Parameters.AddWithValue("@obs", observer);
-        cmd.Parameters.AddWithValue("@act", action);
-        cmd.Parameters.AddWithValue("@target", (object?)target ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@phi", phiScrubbed ? 1 : 0);
-        cmd.Parameters.AddWithValue("@now", now);
-        cmd.Parameters.AddWithValue("@hash", hash);
-        cmd.ExecuteNonQuery();
     }
 
     public int GetLearningAuditCount(string sessionId)
@@ -1468,6 +1656,50 @@ public sealed class AgentStateDb : IDisposable
         cmd.CommandText = "SELECT COUNT(*) FROM learning_audit WHERE session_id = @sid";
         cmd.Parameters.AddWithValue("@sid", sessionId);
         return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// Codex 2026-04-27 review — verify the per-session learning_audit
+    /// chain. Walks rows in id order; each row's prev_hash must equal the
+    /// hash of the prior row (or null for the first). Reads under
+    /// <see cref="_auditWriteLock"/> + materializes rows so verification
+    /// observes a consistent snapshot.
+    /// </summary>
+    public bool VerifyLearningAuditChain(string sessionId)
+    {
+        var rows = new List<(string Observer, string Action, string? Target,
+            bool PhiScrubbed, string Timestamp, string Hash)>();
+        lock (_auditWriteLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT observer, action, target, phi_scrubbed, timestamp, prev_hash
+                FROM learning_audit WHERE session_id = @sid ORDER BY id ASC
+                """;
+            cmd.Parameters.AddWithValue("@sid", sessionId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                rows.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.GetInt32(3) == 1,
+                    reader.GetString(4),
+                    reader.IsDBNull(5) ? "" : reader.GetString(5)));
+            }
+        }
+
+        string? expectedPrev = null;
+        foreach (var row in rows)
+        {
+            var chainInput = $"{sessionId}|{row.Observer}|{row.Action}|{row.Target}|{row.Timestamp}|{expectedPrev}";
+            var expectedHash = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(chainInput))).ToLowerInvariant();
+            if (row.Hash != expectedHash) return false;
+            expectedPrev = expectedHash;
+        }
+        return true;
     }
 
     // ── Rx Queue Candidates ──
