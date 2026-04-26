@@ -193,6 +193,11 @@ try
     }
     builder.Services.AddSingleton(sp => new SeedApplicator(sp.GetRequiredService<AgentStateDb>()));
 
+    // PIAG-1 (Pilot Install Acceptance Gate) — local runner that gathers
+    // agent-side evidence + POSTs to /api/agent/piag-verify. Triggered by
+    // run_piag signed command + bootstrap.ps1 -RunPiag (PR C).
+    builder.Services.AddSingleton<SuavoAgent.Core.Diagnostics.PiagRunner>();
+
     builder.Services.AddHostedService<HeartbeatWorker>();
 
     builder.Services.AddSingleton<AgentStateDb>(sp =>
