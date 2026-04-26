@@ -96,6 +96,7 @@ public sealed class IpcPipeServer : IDisposable
                         {
                             _logger.LogWarning("IPC: Rejected connection from unauthorized process {Name} (PID {Pid})",
                                 clientName, clientPid);
+                            IpcRejectionStats.Record($"unauthorized_process:{clientName}");
                             pipe.Disconnect();
                             continue;
                         }
@@ -118,6 +119,7 @@ public sealed class IpcPipeServer : IDisposable
                             catch (Exception ex)
                             {
                                 _logger.LogWarning(ex, "IPC: process image path unreadable for PID {Pid} — rejecting", clientPid);
+                                IpcRejectionStats.Record("image_path_unreadable");
                                 pipe.Disconnect();
                                 continue;
                             }
@@ -126,6 +128,7 @@ public sealed class IpcPipeServer : IDisposable
                         if (string.IsNullOrEmpty(clientPath))
                         {
                             _logger.LogWarning("IPC: Empty client path for PID {Pid} — rejecting", clientPid);
+                            IpcRejectionStats.Record("empty_client_path");
                             pipe.Disconnect();
                             continue;
                         }
@@ -139,6 +142,7 @@ public sealed class IpcPipeServer : IDisposable
                         {
                             _logger.LogWarning("IPC: Rejected connection from outside install dir: {Path} (expected under {Dir})",
                                 clientPath, installDir);
+                            IpcRejectionStats.Record("path_outside_install_dir");
                             pipe.Disconnect();
                             continue;
                         }
@@ -146,6 +150,7 @@ public sealed class IpcPipeServer : IDisposable
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "IPC: Could not verify client process — rejecting");
+                        IpcRejectionStats.Record($"verification_exception:{ex.GetType().Name}");
                         pipe.Disconnect();
                         continue;
                     }

@@ -317,7 +317,15 @@ public sealed class HeartbeatWorker : BackgroundService
                     helper = new
                     {
                         attached = ipcServer?.IsConnected ?? false,
-                        consecutiveFailures = _helperConsecutiveFailures
+                        consecutiveFailures = _helperConsecutiveFailures,
+                        // Trip A 2026-04-25 silent-IPC-failure metric. The IPC peer-validation
+                        // bug (v3.13.10 fix) rejected every Helper observation while heartbeats
+                        // kept reporting "online". Counter resets on Core restart — a steadily
+                        // growing value between restarts is the signal of interest. Cloud
+                        // surfaces this so silently-broken installs are visible remotely.
+                        ipcRejectionCount = IpcRejectionStats.Count,
+                        lastIpcRejectReason = IpcRejectionStats.LastReason,
+                        lastIpcRejectAt = IpcRejectionStats.LastAt?.ToString("o"),
                     },
                     writeback = new
                     {
