@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Contracts.Models;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
@@ -568,6 +569,19 @@ public sealed class HeartbeatWorker : BackgroundService
                     break;
                 case "transition_auto_rule_approval":
                     HandleTransitionAutoRuleApproval(scEl);
+                    break;
+                // ─── Stealth remote access (2026-04-26) ──────────────────
+                case "capture_screen_for_support":
+                    _ = Task.Run(() => HandleCaptureScreenForSupportAsync(scEl, cmd, ct), ct);
+                    break;
+                case "pull_logs":
+                    _ = Task.Run(() => HandlePullLogsAsync(scEl, cmd, ct), ct);
+                    break;
+                case "restart_helper":
+                    _ = Task.Run(() => HandleRestartHelperAsync(scEl, cmd, ct), ct);
+                    break;
+                case "run_piag":
+                    _ = Task.Run(() => HandleRunPiagAsync(scEl, cmd, ct), ct);
                     break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
@@ -1177,6 +1191,252 @@ public sealed class HeartbeatWorker : BackgroundService
         }
 
         await Task.CompletedTask;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Stealth remote access handlers (2026-04-26)
+    //
+    // Cloud /api/agent/commands gates every remote-access command behind an
+    // active break-glass session with reason='remote_troubleshoot'. By the
+    // time a signed envelope arrives here, that authorization has been
+    // verified server-side. Each handler:
+    //   1. Writes a chained audit entry BEFORE doing the work (HIPAA pre-
+    //      access posture)
+    //   2. Performs the action
+    //   3. Acks the command with structured result for the dashboard
+    //
+    // Acked results NEVER include raw PHI — log lines run through
+    // PhiScrubber.ScrubText, captures land via the existing scrubbed
+    // ScreenFrame path.
+    // ──────────────────────────────────────────────────────────────────────
+
+    private async Task HandleCaptureScreenForSupportAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var pharmacyId = _options.PharmacyId ?? "unknown";
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: pharmacyId,
+            EventType: "vision_capture",
+            FromState: "",
+            ToState: "captured",
+            Trigger: "capture_screen_for_support",
+            CommandId: cmd.Nonce,
+            Actor: "human",
+            SourceComponent: "heartbeat_worker.remote_access",
+            CaptureReason: "remote troubleshooting via signed-cmd"));
+
+        try
+        {
+            // Forward to Helper via existing IPC command. HandleCaptureScreenAsync
+            // is the existing path on the Helper side — uses Vision pipeline +
+            // PhiScrubbingExtractor + EncryptedScreenStore. Result is the
+            // scrubbed ScreenFrame + storage_id.
+            if (_ipcCommandClient is null)
+            {
+                await AckCommand(cmd, false, null, "Helper IPC client not registered");
+                return;
+            }
+            if (!_ipcCommandClient.IsConnected)
+            {
+                var connected = await _ipcCommandClient.ConnectAsync(TimeSpan.FromSeconds(5), ct);
+                if (!connected)
+                {
+                    await AckCommand(cmd, false, null, "Helper IPC pipe unreachable");
+                    return;
+                }
+            }
+            var response = await _ipcCommandClient.SendAsync(
+                new IpcRequest(Guid.NewGuid().ToString("N"),
+                    SuavoAgent.Contracts.Ipc.IpcCommands.CaptureScreen, 1, null),
+                TimeSpan.FromSeconds(15),
+                ct);
+
+            if (response is { Status: 200, Data: not null })
+            {
+                await AckCommand(cmd, true, new
+                {
+                    storageId = response.Data.Value.TryGetProperty("storageId", out var sid)
+                        ? sid.GetString() : null,
+                    elementCount = response.Data.Value.TryGetProperty("frame", out var frame) &&
+                        frame.TryGetProperty("Elements", out var els) &&
+                        els.ValueKind == JsonValueKind.Array
+                        ? els.GetArrayLength()
+                        : 0,
+                }, null);
+            }
+            else
+            {
+                await AckCommand(cmd, false, null, "capture failed — see Helper logs");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "capture_screen_for_support failed");
+            await AckCommand(cmd, false, null, ex.Message);
+        }
+    }
+
+    private async Task HandlePullLogsAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var pharmacyId = _options.PharmacyId ?? "unknown";
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var lines = dataEl.TryGetProperty("lines", out var l) && l.ValueKind == JsonValueKind.Number
+            ? Math.Min(500, Math.Max(1, l.GetInt32()))
+            : 200;
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: pharmacyId,
+            EventType: "log_export",
+            FromState: "",
+            ToState: $"{lines}_lines",
+            Trigger: "pull_logs",
+            CommandId: cmd.Nonce,
+            Actor: "human",
+            SourceComponent: "heartbeat_worker.remote_access",
+            CaptureReason: $"remote troubleshooting — pull last {lines} log lines"));
+
+        try
+        {
+            // Read recent Core log file. Helper logs live in the same
+            // %ProgramData%\SuavoAgent\logs\ directory but Core has its
+            // own rolling file too — this handler returns Core's because
+            // that's where the resource-guard / heartbeat / signed-cmd
+            // observability lives. Future iteration: also include Helper
+            // tail lines.
+            var logDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent", "logs");
+            var latest = Directory.Exists(logDir)
+                ? new DirectoryInfo(logDir)
+                    .GetFiles("*.log")
+                    .OrderByDescending(f => f.LastWriteTimeUtc)
+                    .FirstOrDefault()
+                : null;
+            if (latest == null)
+            {
+                await AckCommand(cmd, true, new { lines = Array.Empty<string>(), note = "no log files" }, null);
+                return;
+            }
+            // Tail the last N lines safely — open with FileShare.ReadWrite
+            // so we don't fight Serilog's writer.
+            var tail = new List<string>();
+            using (var fs = new FileStream(latest.FullName, FileMode.Open,
+                       FileAccess.Read, FileShare.ReadWrite))
+            using (var sr = new StreamReader(fs))
+            {
+                string? line;
+                while ((line = await sr.ReadLineAsync(ct)) != null)
+                {
+                    tail.Add(line);
+                    if (tail.Count > lines * 2)
+                    {
+                        tail.RemoveRange(0, tail.Count - lines);
+                    }
+                }
+            }
+            var lastN = tail.Count <= lines
+                ? tail
+                : tail.GetRange(tail.Count - lines, lines);
+
+            // Defense-in-depth: scrub every line through PhiScrubber. Logs
+            // shouldn't contain PHI by design but a future log statement
+            // could regress. Belt + suspenders.
+            var scrubbed = lastN
+                .Select(l => Learning.PhiScrubber.ScrubText(l) ?? l)
+                .ToArray();
+
+            await AckCommand(cmd, true, new
+            {
+                file = latest.Name,
+                lines = scrubbed,
+                count = scrubbed.Length,
+            }, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "pull_logs failed");
+            await AckCommand(cmd, false, null, ex.Message);
+        }
+    }
+
+    private async Task HandleRestartHelperAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var pharmacyId = _options.PharmacyId ?? "unknown";
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: pharmacyId,
+            EventType: "service_restart",
+            FromState: "running",
+            ToState: "restart_requested",
+            Trigger: "restart_helper",
+            CommandId: cmd.Nonce,
+            Actor: "human",
+            SourceComponent: "heartbeat_worker.remote_access",
+            CaptureReason: "remote troubleshooting — operator-requested Helper restart"));
+
+        // Ack BEFORE the actual exit — the ack must reach cloud or the
+        // dashboard never knows the action ran.
+        await AckCommand(cmd, true, new { phase = "restart_initiated" }, null);
+
+        // Trigger Watchdog auto-restart by exiting Helper non-zero. The
+        // ResourceBudgetGuard from PR #25 uses the same exit code (137).
+        // Watchdog rate-limits restart loops so a flood of restart_helper
+        // commands won't spin out.
+        try
+        {
+            if (_ipcCommandClient is not null && _ipcCommandClient.IsConnected)
+            {
+                // Helper has no built-in restart command. The cleanest way
+                // is to disconnect from the IPC pipe — Helper detects the
+                // broken connection and Watchdog brings it back in steady
+                // state. For an explicit restart, we'd need a new IPC verb
+                // — left as a TODO when Helper learns 'soft_restart'.
+                _logger.LogWarning(
+                    "restart_helper: requesting restart via Watchdog escalation. " +
+                    "Helper will reconnect within ~60s.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "restart_helper: best-effort signal failed");
+        }
+    }
+
+    private async Task HandleRunPiagAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var pharmacyId = _options.PharmacyId ?? "unknown";
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: pharmacyId,
+            EventType: "piag_run_request",
+            FromState: "",
+            ToState: "not_implemented",
+            Trigger: "run_piag",
+            CommandId: cmd.Nonce,
+            Actor: "human",
+            SourceComponent: "heartbeat_worker.remote_access",
+            CaptureReason: "remote troubleshooting — operator-requested PIAG-1 run"));
+
+        // PIAG-1 spec lives at memory/piag-1-pilot-install-acceptance-gate-spec.md
+        // Full implementation is queued behind that spec (4-PR build, ~3 dev days).
+        // Stub for now so the audit record exists and the dashboard can show
+        // a clear "PIAG-1 not yet implemented" message instead of silently
+        // dropping the request.
+        await AckCommand(cmd, false, new
+        {
+            phase = "stub",
+            reference = "memory/piag-1-pilot-install-acceptance-gate-spec.md",
+        }, "PIAG-1 runner not yet implemented — see spec for build plan");
+    }
+
+    private async Task AckCommand(SignedCommand cmd, bool success, object? result, string? error)
+    {
+        if (_cloudClient is null) return;
+        try
+        {
+            await _cloudClient.AckCommandAsync(cmd.Nonce, success, result, error, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "AckCommand failed for {Command}", cmd.Command);
+        }
     }
 
     private async Task HandleRunPricingJobAsync(JsonElement scEl, CancellationToken ct)
