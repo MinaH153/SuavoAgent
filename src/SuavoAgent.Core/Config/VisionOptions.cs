@@ -49,6 +49,48 @@ public sealed class VisionOptions
     /// NullScreenExtractor (empty frames).
     /// </summary>
     public TesseractOptions Tesseract { get; set; } = new();
+
+    /// <summary>
+    /// Periodic auto-capture trigger — Core's <c>VisionCaptureWorker</c> reads
+    /// these settings to decide whether to send <c>capture_screen</c> IPC
+    /// commands to Helper on a cadence. Without this, the existing capture
+    /// path is unused (Helper has the handler wired but no Core caller as of
+    /// 2026-04-26).
+    /// </summary>
+    public VisionPeriodicCaptureOptions PeriodicCapture { get; set; } = new();
+}
+
+/// <summary>
+/// Configuration for the Core-side <c>VisionCaptureWorker</c> that triggers
+/// periodic screen captures while a learning session is active. Separate from
+/// <see cref="VisionOptions.Enabled"/> — Vision-Enabled is the master HIPAA
+/// gate (no captures at all when false), PeriodicCapture.Enabled is the
+/// "schedule-on-cadence" sub-toggle. A pilot can run Vision-On manually-
+/// triggered captures only by leaving PeriodicCapture.Enabled=false.
+/// </summary>
+public sealed class VisionPeriodicCaptureOptions
+{
+    /// <summary>
+    /// Master toggle for the periodic-capture worker. Default false — pilot
+    /// installs ship with this OFF until Tier 1+ is approved per pharmacy.
+    /// </summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Seconds between capture attempts. Default 30. The Helper-side rate
+    /// limiter (<see cref="VisionOptions.MinIntervalMs"/>) is the safety
+    /// floor; this value should be at or above that floor.
+    /// </summary>
+    public int IntervalSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// When true, Core skips the IPC send if Helper reports the PMS process
+    /// is not the foreground window. Prevents capturing user's Chrome, email,
+    /// etc., when they alt-tab away from PioneerRx. Default true. Helper
+    /// performs the actual GetForegroundWindow check; this flag tells Core
+    /// to honor the resulting <c>not_foreground</c> error as expected.
+    /// </summary>
+    public bool RequireForegroundMatch { get; set; } = true;
 }
 
 /// <summary>

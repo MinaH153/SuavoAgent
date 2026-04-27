@@ -195,6 +195,12 @@ try
 
     builder.Services.AddHostedService<HeartbeatWorker>();
 
+    // VisionCaptureWorker — fires periodic capture_screen IPC commands when
+    // Vision.Enabled + PeriodicCapture.Enabled + active learning session.
+    // Both gates default OFF so this is a no-op until a pilot opts in.
+    builder.Services.Configure<VisionOptions>(builder.Configuration.GetSection("Vision"));
+    builder.Services.AddHostedService<SuavoAgent.Core.Workers.VisionCaptureWorker>();
+
     builder.Services.AddSingleton<AgentStateDb>(sp =>
     {
         var dataDir = Path.Combine(
@@ -341,6 +347,7 @@ try
     // Pricing intelligence — Core→Helper command channel
     builder.Services.AddSingleton<IpcCommandClient>(sp =>
         new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()));
+    builder.Services.AddSingleton<IIpcCommandClient>(sp => sp.GetRequiredService<IpcCommandClient>());
     builder.Services.AddSingleton<ExcelPricingReader>();
     builder.Services.AddSingleton<ExcelPricingWriter>();
 
