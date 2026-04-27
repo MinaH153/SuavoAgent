@@ -29,8 +29,12 @@ public static partial class PhiScrubber
     [GeneratedRegex(@"(?<=MRN[:\s]+)\w+", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
     private static partial Regex MrnPattern();
 
-    // Name heuristic: "Patient: First Last", "DOB: 01/15/1990" — preserve keyword, scrub value
-    [GeneratedRegex(@"(?<=(?:Patient|Name|DOB|SSN)[:\s]+)\S+(?:\s+\S+)?", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    // Name heuristic: "Patient: First Last", "DOB: 01/15/1990" — preserve keyword, scrub value.
+    // Codex 2026-04-27 review fix: negative lookahead `(?!Address[:\s])` prevents
+    // false-firing on "Patient Address: 1234 Maple Street" — without it, this
+    // pattern would scrub "Address: 1234" as if it were a patient name and
+    // erase the structural Address: label that downstream auditing depends on.
+    [GeneratedRegex(@"(?<=(?:Patient|Name|DOB|SSN)[:\s]+)(?!Address[:\s])\S+(?:\s+\S+)?", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
     private static partial Regex NameContextPattern();
 
     // Capitalized name pair at start of string: "John Smith - ..."
@@ -87,8 +91,80 @@ public static partial class PhiScrubber
     [GeneratedRegex(@"(?<=\b(?:Dx|Diagnosis|ICD|Code)[:\s=]+)([A-TV-Z][0-9][0-9AB](?:\.[0-9A-TV-Z]{1,4})?)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
     private static partial Regex IcdContextPattern();
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Codex 2026-04-26 P1.3 + 2026-04-27 review-fix — street-address coverage.
+    // PMS pharmacy windows display patient mailing addresses; the prior
+    // scrubber had no address pattern, so addresses crossed the IPC + cloud
+    // boundary. Coverage matrix:
+    //
+    //   AddressContextPattern  — value scrubbing after "Address:" / "Addr:" /
+    //                            "Mailing|Home|Work|Shipping|Billing Address:"
+    //                            keyword. Lookahead stops at the next field
+    //                            keyword (DOB|SSN|Phone|MRN|Patient|Name|...)
+    //                            so a multi-field line preserves adjacent
+    //                            structural labels rather than collapsing
+    //                            everything into a single replacement.
+    //   StreetSuffixPattern    — bare addresses with a recognised street-type
+    //                            suffix. Full forms (Street/Avenue/Boulevard)
+    //                            always allowed; 2-letter abbreviations
+    //                            (St/Ave/Dr/Ln) require a period OR a comma
+    //                            OR an apt-keyword tail to disambiguate
+    //                            against pharmacist titles ("Dr Smith") and
+    //                            inventory labels ("12 Months Old"). Civic
+    //                            numbers may be hyphenated (1234-A); ordinal
+    //                            street names (5th Avenue) supported.
+    //   PoBoxPattern           — bare "PO Box / P.O. Box / P.O.B. / P O Box
+    //                            <digits>" with case-insensitive matching.
+    //   MilitaryAddressPattern — APO|FPO|DPO + AA|AE|AP + 5-digit ZIP.
+    //   RuralRoutePattern      — RR|HC + digits + Box + digits.
+    //
+    // Replacement label is the universal [REDACTED] for downstream-consumer
+    // consistency with NPI/DEA/SSN/Phone scrubbing (Codex 2026-04-27 review).
+    // ──────────────────────────────────────────────────────────────────────
+
+    // Codex 2026-04-27 round-2 review: stop-keywords MUST be followed by a
+    // colon or equals sign, not just any whitespace — otherwise a street
+    // name like "State Street" or "City Drive" terminates the address
+    // capture early and leaks the rest of the value. `\s*[:=]` requires
+    // an explicit field delimiter; pipe / EOL / EOF still terminate
+    // unconditionally as natural delimiters.
+    [GeneratedRegex(
+        @"(?<=\b(?:Mailing|Home|Work|Shipping|Billing|Patient|Primary)?\s*Addr(?:ess)?[:\s]+)((?:\d|P\.?\s*O\.?|APO|FPO|DPO|RR|HC).*?)(?=\s*(?:\||$|\r|\n|\b(?:DOB|SSN|Phone|MRN|Patient|Name|Status|ID|Email|Tel|City|State|Zip|Notes|Allergy|Insurance|Caregiver|Member|Subscriber|Group|Policy|Plan)\s*[:=]))",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Multiline)]
+    private static partial Regex AddressContextPattern();
+
+    [GeneratedRegex(
+        @"\b\d{1,5}(?:-[A-Za-z]\d?)?\s+(?:[NSEW][NSEW]?\.?\s+)?(?:(?:\d{1,3}(?:st|nd|rd|th)|[A-Za-z][A-Za-z'-]+)\s+){1,4}(?:Street|Avenue|Boulevard|Highway|Parkway|Terrace|Circle|Drive|Place|Court|Road|Lane|Way|(?:St|Ave|Blvd|Hwy|Pkwy|Ter|Cir|Dr|Pl|Ct|Rd|Ln)(?:\.|(?=,|\s+(?:Apartment|Apt|Suite|Ste|Unit|#)\b)))(?:\s*,?\s*(?:Apartment|Apt|Suite|Ste|Unit|#)\.?\s*[A-Za-z0-9]{1,6})?",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    private static partial Regex StreetSuffixPattern();
+
+    [GeneratedRegex(@"\bP\.?\s*O\.?\s*(?:Box|B)\.?\s+\d+\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    private static partial Regex PoBoxPattern();
+
+    [GeneratedRegex(@"\b(?:APO|FPO|DPO)\s+(?:AA|AE|AP)\s+\d{5}\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    private static partial Regex MilitaryAddressPattern();
+
+    [GeneratedRegex(@"\b(?:RR|HC)\s+\d+\s+Box\s+\d+\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    private static partial Regex RuralRoutePattern();
+
+    // Codex 2026-04-27 round-2 review (HIPAA Safe Harbor #5): health-plan
+    // beneficiary numbers — Member ID / Subscriber ID / Group / Policy /
+    // Insurance / Plan / Beneficiary / Carrier — keyword-anchored,
+    // value-scrubbing pattern. Bound to ≥3 alphanumerics so labels like
+    // "Group: A" don't false-fire on placeholder content.
+    [GeneratedRegex(@"(?<=\b(?:Member|Subscriber|Group|Policy|Insurance|Plan|Beneficiary|Carrier)(?:\s*(?:ID|Number|#|No)\.?)?\s*[:=]\s*)[A-Z0-9-]{3,}",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    private static partial Regex InsuranceIdPattern();
+
     private static readonly Regex[] PhiPatterns =
     [
+        // Address patterns first — keyword-anchored AddressContext consumes "Address: 1234 Maple Street, Apt 2"
+        // wholesale before LastFirstPattern sees "Street, Apt" and mis-scrubs only the suffix.
+        // Order within the address group: more-specific first so the lazy AddressContext lookahead
+        // doesn't swallow a military/rural pattern that should be reported by its own label.
+        MilitaryAddressPattern(), RuralRoutePattern(),
+        AddressContextPattern(), StreetSuffixPattern(), PoBoxPattern(),
+        InsuranceIdPattern(),
         SsnPattern(), PhonePattern(), DatePattern(), MrnPattern(),
         NameContextPattern(), LeadingNamePattern(),
         NpiPattern(), DeaPattern(), RxNumberPattern(), ContextualNamePattern(),
