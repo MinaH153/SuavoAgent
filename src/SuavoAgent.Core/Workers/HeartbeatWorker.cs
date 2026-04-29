@@ -589,17 +589,19 @@ public sealed class HeartbeatWorker : BackgroundService
                 Signature: scEl.TryGetProperty("signature", out var s) ? s.GetString() ?? "" : "",
                 DataHash: dataHashValue);
 
-            // Persistent nonce check (survives restarts)
-            if (!_stateDb.TryRecordNonce(cmd.Nonce))
-            {
-                _logger.LogWarning("Command nonce already used: {Nonce}", cmd.Nonce);
-                return;
-            }
-
             var result = _commandVerifier.Verify(cmd);
             if (!result.IsValid)
             {
                 _logger.LogWarning("Signed command rejected: {Reason}", result.Reason);
+                return;
+            }
+
+            // Persistent nonce check (survives restarts). Record only AFTER
+            // cryptographic verification, otherwise an attacker can burn a
+            // future valid nonce by sending a forged envelope first.
+            if (!_stateDb.TryRecordNonce(cmd.Nonce))
+            {
+                _logger.LogWarning("Command nonce already used: {Nonce}", cmd.Nonce);
                 return;
             }
 

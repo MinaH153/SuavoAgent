@@ -35,6 +35,15 @@ public class SignedCommandVerifier
 
     public VerificationResult Verify(SignedCommand cmd)
     {
+        if (string.IsNullOrWhiteSpace(cmd.Command))
+            return new(false, "Missing command");
+
+        if (string.IsNullOrWhiteSpace(cmd.Nonce))
+            return new(false, "Missing nonce");
+
+        if (string.IsNullOrWhiteSpace(cmd.Signature))
+            return new(false, "Missing signature");
+
         if (!_keys.TryGetValue(cmd.KeyId, out var key))
             return new(false, $"Unknown keyId: {cmd.KeyId}");
 
@@ -54,7 +63,6 @@ public class SignedCommandVerifier
         {
             if (_usedNonces.ContainsKey(cmd.Nonce))
                 return new(false, "Nonce replay detected");
-            _usedNonces[cmd.Nonce] = DateTimeOffset.UtcNow;
         }
 
         var dataHash = string.IsNullOrEmpty(cmd.DataHash) ? "" : cmd.DataHash;
@@ -65,7 +73,17 @@ public class SignedCommandVerifier
                 Encoding.UTF8.GetBytes(canonical),
                 Convert.FromBase64String(cmd.Signature),
                 HashAlgorithmName.SHA256);
-            return valid ? new(true) : new(false, "Invalid signature");
+            if (!valid)
+                return new(false, "Invalid signature");
+
+            lock (_usedNonces)
+            {
+                if (_usedNonces.ContainsKey(cmd.Nonce))
+                    return new(false, "Nonce replay detected");
+                _usedNonces[cmd.Nonce] = DateTimeOffset.UtcNow;
+            }
+
+            return new(true);
         }
         catch
         {

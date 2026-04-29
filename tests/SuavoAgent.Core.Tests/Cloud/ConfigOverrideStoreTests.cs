@@ -123,6 +123,36 @@ public class ConfigOverrideStoreTests : IDisposable
     }
 
     [Fact]
+    public void Apply_BlocksSecretAndIdentityOverrides()
+    {
+        var store = NewStore();
+        var overrides = new[]
+        {
+            Override("Agent.ApiKey", JsonDocument.Parse("\"leak\"").RootElement),
+            Override("Agent.AgentId", JsonDocument.Parse("\"agent-other\"").RootElement),
+            Override("Agent.PharmacyId", JsonDocument.Parse("\"pharm-other\"").RootElement),
+            Override("Agent.MachineFingerprint", JsonDocument.Parse("\"fp-other\"").RootElement),
+            Override("Agent.SqlPassword", JsonDocument.Parse("\"pw\"").RootElement),
+            Override("Agent.HmacSalt", JsonDocument.Parse("\"salt\"").RootElement),
+            Override("Agent.CloudCertPin", JsonDocument.Parse("\"pin\"").RootElement),
+            Override("Agent.LearningMode", JsonDocument.Parse("true").RootElement),
+        };
+
+        store.Apply(overrides);
+
+        var root = JsonDocument.Parse(File.ReadAllText(_path)).RootElement;
+        var agent = root.GetProperty("Agent");
+        Assert.True(agent.GetProperty("LearningMode").GetBoolean());
+        Assert.False(agent.TryGetProperty("ApiKey", out _));
+        Assert.False(agent.TryGetProperty("AgentId", out _));
+        Assert.False(agent.TryGetProperty("PharmacyId", out _));
+        Assert.False(agent.TryGetProperty("MachineFingerprint", out _));
+        Assert.False(agent.TryGetProperty("SqlPassword", out _));
+        Assert.False(agent.TryGetProperty("HmacSalt", out _));
+        Assert.False(agent.TryGetProperty("CloudCertPin", out _));
+    }
+
+    [Fact]
     public void Unwrap_ArrayElement_ReturnsArray()
     {
         var el = JsonDocument.Parse("[1, 2, 3]").RootElement;

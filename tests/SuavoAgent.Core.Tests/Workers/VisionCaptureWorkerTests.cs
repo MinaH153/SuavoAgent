@@ -44,7 +44,7 @@ public class VisionCaptureWorkerTests : IDisposable
         new(
             NullLogger<VisionCaptureWorker>.Instance,
             Options.Create(new AgentOptions { PharmacyId = PharmacyId }),
-            Options.Create(new VisionOptions
+            StaticOptionsMonitor<VisionOptions>.Create(new VisionOptions
             {
                 Enabled = visionEnabled,
                 PeriodicCapture = new VisionPeriodicCaptureOptions
@@ -69,7 +69,7 @@ public class VisionCaptureWorkerTests : IDisposable
             var orphanWorker = new VisionCaptureWorker(
                 NullLogger<VisionCaptureWorker>.Instance,
                 Options.Create(new AgentOptions { PharmacyId = "different-pharmacy" }),
-                Options.Create(new VisionOptions { Enabled = true,
+                StaticOptionsMonitor<VisionOptions>.Create(new VisionOptions { Enabled = true,
                     PeriodicCapture = new VisionPeriodicCaptureOptions { Enabled = true } }),
                 orphanDb,
                 _ipc);
@@ -87,7 +87,7 @@ public class VisionCaptureWorkerTests : IDisposable
         var worker = new VisionCaptureWorker(
             NullLogger<VisionCaptureWorker>.Instance,
             Options.Create(new AgentOptions { PharmacyId = null }),
-            Options.Create(new VisionOptions { Enabled = true,
+            StaticOptionsMonitor<VisionOptions>.Create(new VisionOptions { Enabled = true,
                 PeriodicCapture = new VisionPeriodicCaptureOptions { Enabled = true } }),
             _db,
             _ipc);
@@ -100,10 +100,38 @@ public class VisionCaptureWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task Tick_IpcDisconnected_Skips_ButPreSendAuditEntryRecorded()
+    public async Task Tick_VisionDisabled_SkipsWithoutAuditOrIpc()
     {
-        // Pre-send audit entry MUST land before the IPC attempt — operators
-        // need to see the trigger even when Helper is unreachable.
+        var auditCountBefore = _db.GetAuditEntryCount();
+        var worker = BuildWorker(visionEnabled: false);
+
+        var result = await worker.TickAsync(CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("vision_disabled", result.Reason);
+        Assert.Equal(auditCountBefore, _db.GetAuditEntryCount());
+        Assert.Equal(0, _ipc.SendCount);
+    }
+
+    [Fact]
+    public async Task Tick_PeriodicCaptureDisabled_SkipsWithoutAuditOrIpc()
+    {
+        var auditCountBefore = _db.GetAuditEntryCount();
+        var worker = BuildWorker(periodicEnabled: false);
+
+        var result = await worker.TickAsync(CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("periodic_capture_disabled", result.Reason);
+        Assert.Equal(auditCountBefore, _db.GetAuditEntryCount());
+        Assert.Equal(0, _ipc.SendCount);
+    }
+
+    [Fact]
+    public async Task Tick_IpcDisconnected_Skips_WithTerminalAuditEntry()
+    {
+        // Every attempted capture should have a terminal audit outcome so
+        // forensic review never sees a dangling request row.
         _ipc.ConnectShouldSucceed = false;
         _ipc.IsConnectedValue = false;
         var auditCountBefore = _db.GetAuditEntryCount();
@@ -113,7 +141,7 @@ public class VisionCaptureWorkerTests : IDisposable
 
         Assert.False(result.Success);
         Assert.Equal("ipc_disconnected", result.Reason);
-        Assert.Equal(auditCountBefore + 1, _db.GetAuditEntryCount()); // pre-send only
+        Assert.Equal(auditCountBefore + 2, _db.GetAuditEntryCount());
         Assert.Equal(0, _ipc.SendCount);
     }
 
@@ -150,14 +178,16 @@ public class VisionCaptureWorkerTests : IDisposable
             new IpcError("not_foreground", "Capture refused — PMS not foreground", false, 0));
 
         var worker = BuildWorker();
+        var auditCountBefore = _db.GetAuditEntryCount();
         var result = await worker.TickAsync(CancellationToken.None);
 
         Assert.False(result.Success);
         Assert.Equal("not_foreground", result.Reason);
+        Assert.Equal(auditCountBefore + 2, _db.GetAuditEntryCount());
     }
 
     [Fact]
-    public async Task Tick_HelperReturnsCaptureFailed_ReportsFailure()
+    public async Task Tick_HelperReturnsCaptureFailed_ReportsFailure_WithTerminalAuditEntry()
     {
         _ipc.IsConnectedValue = true;
         _ipc.NextResponse = (req) => new IpcResponse(
@@ -165,10 +195,12 @@ public class VisionCaptureWorkerTests : IDisposable
             new IpcError("capture_failed", "Vision rate-limited", false, 0));
 
         var worker = BuildWorker();
+        var auditCountBefore = _db.GetAuditEntryCount();
         var result = await worker.TickAsync(CancellationToken.None);
 
         Assert.False(result.Success);
         Assert.Equal("capture_failed", result.Reason);
+        Assert.Equal(auditCountBefore + 2, _db.GetAuditEntryCount());
     }
 
     [Fact]
@@ -210,4 +242,22 @@ internal sealed class FakeIpcCommandClient : IIpcCommandClient
         SendCount++;
         return Task.FromResult(NextResponse(request));
     }
+}
+
+internal sealed class StaticOptionsMonitor<T> : IOptionsMonitor<T>
+{
+    private readonly T _value;
+
+    private StaticOptionsMonitor(T value)
+    {
+        _value = value;
+    }
+
+    public T CurrentValue => _value;
+
+    public T Get(string? name) => _value;
+
+    public IDisposable? OnChange(Action<T, string?> listener) => null;
+
+    public static StaticOptionsMonitor<T> Create(T value) => new(value);
 }

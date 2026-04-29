@@ -19,6 +19,25 @@ public sealed class ConfigOverrideStore
 {
     public string Path { get; }
     private readonly ILogger<ConfigOverrideStore> _logger;
+    private static readonly string[] BlockedExactPaths =
+    {
+        "Agent.ApiKey",
+        "Agent.AgentId",
+        "Agent.PharmacyId",
+        "Agent.MachineFingerprint",
+        "Agent.CloudUrl",
+        "Agent.CloudCertPin",
+        "Agent.SqlServer",
+        "Agent.SqlDatabase",
+        "Agent.SqlUser",
+        "Agent.SqlPassword",
+        "Agent.HmacSalt",
+    };
+
+    private static readonly string[] BlockedPrefixes =
+    {
+        "Agent.Pharmacies.",
+    };
 
     public ConfigOverrideStore(string path, ILogger<ConfigOverrideStore> logger)
     {
@@ -35,8 +54,19 @@ public sealed class ConfigOverrideStore
         var root = new Dictionary<string, object?>();
         foreach (var ov in overrides)
         {
-            if (string.IsNullOrWhiteSpace(ov.Path)) continue;
-            Insert(root, ov.Path.Split('.'), ov.Value);
+            var path = ov.Path?.Trim();
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            if (IsBlockedOverridePath(path))
+            {
+                _logger.LogWarning(
+                    "ConfigOverrideStore: rejected protected override path {Path}",
+                    path);
+                continue;
+            }
+
+            var segments = path.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (segments.Length == 0) continue;
+            Insert(root, segments, ov.Value);
         }
 
         var payload = JsonSerializer.Serialize(root, new JsonSerializerOptions
@@ -56,12 +86,36 @@ public sealed class ConfigOverrideStore
             Directory.CreateDirectory(dir);
 
         var tmp = Path + ".tmp";
-        File.WriteAllText(tmp, payload, new UTF8Encoding(false));
+        using (var fs = new FileStream(
+            tmp,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: 4096,
+            FileOptions.WriteThrough))
+        using (var writer = new StreamWriter(fs, new UTF8Encoding(false)))
+        {
+            writer.Write(payload);
+            writer.Flush();
+            fs.Flush(flushToDisk: true);
+        }
         File.Move(tmp, Path, overwrite: true);
         _logger.LogInformation(
             "ConfigOverrideStore: wrote {Count} override(s) to {Path}",
             overrides.Count, Path);
         return true;
+    }
+
+    private static bool IsBlockedOverridePath(string path)
+    {
+        if (BlockedExactPaths.Any(blocked =>
+                string.Equals(path, blocked, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        return BlockedPrefixes.Any(prefix =>
+            path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
     }
 
     private static void Insert(Dictionary<string, object?> node, string[] segments, JsonElement value)

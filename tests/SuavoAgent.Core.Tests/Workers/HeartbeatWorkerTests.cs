@@ -97,6 +97,11 @@ public class HeartbeatWorkerTests : IDisposable
     private JsonElement BuildResponseJson(string command, object? data = null)
     {
         var cmd = Sign(command, data != null ? JsonSerializer.Serialize(data) : null);
+        return BuildResponseJson(cmd, data);
+    }
+
+    private static JsonElement BuildResponseJson(SignedCommand cmd, object? data = null)
+    {
         var envelope = new Dictionary<string, object?>
         {
             ["command"] = cmd.Command,
@@ -145,6 +150,18 @@ public class HeartbeatWorkerTests : IDisposable
         // Prune with zero window removes everything
         _db.PruneOldNonces(TimeSpan.Zero);
         Assert.True(_db.TryRecordNonce("nonce-prune-1"));
+    }
+
+    [Fact]
+    public async Task ProcessCommand_InvalidSignature_DoesNotPersistNonce()
+    {
+        var cmd = Sign("unknown_command");
+        var tampered = cmd with { Signature = Convert.ToBase64String(new byte[64]) };
+
+        await InvokeProcessAsync(BuildResponseJson(tampered));
+        await InvokeProcessAsync(BuildResponseJson(cmd));
+
+        Assert.False(_db.TryRecordNonce(cmd.Nonce));
     }
 
     // ── Command Dispatch: approve_pom ──

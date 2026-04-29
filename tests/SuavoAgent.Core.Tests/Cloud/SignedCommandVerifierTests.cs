@@ -23,13 +23,13 @@ public class SignedCommandVerifierTests
 
     private SignedCommand CreateSignedCommand(string command, string? agentId = null,
         string? fingerprint = null, string? keyId = null, DateTimeOffset? timestamp = null,
-        string? dataJson = null)
+        string? dataJson = null, string? nonce = null)
     {
         agentId ??= AgentId;
         fingerprint ??= Fingerprint;
         keyId ??= "test-key-v1";
         var ts = (timestamp ?? DateTimeOffset.UtcNow).ToString("o");
-        var nonce = Guid.NewGuid().ToString();
+        nonce ??= Guid.NewGuid().ToString();
         var dataHash = SignedCommandVerifier.ComputeDataHash(dataJson);
         var canonical = $"{command}|{agentId}|{fingerprint}|{ts}|{nonce}|{dataHash}";
         var sig = Convert.ToBase64String(
@@ -82,6 +82,13 @@ public class SignedCommandVerifierTests
     }
 
     [Fact]
+    public void Verify_EmptyNonce_Fails()
+    {
+        var cmd = CreateSignedCommand("force_sync", nonce: "");
+        Assert.False(_verifier.Verify(cmd).IsValid);
+    }
+
+    [Fact]
     public void Verify_ReplayedNonce_Fails()
     {
         var cmd = CreateSignedCommand("force_sync");
@@ -94,6 +101,16 @@ public class SignedCommandVerifierTests
     {
         var cmd = CreateSignedCommand("force_sync") with { Signature = Convert.ToBase64String(new byte[64]) };
         Assert.False(_verifier.Verify(cmd).IsValid);
+    }
+
+    [Fact]
+    public void Verify_InvalidSignature_DoesNotConsumeNonce()
+    {
+        var cmd = CreateSignedCommand("force_sync");
+        var tampered = cmd with { Signature = Convert.ToBase64String(new byte[64]) };
+
+        Assert.False(_verifier.Verify(tampered).IsValid);
+        Assert.True(_verifier.Verify(cmd).IsValid);
     }
 
     [Fact]
