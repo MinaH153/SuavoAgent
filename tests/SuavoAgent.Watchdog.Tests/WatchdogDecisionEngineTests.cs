@@ -15,6 +15,18 @@ public class WatchdogDecisionEngineTests
     };
 
     [Fact]
+    public void Defaults_RestartWithinRunbookWindow()
+    {
+        var eng = new WatchdogDecisionEngine();
+        var ledger = ServiceLedger.Initial("SuavoAgent.Core", T0);
+
+        var (_, unhealthy) = eng.Decide(ledger, ServiceState.Stopped, T0);
+        var (decision, _) = eng.Decide(unhealthy, ServiceState.Stopped, T0.AddSeconds(75));
+
+        Assert.Equal(DecisionAction.AttemptRestart, decision.Action);
+    }
+
+    [Fact]
     public void Running_IsDoNothing_AndClearsFailureCounter()
     {
         var eng = Engine();

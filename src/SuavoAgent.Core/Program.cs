@@ -36,7 +36,10 @@ static void WriteCrash(string stage, Exception ex)
     {
         var line = $"[{DateTimeOffset.Now:O}] [{stage}] {ex.GetType().FullName}: {ex.Message}"
                    + Environment.NewLine + ex.ToString() + Environment.NewLine + Environment.NewLine;
-        File.AppendAllText(Path.Combine(CoreCrashDir(), "startup-crash.log"), line);
+        File.AppendAllText(
+            Path.Combine(CoreCrashDir(), "startup-crash.log"),
+            line,
+            new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
     }
     catch { /* last resort — nothing we can do */ }
 }
@@ -60,6 +63,7 @@ try
         .WriteTo.Console()
         .WriteTo.File(
             Path.Combine(dataDir, "logs", "startup-.log"),
+            encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
             rollingInterval: RollingInterval.Day,
             retainedFileCountLimit: 7)
         .CreateLogger();
@@ -88,6 +92,7 @@ Log.Logger = new LoggerConfiguration()
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "logs", "core-.log"),
+        encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
         rollingInterval: RollingInterval.Day,
         retainedFileCountLimit: 30,
         fileSizeLimitBytes: 50_000_000,
@@ -119,6 +124,7 @@ try
         "SuavoAgent",
         "config-overrides.json");
     builder.Configuration.AddJsonFile(configOverridesPath, optional: true, reloadOnChange: true);
+    var appSettingsPath = Path.Combine(exeDir, "appsettings.json");
 
     var startupVersion = builder.Configuration.GetSection("Agent").Get<AgentOptions>()?.Version ?? "unknown";
     Log.Information("SuavoAgent.Core starting v{Version}", startupVersion);
@@ -152,8 +158,21 @@ try
 
     // H-1: Seal plaintext credentials with DPAPI on first run (Windows only)
     SuavoAgent.Core.Config.CredentialProtector.SealSecretsFile(
-        Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
+        appSettingsPath,
         LoggerFactory.Create(lb => lb.AddSerilog()).CreateLogger("CredentialProtector"));
+
+    // The cloud clients below capture this local AgentOptions instance, not the
+    // later IOptions<AgentOptions>.Value object. On restart, appsettings.json
+    // already contains DPAPI-wrapped secrets, so unwrap agentOpts before any
+    // HMAC signer is constructed. Otherwise config/heartbeat clients sign with
+    // the literal "DPAPI:..." envelope and cloud correctly returns 401.
+    if (OperatingSystem.IsWindows())
+    {
+        agentOpts.ApiKey = SuavoAgent.Core.Config.CredentialProtector.Unprotect(agentOpts.ApiKey);
+        agentOpts.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(agentOpts.SqlPassword);
+        foreach (var ph in agentOpts.Pharmacies)
+            ph.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(ph.SqlPassword);
+    }
 
     Log.Information(
         "Writeback mode: {Mode} (SQL writes {Status}) — audit receipts always generated",
@@ -164,7 +183,14 @@ try
         var cloudClient = new SuavoCloudClient(agentOpts);
         builder.Services.AddSingleton(cloudClient);
         builder.Services.AddSingleton<IPostSigner>(cloudClient);
+        builder.Services.AddSingleton<PricingJobCloudUploader>();
         builder.Services.AddSingleton<SeedClient>();
+        builder.Services.AddSingleton<IAgentCredentialRecoveryClient>(sp =>
+            new AgentCredentialRecoveryClient(
+                agentOpts,
+                appSettingsPath,
+                sp.GetRequiredService<ILogger<AgentCredentialRecoveryClient>>()));
+        builder.Services.AddSingleton<CloudAuthRecoveryCoordinator>();
 
         // Cloud config-push: AgentConfigClient polls GET /api/agent/config,
         // ConfigOverrideStore flattens to config-overrides.json on disk,
@@ -180,7 +206,8 @@ try
             new AgentConfigClient(
                 configHttp,
                 agentOpts,
-                sp.GetRequiredService<ILogger<AgentConfigClient>>()));
+                sp.GetRequiredService<ILogger<AgentConfigClient>>(),
+                sp.GetService<CloudAuthRecoveryCoordinator>()));
         builder.Services.AddSingleton(sp => new ConfigOverrideStore(
             configOverridesPath,
             sp.GetRequiredService<ILogger<ConfigOverrideStore>>()));
@@ -199,6 +226,7 @@ try
     // Vision.Enabled + PeriodicCapture.Enabled + active learning session.
     // Both gates default OFF so this is a no-op until a pilot opts in.
     builder.Services.Configure<VisionOptions>(builder.Configuration.GetSection("Vision"));
+    builder.Services.AddSingleton<SuavoAgent.Core.Workers.VisionCaptureTelemetry>();
     builder.Services.AddHostedService<SuavoAgent.Core.Workers.VisionCaptureWorker>();
 
     builder.Services.AddSingleton<AgentStateDb>(sp =>
@@ -348,8 +376,11 @@ try
     builder.Services.AddSingleton<IpcCommandClient>(sp =>
         new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()));
     builder.Services.AddSingleton<IIpcCommandClient>(sp => sp.GetRequiredService<IpcCommandClient>());
+    builder.Services.AddSingleton<IIntentCursorClient, IntentCursorClient>();
     builder.Services.AddSingleton<ExcelPricingReader>();
     builder.Services.AddSingleton<ExcelPricingWriter>();
+    builder.Services.AddSingleton<IPricingLookupFactory, PioneerRxSqlPricingLookupFactory>();
+    builder.Services.AddSingleton<IPricingJobExecutor, SqlFirstPricingJobExecutor>();
 
     // File discovery — Core side. Helper runs the actual locator; this client
     // wraps the find_file IPC call so HeartbeatWorker can dispatch
@@ -493,6 +524,7 @@ try
     {
         var logger = sp.GetRequiredService<ILogger<IpcPipeServer>>();
         var eventRateLimiter = new SuavoAgent.Core.Ipc.EventRateLimiter(maxEventsPerSecond: 500);
+        var helperAttestationPath = SuavoAgent.Contracts.Ipc.IpcPeerAttestationStore.GetDefaultPath();
         return new IpcPipeServer(pipeName, msg =>
         {
             logger.LogDebug("IPC: {Command}", msg.Command);
@@ -589,7 +621,13 @@ try
                     return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
                         msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
             }
-        }, logger);
+        }, logger, isBrokerAttestedHelper: pid =>
+            SuavoAgent.Contracts.Ipc.IpcPeerAttestationStore.ContainsHelper(
+                helperAttestationPath,
+                pipeNonce,
+                pid,
+                DateTimeOffset.UtcNow,
+                TimeSpan.FromMinutes(5)));
     });
 
     builder.Services.AddSingleton<RxDetectionWorker>();

@@ -1,4 +1,4 @@
-# SuavoAgent v2 — Publish all binaries
+# SuavoAgent v2 - Publish all binaries
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
@@ -37,7 +37,7 @@ if ($needKeys) {
         }
     } else {
         # Fallback: .NET ECDsa (works on any machine with .NET runtime)
-        Write-Host "  openssl not found — using .NET ECDsa key generation" -ForegroundColor Yellow
+        Write-Host "  openssl not found - using .NET ECDsa key generation" -ForegroundColor Yellow
         function Export-ECDsaKeyPair([string]$privPath, [string]$pubPath) {
             $ecdsa = [System.Security.Cryptography.ECDsa]::Create(
                 [System.Security.Cryptography.ECCurve]::NamedCurves.nistP256)
@@ -67,9 +67,11 @@ if (Test-Path $OutputDir) { Remove-Item -Recurse -Force $OutputDir }
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
 $projects = @(
-    @{ Name = "Core";   Path = "src\SuavoAgent.Core\SuavoAgent.Core.csproj" },
-    @{ Name = "Broker"; Path = "src\SuavoAgent.Broker\SuavoAgent.Broker.csproj" },
-    @{ Name = "Helper"; Path = "src\SuavoAgent.Helper\SuavoAgent.Helper.csproj" }
+    @{ Name = "Core";     Path = "src\SuavoAgent.Core\SuavoAgent.Core.csproj";     Exe = "SuavoAgent.Core.exe" },
+    @{ Name = "Broker";   Path = "src\SuavoAgent.Broker\SuavoAgent.Broker.csproj"; Exe = "SuavoAgent.Broker.exe" },
+    @{ Name = "Helper";   Path = "src\SuavoAgent.Helper\SuavoAgent.Helper.csproj"; Exe = "SuavoAgent.Helper.exe" },
+    @{ Name = "Watchdog"; Path = "src\SuavoAgent.Watchdog\SuavoAgent.Watchdog.csproj"; Exe = "SuavoAgent.Watchdog.exe" },
+    @{ Name = "Setup";    Path = "src\SuavoAgent.Setup\SuavoAgent.Setup.csproj";   Exe = "SuavoSetup.exe" }
 )
 
 foreach ($proj in $projects) {
@@ -115,9 +117,9 @@ if ($CertThumbprint) {
         $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
     }
     if ($signtool) {
-        foreach ($bin in @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe")) {
-            $subdir = $bin -replace "^SuavoAgent\.(.+)\.exe$", '$1'
-            $path = Join-Path $OutputDir (Join-Path $subdir $bin)
+        foreach ($proj in $projects) {
+            $bin = $proj.Exe
+            $path = Join-Path $OutputDir (Join-Path $proj.Name $bin)
             if (Test-Path $path) {
                 Write-Host "  Signing $bin..." -ForegroundColor Gray
                 & $signtool.FullName sign /sha1 $CertThumbprint /fd sha256 /tr $TimestampServer /td sha256 /v $path
@@ -136,7 +138,7 @@ if ($CertThumbprint) {
             }
         }
     } else {
-        Write-Error "signtool.exe not found — install Windows SDK or add to PATH"
+        Write-Error "signtool.exe not found - install Windows SDK or add to PATH"
         exit 1
     }
 } else {
@@ -144,14 +146,13 @@ if ($CertThumbprint) {
     Write-Host "  To sign: .\publish.ps1 -CertThumbprint <SHA1>" -ForegroundColor Gray
 }
 
-# ── Generate checksums (AFTER signing — hash the signed binaries) ──
+# ── Generate checksums (AFTER signing - hash the signed binaries) ──
 Write-Host "`n--- Generating checksums ---" -ForegroundColor Yellow
 $checksumFile = Join-Path $OutputDir "checksums.sha256"
 $checksums = @()
-foreach ($bin in @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe")) {
-    # EXEs are in subdirectories: Core/, Broker/, Helper/
-    $subdir = $bin -replace "^SuavoAgent\.(.+)\.exe$", '$1'
-    $path = Join-Path $OutputDir (Join-Path $subdir $bin)
+foreach ($proj in $projects) {
+    $bin = $proj.Exe
+    $path = Join-Path $OutputDir (Join-Path $proj.Name $bin)
     if (Test-Path $path) {
         $hash = (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
         $checksums += "$hash  $bin"

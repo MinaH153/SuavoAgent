@@ -4,7 +4,7 @@ using SuavoAgent.Contracts.Pricing;
 namespace SuavoAgent.Core.Pricing;
 
 /// <summary>
-/// Writes Supplier, Cost, and Status columns into an Excel file.
+/// Writes Best Supplier, Best Cost, and Status columns into an Excel file.
 /// Output mode is Sibling by default — produces <c>{stem}-priced-{ts}.xlsx</c> next to the source
 /// workbook. In-place mode is available for explicit re-run scenarios; it first verifies the source
 /// is not locked by Excel.exe to avoid the "succeed 499 rows, fail at move" Codex scenario.
@@ -36,15 +36,15 @@ public sealed class ExcelPricingWriter
     public WriteResult Write(
         string sourcePath,
         IReadOnlyList<SupplierPriceResult> results,
-        string supplierColumnHeader = "Supplier",
-        string costColumnHeader = "Cost (per unit)",
+        string supplierColumnHeader = PricingJobDefaults.SupplierColumn,
+        string costColumnHeader = PricingJobDefaults.CostColumn,
         string statusColumnHeader = DefaultStatusHeader,
         WriteMode mode = WriteMode.Sibling)
     {
         if (!File.Exists(sourcePath))
         {
-            _logger.LogError("ExcelPricingWriter: source not found {Path}", sourcePath);
-            return WriteResult.Fail($"Source not found: {sourcePath}");
+            _logger.LogError("ExcelPricingWriter: source not found");
+            return WriteResult.Fail("Source not found");
         }
 
         var outputPath = mode == WriteMode.InPlace
@@ -54,8 +54,8 @@ public sealed class ExcelPricingWriter
         if (mode == WriteMode.InPlace && IsFileLocked(sourcePath))
         {
             _logger.LogError(
-                "ExcelPricingWriter: source {Path} is locked (Excel open?) — aborting in-place write. " +
-                "Re-run with WriteMode.Sibling or close the workbook.", sourcePath);
+                "ExcelPricingWriter: source workbook is locked (Excel open?) — aborting in-place write. " +
+                "Re-run with WriteMode.Sibling or close the workbook.");
             return WriteResult.Fail("Source workbook is locked — close Excel and retry, or use Sibling mode.");
         }
 
@@ -67,7 +67,7 @@ public sealed class ExcelPricingWriter
             var ws = wb.Worksheets.FirstOrDefault();
             if (ws == null)
             {
-                _logger.LogError("ExcelPricingWriter: no worksheet in {Path}", sourcePath);
+                _logger.LogError("ExcelPricingWriter: no worksheet in source workbook");
                 return WriteResult.Fail("No worksheet in source");
             }
 
@@ -126,15 +126,15 @@ public sealed class ExcelPricingWriter
             }
 
             _logger.LogInformation(
-                "ExcelPricingWriter: wrote {Ok} OK / {Fail} fail rows to {Path} (mode={Mode})",
-                okCount, failCount, outputPath, mode);
+                "ExcelPricingWriter: wrote {Ok} OK / {Fail} fail rows (mode={Mode})",
+                okCount, failCount, mode);
 
             return WriteResult.Ok(outputPath, okCount, failCount);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "ExcelPricingWriter failed for {Path}", sourcePath);
-            return WriteResult.Fail(ex.Message);
+            _logger.LogError("ExcelPricingWriter failed ({ErrorType})", ex.GetType().Name);
+            return WriteResult.Fail("Excel write failed");
         }
     }
 

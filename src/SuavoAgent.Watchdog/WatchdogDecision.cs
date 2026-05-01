@@ -31,8 +31,8 @@ public sealed record ServiceLedger(
 
 public sealed class WatchdogDecisionEngine
 {
-    public TimeSpan UnhealthyGrace { get; init; } = TimeSpan.FromMinutes(5);
-    public TimeSpan RestartBackoff { get; init; } = TimeSpan.FromSeconds(60);
+    public TimeSpan UnhealthyGrace { get; init; } = TimeSpan.FromSeconds(45);
+    public TimeSpan RestartBackoff { get; init; } = TimeSpan.FromSeconds(30);
     public int EscalateAfterConsecutiveFailures { get; init; } = 3;
 
     public (WatchdogDecision Decision, ServiceLedger NextLedger) Decide(

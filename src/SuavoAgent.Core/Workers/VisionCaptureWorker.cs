@@ -37,6 +37,7 @@ public sealed class VisionCaptureWorker : BackgroundService
     private readonly AgentStateDb _stateDb;
     private readonly IIpcCommandClient _ipc;
     private readonly TimeProvider _clock;
+    private readonly VisionCaptureTelemetry _telemetry;
 
     public VisionCaptureWorker(
         ILogger<VisionCaptureWorker> logger,
@@ -44,7 +45,8 @@ public sealed class VisionCaptureWorker : BackgroundService
         IOptionsMonitor<VisionOptions> visionOptions,
         AgentStateDb stateDb,
         IIpcCommandClient ipc,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        VisionCaptureTelemetry? telemetry = null)
     {
         _logger = logger;
         _agentOptions = agentOptions.Value;
@@ -52,6 +54,7 @@ public sealed class VisionCaptureWorker : BackgroundService
         _stateDb = stateDb;
         _ipc = ipc;
         _clock = clock ?? TimeProvider.System;
+        _telemetry = telemetry ?? new VisionCaptureTelemetry();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -102,17 +105,20 @@ public sealed class VisionCaptureWorker : BackgroundService
         var options = _visionOptions.CurrentValue;
         if (!options.Enabled)
         {
+            _telemetry.RecordSkipped("vision_disabled");
             return TickResult.Skipped("vision_disabled");
         }
 
         if (!options.PeriodicCapture.Enabled)
         {
+            _telemetry.RecordSkipped("periodic_capture_disabled");
             return TickResult.Skipped("periodic_capture_disabled");
         }
 
         var pharmacyId = _agentOptions.PharmacyId ?? string.Empty;
         if (string.IsNullOrEmpty(pharmacyId))
         {
+            _telemetry.RecordSkipped("no_pharmacy_id");
             return TickResult.Skipped("no_pharmacy_id");
         }
 
@@ -123,6 +129,7 @@ public sealed class VisionCaptureWorker : BackgroundService
             // Heartbeat counters won't see it either since they query the
             // active session id. Skip silently (LearningWorker will create a
             // session when it boots).
+            _telemetry.RecordSkipped("no_active_session");
             return TickResult.Skipped("no_active_session");
         }
 
@@ -149,6 +156,7 @@ public sealed class VisionCaptureWorker : BackgroundService
         {
             _logger.LogDebug("VisionCaptureWorker: Helper IPC not connected — skip");
             AppendCaptureOutcome(commandId, "failed", "ipc_disconnected");
+            _telemetry.RecordFailed("ipc_disconnected", commandId);
             return TickResult.Skipped("ipc_disconnected");
         }
 
@@ -159,6 +167,7 @@ public sealed class VisionCaptureWorker : BackgroundService
         {
             _logger.LogDebug("VisionCaptureWorker: capture timed out / connection dropped");
             AppendCaptureOutcome(commandId, "failed", "ipc_timeout");
+            _telemetry.RecordFailed("ipc_timeout", commandId);
             return TickResult.Failed("ipc_timeout");
         }
 
@@ -181,6 +190,7 @@ public sealed class VisionCaptureWorker : BackgroundService
             }
 
             AppendCaptureOutcome(commandId, "failed", code);
+            _telemetry.RecordFailed(code, commandId);
             return TickResult.Failed(code);
         }
 
@@ -196,6 +206,7 @@ public sealed class VisionCaptureWorker : BackgroundService
         catch { /* malformed payload — log via TickResult */ }
 
         AppendCaptureOutcome(commandId, "complete", "captured", storageId);
+        _telemetry.RecordCaptured(storageId, commandId);
 
         _logger.LogInformation(
             "VisionCaptureWorker: capture committed — storageId={StorageId}", storageId);

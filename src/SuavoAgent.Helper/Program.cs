@@ -16,6 +16,7 @@ Log.Logger = new LoggerConfiguration()
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "logs", "helper-.log"),
+        encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
         rollingInterval: RollingInterval.Day,
         retainedFileCountLimit: 14)
     .CreateLogger();
@@ -64,6 +65,11 @@ try
     // Returns null (no vision) when disabled, which is the default.
     var visionController = SuavoAgent.Helper.Vision.VisionBootstrap.TryBuild(Log.Logger);
 
+    // Intent cursor — visual-only pointer overlay. It runs in Helper because
+    // Helper owns the interactive desktop session. It does not move/click/type
+    // and carries no text labels or screen content across IPC.
+    var intentCursor = SuavoAgent.Helper.IntentCursor.IntentCursorBootstrap.Build(Log.Logger);
+
     // File discovery — runs in Helper (interactive user session) because
     // Core runs as LocalSystem and doesn't see the user's Desktop/
     // Documents. Heuristic-only ranker in v3.13; LLM tier plugs in later.
@@ -78,7 +84,8 @@ try
     using var cmdServer = new IpcCommandServer(
         cmdPipeName, pricingWorkflow, Log.Logger, visionController, fileLocator,
         isPmsForeground: () => SuavoAgent.Helper.SystemObservers.ForegroundGuard
-            .IsPidForeground(pioneer.ProcessId));
+            .IsPidForeground(pioneer.ProcessId),
+        intentCursor: intentCursor);
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying

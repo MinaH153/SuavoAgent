@@ -611,8 +611,8 @@ public sealed class AgentStateDb : IDisposable
                 job_id TEXT PRIMARY KEY,
                 excel_path TEXT NOT NULL,
                 ndc_column TEXT NOT NULL DEFAULT 'NDC',
-                supplier_column TEXT NOT NULL DEFAULT 'Supplier',
-                cost_column TEXT NOT NULL DEFAULT 'Cost (per unit)',
+                supplier_column TEXT NOT NULL DEFAULT 'Best Supplier',
+                cost_column TEXT NOT NULL DEFAULT 'Best Cost',
                 status TEXT NOT NULL DEFAULT 'pending',
                 total_items INTEGER NOT NULL DEFAULT 0,
                 completed_items INTEGER NOT NULL DEFAULT 0,
@@ -636,6 +636,16 @@ public sealed class AgentStateDb : IDisposable
             )
         """);
         Execute("CREATE INDEX IF NOT EXISTS idx_pricing_results_job ON pricing_results(job_id)");
+
+        Execute("""
+            CREATE TABLE IF NOT EXISTS pricing_discovery_candidates (
+                token TEXT PRIMARY KEY,
+                absolute_path TEXT NOT NULL,
+                file_name TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """);
+        Execute("CREATE INDEX IF NOT EXISTS idx_pricing_discovery_candidates_created ON pricing_discovery_candidates(created_at)");
 
         // v3.12 — numbered transactional migrations (Codex Area 5 fix).
         // schema_migrations tracks applied versions so new migrations can fail-closed.
@@ -3905,5 +3915,40 @@ public sealed class AgentStateDb : IDisposable
         var rows = new HashSet<int>();
         while (reader.Read()) rows.Add(reader.GetInt32(0));
         return rows;
+    }
+
+    public string SavePricingDiscoveryCandidate(string absolutePath, string? fileName = null)
+    {
+        var token = $"pdc_{Guid.NewGuid():N}";
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO pricing_discovery_candidates (token, absolute_path, file_name)
+            VALUES (@token, @path, @file)
+            """;
+        cmd.Parameters.AddWithValue("@token", token);
+        cmd.Parameters.AddWithValue("@path", absolutePath);
+        cmd.Parameters.AddWithValue("@file", (object?)fileName ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+        return token;
+    }
+
+    public string? TryResolvePricingDiscoveryCandidate(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token) ||
+            !token.StartsWith("pdc_", StringComparison.Ordinal) ||
+            token.Length != 36)
+        {
+            return null;
+        }
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT absolute_path
+            FROM pricing_discovery_candidates
+            WHERE token = @token
+            LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("@token", token);
+        return cmd.ExecuteScalar() as string;
     }
 }

@@ -83,7 +83,7 @@ internal static class ConsoleInstaller
             }
 
             ConsoleUI.WriteStep("Phase 4: Writing configuration");
-            var agentId = "agent-" + Guid.NewGuid().ToString("N")[..12];
+            var agentId = config.AgentId;
             var fingerprint = GetMachineFingerprint();
             var agentConfig = new Dictionary<string, object>
             {

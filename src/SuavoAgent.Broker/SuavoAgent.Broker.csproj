@@ -16,4 +16,8 @@
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
+  </ItemGroup>
+
 </Project>

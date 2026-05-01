@@ -23,6 +23,11 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     private readonly AgentOptions _options;
 
     public SuavoCloudClient(AgentOptions options)
+        : this(options, CreateHandler(options))
+    {
+    }
+
+    internal SuavoCloudClient(AgentOptions options, HttpMessageHandler handler)
     {
         _options = options;
         _signer = new HmacSigner(options.ApiKey ?? throw new InvalidOperationException("ApiKey is required"));
@@ -31,6 +36,11 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         if (uri.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException($"CloudUrl must use HTTPS, got: {uri.Scheme}");
 
+        _http = new HttpClient(handler) { BaseAddress = uri, Timeout = TimeSpan.FromSeconds(30) };
+    }
+
+    private static HttpMessageHandler CreateHandler(AgentOptions options)
+    {
         var handler = new HttpClientHandler();
         if (!string.IsNullOrEmpty(options.CloudCertPin))
         {
@@ -44,7 +54,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
                 return pins.Any(pin => pin.Equals(certHash, StringComparison.Ordinal));
             };
         }
-        _http = new HttpClient(handler) { BaseAddress = uri, Timeout = TimeSpan.FromSeconds(30) };
+        return handler;
     }
 
     public async Task<JsonElement?> HeartbeatAsync(object payload, CancellationToken ct)
@@ -91,7 +101,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         request.Headers.Add("x-agent-signature", signature);
 
         using var response = await _http.SendAsync(request, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureCloudSuccessAsync(response, path, ct).ConfigureAwait(false);
 
         var responseBody = await response.Content.ReadAsStringAsync(ct);
         if (string.IsNullOrWhiteSpace(responseBody))
@@ -113,7 +123,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         request.Headers.Add("x-agent-signature", signature);
 
         using var response = await _http.SendAsync(request, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureCloudSuccessAsync(response, path, ct).ConfigureAwait(false);
 
         var responseBody = await response.Content.ReadAsStringAsync(ct);
         if (string.IsNullOrWhiteSpace(responseBody))
@@ -128,6 +138,24 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         }
 
         return JsonSerializer.Deserialize<JsonElement>(responseBody);
+    }
+
+    private static async Task EnsureCloudSuccessAsync(
+        HttpResponseMessage response,
+        string path,
+        CancellationToken ct)
+    {
+        if (response.IsSuccessStatusCode)
+            return;
+
+        var body = response.Content == null
+            ? null
+            : await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var safeReason = CloudErrorSanitizer.FromBody(body);
+        throw new HttpRequestException(
+            $"Cloud request {path} failed with {(int)response.StatusCode} ({response.ReasonPhrase}); reason={safeReason}",
+            null,
+            response.StatusCode);
     }
 
     private static bool VerifyEcdsaSignature(string body, string signatureBase64, string publicKeyDer)

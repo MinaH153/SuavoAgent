@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Health;
 
 namespace SuavoAgent.Core.Workers;
 
@@ -37,22 +38,26 @@ public sealed class ConfigSyncWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Stagger first fetch so we don't race startup of every pharmacy
-        // agent hitting cloud in lockstep after a deploy.
-        try
-        {
-            await Task.Delay(_opts.InitialDelay, stoppingToken);
-        }
-        catch (OperationCanceledException) { return; }
-
         while (!stoppingToken.IsCancellationRequested)
         {
+            var attemptAt = DateTimeOffset.UtcNow;
+            var status = "failed";
+            string? errorKind = null;
             try
             {
                 var resp = await _client.FetchAsync(stoppingToken);
                 if (resp != null)
                 {
                     _store.Apply(resp.Overrides);
+                    _opts.LastAppliedOverrideCount = resp.Overrides.Count;
+                    _opts.ConsecutiveFailures = 0;
+                    _opts.LastSuccessAt = attemptAt;
+                    status = "ok";
+                }
+                else
+                {
+                    _opts.ConsecutiveFailures++;
+                    errorKind = _client.LastFailureKind ?? "fetch_returned_null";
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -61,7 +66,27 @@ public sealed class ConfigSyncWorker : BackgroundService
             }
             catch (Exception ex)
             {
+                _opts.ConsecutiveFailures++;
+                errorKind = ex.GetType().Name;
                 _logger.LogWarning(ex, "ConfigSyncWorker: iteration failed (continuing)");
+            }
+            finally
+            {
+                try
+                {
+                    RuntimeHealthEvidence.WriteConfigSyncHealth(
+                        _opts.HealthPath,
+                        status,
+                        attemptAt,
+                        _opts.LastSuccessAt,
+                        _opts.ConsecutiveFailures,
+                        errorKind,
+                        _opts.LastAppliedOverrideCount);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "ConfigSyncWorker: health write failed");
+                }
             }
 
             try
@@ -74,11 +99,16 @@ public sealed class ConfigSyncWorker : BackgroundService
 }
 
 /// <summary>
-/// Tunables for <see cref="ConfigSyncWorker"/>. Defaults: initial delay 15 s
-/// (small skew + some cushion while other workers boot), poll every 5 min.
+/// Tunables for <see cref="ConfigSyncWorker"/>. The first fetch is immediate
+/// so a fresh restart does not run with stale or empty overrides; PollInterval
+/// controls later refreshes.
 /// </summary>
 public sealed class ConfigSyncOptions
 {
-    public TimeSpan InitialDelay { get; set; } = TimeSpan.FromSeconds(15);
+    public TimeSpan InitialDelay { get; set; } = TimeSpan.Zero;
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromMinutes(5);
+    public string HealthPath { get; set; } = RuntimeHealthEvidence.ConfigSyncHealthPath();
+    public DateTimeOffset? LastSuccessAt { get; set; }
+    public int ConsecutiveFailures { get; set; }
+    public int LastAppliedOverrideCount { get; set; }
 }

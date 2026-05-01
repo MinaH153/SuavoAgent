@@ -44,6 +44,31 @@ public class IpcMessageTests
         Assert.Equal("drain", IpcCommands.Drain);
         Assert.Equal("helper_status", IpcCommands.HelperStatus);
         Assert.Equal("attach_pioneerrx", IpcCommands.AttachPioneerRx);
+        Assert.Equal("intent_cursor", IpcCommands.IntentCursor);
+    }
+
+    [Fact]
+    public void IntentCursorRequest_SerializesWithoutPhiBearingTextFields()
+    {
+        var request = new IntentCursorRequest(
+            X: 120.25,
+            Y: 240.75,
+            DurationMs: 900,
+            Tone: IntentCursorTones.Agent);
+
+        var json = JsonSerializer.SerializeToElement(request);
+
+        Assert.Equal(120.25, json.GetProperty("x").GetDouble());
+        Assert.Equal(240.75, json.GetProperty("y").GetDouble());
+        Assert.Equal("screen", json.GetProperty("coordinateSpace").GetString());
+        Assert.Equal(900, json.GetProperty("durationMs").GetInt32());
+        Assert.Equal("agent", json.GetProperty("tone").GetString());
+
+        var raw = json.GetRawText();
+        Assert.DoesNotContain("text", raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("label", raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("windowTitle", raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("rx", raw, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

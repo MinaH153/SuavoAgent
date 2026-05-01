@@ -135,6 +135,8 @@ public class ConfigOverrideStoreTests : IDisposable
             Override("Agent.SqlPassword", JsonDocument.Parse("\"pw\"").RootElement),
             Override("Agent.HmacSalt", JsonDocument.Parse("\"salt\"").RootElement),
             Override("Agent.CloudCertPin", JsonDocument.Parse("\"pin\"").RootElement),
+            Override("Agent.Pharmacies", JsonDocument.Parse("[{\"SqlPassword\":\"pw\"}]").RootElement),
+            Override("Agent.Pharmacies.0.SqlPassword", JsonDocument.Parse("\"pw\"").RootElement),
             Override("Agent.LearningMode", JsonDocument.Parse("true").RootElement),
         };
 
@@ -150,6 +152,96 @@ public class ConfigOverrideStoreTests : IDisposable
         Assert.False(agent.TryGetProperty("SqlPassword", out _));
         Assert.False(agent.TryGetProperty("HmacSalt", out _));
         Assert.False(agent.TryGetProperty("CloudCertPin", out _));
+        Assert.False(agent.TryGetProperty("Pharmacies", out _));
+    }
+
+    [Fact]
+    public void Apply_BlocksHighRiskWritebackOverrides()
+    {
+        var store = NewStore();
+        var overrides = new[]
+        {
+            Override("Agent.ReceiptOnlyMode", JsonDocument.Parse("false").RootElement),
+            Override("Agent.AutoExecution.Enabled", JsonDocument.Parse("true").RootElement),
+            Override("Agent.AutoExecution.WritebackEnabled", JsonDocument.Parse("true").RootElement),
+            Override("Agent.LearningMode", JsonDocument.Parse("true").RootElement),
+        };
+
+        store.Apply(overrides);
+
+        var root = JsonDocument.Parse(File.ReadAllText(_path)).RootElement;
+        var agent = root.GetProperty("Agent");
+        Assert.True(agent.GetProperty("LearningMode").GetBoolean());
+        Assert.False(agent.TryGetProperty("ReceiptOnlyMode", out _));
+        Assert.False(agent.TryGetProperty("AutoExecution", out _));
+    }
+
+    [Fact]
+    public void Apply_RejectsOutOfBoundsRuntimeTunables()
+    {
+        var store = NewStore();
+        var overrides = new[]
+        {
+            Override("Agent.HeartbeatIntervalSeconds", JsonDocument.Parse("0").RootElement),
+            Override("Agent.HeartbeatJitterSeconds", JsonDocument.Parse("-1").RootElement),
+            Override("Agent.MaxDetectionBatchSize", JsonDocument.Parse("10000").RootElement),
+            Override("Vision.PeriodicCapture.IntervalSeconds", JsonDocument.Parse("0").RootElement),
+            Override("Vision.MaxStoredScreens", JsonDocument.Parse("0").RootElement),
+            Override("Vision.Tesseract.MinConfidence", JsonDocument.Parse("101").RootElement),
+            Override("Good.Flag", JsonDocument.Parse("true").RootElement),
+        };
+
+        store.Apply(overrides);
+
+        var root = JsonDocument.Parse(File.ReadAllText(_path)).RootElement;
+        Assert.True(root.GetProperty("Good").GetProperty("Flag").GetBoolean());
+        Assert.False(root.TryGetProperty("Agent", out _));
+        Assert.False(root.TryGetProperty("Vision", out _));
+    }
+
+    [Fact]
+    public void Apply_AllowsBoundedRuntimeTunables()
+    {
+        var store = NewStore();
+        var overrides = new[]
+        {
+            Override("Agent.HeartbeatIntervalSeconds", JsonDocument.Parse("30").RootElement),
+            Override("Agent.HeartbeatJitterSeconds", JsonDocument.Parse("5").RootElement),
+            Override("Agent.MaxDetectionBatchSize", JsonDocument.Parse("250").RootElement),
+            Override("Vision.PeriodicCapture.IntervalSeconds", JsonDocument.Parse("30").RootElement),
+            Override("Vision.Tesseract.MinConfidence", JsonDocument.Parse("60").RootElement),
+            Override("Vision.PeriodicCapture.Enabled", JsonDocument.Parse("true").RootElement),
+        };
+
+        store.Apply(overrides);
+
+        var root = JsonDocument.Parse(File.ReadAllText(_path)).RootElement;
+        Assert.Equal(30, root.GetProperty("Agent").GetProperty("HeartbeatIntervalSeconds").GetInt32());
+        Assert.Equal(5, root.GetProperty("Agent").GetProperty("HeartbeatJitterSeconds").GetInt32());
+        Assert.Equal(250, root.GetProperty("Agent").GetProperty("MaxDetectionBatchSize").GetInt32());
+        var vision = root.GetProperty("Vision");
+        Assert.Equal(30, vision.GetProperty("PeriodicCapture").GetProperty("IntervalSeconds").GetInt32());
+        Assert.True(vision.GetProperty("PeriodicCapture").GetProperty("Enabled").GetBoolean());
+        Assert.Equal(60, vision.GetProperty("Tesseract").GetProperty("MinConfidence").GetInt32());
+    }
+
+    [Fact]
+    public void Apply_RejectsNonBooleanValuesForBooleanTunables()
+    {
+        var store = NewStore();
+        var overrides = new[]
+        {
+            Override("Vision.Enabled", JsonDocument.Parse("\"true\"").RootElement),
+            Override("Agent.LearningMode", JsonDocument.Parse("1").RootElement),
+            Override("Good.Flag", JsonDocument.Parse("true").RootElement),
+        };
+
+        store.Apply(overrides);
+
+        var root = JsonDocument.Parse(File.ReadAllText(_path)).RootElement;
+        Assert.True(root.GetProperty("Good").GetProperty("Flag").GetBoolean());
+        Assert.False(root.TryGetProperty("Vision", out _));
+        Assert.False(root.TryGetProperty("Agent", out _));
     }
 
     [Fact]

@@ -11,4 +11,9 @@ public record RxMetadata(
     DateTime? DateFilled,
     decimal Quantity,
     Guid StatusGuid,
-    DateTimeOffset DetectedAt);
+    DateTimeOffset DetectedAt,
+    int FillNumber = 0,
+    int DaysSupply = 0,
+    int? DrugSchedule = null,
+    string Priority = "standard",
+    string TemperatureRequirement = "ambient");

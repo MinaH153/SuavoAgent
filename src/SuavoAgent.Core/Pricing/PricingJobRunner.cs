@@ -58,18 +58,31 @@ public sealed class PricingJobRunner
         }
 
         var rows = readResult.Rows;
-        var alreadyDone = _db.GetCompletedPricingRows(spec.JobId);
+        var totalItems = rows.Count + readResult.Invalid.Count;
+        var previousResults = _db.GetPricingResults(spec.JobId);
+        var alreadyDone = previousResults.Select(r => r.RowIndex).ToHashSet();
         var pending = rows.Where(r => !alreadyDone.Contains(r.RowIndex)).ToList();
+        int completed = previousResults.Count(r => r.Found);
+        int failed = previousResults.Count(r => !r.Found);
 
-        _db.UpsertPricingJob(spec, PricingJobStatus.Running, rows.Count, alreadyDone.Count, 0);
-        _logger.LogInformation("PricingJobRunner: {Total} NDCs, {Pending} pending, job {JobId}",
-            rows.Count, pending.Count, spec.JobId);
+        _db.UpsertPricingJob(spec, PricingJobStatus.Running, totalItems, completed, failed);
+        _logger.LogInformation("PricingJobRunner: {Total} NDCs ({Invalid} unparseable skipped), {Pending} pending, job {JobId}",
+            totalItems, readResult.Invalid.Count, pending.Count, spec.JobId);
 
-        int completed = alreadyDone.Count;
-        int failed = 0;
         int consecutiveFailures = 0;
         bool haltedByBrain = false;
         string? haltReason = null;
+
+        if (readResult.Invalid.Count > 0)
+        {
+            foreach (var i in readResult.Invalid)
+            {
+                if (alreadyDone.Contains(i.RowIndex)) continue;
+                _db.SavePricingResult(new SupplierPriceResult(
+                    spec.JobId, i.RowIndex, i.NdcRaw, false, null, null, $"Invalid NDC: {i.Reason}"));
+                failed++;
+            }
+        }
 
         foreach (var row in pending)
         {
@@ -89,7 +102,7 @@ public sealed class PricingJobRunner
                 consecutiveFailures++;
             }
 
-            _db.UpsertPricingJob(spec, PricingJobStatus.Running, rows.Count, completed, failed);
+            _db.UpsertPricingJob(spec, PricingJobStatus.Running, totalItems, completed, failed);
 
             _logger.LogDebug("PricingJobRunner: row {Row} NDC {Ndc} → {Supplier} @ {Cost}",
                 row.RowIndex, row.NdcNormalized, result.SupplierName ?? "N/A", result.CostPerUnit?.ToString("F4") ?? "N/A");
@@ -98,7 +111,7 @@ public sealed class PricingJobRunner
             {
                 var stats = new PricingRunStats
                 {
-                    TotalItems = rows.Count,
+                    TotalItems = totalItems,
                     CompletedItems = completed,
                     FailedItems = failed,
                     ConsecutiveFailures = consecutiveFailures,
@@ -122,11 +135,11 @@ public sealed class PricingJobRunner
         {
             // Skip the Excel writeback — the job stopped mid-stream, and a
             // partial writeback would misrepresent a resumable halt as final.
-            _db.UpsertPricingJob(spec, PricingJobStatus.Halted, rows.Count, completed, failed);
+            _db.UpsertPricingJob(spec, PricingJobStatus.Halted, totalItems, completed, failed);
             _logger.LogInformation(
                 "PricingJobRunner: job {JobId} Halted — {Completed}/{Total} found, {Failed} failed, reason=\"{Reason}\"",
-                spec.JobId, completed, rows.Count, failed, haltReason);
-            return new PricingJobProgress(spec.JobId, rows.Count, completed, failed, PricingJobStatus.Halted);
+                spec.JobId, completed, totalItems, failed, haltReason);
+            return new PricingJobProgress(spec.JobId, totalItems, completed, failed, PricingJobStatus.Halted);
         }
 
         // Write all results (including previously completed rows) to a SIBLING file by default.
@@ -136,13 +149,13 @@ public sealed class PricingJobRunner
         var write = _writer.Write(spec.ExcelPath, allResults, spec.SupplierColumn, spec.CostColumn);
 
         var finalStatus = write.Success ? PricingJobStatus.Completed : PricingJobStatus.Failed;
-        _db.UpsertPricingJob(spec, finalStatus, rows.Count, completed, failed);
+        _db.UpsertPricingJob(spec, finalStatus, totalItems, completed, failed);
 
         _logger.LogInformation(
-            "PricingJobRunner: job {JobId} {Status} — {Completed}/{Total} found, {Failed} failed, output={Out}",
-            spec.JobId, finalStatus, completed, rows.Count, failed, write.OutputPath ?? "(no output)");
+            "PricingJobRunner: job {JobId} {Status} — {Completed}/{Total} found, {Failed} failed",
+            spec.JobId, finalStatus, completed, totalItems, failed);
 
-        return new PricingJobProgress(spec.JobId, rows.Count, completed, failed, finalStatus);
+        return new PricingJobProgress(spec.JobId, totalItems, completed, failed, finalStatus);
     }
 
     private async Task<SupplierPriceResult> LookupNdcAsync(

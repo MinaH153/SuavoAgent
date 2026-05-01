@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using SuavoAgent.Contracts.Ipc;
 
 namespace SuavoAgent.Broker;
 
@@ -7,8 +9,9 @@ public sealed class SessionWatcher : BackgroundService
 {
     private readonly ILogger<SessionWatcher> _logger;
     private readonly Dictionary<uint, HelperInfo> _helpers = new();
+    private DateTimeOffset _lastAttestationWrite = DateTimeOffset.MinValue;
 
-    private record HelperInfo(int ProcessId, uint SessionId, DateTimeOffset LaunchedAt);
+    private record HelperInfo(int ProcessId, uint SessionId, DateTimeOffset LaunchedAt, string HelperSha256);
 
     public SessionWatcher(ILogger<SessionWatcher> logger)
     {
@@ -25,6 +28,7 @@ public sealed class SessionWatcher : BackgroundService
             {
                 CheckActiveSessions();
                 CleanupDeadHelpers();
+                RefreshHelperAttestations();
             }
             catch (Exception ex)
             {
@@ -112,6 +116,47 @@ public sealed class SessionWatcher : BackgroundService
         catch { return null; }
     }
 
+    private void PersistHelperAttestations(string? pipeNonce)
+    {
+        if (string.IsNullOrWhiteSpace(pipeNonce)) return;
+
+        try
+        {
+            var helpers = _helpers.Values
+                .Select(h => new IpcPeerAttestationEntry(
+                    ProcessId: h.ProcessId,
+                    SessionId: h.SessionId,
+                    LaunchedAt: h.LaunchedAt,
+                    HelperSha256: h.HelperSha256))
+                .ToArray();
+
+            IpcPeerAttestationStore.Write(
+                IpcPeerAttestationStore.GetDefaultPath(),
+                pipeNonce,
+                helpers,
+                DateTimeOffset.UtcNow);
+            _lastAttestationWrite = DateTimeOffset.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist Helper IPC attestation");
+        }
+    }
+
+    private void RefreshHelperAttestations()
+    {
+        if (_helpers.Count == 0) return;
+        if (DateTimeOffset.UtcNow - _lastAttestationWrite < TimeSpan.FromMinutes(1)) return;
+
+        PersistHelperAttestations(ReadPipeNonce());
+    }
+
+    private static string ComputeSha256Hex(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
     private void LaunchHelper(uint sessionId)
     {
         var helperPath = Path.Combine(AppContext.BaseDirectory, "SuavoAgent.Helper.exe");
@@ -133,6 +178,7 @@ public sealed class SessionWatcher : BackgroundService
             var pipeArg = nonce != null ? $" --pipe SuavoAgent-{nonce}" : "";
             var cmdPipeArg = nonce != null ? $" --cmd-pipe SuavoAgent-cmd-{nonce}" : "";
             var args = $"--session {sessionId}{pipeArg}{cmdPipeArg}";
+            var helperSha256 = ComputeSha256Hex(helperPath);
 
             // Prefer CreateProcessAsUser on Windows — launches Helper in the user's
             // interactive session with their environment and desktop access.
@@ -159,7 +205,14 @@ public sealed class SessionWatcher : BackgroundService
             }
 
             if (pid != null)
-                _helpers[sessionId] = new HelperInfo(pid.Value, sessionId, DateTimeOffset.UtcNow);
+            {
+                _helpers[sessionId] = new HelperInfo(
+                    pid.Value,
+                    sessionId,
+                    DateTimeOffset.UtcNow,
+                    helperSha256);
+                PersistHelperAttestations(nonce);
+            }
         }
         catch (Exception ex)
         {
@@ -184,6 +237,11 @@ public sealed class SessionWatcher : BackgroundService
         {
             _logger.LogInformation("Cleaning up dead Helper for session {Session}", id);
             _helpers.Remove(id);
+        }
+
+        if (dead.Count > 0)
+        {
+            PersistHelperAttestations(ReadPipeNonce());
         }
     }
 

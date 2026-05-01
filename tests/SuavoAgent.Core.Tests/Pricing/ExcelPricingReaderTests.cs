@@ -71,9 +71,11 @@ public class ExcelPricingReaderTests : IDisposable
     [Fact]
     public void Read_MissingFile_ReturnsFail()
     {
-        var result = _reader.Read("/nonexistent/path/file.xlsx");
+        var result = _reader.Read(Path.Combine(_tempDir, "Patient Jane Doe Top500.xlsx"));
         Assert.False(result.Success);
         Assert.NotNull(result.Error);
+        Assert.DoesNotContain("Jane Doe", result.Error);
+        Assert.DoesNotContain("Top500.xlsx", result.Error);
     }
 
     [Fact]

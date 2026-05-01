@@ -73,7 +73,9 @@ public class SqlPricingJobRunnerTests : IDisposable
         var progress = await runner.RunAsync(spec, CancellationToken.None);
 
         Assert.Equal(PricingJobStatus.Completed, progress.Status);
+        Assert.Equal(3, progress.TotalItems);
         Assert.Equal(1, progress.CompletedItems); // only the valid row
+        Assert.Equal(2, progress.FailedItems);
         Assert.Equal(1, lookup.CallCount);
 
         var all = _db.GetPricingResults(spec.JobId);
@@ -122,6 +124,45 @@ public class SqlPricingJobRunnerTests : IDisposable
         Assert.Equal(PricingJobStatus.Failed, progress.Status);
     }
 
+    [Fact]
+    public async Task SqlFirstExecutor_LookupFactoryUnavailable_FailsClosedWithoutWritingOutput()
+    {
+        var xlsx = CreateExcel(new[] { "55111-0645-01" });
+        var executor = NewExecutor(new FakeLookupFactory(null, "pricing schema unavailable"));
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        var result = await executor.RunAsync(spec, CancellationToken.None);
+
+        Assert.False(result.Ok);
+        Assert.Equal("sql", result.Mode);
+        Assert.Equal(PricingJobStatus.Failed, result.Progress.Status);
+        Assert.Contains("pricing schema unavailable", result.Error);
+        Assert.Empty(Directory.GetFiles(_tempDir, "*-priced-*.xlsx"));
+    }
+
+    [Fact]
+    public async Task SqlFirstExecutor_LookupFactoryAvailable_UsesSqlLookupAndWritesOutput()
+    {
+        var xlsx = CreateExcel(new[] { "55111-0645-01" });
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var executor = NewExecutor(new FakeLookupFactory(lookup, null));
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        var result = await executor.RunAsync(spec, CancellationToken.None);
+
+        Assert.True(result.Ok);
+        Assert.Equal("sql", result.Mode);
+        Assert.Equal(PricingJobStatus.Completed, result.Progress.Status);
+        Assert.Equal(1, lookup.CallCount);
+        var output = Assert.Single(Directory.GetFiles(_tempDir, "*-priced-*.xlsx"));
+        AssertCellEquals(output, "Supplier", 2, "McKesson");
+    }
+
     private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup) =>
         new(
             new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
@@ -129,6 +170,14 @@ public class SqlPricingJobRunnerTests : IDisposable
             _db,
             lookup,
             NullLogger<SqlPricingJobRunner>.Instance);
+
+    private SqlFirstPricingJobExecutor NewExecutor(IPricingLookupFactory lookupFactory) =>
+        new(
+            new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
+            new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
+            _db,
+            lookupFactory,
+            NullLoggerFactory.Instance);
 
     private string CreateExcel(IReadOnlyList<string> ndcs)
     {
@@ -187,5 +236,22 @@ public class SqlPricingJobRunnerTests : IDisposable
             return Task.FromResult(new SupplierPriceResult(
                 jobId, rowIndex, ndc11, false, null, null, "No supplier rows found"));
         }
+    }
+
+    private sealed class FakeLookupFactory : IPricingLookupFactory
+    {
+        private readonly ISupplierPriceLookup? _lookup;
+        private readonly string? _error;
+
+        public FakeLookupFactory(ISupplierPriceLookup? lookup, string? error)
+        {
+            _lookup = lookup;
+            _error = error;
+        }
+
+        public Task<PricingLookupFactoryResult> TryCreateAsync(CancellationToken ct) =>
+            Task.FromResult(_lookup is null
+                ? PricingLookupFactoryResult.Fail(_error ?? "unavailable")
+                : PricingLookupFactoryResult.Success(_lookup, "sql", null));
     }
 }

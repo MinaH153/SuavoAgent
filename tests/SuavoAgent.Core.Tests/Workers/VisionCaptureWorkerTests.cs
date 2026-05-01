@@ -40,7 +40,8 @@ public class VisionCaptureWorkerTests : IDisposable
         bool visionEnabled = true,
         bool periodicEnabled = true,
         bool requireForeground = true,
-        int intervalSec = 30) =>
+        int intervalSec = 30,
+        VisionCaptureTelemetry? telemetry = null) =>
         new(
             NullLogger<VisionCaptureWorker>.Instance,
             Options.Create(new AgentOptions { PharmacyId = PharmacyId }),
@@ -55,7 +56,8 @@ public class VisionCaptureWorkerTests : IDisposable
                 },
             }),
             _db,
-            _ipc);
+            _ipc,
+            telemetry: telemetry);
 
     [Fact]
     public async Task Tick_NoActiveSession_Skips()
@@ -103,7 +105,8 @@ public class VisionCaptureWorkerTests : IDisposable
     public async Task Tick_VisionDisabled_SkipsWithoutAuditOrIpc()
     {
         var auditCountBefore = _db.GetAuditEntryCount();
-        var worker = BuildWorker(visionEnabled: false);
+        var telemetry = new VisionCaptureTelemetry();
+        var worker = BuildWorker(visionEnabled: false, telemetry: telemetry);
 
         var result = await worker.TickAsync(CancellationToken.None);
 
@@ -111,6 +114,8 @@ public class VisionCaptureWorkerTests : IDisposable
         Assert.Equal("vision_disabled", result.Reason);
         Assert.Equal(auditCountBefore, _db.GetAuditEntryCount());
         Assert.Equal(0, _ipc.SendCount);
+        Assert.Equal("skipped", telemetry.Snapshot().LastOutcome);
+        Assert.Equal("vision_disabled", telemetry.Snapshot().LastReason);
     }
 
     [Fact]
@@ -136,13 +141,16 @@ public class VisionCaptureWorkerTests : IDisposable
         _ipc.IsConnectedValue = false;
         var auditCountBefore = _db.GetAuditEntryCount();
 
-        var worker = BuildWorker();
+        var telemetry = new VisionCaptureTelemetry();
+        var worker = BuildWorker(telemetry: telemetry);
         var result = await worker.TickAsync(CancellationToken.None);
 
         Assert.False(result.Success);
         Assert.Equal("ipc_disconnected", result.Reason);
         Assert.Equal(auditCountBefore + 2, _db.GetAuditEntryCount());
         Assert.Equal(0, _ipc.SendCount);
+        Assert.Equal("failed", telemetry.Snapshot().LastOutcome);
+        Assert.Equal("ipc_disconnected", telemetry.Snapshot().LastReason);
     }
 
     [Fact]
@@ -159,13 +167,17 @@ public class VisionCaptureWorkerTests : IDisposable
             null);
 
         var auditCountBefore = _db.GetAuditEntryCount();
-        var worker = BuildWorker();
+        var telemetry = new VisionCaptureTelemetry();
+        var worker = BuildWorker(telemetry: telemetry);
         var result = await worker.TickAsync(CancellationToken.None);
 
         Assert.True(result.Success);
         Assert.Equal("store-abc-123", result.StorageId);
         Assert.Equal(auditCountBefore + 2, _db.GetAuditEntryCount());
         Assert.True(_db.VerifyAuditChain());
+        Assert.Equal(1, telemetry.Snapshot().CapturedCount);
+        Assert.Equal("captured", telemetry.Snapshot().LastOutcome);
+        Assert.Equal("store-abc-123", telemetry.Snapshot().LastStorageId);
     }
 
     [Fact]

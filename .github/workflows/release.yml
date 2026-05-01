@@ -9,9 +9,31 @@ permissions:
   contents: write
 
 jobs:
+  bootstrap-windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse bootstrap.ps1 with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          $source = Get-Content -Raw -LiteralPath .\bootstrap.ps1
+          $null = [scriptblock]::Create($source)
+          $parseErrors = $null
+          [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
+          if ($parseErrors -and $parseErrors.Count -gt 0) {
+            $parseErrors | Format-List * | Out-String | Write-Host
+            throw "bootstrap.ps1 has Windows PowerShell 5.1 parse errors"
+          }
+
   # --- Build unsigned binaries on Linux -----------------------------------
   build:
     runs-on: ubuntu-latest
+    needs: bootstrap-windows-smoke
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
       version_numeric: ${{ steps.version.outputs.VERSION_NUMERIC }}
@@ -139,13 +161,61 @@ jobs:
           path: release/
           retention-days: 7
 
-  # --- Checksums, manifest, GitHub release --------------------------------
-  release:
+  # --- Windows release artifact smoke -------------------------------------
+  windows-release-smoke:
     needs: [build, sign_windows, sign_passthrough]
     if: |
       always() &&
       needs.build.result == 'success' &&
       (needs.sign_windows.result == 'success' || needs.sign_passthrough.result == 'success')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download final binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-final-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Build release zip
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "suavoagent-${{ needs.build.outputs.version }}-win-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          $binaries = Get-ChildItem -LiteralPath release -Filter *.exe -File
+          if (-not $binaries -or $binaries.Count -eq 0) {
+            throw "No release binaries found to zip"
+          }
+          $binaries | Compress-Archive -DestinationPath $zip -Force
+
+      - name: Expand zip and run no-PHI release probe
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "suavoagent-${{ needs.build.outputs.version }}-win-x64.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP 'suavoagent-release-expanded'
+          if (Test-Path $expanded) { Remove-Item $expanded -Recurse -Force }
+          New-Item -ItemType Directory -Path $expanded -Force | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $expanded -Force
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $expanded -BootstrapPath .\bootstrap.ps1 -Json
+
+      - name: Upload smoked release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-smoked-zip-${{ needs.build.outputs.version }}
+          path: suavoagent-${{ needs.build.outputs.version }}-win-x64.zip
+          retention-days: 7
+
+  # --- Checksums, manifest, GitHub release --------------------------------
+  release:
+    needs: [build, sign_windows, sign_passthrough, windows-release-smoke]
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.sign_windows.result == 'success' || needs.sign_passthrough.result == 'success') &&
+      needs.windows-release-smoke.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -156,10 +226,16 @@ jobs:
           name: suavoagent-final-${{ needs.build.outputs.version }}
           path: release
 
+      - name: Download smoked release zip
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-smoked-zip-${{ needs.build.outputs.version }}
+          path: release
+
       - name: Generate checksums
         run: |
           cd release
-          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe > checksums.sha256
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe SuavoSetup.exe suavoagent-${{ needs.build.outputs.version }}-win-x64.zip > checksums.sha256
           cat checksums.sha256
 
       - name: Sign checksums (ECDSA P-256)
@@ -209,8 +285,10 @@ jobs:
             Automated release from CI/CD pipeline.
 
             **Tests:** All passing
+            **Windows smoke:** Release zip expanded and passed no-PHI binary/bootstrap probe on windows-latest
             **Checksums:** ECDSA P-256 signed
             **Authenticode:** ${{ steps.mode.outputs.MODE == 'signed' && 'Signed (Yubikey EV)' || 'Unsigned (SmartScreen warning expected)' }}
+            **Installer URL:** https://github.com/${{ github.repository }}/releases/download/${{ needs.build.outputs.version }}/suavoagent-${{ needs.build.outputs.version }}-win-x64.zip
 
             ### How to update existing agents
             Push the update command from the fleet dashboard. Agents auto-update on next heartbeat (30s).
@@ -225,6 +303,7 @@ jobs:
             release/SuavoAgent.Helper.exe
             release/SuavoAgent.Watchdog.exe
             release/SuavoSetup.exe
+            release/suavoagent-*-win-x64.zip
             release/checksums.sha256
             release/checksums.sha256.sig
             release/update-manifest-v*.txt
