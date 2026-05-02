@@ -70,6 +70,13 @@ Each entry documents:
 - Payload: `{version: string, process: string, exception_type: string, crash_log_id?: string}`
 - Notes: `crash_log_id` references a pre-uploaded crash log in the audit chain.
 
+### `agent.health_composite`
+- Category: `runtime`
+- Severity: `info` (when status is "healthy" or "initializing") / `warn` (when status is "heartbeating-but-unhealthy")
+- Actor: `agent`
+- Payload: `{status: string, components: {helper_attached: bool, ipc_connected: bool, schema_canary_green: bool, extraction_recent: bool}, computed_at: string}`
+- Notes: `status` enum: `"healthy"` | `"heartbeating-but-unhealthy"` | `"initializing"`. The `"silent"` state is cloud-derived and never emitted by the agent. Mirrors C# `HealthCompositePayload` in `SuavoAgent.Contracts.Models`. See `docs/superpowers/specs/2026-05-02-track-1-4-health-composite-design.md`.
+
 ---
 
 ## `service.*` — Windows service events (Watchdog + Setup)
@@ -429,3 +436,4 @@ apply).
 
 - **2026-04-21 v0.1** — Initial draft. 40+ event types across 11 domains. Locks to v1.0 post-Nadim.
 - **2026-05-01 v0.2** — Added `wave.*` namespace (`wave.gate_tripped`, `wave.gate_failed`) for meta-roadmap gate tracking.
+- **2026-05-02 v0.3** — Added `agent.health_composite` for Track 1+4 composite signal (Wave 1 sub-project B).
