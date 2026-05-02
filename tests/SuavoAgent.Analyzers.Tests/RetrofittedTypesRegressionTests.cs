@@ -100,4 +100,32 @@ public class RetrofittedTypesRegressionTests
 
         Assert.Empty(diagnostics.Where(d => d.Id == "SUAVO0001"));
     }
+
+    [Fact]
+    public async Task HealthCompositePayload_Clean()
+    {
+        var source = Annotations + """
+
+            using System;
+            using SuavoAgent.Contracts.Annotations;
+
+            namespace TestNs;
+
+            public sealed record HealthCompositeComponents(
+                bool HelperAttached,
+                bool IpcConnected,
+                bool SchemaCanaryGreen,
+                bool ExtractionRecent);
+
+            [OutboundPayload]
+            public sealed record HealthCompositePayload(
+                string Status,
+                HealthCompositeComponents Components,
+                DateTimeOffset ComputedAt);
+            """;
+
+        var diagnostics = await AnalyzerTestHelper.RunAnalyzerAsync<PhiInOutboundPayloadAnalyzer>(source);
+
+        Assert.Empty(diagnostics.Where(d => d.Id == "SUAVO0001"));
+    }
 }
