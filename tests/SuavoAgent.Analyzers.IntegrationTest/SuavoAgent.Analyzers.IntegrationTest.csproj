@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>SuavoAgent.Analyzers.IntegrationTest</RootNamespace>
+    <!-- Excluded from the normal solution build; only run via run-integration.sh.
+         The intentional SUAVO0001 violation in CanaryLeak.cs WILL fail dotnet build,
+         which is the whole point. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\SuavoAgent.Analyzers\SuavoAgent.Analyzers.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>
