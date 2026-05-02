@@ -1,4 +1,4 @@
-# SuavoAgent — Pre-install compatibility checker
+# SuavoAgent - Pre-install compatibility checker
 #
 # USAGE (paste into ANY PowerShell, admin not required):
 #   Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/MinaH153/SuavoAgent/main/suavo-check.ps1 | iex
@@ -15,9 +15,9 @@
 #   - Require elevation (admin is optional; some checks are more accurate as admin)
 #
 # Exit codes:
-#   0 — PASS (all required checks green)
-#   1 — WARN (install will likely work but something is suboptimal)
-#   2 — FAIL (install will not succeed on this machine today)
+#   0 - PASS (all required checks green)
+#   1 - WARN (install will likely work but something is suboptimal)
+#   2 - FAIL (install will not succeed on this machine today)
 
 # Allow running even if the rest of the session is Strict.
 $ErrorActionPreference = "Continue"
@@ -42,7 +42,7 @@ function Add-Result {
     })
     $color = switch ($Status) { 'pass' { 'Green' } 'warn' { 'Yellow' } 'fail' { 'Red' } default { 'Gray' } }
     $tag   = switch ($Status) { 'pass' { '[ PASS ]' } 'warn' { '[ WARN ]' } 'fail' { '[ FAIL ]' } default { '[ INFO ]' } }
-    Write-Host "  $tag  $Name — $Detail" -ForegroundColor $color
+    Write-Host "  $tag  $Name - $Detail" -ForegroundColor $color
 }
 
 Write-Host ""
@@ -56,9 +56,9 @@ $psMajor = $PSVersionTable.PSVersion.Major
 $psMinor = $PSVersionTable.PSVersion.Minor
 $psFull  = $PSVersionTable.PSVersion.ToString()
 if ($psMajor -lt 3) {
-    Add-Result 'PowerShell version' 'fail' "PS $psFull — SuavoAgent requires 5.1+" @{ version = $psFull }
+    Add-Result 'PowerShell version' 'fail' "PS $psFull - SuavoAgent requires 5.1+" @{ version = $psFull }
 } elseif ($psMajor -lt 5 -or ($psMajor -eq 5 -and $psMinor -lt 1)) {
-    Add-Result 'PowerShell version' 'warn' "PS $psFull — bootstrap may refuse; upgrade to 5.1" @{ version = $psFull }
+    Add-Result 'PowerShell version' 'warn' "PS $psFull - bootstrap may refuse; upgrade to 5.1" @{ version = $psFull }
 } else {
     Add-Result 'PowerShell version' 'pass' "PS $psFull" @{ version = $psFull }
 }
@@ -71,11 +71,11 @@ try {
 if ($netRelease -and $netRelease -ge 528040) {
     Add-Result '.NET Framework (Windows PS)' 'pass' ".NET 4.8+ (release $netRelease)" @{ release = $netRelease }
 } elseif ($netRelease -and $netRelease -ge 461808) {
-    Add-Result '.NET Framework (Windows PS)' 'warn' ".NET 4.7.2 (release $netRelease) — upgrade to 4.8 recommended" @{ release = $netRelease }
+    Add-Result '.NET Framework (Windows PS)' 'warn' ".NET 4.7.2 (release $netRelease) - upgrade to 4.8 recommended" @{ release = $netRelease }
 } elseif ($netRelease) {
     Add-Result '.NET Framework (Windows PS)' 'warn' "Older .NET detected (release $netRelease)" @{ release = $netRelease }
 } else {
-    Add-Result '.NET Framework (Windows PS)' 'warn' 'Could not read .NET registry key — may be a PSCore / non-Windows host' @{ release = $null }
+    Add-Result '.NET Framework (Windows PS)' 'warn' 'Could not read .NET registry key - may be a PSCore / non-Windows host' @{ release = $null }
 }
 
 # ---- 3. Disk space on system drive --------------------------------------
@@ -87,9 +87,9 @@ try {
 } catch {}
 $freeGb = [math]::Round($freeBytes / 1GB, 2)
 if ($freeBytes -lt 500MB) {
-    Add-Result 'Disk space (SystemDrive)' 'fail' "$freeGb GB free — need at least 500 MB" @{ free_gb = $freeGb; drive = $env:SystemDrive }
+    Add-Result 'Disk space (SystemDrive)' 'fail' "$freeGb GB free - need at least 500 MB" @{ free_gb = $freeGb; drive = $env:SystemDrive }
 } elseif ($freeBytes -lt 2GB) {
-    Add-Result 'Disk space (SystemDrive)' 'warn' "$freeGb GB free — 2 GB recommended" @{ free_gb = $freeGb; drive = $env:SystemDrive }
+    Add-Result 'Disk space (SystemDrive)' 'warn' "$freeGb GB free - 2 GB recommended" @{ free_gb = $freeGb; drive = $env:SystemDrive }
 } else {
     Add-Result 'Disk space (SystemDrive)' 'pass' "$freeGb GB free on $env:SystemDrive" @{ free_gb = $freeGb; drive = $env:SystemDrive }
 }
@@ -104,7 +104,7 @@ if ($bitStatus -match 'Protection On') {
 } elseif ($bitStatus) {
     Add-Result 'BitLocker (HIPAA safe harbor)' 'warn' $bitStatus @{ protection = 'off' }
 } else {
-    Add-Result 'BitLocker (HIPAA safe harbor)' 'warn' 'Unable to query manage-bde — may need admin' @{ protection = 'unknown' }
+    Add-Result 'BitLocker (HIPAA safe harbor)' 'warn' 'Unable to query manage-bde - may need admin' @{ protection = 'unknown' }
 }
 
 # ---- 5. PioneerRx presence ----------------------------------------------
@@ -138,7 +138,7 @@ if (-not $pioneerExe) {
 if ($pioneerExe) {
     Add-Result 'PioneerRx installation' 'pass' "Detected at $pioneerDir" @{ exe = $pioneerExe; dir = $pioneerDir }
 } else {
-    Add-Result 'PioneerRx installation' 'warn' 'No PioneerRx on this machine — agent will still install and auto-discover during learning phase' @{ exe = $null; dir = $null }
+    Add-Result 'PioneerRx installation' 'warn' 'No PioneerRx on this machine - agent will still install and auto-discover during learning phase' @{ exe = $null; dir = $null }
 }
 
 # ---- 6. SQL Server reachability ----------------------------------------
@@ -165,10 +165,10 @@ if ($sqlHost) {
     if ($sqlReachable) {
         Add-Result 'SQL Server reachability' 'pass' "Reachable: $sqlHost (port 1433)" @{ host = $sqlHost; port_open = $true }
     } else {
-        Add-Result 'SQL Server reachability' 'warn' "Could not reach $sqlHost on 1433 — may use dynamic port or named pipe" @{ host = $sqlHost; port_open = $false }
+        Add-Result 'SQL Server reachability' 'warn' "Could not reach $sqlHost on 1433 - may use dynamic port or named pipe" @{ host = $sqlHost; port_open = $false }
     }
 } else {
-    Add-Result 'SQL Server reachability' 'warn' 'No ConnectionStringServer found — agent will auto-discover during install' @{ host = $null; port_open = $null }
+    Add-Result 'SQL Server reachability' 'warn' 'No ConnectionStringServer found - agent will auto-discover during install' @{ host = $null; port_open = $null }
 }
 
 # ---- 7. Outbound HTTPS to suavollc.com ---------------------------------
@@ -180,7 +180,7 @@ try {
 if ($cloudReachable) {
     Add-Result 'Outbound HTTPS (suavollc.com:443)' 'pass' 'Reachable' @{ reachable = $true }
 } else {
-    Add-Result 'Outbound HTTPS (suavollc.com:443)' 'fail' 'Cannot reach suavollc.com on 443 — check firewall / proxy' @{ reachable = $false }
+    Add-Result 'Outbound HTTPS (suavollc.com:443)' 'fail' 'Cannot reach suavollc.com on 443 - check firewall / proxy' @{ reachable = $false }
 }
 
 # ---- 8. Antivirus inventory (log only; never fail) ---------------------
@@ -219,7 +219,7 @@ try {
 if ($isAdmin) {
     Add-Result 'Running as administrator' 'pass' 'Installer will run without elevation prompt' @{ admin = $true }
 } else {
-    Add-Result 'Running as administrator' 'warn' 'Install will require elevation — right-click PowerShell > Run as Administrator' @{ admin = $false }
+    Add-Result 'Running as administrator' 'warn' 'Install will require elevation - right-click PowerShell > Run as Administrator' @{ admin = $false }
 }
 
 # ---- summary -----------------------------------------------------------
@@ -231,7 +231,7 @@ $verdict = if ($failCount -gt 0) { 'FAIL' } elseif ($warnCount -gt 0) { 'WARN' }
 $color   = if ($verdict -eq 'FAIL') { 'Red' } elseif ($verdict -eq 'WARN') { 'Yellow' } else { 'Green' }
 
 Write-Host ""
-Write-Host "  Verdict: $verdict — $passCount pass / $warnCount warn / $failCount fail" -ForegroundColor $color
+Write-Host "  Verdict: $verdict - $passCount pass / $warnCount warn / $failCount fail" -ForegroundColor $color
 Write-Host ""
 
 # ---- write detailed JSON for IT handoff --------------------------------
@@ -255,7 +255,7 @@ try {
     Write-Host "  Could not write report: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
-Write-Host "  Share that JSON file with whoever is onboarding you — it has everything we need to prep your install." -ForegroundColor DarkGray
+Write-Host "  Share that JSON file with whoever is onboarding you - it has everything we need to prep your install." -ForegroundColor DarkGray
 Write-Host ""
 
 # Exit code reflects verdict so scripted callers can gate on it.

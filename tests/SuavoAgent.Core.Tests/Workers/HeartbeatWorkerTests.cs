@@ -6,10 +6,14 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
+using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Workers;
 using Xunit;
@@ -26,9 +30,12 @@ public class HeartbeatWorkerTests : IDisposable
     private readonly string _dbPath;
     private readonly AgentStateDb _db;
     private readonly HeartbeatWorker _worker;
+    private readonly FakeIntentCursorClient _intentCursorClient = new();
+    private readonly FakePricingJobExecutor _pricingJobExecutor = new();
     private readonly ECDsa _signingKey;
     private readonly string _pubKeyDer;
     private readonly MethodInfo _processMethod;
+    private readonly MethodInfo _runPricingMethod;
     private const string TestAgentId = "agent-hb-test";
     private const string TestFingerprint = "fp-hb-test";
     private const string TestPharmacyId = "pharm-hb-test";
@@ -44,6 +51,8 @@ public class HeartbeatWorkerTests : IDisposable
 
         var services = new ServiceCollection();
         services.AddSingleton(_db);
+        services.AddSingleton<IIntentCursorClient>(_intentCursorClient);
+        services.AddSingleton<IPricingJobExecutor>(_pricingJobExecutor);
         services.AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
         var sp = services.BuildServiceProvider();
@@ -69,6 +78,8 @@ public class HeartbeatWorkerTests : IDisposable
 
         _processMethod = typeof(HeartbeatWorker)
             .GetMethod("ProcessSignedCommandAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        _runPricingMethod = typeof(HeartbeatWorker)
+            .GetMethod("HandleRunPricingJobAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
     }
 
     public void Dispose()
@@ -97,6 +108,11 @@ public class HeartbeatWorkerTests : IDisposable
     private JsonElement BuildResponseJson(string command, object? data = null)
     {
         var cmd = Sign(command, data != null ? JsonSerializer.Serialize(data) : null);
+        return BuildResponseJson(cmd, data);
+    }
+
+    private static JsonElement BuildResponseJson(SignedCommand cmd, object? data = null)
+    {
         var envelope = new Dictionary<string, object?>
         {
             ["command"] = cmd.Command,
@@ -123,6 +139,12 @@ public class HeartbeatWorkerTests : IDisposable
         await task;
     }
 
+    private async Task InvokeRunPricingAsync(JsonElement signedCommand)
+    {
+        var task = (Task)_runPricingMethod.Invoke(_worker, new object[] { signedCommand, CancellationToken.None })!;
+        await task;
+    }
+
     // ── Nonce Replay Protection (DB Layer) ──
 
     [Fact]
@@ -145,6 +167,18 @@ public class HeartbeatWorkerTests : IDisposable
         // Prune with zero window removes everything
         _db.PruneOldNonces(TimeSpan.Zero);
         Assert.True(_db.TryRecordNonce("nonce-prune-1"));
+    }
+
+    [Fact]
+    public async Task ProcessCommand_InvalidSignature_DoesNotPersistNonce()
+    {
+        var cmd = Sign("unknown_command");
+        var tampered = cmd with { Signature = Convert.ToBase64String(new byte[64]) };
+
+        await InvokeProcessAsync(BuildResponseJson(tampered));
+        await InvokeProcessAsync(BuildResponseJson(cmd));
+
+        Assert.False(_db.TryRecordNonce(cmd.Nonce));
     }
 
     // ── Command Dispatch: approve_pom ──
@@ -416,6 +450,22 @@ public class HeartbeatWorkerTests : IDisposable
         Assert.True(countAfter > countBefore, "Audit entry should be appended for feedback commands");
     }
 
+    [Fact]
+    public async Task RepairAgentCommand_RecordsAuditEntryEvenWhenBootstrapMissing()
+    {
+        var countBefore = _db.GetAuditEntryCount();
+
+        var response = BuildResponseJson("repair_agent", new
+        {
+            commandId = "cmd-repair-1",
+            reason = "watchdog_critical"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.True(_db.GetAuditEntryCount() > countBefore);
+    }
+
     // ── Command Dispatch: acknowledge_drift ──
 
     [Fact]
@@ -549,6 +599,299 @@ public class HeartbeatWorkerTests : IDisposable
 
         Assert.True(_db.GetAuditEntryCount() > countBefore,
             "delivery_writeback should create an audit entry");
+    }
+
+    // ── Command Dispatch: show_intent_cursor ──
+
+    [Fact]
+    public async Task ShowIntentCursor_ValidPayload_RelaysToHelperAndAudits()
+    {
+        var before = _db.GetAuditEntryCount();
+        var response = BuildResponseJson("show_intent_cursor", new
+        {
+            x = 120.0,
+            y = 240.0,
+            durationMs = 900,
+            commandId = "cmd-cursor-1",
+            requesterId = "operator-1"
+        });
+
+        await InvokeProcessAsync(response);
+
+        var sent = Assert.Single(_intentCursorClient.Requests);
+        Assert.Equal(120.0, sent.X.GetValueOrDefault());
+        Assert.Equal(240.0, sent.Y.GetValueOrDefault());
+        Assert.Equal(900, sent.DurationMs);
+        Assert.True(_db.GetAuditEntryCount() > before);
+    }
+
+    [Fact]
+    public async Task ShowIntentCursor_PrimaryCenterAnchor_RelaysWithoutScreenCoordinates()
+    {
+        var response = BuildResponseJson("show_intent_cursor", new
+        {
+            anchor = "primary_center",
+            durationMs = 900,
+            commandId = "cmd-cursor-center",
+            requesterId = "operator-1"
+        });
+
+        await InvokeProcessAsync(response);
+
+        var sent = Assert.Single(_intentCursorClient.Requests);
+        Assert.Null(sent.X);
+        Assert.Null(sent.Y);
+        Assert.Equal(IntentCursorAnchors.PrimaryCenter, sent.Anchor);
+    }
+
+    [Fact]
+    public async Task ShowIntentCursor_TextBearingPayload_RejectsBeforeHelper()
+    {
+        var response = BuildResponseJson("show_intent_cursor", new
+        {
+            x = 120.0,
+            y = 240.0,
+            label = "Rx 12345",
+            commandId = "cmd-cursor-bad"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    [Fact]
+    public async Task ShowIntentCursor_UnknownStringPayload_RejectsBeforeHelper()
+    {
+        var response = BuildResponseJson("show_intent_cursor", new
+        {
+            x = 120.0,
+            y = 240.0,
+            note = "look at Rx 12345",
+            commandId = "cmd-cursor-unknown"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    [Fact]
+    public async Task ShowIntentCursor_UnknownAnchor_RejectsBeforeHelper()
+    {
+        var response = BuildResponseJson("show_intent_cursor", new
+        {
+            anchor = "patient_top_left",
+            commandId = "cmd-cursor-anchor"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    // ── Command Dispatch: computer-use observe/propose (synthetic, non-PHI) ──
+
+    [Fact]
+    public async Task ComputerUseObserve_SyntheticPayload_AuditsWithoutCapturingScreenshots()
+    {
+        var before = _db.GetAuditEntryCount();
+        var response = BuildResponseJson("computer_use_observe", new
+        {
+            pack = "workstation_health",
+            mode = "synthetic",
+            commandId = "cmd-cu-observe-1",
+            requesterId = "operator-1"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.True(_db.GetAuditEntryCount() > before);
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    [Fact]
+    public async Task ComputerUsePropose_SyntheticPayload_AuditsWithoutMutatingPioneerRx()
+    {
+        var before = _db.GetAuditEntryCount();
+        var response = BuildResponseJson("computer_use_propose", new
+        {
+            pack = "pioneerrx_shadow",
+            mode = "synthetic",
+            proposal = "run_diagnostics",
+            commandId = "cmd-cu-propose-1",
+            requesterId = "operator-1"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.True(_db.GetAuditEntryCount() > before);
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    [Fact]
+    public async Task ComputerUseObserve_PhiOrInputPayload_RejectsBeforeAudit()
+    {
+        var before = _db.GetAuditEntryCount();
+        var response = BuildResponseJson("computer_use_observe", new
+        {
+            pack = "workstation_health",
+            mode = "synthetic",
+            patientName = "Nadim",
+            click = true,
+            commandId = "cmd-cu-bad"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Equal(before, _db.GetAuditEntryCount());
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    [Fact]
+    public void PricingJobOperationalLogs_DoNotIncludeWorkbookPathTemplates()
+    {
+        var source = File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
+
+        Assert.DoesNotContain("Pricing job {JobId} starting: {Path}", source);
+        Assert.DoesNotContain("auto-running pricing job {JobId} on {Path}", source);
+    }
+
+    [Fact]
+    public async Task CollectHealthProbe_PhiFreePayload_AuditsWithoutCapturingScreenshots()
+    {
+        var before = _db.GetAuditEntryCount();
+        var response = BuildResponseJson("collect_health_probe", new
+        {
+            reason = "dashboard_diagnostics",
+            commandId = "cmd-health-probe-1",
+            requesterId = "operator-1"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.True(_db.GetAuditEntryCount() > before);
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    [Fact]
+    public async Task CollectHealthProbe_FreeTextPayload_RejectsBeforeAudit()
+    {
+        var before = _db.GetAuditEntryCount();
+        var response = BuildResponseJson("collect_health_probe", new
+        {
+            reason = "patient Jane Doe machine froze",
+            patientName = "Jane Doe",
+            commandId = "cmd-health-probe-bad"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Equal(before, _db.GetAuditEntryCount());
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    // ── Command Dispatch: run_pricing_job ──
+
+    [Fact]
+    public async Task RunPricingJob_UsesSqlFirstPricingExecutor()
+    {
+        var xlsx = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.xlsx");
+        await File.WriteAllTextAsync(xlsx, "placeholder");
+        try
+        {
+            var response = BuildResponseJson("run_pricing_job", new
+            {
+                excelPath = xlsx,
+                ndcColumn = "NDC",
+                supplierColumn = "Supplier",
+                costColumn = "Cost (per unit)",
+                commandId = "cmd-pricing-1"
+            });
+            var sc = response.GetProperty("data").GetProperty("signedCommand");
+
+            await InvokeRunPricingAsync(sc);
+
+            var spec = Assert.Single(_pricingJobExecutor.Specs);
+            Assert.Equal(xlsx, spec.ExcelPath);
+            Assert.Equal("NDC", spec.NdcColumn);
+            Assert.Equal("Supplier", spec.SupplierColumn);
+            Assert.Equal("Cost (per unit)", spec.CostColumn);
+        }
+        finally
+        {
+            try { File.Delete(xlsx); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task RunPricingJob_DefaultsToNadimFriendlyOutputColumns()
+    {
+        var xlsx = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.xlsx");
+        await File.WriteAllTextAsync(xlsx, "placeholder");
+        try
+        {
+            var response = BuildResponseJson("run_pricing_job", new
+            {
+                excelPath = xlsx,
+                commandId = "cmd-pricing-defaults"
+            });
+            var sc = response.GetProperty("data").GetProperty("signedCommand");
+
+            await InvokeRunPricingAsync(sc);
+
+            var spec = Assert.Single(_pricingJobExecutor.Specs);
+            Assert.Equal(PricingJobDefaults.NdcColumn, spec.NdcColumn);
+            Assert.Equal(PricingJobDefaults.SupplierColumn, spec.SupplierColumn);
+            Assert.Equal(PricingJobDefaults.CostColumn, spec.CostColumn);
+        }
+        finally
+        {
+            try { File.Delete(xlsx); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task RunPricingJob_ResolvesOpaqueDiscoveryCandidateTokenLocally()
+    {
+        var xlsx = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.xlsx");
+        await File.WriteAllTextAsync(xlsx, "placeholder");
+        try
+        {
+            var token = _db.SavePricingDiscoveryCandidate(xlsx, Path.GetFileName(xlsx));
+            var response = BuildResponseJson("run_pricing_job", new
+            {
+                pricingCandidateToken = token,
+                commandId = "cmd-pricing-token"
+            });
+            var sc = response.GetProperty("data").GetProperty("signedCommand");
+
+            await InvokeRunPricingAsync(sc);
+
+            var spec = Assert.Single(_pricingJobExecutor.Specs);
+            Assert.Equal(xlsx, spec.ExcelPath);
+        }
+        finally
+        {
+            try { File.Delete(xlsx); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task RunPricingJob_RejectsUnknownDiscoveryCandidateToken()
+    {
+        var response = BuildResponseJson("run_pricing_job", new
+        {
+            pricingCandidateToken = "pdc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            commandId = "cmd-pricing-missing-token"
+        });
+        var sc = response.GetProperty("data").GetProperty("signedCommand");
+
+        await InvokeRunPricingAsync(sc);
+
+        Assert.Empty(_pricingJobExecutor.Specs);
     }
 
     // ── Command Dispatch: Unknown Command ──
@@ -799,10 +1142,92 @@ public class HeartbeatWorkerTests : IDisposable
         var source = File.ReadAllText(
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
                 "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
+        var start = source.IndexOf("private async Task HandleDecommissionAsync", StringComparison.Ordinal);
+        var end = source.IndexOf("private async Task HandleUpdateAsync", StringComparison.Ordinal);
+        Assert.NotEqual(-1, start);
+        Assert.True(end > start);
+        var decommissionSource = source[start..end];
 
-        Assert.DoesNotContain(@"C:\Program Files\Suavo", source);
-        Assert.DoesNotContain(@"C:\\Program Files\\Suavo", source);
-        Assert.DoesNotContain("ExecutionPolicy Bypass", source);
-        Assert.DoesNotContain("powershell.exe", source);
+        Assert.DoesNotContain(@"C:\Program Files\Suavo", decommissionSource);
+        Assert.DoesNotContain(@"C:\\Program Files\\Suavo", decommissionSource);
+        Assert.DoesNotContain("ExecutionPolicy Bypass", decommissionSource);
+        Assert.DoesNotContain("powershell.exe", decommissionSource);
+    }
+
+    [Fact]
+    public void HeartbeatPayload_DoesNotReportSqlAsPioneerRxStatus()
+    {
+        var source = File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
+
+        Assert.DoesNotContain("pioneerrxStatus = sqlConnected", source);
+        Assert.Contains("pioneerRxObservation", source);
+    }
+
+    [Fact]
+    public void HeartbeatPayload_SurfacesVisionAndWatchdogHealthSignals()
+    {
+        var source = File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
+
+        Assert.Contains("periodicCaptureEnabled", source);
+        Assert.Contains("VisionCaptureTelemetry", source);
+        Assert.Contains("watchdog = BuildWatchdogPayload()", source);
+        Assert.Contains("watchdog-health.json", source);
+    }
+
+    [Fact]
+    public void HeartbeatPayload_RecordsLastSuccessfulCloudSync()
+    {
+        var source = File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
+
+        Assert.Contains("lastSyncAt = _lastSyncAt?.ToString(\"o\")", source);
+        Assert.Contains("_lastSyncAt = DateTimeOffset.UtcNow;", source);
+    }
+
+    [Fact]
+    public void HeartbeatPayload_CountsConsecutiveHelperAttachmentFailures()
+    {
+        var source = File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
+
+        Assert.Contains("_helperConsecutiveFailures = helperAttached ? 0 : _helperConsecutiveFailures + 1", source);
+        Assert.Contains("consecutiveFailures = _helperConsecutiveFailures", source);
+    }
+
+    private sealed class FakeIntentCursorClient : IIntentCursorClient
+    {
+        public List<IntentCursorRequest> Requests { get; } = new();
+
+        public Task<IntentCursorClientResult> ShowAsync(IntentCursorRequest request, CancellationToken ct)
+        {
+            Requests.Add(request);
+            return Task.FromResult(new IntentCursorClientResult(
+                true,
+                null,
+                new IntentCursorResponse(
+                    true,
+                    IntentCursorCoordinateSpaces.Screen,
+                    request.DurationMs,
+                    request.DiameterPx,
+                    request.Tone)));
+        }
+    }
+
+    private sealed class FakePricingJobExecutor : IPricingJobExecutor
+    {
+        public List<PricingJobSpec> Specs { get; } = new();
+
+        public Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
+        {
+            Specs.Add(spec);
+            var progress = new PricingJobProgress(spec.JobId, 1, 1, 0, PricingJobStatus.Completed);
+            return Task.FromResult(new PricingJobExecutionResult(progress, "sql", true, null));
+        }
     }
 }

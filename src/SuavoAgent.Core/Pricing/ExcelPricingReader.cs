@@ -21,7 +21,7 @@ public sealed class ExcelPricingReader
     public ReadResult Read(string path, string ndcColumnHint = "ndc")
     {
         if (!File.Exists(path))
-            return ReadResult.Fail($"File not found: {path}");
+            return ReadResult.Fail("File not found");
 
         try
         {
@@ -58,8 +58,8 @@ public sealed class ExcelPricingReader
             }
 
             _logger.LogInformation(
-                "ExcelPricingReader: {Valid} NDC rows, {Invalid} unparseable in {Path}",
-                rows.Count, invalid.Count, path);
+                "ExcelPricingReader: {Valid} NDC rows, {Invalid} unparseable",
+                rows.Count, invalid.Count);
 
             if (invalid.Count > 0)
                 _logger.LogWarning(
@@ -71,8 +71,8 @@ public sealed class ExcelPricingReader
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "ExcelPricingReader failed for {Path}", path);
-            return ReadResult.Fail(ex.Message);
+            _logger.LogError("ExcelPricingReader failed ({ErrorType})", ex.GetType().Name);
+            return ReadResult.Fail("Excel read failed");
         }
     }
 

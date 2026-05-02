@@ -30,6 +30,15 @@ public record PricingJobSpec(
     string SupplierColumn,
     string CostColumn);
 
+public static class PricingJobDefaults
+{
+    public const string NdcColumn = "NDC";
+    public const string SupplierColumn = "Best Supplier";
+    public const string CostColumn = "Best Cost";
+    public const string LegacySupplierColumn = "Supplier";
+    public const string LegacyCostColumn = "Cost (per unit)";
+}
+
 /// <summary>
 /// Progress snapshot reported from PricingJobRunner → cloud heartbeat.
 /// </summary>

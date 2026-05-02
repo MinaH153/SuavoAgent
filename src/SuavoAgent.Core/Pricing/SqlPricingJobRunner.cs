@@ -53,26 +53,29 @@ public sealed class SqlPricingJobRunner
         }
 
         var rows = readResult.Rows;
-        var alreadyDone = _db.GetCompletedPricingRows(spec.JobId);
+        var totalItems = rows.Count + readResult.Invalid.Count;
+        var previousResults = _db.GetPricingResults(spec.JobId);
+        var alreadyDone = previousResults.Select(r => r.RowIndex).ToHashSet();
         var pending = rows.Where(r => !alreadyDone.Contains(r.RowIndex)).ToList();
+        int completed = previousResults.Count(r => r.Found);
+        int failed_ = previousResults.Count(r => !r.Found);
 
-        _db.UpsertPricingJob(spec, PricingJobStatus.Running, rows.Count, alreadyDone.Count, 0);
+        _db.UpsertPricingJob(spec, PricingJobStatus.Running, totalItems, completed, failed_);
         _logger.LogInformation(
             "SqlPricingJobRunner: {Total} NDCs ({Invalid} unparseable skipped), {Pending} pending, job {JobId}",
-            rows.Count, readResult.Invalid.Count, pending.Count, spec.JobId);
+            totalItems, readResult.Invalid.Count, pending.Count, spec.JobId);
 
         if (readResult.Invalid.Count > 0)
         {
             foreach (var i in readResult.Invalid)
             {
+                if (alreadyDone.Contains(i.RowIndex)) continue;
                 var failed = new SupplierPriceResult(
                     spec.JobId, i.RowIndex, i.NdcRaw, false, null, null, $"Invalid NDC: {i.Reason}");
                 _db.SavePricingResult(failed);
+                failed_++;
             }
         }
-
-        int completed = alreadyDone.Count;
-        int failed_ = 0;
 
         foreach (var row in pending)
         {
@@ -85,7 +88,7 @@ public sealed class SqlPricingJobRunner
             if (result.Found) completed++;
             else failed_++;
 
-            _db.UpsertPricingJob(spec, PricingJobStatus.Running, rows.Count, completed, failed_);
+            _db.UpsertPricingJob(spec, PricingJobStatus.Running, totalItems, completed, failed_);
 
             if (InterLookupDelay > TimeSpan.Zero)
                 await Task.Delay(InterLookupDelay, ct);
@@ -95,12 +98,12 @@ public sealed class SqlPricingJobRunner
         var write = _writer.Write(spec.ExcelPath, allResults, spec.SupplierColumn, spec.CostColumn);
 
         var finalStatus = write.Success ? PricingJobStatus.Completed : PricingJobStatus.Failed;
-        _db.UpsertPricingJob(spec, finalStatus, rows.Count, completed, failed_);
+        _db.UpsertPricingJob(spec, finalStatus, totalItems, completed, failed_);
 
         _logger.LogInformation(
-            "SqlPricingJobRunner: job {JobId} {Status} — {Completed}/{Total} found, {Failed} failed, output={Out}",
-            spec.JobId, finalStatus, completed, rows.Count, failed_, write.OutputPath ?? "(no output)");
+            "SqlPricingJobRunner: job {JobId} {Status} — {Completed}/{Total} found, {Failed} failed",
+            spec.JobId, finalStatus, completed, totalItems, failed_);
 
-        return new PricingJobProgress(spec.JobId, rows.Count, completed, failed_, finalStatus);
+        return new PricingJobProgress(spec.JobId, totalItems, completed, failed_, finalStatus);
     }
 }

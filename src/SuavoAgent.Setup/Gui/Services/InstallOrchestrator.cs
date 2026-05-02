@@ -63,7 +63,9 @@ internal sealed class InstallOrchestrator
 
     private void WriteConfigFiles()
     {
-        _ctx.AgentId ??= "agent-" + Guid.NewGuid().ToString("N")[..12];
+        _ctx.AgentId ??= _ctx.Config.AgentId;
+        if (string.IsNullOrWhiteSpace(_ctx.AgentId))
+            throw new InstallException("Cloud agent identity is missing. Use the dashboard bootstrap installer.");
         _ctx.MachineFingerprint ??= GetMachineFingerprint();
 
         Directory.CreateDirectory(_ctx.InstallDir);

@@ -33,48 +33,33 @@ public sealed class VisionCaptureWorker : BackgroundService
 {
     private readonly ILogger<VisionCaptureWorker> _logger;
     private readonly AgentOptions _agentOptions;
-    private readonly VisionOptions _visionOptions;
+    private readonly IOptionsMonitor<VisionOptions> _visionOptions;
     private readonly AgentStateDb _stateDb;
     private readonly IIpcCommandClient _ipc;
     private readonly TimeProvider _clock;
+    private readonly VisionCaptureTelemetry _telemetry;
 
     public VisionCaptureWorker(
         ILogger<VisionCaptureWorker> logger,
         IOptions<AgentOptions> agentOptions,
-        IOptions<VisionOptions> visionOptions,
+        IOptionsMonitor<VisionOptions> visionOptions,
         AgentStateDb stateDb,
         IIpcCommandClient ipc,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        VisionCaptureTelemetry? telemetry = null)
     {
         _logger = logger;
         _agentOptions = agentOptions.Value;
-        _visionOptions = visionOptions.Value;
+        _visionOptions = visionOptions;
         _stateDb = stateDb;
         _ipc = ipc;
         _clock = clock ?? TimeProvider.System;
+        _telemetry = telemetry ?? new VisionCaptureTelemetry();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!_visionOptions.Enabled)
-        {
-            _logger.LogInformation(
-                "VisionCaptureWorker idle — Vision.Enabled=false (master HIPAA gate)");
-            return;
-        }
-        if (!_visionOptions.PeriodicCapture.Enabled)
-        {
-            _logger.LogInformation(
-                "VisionCaptureWorker idle — PeriodicCapture.Enabled=false (cadence toggle off)");
-            return;
-        }
-
-        var interval = TimeSpan.FromSeconds(
-            Math.Max(1, _visionOptions.PeriodicCapture.IntervalSeconds));
-
-        _logger.LogInformation(
-            "VisionCaptureWorker started — interval={IntervalSec}s, requireForeground={ReqFg}",
-            interval.TotalSeconds, _visionOptions.PeriodicCapture.RequireForegroundMatch);
+        _logger.LogInformation("VisionCaptureWorker started — waiting for live vision gates");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -99,6 +84,9 @@ public sealed class VisionCaptureWorker : BackgroundService
 
             try
             {
+                var options = _visionOptions.CurrentValue;
+                var interval = TimeSpan.FromSeconds(
+                    Math.Max(1, options.PeriodicCapture.IntervalSeconds));
                 await Task.Delay(interval, _clock, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -114,9 +102,23 @@ public sealed class VisionCaptureWorker : BackgroundService
     /// </summary>
     public async Task<TickResult> TickAsync(CancellationToken ct)
     {
+        var options = _visionOptions.CurrentValue;
+        if (!options.Enabled)
+        {
+            _telemetry.RecordSkipped("vision_disabled");
+            return TickResult.Skipped("vision_disabled");
+        }
+
+        if (!options.PeriodicCapture.Enabled)
+        {
+            _telemetry.RecordSkipped("periodic_capture_disabled");
+            return TickResult.Skipped("periodic_capture_disabled");
+        }
+
         var pharmacyId = _agentOptions.PharmacyId ?? string.Empty;
         if (string.IsNullOrEmpty(pharmacyId))
         {
+            _telemetry.RecordSkipped("no_pharmacy_id");
             return TickResult.Skipped("no_pharmacy_id");
         }
 
@@ -127,6 +129,7 @@ public sealed class VisionCaptureWorker : BackgroundService
             // Heartbeat counters won't see it either since they query the
             // active session id. Skip silently (LearningWorker will create a
             // session when it boots).
+            _telemetry.RecordSkipped("no_active_session");
             return TickResult.Skipped("no_active_session");
         }
 
@@ -152,6 +155,8 @@ public sealed class VisionCaptureWorker : BackgroundService
         if (!connected)
         {
             _logger.LogDebug("VisionCaptureWorker: Helper IPC not connected — skip");
+            AppendCaptureOutcome(commandId, "failed", "ipc_disconnected");
+            _telemetry.RecordFailed("ipc_disconnected", commandId);
             return TickResult.Skipped("ipc_disconnected");
         }
 
@@ -161,6 +166,8 @@ public sealed class VisionCaptureWorker : BackgroundService
         if (response == null)
         {
             _logger.LogDebug("VisionCaptureWorker: capture timed out / connection dropped");
+            AppendCaptureOutcome(commandId, "failed", "ipc_timeout");
+            _telemetry.RecordFailed("ipc_timeout", commandId);
             return TickResult.Failed("ipc_timeout");
         }
 
@@ -174,7 +181,7 @@ public sealed class VisionCaptureWorker : BackgroundService
                 "VisionCaptureWorker: capture rejected status={Status} code={Code}",
                 response.Status, code);
 
-            if (code == "not_foreground" && !_visionOptions.PeriodicCapture.RequireForegroundMatch)
+            if (code == "not_foreground" && !options.PeriodicCapture.RequireForegroundMatch)
             {
                 // Operator chose to ignore the gate; this is unusual but
                 // bubble up the result so callers can decide.
@@ -182,6 +189,8 @@ public sealed class VisionCaptureWorker : BackgroundService
                     "VisionCaptureWorker: not_foreground returned but RequireForegroundMatch=false — capture refused at Helper anyway");
             }
 
+            AppendCaptureOutcome(commandId, "failed", code);
+            _telemetry.RecordFailed(code, commandId);
             return TickResult.Failed(code);
         }
 
@@ -196,18 +205,8 @@ public sealed class VisionCaptureWorker : BackgroundService
         }
         catch { /* malformed payload — log via TickResult */ }
 
-        _stateDb.AppendChainedAuditEntry(new AuditEntry(
-            TaskId: commandId,
-            EventType: "vision_capture",
-            FromState: "request",
-            ToState: "complete",
-            Trigger: "periodic_worker",
-            CommandId: commandId,
-            RequesterId: nameof(VisionCaptureWorker),
-            Actor: "system",
-            SourceComponent: nameof(VisionCaptureWorker),
-            CaptureReason: "periodic_pms_observation",
-            StorageId: storageId));
+        AppendCaptureOutcome(commandId, "complete", "captured", storageId);
+        _telemetry.RecordCaptured(storageId, commandId);
 
         _logger.LogInformation(
             "VisionCaptureWorker: capture committed — storageId={StorageId}", storageId);
@@ -226,5 +225,38 @@ public sealed class VisionCaptureWorker : BackgroundService
             new(false, null, null, reason);
         public static TickResult Failed(string reason) =>
             new(false, null, null, reason);
+    }
+
+    private void AppendCaptureOutcome(
+        string commandId,
+        string toState,
+        string reason,
+        string? storageId = null)
+    {
+        var safeReason = SanitizeAuditReason(reason);
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: commandId,
+            EventType: "vision_capture",
+            FromState: "request",
+            ToState: toState,
+            Trigger: "periodic_worker",
+            CommandId: commandId,
+            RequesterId: nameof(VisionCaptureWorker),
+            Actor: "system",
+            SourceComponent: nameof(VisionCaptureWorker),
+            CaptureReason: $"periodic_pms_observation:{safeReason}",
+            StorageId: storageId));
+    }
+
+    private static string SanitizeAuditReason(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+            return "unknown";
+
+        var chars = reason
+            .Where(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')
+            .Take(64)
+            .ToArray();
+        return chars.Length == 0 ? "unknown" : new string(chars);
     }
 }

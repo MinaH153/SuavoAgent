@@ -20,7 +20,10 @@ static void WriteWatchdogCrash(string stage, Exception ex)
     {
         var line = $"[{DateTimeOffset.Now:O}] [{stage}] {ex.GetType().FullName}: {ex.Message}"
                    + Environment.NewLine + ex.ToString() + Environment.NewLine + Environment.NewLine;
-        File.AppendAllText(Path.Combine(WatchdogCrashDir(), "watchdog-crash.log"), line);
+        File.AppendAllText(
+            Path.Combine(WatchdogCrashDir(), "watchdog-crash.log"),
+            line,
+            new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
     }
     catch { }
 }
@@ -37,6 +40,7 @@ Log.Logger = new LoggerConfiguration()
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "logs", "watchdog-.log"),
+        encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
         rollingInterval: RollingInterval.Day,
         retainedFileCountLimit: 14)
     .CreateLogger();

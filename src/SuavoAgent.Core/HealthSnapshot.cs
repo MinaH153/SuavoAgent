@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Health;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Workers;
@@ -18,14 +19,16 @@ public sealed class HealthSnapshot
     private readonly AgentStateDb _stateDb;
     private readonly IServiceProvider _sp;
     private readonly DateTimeOffset _startTime;
+    private readonly string? _runtimeHealthRoot;
 
     public HealthSnapshot(AgentOptions options, AgentStateDb stateDb,
-        IServiceProvider sp, DateTimeOffset startTime)
+        IServiceProvider sp, DateTimeOffset startTime, string? runtimeHealthRoot = null)
     {
         _options = options;
         _stateDb = stateDb;
         _sp = sp;
         _startTime = startTime;
+        _runtimeHealthRoot = runtimeHealthRoot;
     }
 
     public JsonElement Take()
@@ -35,14 +38,18 @@ public sealed class HealthSnapshot
         var canaryHold = _stateDb.GetCanaryHold(_options.PharmacyId ?? "", "pioneerrx");
         var wbEngine = rxWorker?.WritebackEngine;
         var learningSessionId = _stateDb.GetActiveSessionId(_options.PharmacyId ?? "");
+        var visionCapture = (_sp.GetService(typeof(VisionCaptureTelemetry)) as VisionCaptureTelemetry)?.Snapshot();
+        var (ipcRejectionCount, lastIpcRejectReason, lastIpcRejectAt) = IpcRejectionStats.Snapshot();
 
         var snapshot = new
         {
             agentId = _options.AgentId,
             version = _options.Version,
             pharmacyId = _options.PharmacyId,
+            machineFingerprint = _options.MachineFingerprint,
             uptimeSeconds = (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
             memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
+            runtimeHealth = RuntimeHealthEvidence.Collect(_runtimeHealthRoot),
             sql = new
             {
                 connected = rxWorker?.IsSqlConnected ?? false,
@@ -51,7 +58,10 @@ public sealed class HealthSnapshot
             },
             helper = new
             {
-                attached = ipcServer?.IsConnected ?? false
+                attached = ipcServer?.IsConnected ?? false,
+                ipcRejectionCount,
+                lastIpcRejectReason,
+                lastIpcRejectAt = lastIpcRejectAt?.ToString("o")
             },
             writeback = new
             {
@@ -71,6 +81,12 @@ public sealed class HealthSnapshot
             {
                 status = canaryHold != null ? "drift_hold" : "clean",
                 blockedCycles = canaryHold?.BlockedCycles ?? 0,
+            },
+            vision = new
+            {
+                enabled = _options.Vision.Enabled,
+                periodicCaptureEnabled = _options.Vision.PeriodicCapture.Enabled,
+                capture = visionCapture?.ToPayload(),
             },
             writebackEngine = new
             {

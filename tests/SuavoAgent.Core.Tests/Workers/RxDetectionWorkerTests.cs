@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Logging.Abstractions;
+using SuavoAgent.Contracts.Canary;
 using SuavoAgent.Contracts.Models;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Learning;
@@ -135,6 +136,136 @@ public class RxDetectionWorkerTests : IDisposable
     }
 
     [Fact]
+    public void SerializeRxBatch_EmitsCanonicalRxOrderCandidatesWithoutPlainRxNumbers()
+    {
+        var detectedAt = DateTimeOffset.Parse("2026-04-29T12:00:00+00:00");
+        var rxs = new List<RxMetadata>
+        {
+            new(
+                RxNumber: "12345",
+                DrugName: "Lisinopril 10mg",
+                Ndc: "00093-7180-01",
+                DateFilled: DateTime.UtcNow,
+                Quantity: 30m,
+                StatusGuid: Guid.Parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+                DetectedAt: detectedAt,
+                FillNumber: 1,
+                DaysSupply: 30,
+                DrugSchedule: 2)
+        };
+
+        var json = RxDetectionWorker.SerializeRxBatch(rxs, "pharmacy-salt");
+        var doc = JsonDocument.Parse(json);
+        var candidate = doc.RootElement
+            .GetProperty("data")
+            .GetProperty("rxOrderCandidates")[0];
+
+        var serializedCandidate = candidate.GetRawText();
+        var expectedHash = PhiScrubber.HmacHash("12345", "pharmacy-salt");
+
+        Assert.Equal(expectedHash, candidate.GetProperty("sourceExternalKeyHash").GetString());
+        Assert.Equal("hmac_sha256_rx_number", candidate.GetProperty("sourceExternalKeyKind").GetString());
+        Assert.False(candidate.TryGetProperty("rxNumber", out _));
+        Assert.DoesNotContain("12345", serializedCandidate);
+        Assert.Equal("sql", candidate.GetProperty("source").GetString());
+        Assert.Equal("pioneerrx.sql.metadata.v1", candidate.GetProperty("schemaSignature").GetString());
+        var localEvidenceId = candidate.GetProperty("localEvidenceId").GetString();
+        Assert.Matches("^rxh-[a-f0-9]{16}-[0-9]{10}$", localEvidenceId);
+        Assert.DoesNotContain("12345", localEvidenceId);
+        Assert.Equal("missing_patient_identity", candidate.GetProperty("warnings")[0].GetString());
+        Assert.Equal("missing_delivery_address", candidate.GetProperty("warnings")[1].GetString());
+        Assert.True(candidate.GetProperty("confidence").GetDouble() < 1.0);
+        Assert.True(candidate.GetProperty("isControlled").GetBoolean());
+        Assert.Equal(2, candidate.GetProperty("drugSchedule").GetInt32());
+        Assert.True(candidate.GetProperty("patientIdRequired").GetBoolean());
+        Assert.Equal(30, candidate.GetProperty("daysSupply").GetInt32());
+        Assert.True(candidate.GetProperty("provenance").TryGetProperty("sourceExternalKeyHash", out var rxProv));
+        Assert.Equal("sql", rxProv.GetProperty("source").GetString());
+        Assert.Equal("phi-direct-hmac", rxProv.GetProperty("classification").GetString());
+    }
+
+    [Fact]
+    public void SerializeRxBatch_CandidateIncludesPatientProvenanceAndFullConfidenceWhenDeliveryFieldsExist()
+    {
+        var rxs = new List<RxMetadata>
+        {
+            new(
+                RxNumber: "99001",
+                DrugName: "Metformin 500mg",
+                Ndc: "00093-7214-01",
+                DateFilled: DateTime.UtcNow,
+                Quantity: 60m,
+                StatusGuid: Guid.Parse("bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"),
+                DetectedAt: DateTimeOffset.Parse("2026-04-29T12:00:00+00:00"))
+        };
+        var patientMap = new Dictionary<string, RxPatientDetails>
+        {
+            ["99001"] = new("99001", "Sarah", "M", "7605551234",
+                "456 Oak Ave", "Apt 3B", "Victorville", "CA", "92392")
+        };
+
+        var json = RxDetectionWorker.SerializeRxBatch(rxs, "test-salt", patientMap);
+        var doc = JsonDocument.Parse(json);
+        var candidate = doc.RootElement
+            .GetProperty("data")
+            .GetProperty("rxOrderCandidates")[0];
+
+        Assert.Empty(candidate.GetProperty("warnings").EnumerateArray());
+        Assert.Equal(1.0d, candidate.GetProperty("confidence").GetDouble(), precision: 3);
+        Assert.Equal("Sarah", candidate.GetProperty("patientFirstName").GetString());
+        Assert.Equal("456 Oak Ave", candidate.GetProperty("deliveryAddress1").GetString());
+        Assert.True(candidate.GetProperty("provenance").TryGetProperty("patientFirstName", out var patientProv));
+        Assert.Equal("phi-direct", patientProv.GetProperty("classification").GetString());
+        Assert.Equal("sql_patient_detail", patientProv.GetProperty("sourceDetail").GetString());
+    }
+
+    [Fact]
+    public void SerializeRxBatch_CandidateCarriesWarningGradeSchemaDrift()
+    {
+        var rxs = new List<RxMetadata>
+        {
+            new(
+                RxNumber: "99001",
+                DrugName: "Metformin 500mg",
+                Ndc: "00093-7214-01",
+                DateFilled: DateTime.UtcNow,
+                Quantity: 60m,
+                StatusGuid: Guid.Parse("bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"),
+                DetectedAt: DateTimeOffset.Parse("2026-04-29T12:00:00+00:00"))
+        };
+        var patientMap = new Dictionary<string, RxPatientDetails>
+        {
+            ["99001"] = new("99001", "Sarah", "M", "7605551234",
+                "456 Oak Ave", "Apt 3B", "Victorville", "CA", "92392")
+        };
+        var warningVerification = new ContractVerification(
+            IsValid: false,
+            Severity: CanarySeverity.Warning,
+            DriftedComponents: new[] { "object" },
+            BaselineHash: "baseline",
+            ObservedHash: "observed",
+            Details: "optional column widened");
+
+        var json = RxDetectionWorker.SerializeRxBatch(
+            rxs,
+            "test-salt",
+            patientMap,
+            warningVerification);
+        var doc = JsonDocument.Parse(json);
+        var candidate = doc.RootElement
+            .GetProperty("data")
+            .GetProperty("rxOrderCandidates")[0];
+        var warnings = candidate.GetProperty("warnings")
+            .EnumerateArray()
+            .Select(w => w.GetString())
+            .ToArray();
+
+        Assert.Contains("schema_canary_drift", warnings);
+        Assert.Contains("schema_canary_object", warnings);
+        Assert.True(candidate.GetProperty("confidence").GetDouble() < 1.0d);
+    }
+
+    [Fact]
     public void CloudSyncFails_EnrichedBatchPersistedToSqlite()
     {
         // Simulate the exact path: serialize enriched batch → persist to SQLite → retrieve intact
@@ -254,6 +385,29 @@ public class RxDetectionWorkerTests : IDisposable
         var pending = _stateDb.GetPendingBatches();
         Assert.Equal(0, pending.Count);
         Assert.Equal(1, _stateDb.GetDeadLetterCount());
+    }
+
+    [Fact]
+    public void CanaryDetection_UsesAuditedPatientEnrichmentAfterSchemaPass()
+    {
+        var source = ReadRepoFile("src/SuavoAgent.Core/Workers/RxDetectionWorker.cs");
+
+        Assert.Contains("EnrichPatientDetailsAsync(result.Rxs, hmacSalt, ct)", source);
+        Assert.Contains("EnrichPatientDetailsAsync(detection.Rxs, hmacSalt, ct)", source);
+        Assert.Contains("Trigger: \"rx_detection_worker.enrich_for_delivery_sync\"", source);
+    }
+
+    private static string ReadRepoFile(string relativePath)
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            var candidate = Path.Combine(directory.FullName, relativePath);
+            if (File.Exists(candidate)) return File.ReadAllText(candidate);
+            directory = directory.Parent;
+        }
+
+        throw new FileNotFoundException($"Could not locate {relativePath}");
     }
 
     public void Dispose()

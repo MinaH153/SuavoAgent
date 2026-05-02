@@ -7,8 +7,56 @@ on:
     branches: [main]
 
 jobs:
+  bootstrap-windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse bootstrap.ps1 with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          $source = Get-Content -Raw -LiteralPath .\bootstrap.ps1
+          $null = [scriptblock]::Create($source)
+          $parseErrors = $null
+          [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
+          if ($parseErrors -and $parseErrors.Count -gt 0) {
+            $parseErrors | Format-List * | Out-String | Write-Host
+            throw "bootstrap.ps1 has Windows PowerShell 5.1 parse errors"
+          }
+
+      - name: Parse and run no-PHI release probe
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Get-Content -Raw -LiteralPath .\scripts\Test-SuavoAgentReleaseProbe.ps1
+          $null = [scriptblock]::Create($source)
+          $parseErrors = $null
+          [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
+          if ($parseErrors -and $parseErrors.Count -gt 0) {
+            $parseErrors | Format-List * | Out-String | Write-Host
+            throw "Test-SuavoAgentReleaseProbe.ps1 has Windows PowerShell 5.1 parse errors"
+          }
+
+          $probeDir = Join-Path $env:RUNNER_TEMP 'suavoagent-release-probe'
+          New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+          foreach ($binary in @(
+            'SuavoAgent.Core.exe',
+            'SuavoAgent.Broker.exe',
+            'SuavoAgent.Helper.exe',
+            'SuavoAgent.Watchdog.exe',
+            'SuavoSetup.exe'
+          )) {
+            Set-Content -LiteralPath (Join-Path $probeDir $binary) -Value 'stub' -Encoding ASCII
+          }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $probeDir -BootstrapPath .\bootstrap.ps1 -Json
+
   build-and-test:
     runs-on: ubuntu-latest
+    needs: bootstrap-windows-smoke
     steps:
       - uses: actions/checkout@v4
 
@@ -66,3 +114,14 @@ jobs:
         with:
           name: win-x64-binaries
           path: artifacts/*.exe
+
+  agent-merge-gate:
+    name: Agent Merge Gate
+    runs-on: ubuntu-latest
+    needs: [bootstrap-windows-smoke, build-and-test]
+    if: always()
+    steps:
+      - name: Require agent checks before merge
+        run: |
+          if [[ "${{ needs.bootstrap-windows-smoke.result }}" != "success" ]]; then exit 1; fi
+          if [[ "${{ needs.build-and-test.result }}" != "success" ]]; then exit 1; fi

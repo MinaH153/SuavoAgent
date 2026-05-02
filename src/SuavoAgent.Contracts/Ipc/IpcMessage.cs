@@ -34,6 +34,11 @@ public static class IpcCommands
     // Vision — Core→Helper command channel.
     // Response payload: { storageId: string|null, frame: ScreenFrame }
     public const string CaptureScreen = "capture_screen";
+
+    // Intent cursor — Core→Helper command channel.
+    // Visual-only overlay in the interactive user session. It must never
+    // move the OS cursor, click, type, hook PioneerRx, or carry text labels.
+    public const string IntentCursor = "intent_cursor";
 }
 
 public static class IpcStatus

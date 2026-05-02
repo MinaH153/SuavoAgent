@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Text.Json;
 using SuavoAgent.Watchdog;
 using Xunit;
 
@@ -31,12 +32,16 @@ public class WatchdogWorkerTests
         }
     }
 
-    private static WatchdogWorker MakeWorker(FakeCommand cmd, string? bootstrapPath = null)
+    private static WatchdogWorker MakeWorker(
+        FakeCommand cmd,
+        string? bootstrapPath = null,
+        string? telemetryPath = null)
     {
         var opts = new WatchdogOptions
         {
             WatchedServices = new[] { "SuavoAgent.Core" },
-            BootstrapPath = bootstrapPath
+            BootstrapPath = bootstrapPath,
+            TelemetryPath = telemetryPath
         };
         var worker = new WatchdogWorker(NullLogger<WatchdogWorker>.Instance, cmd, opts);
         // Seed ledger via reflection-free helper: call TickOnce with a "Running" observation
@@ -134,6 +139,38 @@ public class WatchdogWorkerTests
         var ex = Record.Exception(() => worker.TickOnce(DateTimeOffset.UtcNow));
         Assert.Null(ex);
         Assert.Empty(cmd.RepairCalls); // repair wasn't attempted because path is bad
+    }
+
+    [Fact]
+    public void Tick_WritesTelemetryEvidenceFile()
+    {
+        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
+        var cmd = new FakeCommand { StartOutcome = _ => false };
+        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(
+            new[] { ServiceState.Stopped, ServiceState.Stopped });
+        var worker = MakeWorker(cmd, telemetryPath: telemetryPath);
+        SeedLedgers(worker);
+
+        var now = DateTimeOffset.UtcNow;
+        worker.TickOnce(now);
+        worker.TickOnce(now.AddMinutes(6));
+
+        try
+        {
+            Assert.True(File.Exists(telemetryPath));
+            using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
+            var root = doc.RootElement;
+            Assert.True(root.GetProperty("present").GetBoolean());
+            var service = root.GetProperty("services")[0];
+            Assert.Equal("SuavoAgent.Core", service.GetProperty("serviceName").GetString());
+            Assert.Equal("AttemptRestart", service.GetProperty("action").GetString());
+            Assert.False(service.GetProperty("restartAccepted").GetBoolean());
+            Assert.Equal(1, service.GetProperty("consecutiveRestartFailures").GetInt32());
+        }
+        finally
+        {
+            try { File.Delete(telemetryPath); } catch { }
+        }
     }
 
     private static void SeedLedgers(WatchdogWorker worker)

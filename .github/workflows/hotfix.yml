@@ -16,9 +16,31 @@ permissions:
   contents: write
 
 jobs:
+  bootstrap-windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse bootstrap.ps1 with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          $source = Get-Content -Raw -LiteralPath .\bootstrap.ps1
+          $null = [scriptblock]::Create($source)
+          $parseErrors = $null
+          [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
+          if ($parseErrors -and $parseErrors.Count -gt 0) {
+            $parseErrors | Format-List * | Out-String | Write-Host
+            throw "bootstrap.ps1 has Windows PowerShell 5.1 parse errors"
+          }
+
   # --- Build unsigned binaries on Linux -----------------------------------
   build:
     runs-on: ubuntu-latest
+    needs: bootstrap-windows-smoke
     outputs:
       version_numeric: ${{ steps.version.outputs.VERSION_NUMERIC }}
     steps:

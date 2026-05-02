@@ -17,10 +17,11 @@ public sealed class AgentOptions
     public string? SqlPassword { get; set; }
 
     /// <summary>
-    /// When true, SQL connections accept any server certificate (default for pharmacy LAN compatibility).
-    /// HIPAA warning logged when enabled. Set to false when SQL Server has a trusted certificate.
+    /// When true, SQL connections accept any server certificate. This is an explicit
+    /// break-glass compatibility override for pharmacies with self-signed SQL Server
+    /// certificates; default false avoids silent LAN MITM exposure.
     /// </summary>
-    public bool SqlTrustServerCertificate { get; set; } = true;
+    public bool SqlTrustServerCertificate { get; set; } = false;
 
     /// <summary>
     /// Per-agent HMAC salt for hashing PHI (Rx numbers, etc.) in audit logs and cloud sync.
