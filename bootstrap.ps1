@@ -1251,7 +1251,7 @@ foreach ($bin in $binaries) {
             Write-Ok "$bin ($sizeMb MB, cached)"
             $reusedFromCache = $true
         } catch {
-            Write-Warn "Cached copy failed for $bin: $($_.Exception.Message); downloading fresh"
+            Write-Warn "Cached copy failed for ${bin}: $($_.Exception.Message); downloading fresh"
             Remove-Item -Path $dst -Force -ErrorAction SilentlyContinue
         }
     }
@@ -1286,7 +1286,7 @@ foreach ($bin in $binaries) {
         try {
             Copy-Item -Path $dst -Destination $cacheDst -Force
         } catch {
-            Write-Warn "Could not update binary cache for $bin: $($_.Exception.Message)"
+            Write-Warn "Could not update binary cache for ${bin}: $($_.Exception.Message)"
         }
     }
 }
