@@ -9,6 +9,7 @@ using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Health;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.Pricing;
@@ -31,6 +32,12 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly PricingJobRunner? _pricingJobRunner;
     private readonly IpcCommandClient? _ipcCommandClient;
     private readonly SuavoAgent.Core.Discovery.DiscoveryClient? _discoveryClient;
+    // Wave 1B Track 1.4 — health composite. Both optional so the worker
+    // still starts if Program.cs hasn't wired the health module yet (matches
+    // the existing optional-deps pattern used for cloud client, pricing,
+    // IPC command client, etc).
+    private readonly IHealthSignals? _healthSignals;
+    private readonly HealthCompositeCalculator? _healthCompositeCalculator;
     private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
@@ -63,6 +70,8 @@ public sealed class HeartbeatWorker : BackgroundService
         _pricingJobRunner = serviceProvider.GetService<PricingJobRunner>();
         _ipcCommandClient = serviceProvider.GetService<IpcCommandClient>();
         _discoveryClient = serviceProvider.GetService<SuavoAgent.Core.Discovery.DiscoveryClient>();
+        _healthSignals = serviceProvider.GetService<IHealthSignals>();
+        _healthCompositeCalculator = serviceProvider.GetService<HealthCompositeCalculator>();
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -262,6 +271,12 @@ public sealed class HeartbeatWorker : BackgroundService
                     }
                 }
 
+                // Wave 1B Track 1.4 — compute + locally append the
+                // agent.health_composite event each tick. Failure is logged
+                // but does NOT block the heartbeat critical path; the agent
+                // retries on the next tick.
+                var healthComposite = EmitHealthComposite();
+
                 var pendingWbCount = _stateDb.GetPendingWritebacks().Count;
                 var failedWbCount = _stateDb.GetFailedWritebackCount();
                 var memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
@@ -387,6 +402,13 @@ public sealed class HeartbeatWorker : BackgroundService
                     efficiencyReport = efficiencyReport,
                     fleetSignals = fleetSignals,
                     consentReceipt = consentReceipt,
+                    // Wave 1B Track 1.4 — agent.health_composite payload.
+                    // Null when the health module isn't wired or computation
+                    // failed; cloud treats absent composite as "agent on a
+                    // version older than 1B". Composite presence flips
+                    // status from "heartbeating" to either "healthy" or
+                    // "heartbeating-but-unhealthy" cloud-side.
+                    healthComposite = healthComposite,
                     // v3.12.1.1 auto-rule approval mirror. Empty array when
                     // Learning:Template:Enabled is off or no templates have
                     // been extracted yet — safe to emit either way.
@@ -451,6 +473,67 @@ public sealed class HeartbeatWorker : BackgroundService
         }
 
         _logger.LogInformation("Heartbeat worker stopped");
+    }
+
+    /// <summary>
+    /// Wave 1B Track 1.4 — compute the agent.health_composite payload and
+    /// append a chained audit entry. Returns the composite payload (which
+    /// the caller embeds in the heartbeat body so cloud sees it on the
+    /// same tick), or null when the health module isn't wired or any step
+    /// throws. Failure is non-blocking by design: the heartbeat critical
+    /// path must keep running even if the composite computation breaks.
+    /// </summary>
+    /// <remarks>
+    /// Audit-entry shape:
+    ///   EventType = "agent.health_composite"
+    ///   FromState = previous status (best-effort — empty on first tick)
+    ///   ToState   = current status ("healthy" | "heartbeating-but-unhealthy")
+    ///   Trigger   = "heartbeat_tick"
+    ///   TaskId    = AgentId (so the entry is tenant-attributable)
+    ///
+    /// The HealthCompositePayload itself doesn't fit AuditEntry's columnar
+    /// shape, but the components are derivable from <see cref="ToState"/>
+    /// + cloud-side stitching with the heartbeat payload that ships in
+    /// the same tick. Local audit is the forensic copy; cloud heartbeat
+    /// is the live signal.
+    /// </remarks>
+    internal HealthCompositePayload? EmitHealthComposite()
+    {
+        if (_healthSignals is null || _healthCompositeCalculator is null)
+            return null;
+
+        try
+        {
+            var snapshot = _healthSignals.Snapshot();
+            var composite = _healthCompositeCalculator.Compute(snapshot, DateTimeOffset.UtcNow);
+
+            try
+            {
+                _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                    TaskId: _options.AgentId ?? "",
+                    EventType: "agent.health_composite",
+                    FromState: "",
+                    ToState: composite.Status,
+                    Trigger: "heartbeat_tick",
+                    Actor: "system",
+                    SourceComponent: "heartbeat_worker"));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "agent.health_composite audit append failed; cloud-side payload still ships. " +
+                    "Agent will retry on next tick.");
+            }
+
+            return composite;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Composite emission failed; heartbeat continues. " +
+                "Agent will retry on next tick.");
+            return null;
+        }
     }
 
     /// <summary>
