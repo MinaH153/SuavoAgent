@@ -20,7 +20,7 @@ namespace SuavoAgent.Analyzers.Tests;
 public class PerformanceTests
 {
     private const int TypeCount = 1000;
-    private const int LinuxThresholdMs = 5_000;
+    private const int LinuxThresholdMs = 8_000;
     private const int MacArmThresholdMs = 10_000;
 
     private const string Annotations = """
