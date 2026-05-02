@@ -9,4 +9,10 @@
     <Description>Suavo pharmacy agent shared contracts and DTOs.</Description>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\SuavoAgent.Analyzers\SuavoAgent.Analyzers.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
 </Project>

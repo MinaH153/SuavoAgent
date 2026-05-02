@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using SuavoAgent.Contracts.Annotations;
 
 namespace SuavoAgent.Contracts.Models;
 
@@ -18,6 +19,7 @@ namespace SuavoAgent.Contracts.Models;
 ///     <item><c>TrippedAt</c> — UTC instant the gate is considered tripped.</item>
 ///   </list>
 /// </summary>
+[OutboundPayload]
 public sealed record WaveGateTrippedPayload(
     string WaveId,
     string EvidenceSummary,

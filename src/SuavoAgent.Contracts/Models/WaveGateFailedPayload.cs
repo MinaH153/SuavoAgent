@@ -1,4 +1,5 @@
 using System;
+using SuavoAgent.Contracts.Annotations;
 
 namespace SuavoAgent.Contracts.Models;
 
@@ -23,6 +24,7 @@ namespace SuavoAgent.Contracts.Models;
 ///       "when-blocker-clears" | "after-fix".</item>
 ///   </list>
 /// </summary>
+[OutboundPayload]
 public sealed record WaveGateFailedPayload(
     string WaveId,
     int AttemptNumber,
