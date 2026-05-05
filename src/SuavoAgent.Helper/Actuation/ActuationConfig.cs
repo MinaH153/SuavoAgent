@@ -33,6 +33,17 @@ public sealed record ActuationConfig
     /// </summary>
     public bool RequireKillSwitchHotkey { get; init; } = true;
 
+    /// <summary>
+    /// When false, IpcCommandServer accepts cross-service-context Core
+    /// connections even if it cannot read Core's process image path. The PID
+    /// + ProcessName check still runs first; only the install-dir prefix
+    /// validation is relaxed. Required when Helper runs as NetworkService
+    /// (Broker context) trying to query a LocalService Core — OpenProcess
+    /// returns null and Process.MainModule throws Access Denied. Default
+    /// true for prod where all four services run as the same SID.
+    /// </summary>
+    public bool RelaxIpcClientPathValidation { get; init; } = false;
+
     public static ActuationConfig SafeDefault() => new()
     {
         Enabled = false,
@@ -42,5 +53,6 @@ public sealed record ActuationConfig
         DefaultPerKeyDelayMs = 25,
         DefaultInterChordDelayMs = 80,
         RequireKillSwitchHotkey = true,
+        RelaxIpcClientPathValidation = false,
     };
 }

@@ -74,6 +74,8 @@ public sealed class IpcCommandServer : IDisposable
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
 
+    private readonly bool _relaxClientPathValidation;
+
     public IpcCommandServer(
         string pipeName,
         PricingWorkflow pricing,
@@ -83,10 +85,12 @@ public sealed class IpcCommandServer : IDisposable
         Func<bool>? isPmsForeground = null,
         IntentCursorController? intentCursor = null,
         ActuationCommandHandler? actuation = null,
-        PioneerRxCommandHandler? pioneerRx = null)
+        PioneerRxCommandHandler? pioneerRx = null,
+        bool relaxClientPathValidation = false)
     {
         _pipeName = pipeName;
         _pricing = pricing;
+        _relaxClientPathValidation = relaxClientPathValidation;
         _vision = vision;
         _locator = locator;
         // When provided, capture_screen returns a not_foreground error if
@@ -530,6 +534,11 @@ public sealed class IpcCommandServer : IDisposable
                 }
                 catch (Exception ex)
                 {
+                    if (_relaxClientPathValidation)
+                    {
+                        _logger.Warning(ex, "IpcCommandServer: process image path unreadable for PID {Pid} (ProcessName=SuavoAgent.Core verified) — accepting due to RelaxIpcClientPathValidation=true", clientPid);
+                        return true;
+                    }
                     _logger.Warning(ex, "IpcCommandServer: process image path unreadable for PID {Pid} — rejecting", clientPid);
                     return false;
                 }
@@ -537,6 +546,11 @@ public sealed class IpcCommandServer : IDisposable
 
             if (string.IsNullOrEmpty(clientPath))
             {
+                if (_relaxClientPathValidation)
+                {
+                    _logger.Warning("IpcCommandServer: empty client path for PID {Pid} (ProcessName=SuavoAgent.Core verified) — accepting due to RelaxIpcClientPathValidation=true", clientPid);
+                    return true;
+                }
                 _logger.Warning("IpcCommandServer: empty client path for PID {Pid} — rejecting", clientPid);
                 return false;
             }

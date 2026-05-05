@@ -112,7 +112,8 @@ try
             .IsPidForeground(pioneer.ProcessId),
         intentCursor: intentCursor,
         actuation: actuationHandler,
-        pioneerRx: pioneerRxHandler);
+        pioneerRx: pioneerRxHandler,
+        relaxClientPathValidation: actuationConfig.RelaxIpcClientPathValidation);
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
