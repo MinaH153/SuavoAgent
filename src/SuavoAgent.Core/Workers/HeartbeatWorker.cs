@@ -49,6 +49,9 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly WorkflowExecutor? _workflowExecutor;
     private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
     private readonly SemaphoreSlim _workflowSemaphore = new(1, 1);
+    private readonly object _activeWorkflowLock = new();
+    private CancellationTokenSource? _activeWorkflowCts;
+    private string? _activeWorkflowRunId;
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
@@ -750,6 +753,9 @@ public sealed class HeartbeatWorker : BackgroundService
                 case "run_workflow":
                     _ = Task.Run(() => HandleRunWorkflowAsync(scEl, cmd, ct), ct);
                     break;
+                case "abort_workflow":
+                    await HandleAbortWorkflowAsync(scEl, cmd, ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -892,14 +898,33 @@ public sealed class HeartbeatWorker : BackgroundService
             var pharmacyId = _options.PharmacyId ?? charter.PharmacyId;
             var actor = $"agent:{_options.AgentId ?? "?"}";
 
-            var execResult = await _workflowExecutor.ExecuteAsync(
-                definition,
-                _serviceProvider,
-                auditChain,
-                charter,
-                pharmacyId,
-                actor,
-                ct).ConfigureAwait(false);
+            using var workflowCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            lock (_activeWorkflowLock)
+            {
+                _activeWorkflowCts = workflowCts;
+                _activeWorkflowRunId = definition.WorkflowRunId;
+            }
+
+            WorkflowExecutor.WorkflowExecutionResult execResult;
+            try
+            {
+                execResult = await _workflowExecutor.ExecuteAsync(
+                    definition,
+                    _serviceProvider,
+                    auditChain,
+                    charter,
+                    pharmacyId,
+                    actor,
+                    workflowCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_activeWorkflowLock)
+                {
+                    _activeWorkflowCts = null;
+                    _activeWorkflowRunId = null;
+                }
+            }
 
             _logger.LogInformation(
                 "run_workflow run={RunId} outcome={Outcome} steps={Done}/{Total} reason={Reason}",
@@ -924,6 +949,61 @@ public sealed class HeartbeatWorker : BackgroundService
         {
             _workflowSemaphore.Release();
         }
+    }
+
+    private async Task HandleAbortWorkflowAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+        var requestedRunId = dataEl.TryGetProperty("workflow_run_id", out var rid) ? rid.GetString() : null;
+        var requestedReason = dataEl.TryGetProperty("reason", out var rr) ? rr.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        if (string.IsNullOrEmpty(requestedRunId))
+        {
+            await AckAsync(false, null, "missing workflow_run_id");
+            return;
+        }
+
+        CancellationTokenSource? activeCts;
+        string? activeRunId;
+        lock (_activeWorkflowLock)
+        {
+            activeCts = _activeWorkflowCts;
+            activeRunId = _activeWorkflowRunId;
+        }
+
+        if (!string.Equals(activeRunId, requestedRunId, StringComparison.Ordinal))
+        {
+            _logger.LogInformation(
+                "abort_workflow received for run {Requested}, but active run is {Active} (no-op ack)",
+                requestedRunId,
+                activeRunId ?? "<none>");
+            await AckAsync(true, new { aborted = false, reason = "no_active_run_with_id" }, null);
+            return;
+        }
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: requestedRunId,
+            EventType: "workflow_run_abort_requested",
+            FromState: "in_progress",
+            ToState: "aborting",
+            Trigger: "signed_command",
+            CommandId: cmd.Nonce,
+            RequesterId: "operator",
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: requestedReason ?? "dashboard_abort"));
+
+        try { activeCts?.Cancel(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "abort_workflow: cancel threw"); }
+
+        await AckAsync(true, new { aborted = true, run_id = requestedRunId, reason = requestedReason }, null);
     }
 
     private MissionCharter BuildEphemeralCharter() => new(
