@@ -74,7 +74,7 @@ public class SignedCommandVerifier
                 Convert.FromBase64String(cmd.Signature),
                 HashAlgorithmName.SHA256);
             if (!valid)
-                return new(false, "Invalid signature");
+                return new(false, $"Invalid signature (canonical={canonical})");
 
             lock (_usedNonces)
             {
