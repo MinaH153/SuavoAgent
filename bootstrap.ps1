@@ -384,7 +384,7 @@ if ($Repair) {
     # Re-register any missing services against the existing binaries.
     $serviceSpecs = @(
         @{ Name = 'SuavoAgent.Core';     Exe = 'SuavoAgent.Core.exe';     Account = 'NT AUTHORITY\LocalService';   Depends = $null;              Desc = 'Suavo pharmacy agent - SQL polling, cloud sync' },
-        @{ Name = 'SuavoAgent.Broker';   Exe = 'SuavoAgent.Broker.exe';   Account = 'NT AUTHORITY\NetworkService'; Depends = 'SuavoAgent.Core';  Desc = 'Suavo pharmacy agent - session broker' },
+        @{ Name = 'SuavoAgent.Broker';   Exe = 'SuavoAgent.Broker.exe';   Account = 'LocalSystem';                 Depends = 'SuavoAgent.Core';  Desc = 'Suavo pharmacy agent - session broker (LocalSystem for CreateProcessAsUser)' },
         @{ Name = 'SuavoAgent.Watchdog'; Exe = 'SuavoAgent.Watchdog.exe'; Account = 'LocalSystem';                 Depends = $null;              Desc = 'Suavo pharmacy agent - process watchdog' }
     )
     foreach ($spec in $serviceSpecs) {
@@ -1500,10 +1500,14 @@ sc.exe failure SuavoAgent.Core reset= 3600 actions= restart/5000/restart/30000/r
 sc.exe failureflag SuavoAgent.Core 1 | Out-Null
 Write-Ok "SuavoAgent.Core service registered"
 
-# Install Broker (runs as NetworkService -- needs SeTcbPrivilege for WTSQueryUserToken + CreateProcessAsUser)
+# Install Broker (runs as LocalSystem -- per ADR three-process-architecture, only
+# SYSTEM has SeAssignPrimaryTokenPrivilege required for CreateProcessAsUser to spawn
+# Helper into the user's interactive session. NetworkService configuration silently
+# fell through to Process.Start, leaving Helper in Session 0 and SendInput invisible
+# to the user's desktop. Field-confirmed 2026-05-05 RunID=97c53a68.)
 $brokerPath = Join-Path $installDir "SuavoAgent.Broker.exe"
-sc.exe create SuavoAgent.Broker binPath= "`"$brokerPath`"" start= delayed-auto obj= "NT AUTHORITY\NetworkService" | Out-Null
-sc.exe description SuavoAgent.Broker "Suavo pharmacy agent - session broker" | Out-Null
+sc.exe create SuavoAgent.Broker binPath= "`"$brokerPath`"" start= delayed-auto obj= "LocalSystem" | Out-Null
+sc.exe description SuavoAgent.Broker "Suavo pharmacy agent - session broker (LocalSystem for CreateProcessAsUser)" | Out-Null
 sc.exe failure SuavoAgent.Broker reset= 3600 actions= restart/5000/restart/30000/restart/60000 | Out-Null
 sc.exe failureflag SuavoAgent.Broker 1 | Out-Null
 sc.exe config SuavoAgent.Broker depend= SuavoAgent.Core | Out-Null
