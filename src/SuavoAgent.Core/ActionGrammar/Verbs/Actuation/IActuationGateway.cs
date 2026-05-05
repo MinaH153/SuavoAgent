@@ -1,0 +1,22 @@
+using SuavoAgent.Contracts.Ipc;
+
+namespace SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation;
+
+/// <summary>
+/// Core→Helper actuation surface. Concrete production wiring lives in
+/// <see cref="HelperActuationGateway"/> (named-pipe IPC). The interface
+/// keeps verbs unit-testable without spinning a real pipe.
+///
+/// Every method maps 1:1 to a command in
+/// <see cref="ActuationIpcCommands"/>. The Helper enforces the gate +
+/// dry-run + PHI guards, so verbs never need to ask "is it safe to
+/// actuate" — they ask the gateway and read the rejection envelope.
+/// </summary>
+public interface IActuationGateway
+{
+    Task<ActuationGateState> GetStateAsync(CancellationToken ct);
+    Task<ActuationResult> ClickByLabelAsync(ClickByLabelRequest req, CancellationToken ct);
+    Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct);
+    Task<ActuationResult> PressKeysAsync(PressKeysRequest req, CancellationToken ct);
+    Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct);
+}

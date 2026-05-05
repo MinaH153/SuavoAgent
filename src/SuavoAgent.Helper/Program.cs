@@ -3,6 +3,7 @@ using Serilog;
 using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Helper;
+using SuavoAgent.Helper.Actuation;
 using SuavoAgent.Helper.Behavioral;
 using SuavoAgent.Helper.SystemObservers;
 using SuavoAgent.Helper.Workflows;
@@ -79,13 +80,35 @@ try
         sampler: new SuavoAgent.Core.Discovery.TabularShapeSampler(),
         ranker: new SuavoAgent.Core.Discovery.HeuristicOnlyRanker());
 
+    // Actuation runtime — Phase 5.2 sandbox actuation chain. Disabled +
+    // dry-run by default; flipped per-pharmacy via appsettings or operator
+    // override. Owns the WH_KEYBOARD_LL/WH_MOUSE_LL hooks and the
+    // Ctrl+Shift+Esc hotkey on dedicated STA threads.
+    var actuationConfig = ActuationBootstrap.LoadConfig(Log.Logger);
+    var actuationGate = new ActuationGate(actuationConfig, Log.Logger);
+    SendInputDriver? sendInputDriver = null;
+    UiaLabelResolver? uiaResolver = null;
+    ActuationCommandHandler? actuationHandler = null;
+    ActuationRuntime? actuationRuntime = null;
+    if (OperatingSystem.IsWindows())
+    {
+        sendInputDriver = new SendInputDriver(actuationGate, actuationConfig, Log.Logger);
+        uiaResolver = new UiaLabelResolver(Log.Logger);
+        actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger);
+        var observer = new UserInputObserver(actuationGate, Log.Logger);
+        var hotkey = new HotkeyKillSwitch(actuationGate, Log.Logger);
+        actuationRuntime = new ActuationRuntime(actuationGate, observer, hotkey, Log.Logger);
+        actuationRuntime.Start();
+    }
+
     // Pass a foreground-PID check that always re-reads pioneer.ProcessId so
     // capture_screen's HIPAA gate stays accurate as PMS detaches/re-attaches.
     using var cmdServer = new IpcCommandServer(
         cmdPipeName, pricingWorkflow, Log.Logger, visionController, fileLocator,
         isPmsForeground: () => SuavoAgent.Helper.SystemObservers.ForegroundGuard
             .IsPidForeground(pioneer.ProcessId),
-        intentCursor: intentCursor);
+        intentCursor: intentCursor,
+        actuation: actuationHandler);
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
@@ -363,6 +386,8 @@ try
     printObsCts?.Cancel();
     printObserver?.Dispose();
     systemBuffer?.Dispose();
+    actuationRuntime?.Dispose();
+    uiaResolver?.Dispose();
 
     // Final cleanup
     StopBehavioralObservers();

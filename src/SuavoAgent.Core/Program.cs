@@ -387,6 +387,39 @@ try
     // find_and_run_pricing_job without knowing IPC details.
     builder.Services.AddSingleton<SuavoAgent.Core.Discovery.DiscoveryClient>();
 
+    // SP4 Phase 5.2 — Actuation chain (Track 5). Verb registry + dispatcher +
+    // workflow executor. The HelperActuationGateway wraps the existing IPC
+    // command client so verbs delegate to the Helper-resident
+    // SendInputDriver / UiaLabelResolver. Disabled-by-default by virtue of
+    // the Helper-side ActuationGate (gate flips false unless operator
+    // approves via cloud + signs the per-pharmacy actuation.json).
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Policy.IAuthzPolicy>(sp =>
+        new SuavoAgent.Core.ActionGrammarV1.Policy.CharterDrivenAuthzPolicy());
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.VerbDispatcher>();
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.VerbRegistry>(sp =>
+        SuavoAgent.Core.ActionGrammarV1.VerbRegistry.Build(
+            new[] { typeof(SuavoAgent.Core.ActionGrammarV1.IVerb).Assembly },
+            sp.GetRequiredService<ILogger<SuavoAgent.Core.ActionGrammarV1.VerbRegistry>>()));
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.IActuationGateway>(sp =>
+        new SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.HelperActuationGateway(
+            clientFactory: () => new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()),
+            logger: sp.GetRequiredService<ILogger<SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.HelperActuationGateway>>()));
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Workflows.IWorkflowAuditClient>(sp =>
+    {
+        var cloud = sp.GetService<SuavoAgent.Core.Cloud.SuavoCloudClient>();
+        if (cloud is null)
+        {
+            // Cloud is optional in some test/runtime configurations. Returning
+            // a null-object lets workflows still execute locally for dry-run
+            // smoke tests.
+            return new SuavoAgent.Core.ActionGrammarV1.Workflows.NullWorkflowAuditClient();
+        }
+        return new SuavoAgent.Core.Cloud.WorkflowAuditCloudClient(
+            cloud,
+            sp.GetRequiredService<ILogger<SuavoAgent.Core.Cloud.WorkflowAuditCloudClient>>());
+    });
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Workflows.WorkflowExecutor>();
+
     // PricingJobRunner gets an optional TieredBrain evaluator wired only when
     // Reasoning.PricingBrainEnabled is true. Default: disabled — behavior is
     // byte-for-byte identical to pre-brain. Enabling lets the brain Halt jobs

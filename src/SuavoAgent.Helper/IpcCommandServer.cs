@@ -7,6 +7,7 @@ using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Discovery;
+using SuavoAgent.Helper.Actuation;
 using SuavoAgent.Helper.IntentCursor;
 using SuavoAgent.Helper.Vision;
 using SuavoAgent.Helper.Workflows;
@@ -67,6 +68,7 @@ public sealed class IpcCommandServer : IDisposable
     private readonly FileLocatorService? _locator;
     private readonly Func<bool>? _isPmsForeground;
     private readonly IntentCursorController? _intentCursor;
+    private readonly ActuationCommandHandler? _actuation;
     private readonly ILogger _logger;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
@@ -78,7 +80,8 @@ public sealed class IpcCommandServer : IDisposable
         ScreenCaptureController? vision = null,
         FileLocatorService? locator = null,
         Func<bool>? isPmsForeground = null,
-        IntentCursorController? intentCursor = null)
+        IntentCursorController? intentCursor = null,
+        ActuationCommandHandler? actuation = null)
     {
         _pipeName = pipeName;
         _pricing = pricing;
@@ -91,6 +94,7 @@ public sealed class IpcCommandServer : IDisposable
         // captured even with Vision.Enabled=true.
         _isPmsForeground = isPmsForeground;
         _intentCursor = intentCursor;
+        _actuation = actuation;
         _logger = logger;
     }
 
@@ -181,8 +185,44 @@ public sealed class IpcCommandServer : IDisposable
             IpcCommands.FindFile => HandleFindFileAsync(request, ct),
             IpcCommands.IntentCursor => HandleIntentCursorAsync(request, ct),
             IpcCommands.Ping => Task.FromResult(Ok(request.Id, request.Command, null)),
+            ActuationIpcCommands.GetState
+                or ActuationIpcCommands.ClickByLabel
+                or ActuationIpcCommands.TypeText
+                or ActuationIpcCommands.PressKeys
+                or ActuationIpcCommands.LaunchSandboxApp
+                => HandleActuationAsync(request, ct),
             _ => Task.FromResult(Error(request.Id, request.Command, "unknown_command", $"Unknown command: {request.Command}"))
         };
+    }
+
+    private async Task<IpcResponse> HandleActuationAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (_actuation is null)
+        {
+            return Error(request.Id, request.Command, "actuation_unavailable",
+                "Helper started without ActuationCommandHandler — check Actuation:Enabled / SystemEnabled config");
+        }
+
+        try
+        {
+            if (request.Command == ActuationIpcCommands.GetState)
+            {
+                var state = _actuation.GetState();
+                var json = JsonSerializer.SerializeToElement(state);
+                return Ok(request.Id, request.Command, json);
+            }
+
+            var result = await _actuation.HandleAsync(request.Command, request.Data, ct).ConfigureAwait(false);
+            var payload = JsonSerializer.SerializeToElement(result);
+            // Always 200 at the IPC layer — the ActuationResult.Ok bit is the
+            // semantic outcome. Cloud audit + WorkflowExecutor read .Ok / .RejectionCode.
+            return Ok(request.Id, request.Command, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: actuation dispatch failure for {Command}", request.Command);
+            return Error(request.Id, request.Command, "actuation_dispatch_exception", ex.Message);
+        }
     }
 
     private async Task<IpcResponse> HandleIntentCursorAsync(IpcRequest request, CancellationToken ct)

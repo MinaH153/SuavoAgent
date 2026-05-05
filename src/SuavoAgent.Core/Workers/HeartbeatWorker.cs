@@ -8,12 +8,15 @@ using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Models;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Core.ActionGrammarV1;
+using SuavoAgent.Core.ActionGrammarV1.Workflows;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Health;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
+using SuavoAgent.Core.Mission;
 using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.Receipts;
 using SuavoAgent.Core.State;
@@ -43,7 +46,9 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly IHealthSignals? _healthSignals;
     private readonly HealthCompositeCalculator? _healthCompositeCalculator;
     private readonly CloudAuthRecoveryCoordinator? _cloudAuthRecovery;
+    private readonly WorkflowExecutor? _workflowExecutor;
     private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
+    private readonly SemaphoreSlim _workflowSemaphore = new(1, 1);
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
@@ -80,6 +85,7 @@ public sealed class HeartbeatWorker : BackgroundService
         _healthSignals = serviceProvider.GetService<IHealthSignals>();
         _healthCompositeCalculator = serviceProvider.GetService<HealthCompositeCalculator>();
         _cloudAuthRecovery = serviceProvider.GetService<CloudAuthRecoveryCoordinator>();
+        _workflowExecutor = serviceProvider.GetService<WorkflowExecutor>();
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -741,6 +747,9 @@ public sealed class HeartbeatWorker : BackgroundService
                 case "transition_auto_rule_approval":
                     HandleTransitionAutoRuleApproval(scEl);
                     break;
+                case "run_workflow":
+                    _ = Task.Run(() => HandleRunWorkflowAsync(scEl, cmd, ct), ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -817,6 +826,117 @@ public sealed class HeartbeatWorker : BackgroundService
 
         await AckAsync(true, result.Response, null);
     }
+
+    private async Task HandleRunWorkflowAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        if (_workflowExecutor is null)
+        {
+            _logger.LogWarning("run_workflow received but WorkflowExecutor not registered (DI gap)");
+            await AckAsync(false, null, "workflow_executor_unavailable");
+            return;
+        }
+
+        if (!await _workflowSemaphore.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            _logger.LogWarning("run_workflow rejected: another workflow is already running");
+            await AckAsync(false, null, "workflow_already_running");
+            return;
+        }
+
+        try
+        {
+            WorkflowDefinitionDto? definition;
+            try { definition = dataEl.Deserialize<WorkflowDefinitionDto>(); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "run_workflow: malformed payload");
+                await AckAsync(false, null, "malformed_workflow_payload");
+                return;
+            }
+
+            if (definition is null
+                || string.IsNullOrEmpty(definition.WorkflowRunId)
+                || string.IsNullOrEmpty(definition.WorkflowName)
+                || definition.Steps is null
+                || definition.Steps.Count == 0)
+            {
+                await AckAsync(false, null, "invalid_workflow_definition");
+                return;
+            }
+
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: definition.WorkflowRunId,
+                EventType: "workflow_run_received",
+                FromState: "queued",
+                ToState: "starting",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: $"workflow={definition.WorkflowName}@{definition.WorkflowVersion} steps={definition.Steps.Count}"));
+
+            var charter = _serviceProvider.GetService<MissionCharter>() ?? BuildEphemeralCharter();
+            var auditChain = _serviceProvider.GetService<SuavoAgent.Core.Audit.AuditChain>()
+                ?? new SuavoAgent.Core.Audit.AuditChain();
+
+            var pharmacyId = _options.PharmacyId ?? charter.PharmacyId;
+            var actor = $"agent:{_options.AgentId ?? "?"}";
+
+            var execResult = await _workflowExecutor.ExecuteAsync(
+                definition,
+                _serviceProvider,
+                auditChain,
+                charter,
+                pharmacyId,
+                actor,
+                ct).ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "run_workflow run={RunId} outcome={Outcome} steps={Done}/{Total} reason={Reason}",
+                definition.WorkflowRunId,
+                execResult.Outcome,
+                execResult.StepsCompleted,
+                execResult.TotalSteps,
+                execResult.AbortReason);
+
+            await AckAsync(
+                ok: execResult.Outcome == WorkflowRunOutcome.Completed,
+                result: new { run_id = definition.WorkflowRunId, outcome = execResult.Outcome.ToString(), steps_completed = execResult.StepsCompleted },
+                err: execResult.AbortReason);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "run_workflow execution exception");
+            await AckAsync(false, null, ex.Message);
+        }
+        finally
+        {
+            _workflowSemaphore.Release();
+        }
+    }
+
+    private MissionCharter BuildEphemeralCharter() => new(
+        CharterId: Guid.Empty,
+        PharmacyId: _options.PharmacyId ?? "",
+        Version: 0,
+        EffectiveFrom: DateTimeOffset.UtcNow,
+        Objectives: Array.Empty<MissionObjective>(),
+        Constraints: Array.Empty<MissionConstraint>(),
+        PriorityOrdering: new MissionPriorityOrdering(Array.Empty<string>()),
+        Tolerance: new MissionToleranceThresholds(0, 0, 0.0),
+        SignedByOperator: "agent_ephemeral",
+        SignedAt: DateTimeOffset.UtcNow);
 
     private async Task HandleComputerUseObserveProposeAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
     {
