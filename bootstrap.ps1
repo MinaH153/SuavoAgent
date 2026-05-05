@@ -50,7 +50,7 @@ $dataDir = "$env:ProgramData\SuavoAgent"
 # Single source of truth for installerVersion in the consent receipt. Bump
 # alongside any tag release so the audit trail reflects which bootstrap
 # wrote the receipt. Two prior literals (3.8.0 / 3.9.1) were left stale.
-$bootstrapVersion = "3.13.13"
+$bootstrapVersion = "3.14.1"
 # Persisted across reinstalls. The cleanup path keeps these so consent +
 # learned-state survive a re-run (Trip A 2026-04-25: pharmacist re-typed
 # consent 4x because state.db AND consent-receipt.json were both wiped).
@@ -375,6 +375,13 @@ if ($Repair) {
             "NT AUTHORITY\LOCAL SERVICE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
         $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
             "NT AUTHORITY\NETWORK SERVICE", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+        # Phase 5.6: Helper now spawns into the user's interactive session via
+        # CreateProcessAsUser. The .NET single-file apphost calls realpath() on
+        # SuavoAgent.Helper.exe at startup, which opens the EXE as the running
+        # user; without Users:RX the open fails and Helper crashes with
+        # "Failed to resolve full path of the current executable" (Event 1023).
+        $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "BUILTIN\Users", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
         Set-Acl $installDir $dirAcl
         Write-Host "  Install dir ACLs re-applied" -ForegroundColor Green
     } catch {
@@ -387,6 +394,34 @@ if ($Repair) {
         @{ Name = 'SuavoAgent.Broker';   Exe = 'SuavoAgent.Broker.exe';   Account = 'LocalSystem';                 Depends = 'SuavoAgent.Core';  Desc = 'Suavo pharmacy agent - session broker (LocalSystem for CreateProcessAsUser)' },
         @{ Name = 'SuavoAgent.Watchdog'; Exe = 'SuavoAgent.Watchdog.exe'; Account = 'LocalSystem';                 Depends = $null;              Desc = 'Suavo pharmacy agent - process watchdog' }
     )
+
+    # Phase 5.6: re-pin dataDir ACL to include INTERACTIVE so Helper running as
+    # the logged-in user can read state.db/state.key/configs and write logs.
+    # Pre-3.14.1 installs locked dataDir to services-only, which crashed Helper
+    # on startup (.NET 1023 "Failed to resolve full path" / log open denied).
+    if (Test-Path $dataDir) {
+        try {
+            $repairDataAcl = Get-Acl $dataDir
+            $repairDataAcl.SetAccessRuleProtection($true, $false)
+            $repairRules = @(
+                (New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    "NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
+                (New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    "BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
+                (New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    "NT AUTHORITY\LOCAL SERVICE", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
+                (New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    "NT AUTHORITY\NETWORK SERVICE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")),
+                (New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    "NT AUTHORITY\INTERACTIVE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow"))
+            )
+            foreach ($rule in $repairRules) { $repairDataAcl.AddAccessRule($rule) }
+            Set-Acl $dataDir $repairDataAcl
+            Write-Host "  Data dir ACL re-pinned with INTERACTIVE Modify (Phase 5.6)" -ForegroundColor Green
+        } catch {
+            Write-Host "  Data dir ACL re-pin failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
     foreach ($spec in $serviceSpecs) {
         $exePath = Join-Path $installDir $spec.Exe
         if (-not (Test-Path $exePath)) {
@@ -1042,8 +1077,18 @@ try {
 }
 
 # HIPAA 164.312(a)(2)(iv) -- lock down data dir to SYSTEM + LocalService +
-# NetworkService (Broker) + Administrators. Runtime service account lacks
-# WRITE_DAC so this is the one-and-only place the DACL gets pinned.
+# NetworkService (Broker) + Administrators + INTERACTIVE (Helper, Phase 5.6).
+# Runtime service account lacks WRITE_DAC so this is the one-and-only place
+# the DACL gets pinned.
+#
+# INTERACTIVE (S-1-5-4) is added because Phase 5.6 now spawns Helper into the
+# logged-in user's session via CreateProcessAsUser. Helper needs Modify to
+# read state.db / state.key / vision.json / pioneerrx.json and to write
+# helper-*.log entries. INTERACTIVE only applies to currently-logged-in
+# console users -- services in Session 0 still hit their explicit rules
+# above, preserving the HIPAA threat model. Pre-3.14.1 installs lacked this
+# rule, which crashed Helper at startup with .NET Event 1023 "Failed to
+# resolve full path of the current executable" (verified Queen 2026-05-05).
 try {
     $dataAcl = Get-Acl $dataDir
     $dataAcl.SetAccessRuleProtection($true, $false) # strip inherited rules
@@ -1055,7 +1100,9 @@ try {
         (New-Object System.Security.AccessControl.FileSystemAccessRule(
             "NT AUTHORITY\LOCAL SERVICE", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
         (New-Object System.Security.AccessControl.FileSystemAccessRule(
-            "NT AUTHORITY\NETWORK SERVICE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow"))
+            "NT AUTHORITY\NETWORK SERVICE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")),
+        (New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "NT AUTHORITY\INTERACTIVE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow"))
     )
     foreach ($rule in $rules) { $dataAcl.AddAccessRule($rule) }
     Set-Acl $dataDir $dataAcl
@@ -1526,6 +1573,15 @@ Write-Ok "SuavoAgent.Watchdog service registered"
 # Lock down install directory. NetworkService needs ReadAndExecute to load
 # and launch SuavoAgent.Broker.exe -- omitting it causes SCM error 7000
 # ("system cannot find the file specified") when Broker tries to start.
+#
+# Phase 5.6: Users:RX added because Helper now spawns into the user's
+# interactive session via CreateProcessAsUser. The .NET single-file apphost
+# calls realpath() / GetFinalPathNameByHandleW on SuavoAgent.Helper.exe at
+# startup, which opens the EXE as the running user; without Users:RX the
+# open fails with ACCESS_DENIED and Helper crashes immediately with
+# .NET Event 1023 "Failed to resolve full path of the current executable".
+# Field-confirmed Queen 2026-05-05 (helper PIDs 11588...1840 all died
+# within milliseconds before this rule was added).
 $dirAcl = Get-Acl $installDir
 $dirAcl.SetAccessRuleProtection($true, $false)
 $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
@@ -1536,6 +1592,8 @@ $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccess
     "NT AUTHORITY\LOCAL SERVICE", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")))
 $dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
     "NT AUTHORITY\NETWORK SERVICE", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+$dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    "BUILTIN\Users", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
 Set-Acl $installDir $dirAcl
 
 # Start services. Start-Service's 30s default wait is tight for cold starts
