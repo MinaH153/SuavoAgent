@@ -69,6 +69,7 @@ public sealed class IpcCommandServer : IDisposable
     private readonly Func<bool>? _isPmsForeground;
     private readonly IntentCursorController? _intentCursor;
     private readonly ActuationCommandHandler? _actuation;
+    private readonly PioneerRxCommandHandler? _pioneerRx;
     private readonly ILogger _logger;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
@@ -81,7 +82,8 @@ public sealed class IpcCommandServer : IDisposable
         FileLocatorService? locator = null,
         Func<bool>? isPmsForeground = null,
         IntentCursorController? intentCursor = null,
-        ActuationCommandHandler? actuation = null)
+        ActuationCommandHandler? actuation = null,
+        PioneerRxCommandHandler? pioneerRx = null)
     {
         _pipeName = pipeName;
         _pricing = pricing;
@@ -95,6 +97,7 @@ public sealed class IpcCommandServer : IDisposable
         _isPmsForeground = isPmsForeground;
         _intentCursor = intentCursor;
         _actuation = actuation;
+        _pioneerRx = pioneerRx;
         _logger = logger;
     }
 
@@ -191,8 +194,33 @@ public sealed class IpcCommandServer : IDisposable
                 or ActuationIpcCommands.PressKeys
                 or ActuationIpcCommands.LaunchSandboxApp
                 => HandleActuationAsync(request, ct),
+            PioneerRxActuationIpcCommands.Click
+                or PioneerRxActuationIpcCommands.TypeText
+                or PioneerRxActuationIpcCommands.Query
+                or PioneerRxActuationIpcCommands.WritebackRxDelivery
+                => HandlePioneerRxActuationAsync(request, ct),
             _ => Task.FromResult(Error(request.Id, request.Command, "unknown_command", $"Unknown command: {request.Command}"))
         };
+    }
+
+    private async Task<IpcResponse> HandlePioneerRxActuationAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (_pioneerRx is null)
+        {
+            return Error(request.Id, request.Command, "pioneerrx_unavailable",
+                "Helper started without PioneerRxCommandHandler — drop pioneerrx.json into ProgramData\\SuavoAgent and restart");
+        }
+        try
+        {
+            var result = await _pioneerRx.HandleAsync(request.Command, request.Data, ct).ConfigureAwait(false);
+            var payload = JsonSerializer.SerializeToElement(result);
+            return Ok(request.Id, request.Command, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: pioneerrx dispatch failure for {Command}", request.Command);
+            return Error(request.Id, request.Command, "pioneerrx_dispatch_exception", ex.Message);
+        }
     }
 
     private async Task<IpcResponse> HandleActuationAsync(IpcRequest request, CancellationToken ct)

@@ -86,15 +86,18 @@ try
     // Ctrl+Shift+Esc hotkey on dedicated STA threads.
     var actuationConfig = ActuationBootstrap.LoadConfig(Log.Logger);
     var actuationGate = new ActuationGate(actuationConfig, Log.Logger);
+    var pioneerRxConfig = PioneerRxBootstrap.LoadConfig(Log.Logger);
     SendInputDriver? sendInputDriver = null;
     UiaLabelResolver? uiaResolver = null;
     ActuationCommandHandler? actuationHandler = null;
+    PioneerRxCommandHandler? pioneerRxHandler = null;
     ActuationRuntime? actuationRuntime = null;
     if (OperatingSystem.IsWindows())
     {
         sendInputDriver = new SendInputDriver(actuationGate, actuationConfig, Log.Logger);
         uiaResolver = new UiaLabelResolver(Log.Logger);
         actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger);
+        pioneerRxHandler = new PioneerRxCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, pioneerRxConfig, Log.Logger);
         var observer = new UserInputObserver(actuationGate, Log.Logger);
         var hotkey = new HotkeyKillSwitch(actuationGate, Log.Logger);
         actuationRuntime = new ActuationRuntime(actuationGate, observer, hotkey, Log.Logger);
@@ -108,7 +111,8 @@ try
         isPmsForeground: () => SuavoAgent.Helper.SystemObservers.ForegroundGuard
             .IsPidForeground(pioneer.ProcessId),
         intentCursor: intentCursor,
-        actuation: actuationHandler);
+        actuation: actuationHandler,
+        pioneerRx: pioneerRxHandler);
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
