@@ -54,14 +54,16 @@ public sealed class HotkeyKillSwitch : IDisposable
 
     private readonly ActuationGate _gate;
     private readonly ILogger _logger;
+    private readonly bool _requireRegistration;
     private bool _registered;
 
     public event Action? KillSwitchActivated;
 
-    public HotkeyKillSwitch(ActuationGate gate, ILogger logger)
+    public HotkeyKillSwitch(ActuationGate gate, ILogger logger, bool requireRegistration = true)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<HotkeyKillSwitch>();
+        _requireRegistration = requireRegistration;
     }
 
     /// <summary>
@@ -87,10 +89,20 @@ public sealed class HotkeyKillSwitch : IDisposable
             const int VK_F12 = 0x7B;
             if (!RegisterHotKey(IntPtr.Zero, HotkeyId, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_F12))
             {
-                _logger.Error(
-                    "RegisterHotKey fallback also failed (Win32 err={Err}); kill switch unavailable, tripping gate immediately",
-                    Marshal.GetLastWin32Error());
-                _gate.TripKillSwitch("hotkey_register_failed");
+                var fallbackErr = Marshal.GetLastWin32Error();
+                if (_requireRegistration)
+                {
+                    _logger.Error(
+                        "RegisterHotKey fallback also failed (Win32 err={Err}); kill switch unavailable, tripping gate immediately (RequireKillSwitchHotkey=true, fail-closed)",
+                        fallbackErr);
+                    _gate.TripKillSwitch("hotkey_register_failed");
+                    return;
+                }
+                _logger.Warning(
+                    "RegisterHotKey fallback also failed (Win32 err={Err}); local hotkey unavailable but RequireKillSwitchHotkey=false — gate stays open, dashboard ABORT is the kill path",
+                    fallbackErr);
+                // Run a no-op pump so the thread stays alive matching prior contract.
+                while (!ct.IsCancellationRequested) Thread.Sleep(200);
                 return;
             }
         }

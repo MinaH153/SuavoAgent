@@ -20,6 +20,19 @@ public sealed record ActuationConfig
     public int DefaultPerKeyDelayMs { get; init; } = 25;
     public int DefaultInterChordDelayMs { get; init; } = 80;
 
+    /// <summary>
+    /// When true (default), failure to register the local Ctrl+Shift+Esc /
+    /// Ctrl+Shift+F12 hotkey trips the gate immediately (fail-closed). The
+    /// pre-build decision (locked 2026-05-02) requires both local hotkey AND
+    /// dashboard ABORT for safety. When the agent runs in Session 0 (Windows
+    /// service context — LocalService/NetworkService), RegisterHotKey fails
+    /// because Session 0 has no interactive desktop. Sandbox-tier installs
+    /// can flip this to false; cloud ABORT remains the kill path. Production
+    /// installs should keep this true and fix the spawning flow so Helper
+    /// runs in the user's interactive session.
+    /// </summary>
+    public bool RequireKillSwitchHotkey { get; init; } = true;
+
     public static ActuationConfig SafeDefault() => new()
     {
         Enabled = false,
@@ -28,5 +41,6 @@ public sealed record ActuationConfig
         DefaultUiaTimeout = TimeSpan.FromSeconds(8),
         DefaultPerKeyDelayMs = 25,
         DefaultInterChordDelayMs = 80,
+        RequireKillSwitchHotkey = true,
     };
 }

@@ -99,7 +99,7 @@ try
         actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger);
         pioneerRxHandler = new PioneerRxCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, pioneerRxConfig, Log.Logger);
         var observer = new UserInputObserver(actuationGate, Log.Logger);
-        var hotkey = new HotkeyKillSwitch(actuationGate, Log.Logger);
+        var hotkey = new HotkeyKillSwitch(actuationGate, Log.Logger, requireRegistration: actuationConfig.RequireKillSwitchHotkey);
         actuationRuntime = new ActuationRuntime(actuationGate, observer, hotkey, Log.Logger);
         actuationRuntime.Start();
     }

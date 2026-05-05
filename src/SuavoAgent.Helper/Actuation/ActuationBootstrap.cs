@@ -30,7 +30,8 @@ public static class ActuationBootstrap
         int? UserInputPauseSeconds,
         int? DefaultUiaTimeoutMs,
         int? DefaultPerKeyDelayMs,
-        int? DefaultInterChordDelayMs);
+        int? DefaultInterChordDelayMs,
+        bool? RequireKillSwitchHotkey);
 
     public static ActuationConfig LoadConfig(ILogger logger)
     {
@@ -75,6 +76,7 @@ public static class ActuationBootstrap
                 DefaultInterChordDelayMs = parsed.DefaultInterChordDelayMs is { } icd
                     ? Math.Clamp(icd, 0, 1000)
                     : safe.DefaultInterChordDelayMs,
+                RequireKillSwitchHotkey = parsed.RequireKillSwitchHotkey ?? safe.RequireKillSwitchHotkey,
             };
         }
         catch (Exception ex)
