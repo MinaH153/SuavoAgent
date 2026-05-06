@@ -50,7 +50,7 @@ $dataDir = "$env:ProgramData\SuavoAgent"
 # Single source of truth for installerVersion in the consent receipt. Bump
 # alongside any tag release so the audit trail reflects which bootstrap
 # wrote the receipt. Two prior literals (3.8.0 / 3.9.1) were left stale.
-$bootstrapVersion = "3.14.1"
+$bootstrapVersion = "3.14.2"
 # Persisted across reinstalls. The cleanup path keeps these so consent +
 # learned-state survive a re-run (Trip A 2026-04-25: pharmacist re-typed
 # consent 4x because state.db AND consent-receipt.json were both wiped).
@@ -60,7 +60,7 @@ $bootstrapVersion = "3.14.1"
 # when state.key is missing. If we keep state.db but wipe state.key, the new
 # key won't decrypt the existing DB and AgentStateDb wipes it as 'unreadable'.
 # Codex flagged this as a CRITICAL state-loss risk on PR #23 review.
-$dataDirKeepList = @('logs', 'consent-receipt.json', 'state.db', 'state.key', 'download-cache')
+$dataDirKeepList = @('logs', 'consent-receipt.json', 'state.db', 'state.key', 'download-cache', 'actuation.json', 'pioneerrx.json', 'vision.json')
 $script:BootstrapStartedAt = Get-Date
 $script:CurrentInstallStage = "bootstrap_start"
 $script:InstallTelemetryToken = $null
