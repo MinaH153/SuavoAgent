@@ -288,6 +288,38 @@ try
         multiAppUia.OnAppFocused(processName, null); // no raw titles
     });
 
+    // Pre-flight: skip the entire attach polling loop on hosts where
+    // PioneerRx isn't installed. Pre-2026-05-06 this loop spammed 30
+    // "PioneerRx not found" warnings every 5 minutes on no-PMS sandboxes
+    // (Queen, dev workstations) and forced Helper to exit-and-respawn
+    // for no operational reason. Detection is path+registry only — never
+    // process-state — so a PMS box that simply hasn't started PioneerRx
+    // yet still enters the polling loop and waits, as designed.
+    if (!PioneerRxInstallDetector.IsInstalled(Log.Logger))
+    {
+        Log.Information(
+            "PioneerRx not installed on this host — skipping attach polling. " +
+            "Helper remains alive for IPC + actuation runtime + observers, " +
+            "but PioneerRx-specific behavior is disabled.");
+        await ipcClient.TrySendAsync(
+            "pioneer_not_installed",
+            System.Text.Json.JsonSerializer.Serialize(new { reason = "absent_from_host" }),
+            cts.Token);
+        // Park here until cancellation. Helper does NOT exit — Broker
+        // would respawn it and we'd loop forever. Other parts of Helper
+        // (hotkey pump, IPC server, ResourceBudgetGuard, observers) are
+        // already running on background tasks at this point.
+        try
+        {
+            await Task.Delay(Timeout.Infinite, cts.Token);
+        }
+        catch (TaskCanceledException)
+        {
+            // Normal shutdown path.
+        }
+        return;
+    }
+
     // Retry attachment — PioneerRx may not be running when Helper starts
     while (!cts.Token.IsCancellationRequested && !attached)
     {
