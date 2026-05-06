@@ -163,23 +163,33 @@ public class RxDetectionWorkerTests : IDisposable
         var serializedCandidate = candidate.GetRawText();
         var expectedHash = PhiScrubber.HmacHash("12345", "pharmacy-salt");
 
-        Assert.Equal(expectedHash, candidate.GetProperty("sourceExternalKeyHash").GetString());
-        Assert.Equal("hmac_sha256_rx_number", candidate.GetProperty("sourceExternalKeyKind").GetString());
+        Assert.Equal(expectedHash, candidate.GetProperty("rxHash").GetString());
         Assert.False(candidate.TryGetProperty("rxNumber", out _));
+        Assert.False(candidate.TryGetProperty("sourceExternalKeyHash", out _));
         Assert.DoesNotContain("12345", serializedCandidate);
-        Assert.Equal("sql", candidate.GetProperty("source").GetString());
-        Assert.Equal("pioneerrx.sql.metadata.v1", candidate.GetProperty("schemaSignature").GetString());
-        var localEvidenceId = candidate.GetProperty("localEvidenceId").GetString();
+        Assert.DoesNotContain("Lisinopril", serializedCandidate);
+        Assert.Equal(1, candidate.GetProperty("schemaVersion").GetInt32());
+
+        var medication = candidate.GetProperty("medication");
+        Assert.Equal(PhiScrubber.HmacHash("lisinopril 10mg", "pharmacy-salt"), medication.GetProperty("nameHash").GetString());
+        Assert.Equal("00093-7180-01", medication.GetProperty("ndc").GetString());
+        Assert.True(medication.GetProperty("isControlled").GetBoolean());
+        Assert.Equal(2, medication.GetProperty("drugSchedule").GetInt32());
+        Assert.True(medication.GetProperty("patientIdRequired").GetBoolean());
+        Assert.Equal(30, medication.GetProperty("daysSupply").GetInt32());
+
+        var provenance = candidate.GetProperty("provenance");
+        Assert.Equal("sql", provenance.GetProperty("extractionMethod").GetString());
+        Assert.Equal("PioneerRx", provenance.GetProperty("pms").GetString());
+        Assert.Equal("pioneerrx.sql.metadata.v1", provenance.GetProperty("schemaSignature").GetString());
+        var localEvidenceId = provenance.GetProperty("evidenceId").GetString();
         Assert.Matches("^rxh-[a-f0-9]{16}-[0-9]{10}$", localEvidenceId);
         Assert.DoesNotContain("12345", localEvidenceId);
-        Assert.Equal("missing_patient_identity", candidate.GetProperty("warnings")[0].GetString());
-        Assert.Equal("missing_delivery_address", candidate.GetProperty("warnings")[1].GetString());
+        Assert.Equal("missingPatientIdentity", candidate.GetProperty("warnings")[0].GetString());
+        Assert.Equal("missingDeliveryAddress", candidate.GetProperty("warnings")[1].GetString());
+        Assert.Equal("missingZip5", candidate.GetProperty("warnings")[2].GetString());
         Assert.True(candidate.GetProperty("confidence").GetDouble() < 1.0);
-        Assert.True(candidate.GetProperty("isControlled").GetBoolean());
-        Assert.Equal(2, candidate.GetProperty("drugSchedule").GetInt32());
-        Assert.True(candidate.GetProperty("patientIdRequired").GetBoolean());
-        Assert.Equal(30, candidate.GetProperty("daysSupply").GetInt32());
-        Assert.True(candidate.GetProperty("provenance").TryGetProperty("sourceExternalKeyHash", out var rxProv));
+        Assert.True(candidate.GetProperty("fieldProvenance").TryGetProperty("rxHash", out var rxProv));
         Assert.Equal("sql", rxProv.GetProperty("source").GetString());
         Assert.Equal("phi-direct-hmac", rxProv.GetProperty("classification").GetString());
     }
@@ -209,12 +219,26 @@ public class RxDetectionWorkerTests : IDisposable
         var candidate = doc.RootElement
             .GetProperty("data")
             .GetProperty("rxOrderCandidates")[0];
+        var serializedCandidate = candidate.GetRawText();
 
         Assert.Empty(candidate.GetProperty("warnings").EnumerateArray());
         Assert.Equal(1.0d, candidate.GetProperty("confidence").GetDouble(), precision: 3);
-        Assert.Equal("Sarah", candidate.GetProperty("patientFirstName").GetString());
-        Assert.Equal("456 Oak Ave", candidate.GetProperty("deliveryAddress1").GetString());
-        Assert.True(candidate.GetProperty("provenance").TryGetProperty("patientFirstName", out var patientProv));
+        Assert.DoesNotContain("Sarah", serializedCandidate);
+        Assert.DoesNotContain("456 Oak Ave", serializedCandidate);
+        Assert.DoesNotContain("7605551234", serializedCandidate);
+        Assert.DoesNotContain("Metformin", serializedCandidate);
+
+        var patientDelivery = candidate.GetProperty("patientDelivery");
+        Assert.Equal(PhiScrubber.HmacHash("sarah m", "test-salt"), patientDelivery.GetProperty("nameHash").GetString());
+        Assert.Equal(PhiScrubber.HmacHash("456 oak ave", "test-salt"), patientDelivery.GetProperty("addressLine1Hash").GetString());
+        Assert.Equal(PhiScrubber.HmacHash("7605551234", "test-salt"), patientDelivery.GetProperty("phoneHash").GetString());
+        Assert.Equal("Victorville", patientDelivery.GetProperty("city").GetString());
+        Assert.Equal("CA", patientDelivery.GetProperty("state").GetString());
+        Assert.Equal("92392", patientDelivery.GetProperty("zip5").GetString());
+        Assert.False(patientDelivery.GetProperty("zip4Present").GetBoolean());
+        Assert.Empty(patientDelivery.GetProperty("missingAddressFlags").EnumerateArray());
+
+        Assert.True(candidate.GetProperty("fieldProvenance").TryGetProperty("patientDelivery.nameHash", out var patientProv));
         Assert.Equal("phi-direct", patientProv.GetProperty("classification").GetString());
         Assert.Equal("sql_patient_detail", patientProv.GetProperty("sourceDetail").GetString());
     }
@@ -260,8 +284,8 @@ public class RxDetectionWorkerTests : IDisposable
             .Select(w => w.GetString())
             .ToArray();
 
-        Assert.Contains("schema_canary_drift", warnings);
-        Assert.Contains("schema_canary_object", warnings);
+        Assert.Contains("schemaCanaryDrift", warnings);
+        Assert.Contains("schemaCanaryObject", warnings);
         Assert.True(candidate.GetProperty("confidence").GetDouble() < 1.0d);
     }
 

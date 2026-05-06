@@ -124,7 +124,12 @@ public sealed class RxDetectionWorker : BackgroundService
             var hmacSalt = _options.HmacSalt ?? "[no-hmac-salt]";
             var patientMap = await EnrichPatientDetailsAsync(readyRxs, hmacSalt, ct);
 
-            var json = SerializeRxBatch(readyRxs, hmacSalt, patientMap);
+            var json = SerializeRxBatch(
+                readyRxs,
+                hmacSalt,
+                patientMap,
+                pharmacyId: _options.PharmacyId,
+                agentInstallId: _options.AgentId);
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -169,7 +174,9 @@ public sealed class RxDetectionWorker : BackgroundService
                     result.Rxs,
                     hmacSalt,
                     patientMap,
-                    schemaVerification: result.PostflightVerification);
+                    schemaVerification: result.PostflightVerification,
+                    pharmacyId: _options.PharmacyId,
+                    agentInstallId: _options.AgentId);
                 if (!await TrySyncPayloadToCloudAsync(json, ct))
                     _stateDb.InsertUnsyncedBatch(json);
             }
@@ -237,7 +244,9 @@ public sealed class RxDetectionWorker : BackgroundService
                 detection.Rxs,
                 hmacSalt,
                 patientMap,
-                schemaVerification: detection.PostflightVerification);
+                schemaVerification: detection.PostflightVerification,
+                pharmacyId: _options.PharmacyId,
+                agentInstallId: _options.AgentId);
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -439,8 +448,13 @@ public sealed class RxDetectionWorker : BackgroundService
         IReadOnlyList<RxMetadata> rxs,
         string hmacSalt = "",
         IReadOnlyDictionary<string, RxPatientDetails>? patientDetails = null,
-        ContractVerification? schemaVerification = null)
+        ContractVerification? schemaVerification = null,
+        string? pharmacyId = null,
+        string? agentInstallId = null,
+        string? pmsVersion = null,
+        string hashKeyVersion = "local-hmac-v1")
     {
+        var scanWindowId = $"rxscan-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
         var candidates = rxs.Select(rx =>
         {
             var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
@@ -451,38 +465,44 @@ public sealed class RxDetectionWorker : BackgroundService
             const DetectionSource source = DetectionSource.Sql;
             const string schemaSignature = "pioneerrx.sql.metadata.v1";
             var localEvidenceId = BuildLocalEvidenceId(rxHash, rx.DetectedAt);
+            var patientDelivery = BuildPatientDelivery(pd, hmacSalt);
+            var fieldConfidence = BuildCandidateFieldConfidence(rx, pd);
+            var fieldProvenance = BuildCandidateProvenance(rx, pd, source, schemaSignature, localEvidenceId);
 
             return new RxOrderCandidate(
-                SourceExternalKeyHash: rxHash,
-                SourceExternalKeyKind: "hmac_sha256_rx_number",
-                MedicationDisplay: rx.DrugName,
-                Ndc: rx.Ndc,
-                Quantity: rx.Quantity,
-                FillNumber: rx.FillNumber,
-                DaysSupply: rx.DaysSupply,
-                StatusGuid: rx.StatusGuid.ToString(),
-                IsControlled: isControlled,
-                DrugSchedule: rx.DrugSchedule,
-                PatientIdRequired: isControlled && rx.DrugSchedule <= 3,
-                CounselingRequired: false,
-                Priority: rx.Priority,
-                TemperatureRequirement: rx.TemperatureRequirement,
-                DetectedAt: rx.DetectedAt,
-                Source: source,
+                RxHash: rxHash,
+                Medication: new RxOrderMedication(
+                    NameHash: HashPhi(rx.DrugName, hmacSalt),
+                    Ndc: rx.Ndc,
+                    Strength: null,
+                    Form: null,
+                    Quantity: rx.Quantity,
+                    DaysSupply: rx.DaysSupply,
+                    Refills: rx.FillNumber,
+                    IsControlled: isControlled,
+                    DrugSchedule: rx.DrugSchedule,
+                    PatientIdRequired: isControlled && rx.DrugSchedule <= 3,
+                    CounselingRequired: false,
+                    Priority: rx.Priority,
+                    TemperatureRequirement: rx.TemperatureRequirement),
+                PatientDelivery: patientDelivery,
+                Provenance: new RxOrderCandidateProvenance(
+                    PharmacyId: pharmacyId,
+                    AgentInstallId: agentInstallId,
+                    EvidenceId: localEvidenceId,
+                    Pms: "PioneerRx",
+                    PmsVersion: pmsVersion,
+                    ExtractionMethod: source,
+                    CapturedAtUtc: rx.DetectedAt,
+                    ScanWindowId: scanWindowId,
+                    SchemaSignature: schemaSignature,
+                    WindowSignature: null,
+                    HashKeyVersion: hashKeyVersion),
                 Confidence: confidence,
-                SchemaSignature: schemaSignature,
-                WindowSignature: null,
-                LocalEvidenceId: localEvidenceId,
-                Provenance: BuildCandidateProvenance(rx, pd, source, schemaSignature, localEvidenceId),
+                FieldConfidence: fieldConfidence,
+                FieldProvenance: fieldProvenance,
                 Warnings: warnings,
-                PatientFirstName: pd?.FirstName,
-                PatientLastInitial: pd?.LastInitial,
-                PatientPhone: pd?.Phone,
-                DeliveryAddress1: pd?.Address1,
-                DeliveryAddress2: pd?.Address2,
-                DeliveryCity: pd?.City,
-                DeliveryState: pd?.State,
-                DeliveryZip: pd?.Zip);
+                SchemaVersion: 1);
         }).ToArray();
 
         var payload = new
@@ -527,40 +547,122 @@ public sealed class RxDetectionWorker : BackgroundService
             ? PhiScrubber.HmacHash(rxNumber, hmacSalt)
             : PhiScrubber.HmacHash(rxNumber, "[no-hmac-salt]");
 
+    private static string? HashPhi(string? value, string hmacSalt)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var normalized = string.Join(
+            " ",
+            value.Trim().ToLowerInvariant().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return PhiScrubber.HmacHash(
+            normalized,
+            !string.IsNullOrEmpty(hmacSalt) ? hmacSalt : "[no-hmac-salt]");
+    }
+
+    private static RxOrderPatientDelivery BuildPatientDelivery(RxPatientDetails? pd, string hmacSalt)
+    {
+        var flags = BuildMissingAddressFlags(pd);
+        var zipDigits = new string((pd?.Zip ?? "").Where(char.IsDigit).Take(9).ToArray());
+        var zip5 = zipDigits.Length >= 5 ? zipDigits[..5] : null;
+        var zip4Present = zipDigits.Length >= 9;
+        var nameBasis = string.Join(" ", new[] { pd?.FirstName, pd?.LastInitial }
+            .Where(v => !string.IsNullOrWhiteSpace(v)));
+
+        return new RxOrderPatientDelivery(
+            NameHash: HashPhi(nameBasis, hmacSalt),
+            AddressLine1Hash: HashPhi(pd?.Address1, hmacSalt),
+            AddressLine2Hash: HashPhi(pd?.Address2, hmacSalt),
+            City: string.IsNullOrWhiteSpace(pd?.City) ? null : pd!.City!.Trim(),
+            State: string.IsNullOrWhiteSpace(pd?.State) ? null : pd!.State!.Trim().ToUpperInvariant(),
+            Zip5: zip5,
+            Zip4Present: zip4Present,
+            PhoneHash: HashPhi(pd?.Phone, hmacSalt),
+            MissingAddressFlags: flags);
+    }
+
     private static string BuildLocalEvidenceId(string rxHash, DateTimeOffset detectedAt)
     {
         var shortHash = rxHash.Length >= 16 ? rxHash[..16] : rxHash;
         return $"rxh-{shortHash}-{detectedAt.ToUnixTimeSeconds()}";
     }
 
-    private static List<string> BuildCandidateWarnings(
+    private static List<RxOrderCandidateWarning> BuildCandidateWarnings(
         RxPatientDetails? pd,
         ContractVerification? schemaVerification = null)
     {
-        var warnings = new List<string>();
+        var warnings = new List<RxOrderCandidateWarning>();
         if (string.IsNullOrWhiteSpace(pd?.FirstName) || string.IsNullOrWhiteSpace(pd?.LastInitial))
-            warnings.Add("missing_patient_identity");
+            warnings.Add(RxOrderCandidateWarning.MissingPatientIdentity);
         if (string.IsNullOrWhiteSpace(pd?.Address1) ||
             string.IsNullOrWhiteSpace(pd?.City) ||
             string.IsNullOrWhiteSpace(pd?.State) ||
             string.IsNullOrWhiteSpace(pd?.Zip))
         {
-            warnings.Add("missing_delivery_address");
+            warnings.Add(RxOrderCandidateWarning.MissingDeliveryAddress);
+        }
+        if (BuildMissingAddressFlags(pd).Contains(RxMissingAddressFlag.MissingZip5))
+        {
+            warnings.Add(RxOrderCandidateWarning.MissingZip5);
         }
         if (schemaVerification?.Severity == CanarySeverity.Warning)
         {
-            warnings.Add("schema_canary_drift");
+            warnings.Add(RxOrderCandidateWarning.SchemaCanaryDrift);
             foreach (var component in schemaVerification.DriftedComponents)
             {
                 var normalized = new string(component
                     .Where(ch => char.IsLetterOrDigit(ch) || ch == '_')
                     .Select(char.ToLowerInvariant)
                     .ToArray());
-                if (!string.IsNullOrWhiteSpace(normalized))
-                    warnings.Add($"schema_canary_{normalized}");
+                if (normalized == "object")
+                    warnings.Add(RxOrderCandidateWarning.SchemaCanaryObject);
+                else if (normalized == "column")
+                    warnings.Add(RxOrderCandidateWarning.SchemaCanaryColumn);
+                else if (normalized == "index")
+                    warnings.Add(RxOrderCandidateWarning.SchemaCanaryIndex);
+                else if (normalized == "type")
+                    warnings.Add(RxOrderCandidateWarning.SchemaCanaryType);
             }
         }
         return warnings;
+    }
+
+    private static List<RxMissingAddressFlag> BuildMissingAddressFlags(RxPatientDetails? pd)
+    {
+        var flags = new List<RxMissingAddressFlag>();
+        if (string.IsNullOrWhiteSpace(pd?.FirstName) || string.IsNullOrWhiteSpace(pd?.LastInitial))
+            flags.Add(RxMissingAddressFlag.MissingName);
+        if (string.IsNullOrWhiteSpace(pd?.Phone))
+            flags.Add(RxMissingAddressFlag.MissingPhone);
+        if (string.IsNullOrWhiteSpace(pd?.Address1))
+            flags.Add(RxMissingAddressFlag.MissingAddressLine1);
+        if (string.IsNullOrWhiteSpace(pd?.City))
+            flags.Add(RxMissingAddressFlag.MissingCity);
+        if (string.IsNullOrWhiteSpace(pd?.State))
+            flags.Add(RxMissingAddressFlag.MissingState);
+
+        var zipDigits = new string((pd?.Zip ?? "").Where(char.IsDigit).Take(9).ToArray());
+        if (zipDigits.Length < 5)
+            flags.Add(RxMissingAddressFlag.MissingZip5);
+
+        return flags;
+    }
+
+    private static Dictionary<string, double> BuildCandidateFieldConfidence(RxMetadata rx, RxPatientDetails? pd)
+    {
+        return new Dictionary<string, double>
+        {
+            ["rxHash"] = 1.0d,
+            ["medication.nameHash"] = string.IsNullOrWhiteSpace(rx.DrugName) ? 0.4d : 1.0d,
+            ["medication.ndc"] = string.IsNullOrWhiteSpace(rx.Ndc) ? 0.4d : 1.0d,
+            ["medication.quantity"] = rx.Quantity > 0 ? 1.0d : 0.4d,
+            ["medication.daysSupply"] = rx.DaysSupply > 0 ? 1.0d : 0.4d,
+            ["patientDelivery.nameHash"] =
+                string.IsNullOrWhiteSpace(pd?.FirstName) || string.IsNullOrWhiteSpace(pd?.LastInitial) ? 0.4d : 1.0d,
+            ["patientDelivery.addressLine1Hash"] = string.IsNullOrWhiteSpace(pd?.Address1) ? 0.4d : 1.0d,
+            ["patientDelivery.city"] = string.IsNullOrWhiteSpace(pd?.City) ? 0.4d : 1.0d,
+            ["patientDelivery.state"] = string.IsNullOrWhiteSpace(pd?.State) ? 0.4d : 1.0d,
+            ["patientDelivery.zip5"] = BuildMissingAddressFlags(pd).Contains(RxMissingAddressFlag.MissingZip5) ? 0.4d : 1.0d,
+            ["patientDelivery.phoneHash"] = string.IsNullOrWhiteSpace(pd?.Phone) ? 0.4d : 1.0d,
+        };
     }
 
     private static Dictionary<string, RxFieldProvenance> BuildCandidateProvenance(
@@ -588,32 +690,31 @@ public sealed class RxDetectionWorker : BackgroundService
 
         var provenance = new Dictionary<string, RxFieldProvenance>
         {
-            ["sourceExternalKeyHash"] = new(
+            ["rxHash"] = new(
                 Source: source,
                 SourceDetail: "sql_metadata",
                 Confidence: 1.0d,
                 Classification: "phi-direct-hmac",
                 EvidenceId: localEvidenceId,
                 Signature: schemaSignature),
-            ["medicationDisplay"] = SqlOperational(),
-            ["ndc"] = SqlOperational(),
-            ["quantity"] = SqlOperational(),
-            ["fillNumber"] = SqlOperational(),
-            ["daysSupply"] = SqlOperational(),
-            ["statusGuid"] = SqlOperational(),
-            ["drugSchedule"] = SqlOperational(rx.DrugSchedule.HasValue ? 1.0d : 0.4d),
+            ["medication.nameHash"] = SqlOperational(string.IsNullOrWhiteSpace(rx.DrugName) ? 0.4d : 1.0d),
+            ["medication.ndc"] = SqlOperational(string.IsNullOrWhiteSpace(rx.Ndc) ? 0.4d : 1.0d),
+            ["medication.quantity"] = SqlOperational(rx.Quantity > 0 ? 1.0d : 0.4d),
+            ["medication.refills"] = SqlOperational(),
+            ["medication.daysSupply"] = SqlOperational(rx.DaysSupply > 0 ? 1.0d : 0.4d),
+            ["medication.drugSchedule"] = SqlOperational(rx.DrugSchedule.HasValue ? 1.0d : 0.4d),
         };
 
         if (pd != null)
         {
-            provenance["patientFirstName"] = SqlPhi(string.IsNullOrWhiteSpace(pd.FirstName) ? 0.4d : 1.0d);
-            provenance["patientLastInitial"] = SqlPhi(string.IsNullOrWhiteSpace(pd.LastInitial) ? 0.4d : 1.0d);
-            provenance["patientPhone"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Phone) ? 0.4d : 1.0d);
-            provenance["deliveryAddress1"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Address1) ? 0.4d : 1.0d);
-            provenance["deliveryAddress2"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Address2) ? 0.7d : 1.0d);
-            provenance["deliveryCity"] = SqlPhi(string.IsNullOrWhiteSpace(pd.City) ? 0.4d : 1.0d);
-            provenance["deliveryState"] = SqlPhi(string.IsNullOrWhiteSpace(pd.State) ? 0.4d : 1.0d);
-            provenance["deliveryZip"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Zip) ? 0.4d : 1.0d);
+            provenance["patientDelivery.nameHash"] =
+                SqlPhi(string.IsNullOrWhiteSpace(pd.FirstName) || string.IsNullOrWhiteSpace(pd.LastInitial) ? 0.4d : 1.0d);
+            provenance["patientDelivery.phoneHash"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Phone) ? 0.4d : 1.0d);
+            provenance["patientDelivery.addressLine1Hash"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Address1) ? 0.4d : 1.0d);
+            provenance["patientDelivery.addressLine2Hash"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Address2) ? 0.7d : 1.0d);
+            provenance["patientDelivery.city"] = SqlPhi(string.IsNullOrWhiteSpace(pd.City) ? 0.4d : 1.0d);
+            provenance["patientDelivery.state"] = SqlPhi(string.IsNullOrWhiteSpace(pd.State) ? 0.4d : 1.0d);
+            provenance["patientDelivery.zip5"] = SqlPhi(BuildMissingAddressFlags(pd).Contains(RxMissingAddressFlag.MissingZip5) ? 0.4d : 1.0d);
         }
 
         return provenance;
