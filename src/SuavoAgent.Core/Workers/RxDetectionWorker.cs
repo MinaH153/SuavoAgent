@@ -453,7 +453,8 @@ public sealed class RxDetectionWorker : BackgroundService
         string? agentInstallId = null,
         string? pmsVersion = null,
         string hashKeyVersion = "local-hmac-v1",
-        DateTimeOffset? serializedAtUtc = null)
+        DateTimeOffset? serializedAtUtc = null,
+        bool includeLegacyDeliveryQueue = true)
     {
         var serializedAt = serializedAtUtc ?? DateTimeOffset.UtcNow;
         var scanWindowId = $"rxscan-{serializedAt.ToUnixTimeMilliseconds()}";
@@ -507,40 +508,47 @@ public sealed class RxDetectionWorker : BackgroundService
                 SchemaVersion: 1);
         }).ToArray();
 
+        var data = new Dictionary<string, object?>
+        {
+            ["rxOrderCandidates"] = candidates,
+            ["totalDetected"] = rxs.Count,
+            ["syncedAt"] = serializedAt.ToString("o")
+        };
+
+        if (includeLegacyDeliveryQueue)
+        {
+            data["rxDeliveryQueue"] = rxs.Select(rx =>
+            {
+                var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
+                var rxHash = HashRxNumber(rx.RxNumber, hmacSalt);
+                return new
+                {
+                    rxNumber = rxHash,
+                    drugName = rx.DrugName,
+                    ndc = rx.Ndc,
+                    dateFilled = rx.DateFilled?.ToString("o"),
+                    quantity = rx.Quantity,
+                    statusGuid = rx.StatusGuid.ToString(),
+                    detectedAt = rx.DetectedAt.ToString("o"),
+                    patientFirstName = pd?.FirstName,
+                    patientLastInitial = pd?.LastInitial,
+                    patientPhone = pd?.Phone,
+                    deliveryAddress1 = pd?.Address1,
+                    deliveryAddress2 = pd?.Address2,
+                    deliveryCity = pd?.City,
+                    deliveryState = pd?.State,
+                    deliveryZip = pd?.Zip
+                };
+            }).ToArray();
+        }
+
         var payload = new
         {
             snapshotType = "rx_delivery_queue",
-            data = new
-            {
-                rxOrderCandidates = candidates,
-                rxDeliveryQueue = rxs.Select(rx =>
-                {
-                    var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
-                    var rxHash = HashRxNumber(rx.RxNumber, hmacSalt);
-                    return new
-                    {
-                        rxNumber = rxHash,
-                        drugName = rx.DrugName,
-                        ndc = rx.Ndc,
-                        dateFilled = rx.DateFilled?.ToString("o"),
-                        quantity = rx.Quantity,
-                        statusGuid = rx.StatusGuid.ToString(),
-                        detectedAt = rx.DetectedAt.ToString("o"),
-                        patientFirstName = pd?.FirstName,
-                        patientLastInitial = pd?.LastInitial,
-                        patientPhone = pd?.Phone,
-                        deliveryAddress1 = pd?.Address1,
-                        deliveryAddress2 = pd?.Address2,
-                        deliveryCity = pd?.City,
-                        deliveryState = pd?.State,
-                        deliveryZip = pd?.Zip
-                    };
-                }).ToArray(),
-                totalDetected = rxs.Count,
-                syncedAt = serializedAt.ToString("o")
-            },
+            data,
             sqlConnected = true
         };
+
         return JsonSerializer.Serialize(payload, SyncPayloadJsonOptions);
     }
 

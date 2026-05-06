@@ -195,6 +195,52 @@ public class RxDetectionWorkerTests : IDisposable
     }
 
     [Fact]
+    public void SerializeRxBatch_CandidateOnlyMode_OmitsLegacyQueueAndPlainPhi()
+    {
+        var rxs = new List<RxMetadata>
+        {
+            new(
+                RxNumber: "RX-PLAIN-1001",
+                DrugName: "Cephalexin 500mg",
+                Ndc: "00093-3147-01",
+                DateFilled: DateTime.UtcNow,
+                Quantity: 28m,
+                StatusGuid: Guid.Parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+                DetectedAt: DateTimeOffset.Parse("2026-05-06T15:20:00+00:00"),
+                FillNumber: 0,
+                DaysSupply: 7)
+        };
+        var patientMap = new Dictionary<string, RxPatientDetails>
+        {
+            ["RX-PLAIN-1001"] = new("RX-PLAIN-1001", "Nora", "P", "6195552222",
+                "1234 Privacy Ln", "Unit 8", "San Diego", "CA", "92101")
+        };
+
+        var json = RxDetectionWorker.SerializeRxBatch(
+            rxs,
+            "candidate-only-salt",
+            patientMap,
+            includeLegacyDeliveryQueue: false);
+        var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var data = root.GetProperty("data");
+
+        Assert.Equal("rx_delivery_queue", root.GetProperty("snapshotType").GetString());
+        Assert.True(data.TryGetProperty("rxOrderCandidates", out var candidates));
+        Assert.Equal(1, candidates.GetArrayLength());
+        Assert.False(data.TryGetProperty("rxDeliveryQueue", out _));
+        Assert.Equal(1, data.GetProperty("totalDetected").GetInt32());
+
+        var payload = root.GetRawText();
+        Assert.DoesNotContain("RX-PLAIN-1001", payload);
+        Assert.DoesNotContain("Cephalexin", payload);
+        Assert.DoesNotContain("Nora", payload);
+        Assert.DoesNotContain("6195552222", payload);
+        Assert.DoesNotContain("1234 Privacy Ln", payload);
+        Assert.DoesNotContain("Unit 8", payload);
+    }
+
+    [Fact]
     public void SerializeRxBatch_CandidateIncludesPatientProvenanceAndFullConfidenceWhenDeliveryFieldsExist()
     {
         var rxs = new List<RxMetadata>
