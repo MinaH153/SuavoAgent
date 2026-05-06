@@ -1725,15 +1725,24 @@ public sealed class HeartbeatWorker : BackgroundService
     {
         if (_updateInProgress) return;
 
+        string? targetVersion = null;
+        string? targetChannel = null;
         try
         {
             var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
             var manifestStr = dataEl.TryGetProperty("manifest", out var m) ? m.GetString() : null;
             var signatureHex = dataEl.TryGetProperty("manifestSignature", out var sig) ? sig.GetString() : null;
+            targetChannel = dataEl.TryGetProperty("channel", out var ch) ? ch.GetString() : "stable";
 
             if (string.IsNullOrEmpty(manifestStr))
             {
                 _logger.LogWarning("Signed update command missing manifest — rejecting");
+                WriteUpdateHealthEvidence(
+                    "failed",
+                    targetVersion: null,
+                    lastErrorKind: "missing_manifest",
+                    consecutiveFailures: 1,
+                    channel: targetChannel);
                 return;
             }
 
@@ -1741,39 +1750,100 @@ public sealed class HeartbeatWorker : BackgroundService
             if (manifest is null)
             {
                 _logger.LogWarning("Signed update command has malformed manifest — rejecting");
+                WriteUpdateHealthEvidence(
+                    "failed",
+                    targetVersion: null,
+                    lastErrorKind: "malformed_manifest",
+                    consecutiveFailures: 1,
+                    channel: targetChannel);
                 return;
             }
+            targetVersion = manifest.Version;
 
             if (manifest.Version == _options.Version)
             {
                 _logger.LogDebug("Already running v{Version} — skipping update", manifest.Version);
+                WriteUpdateHealthEvidence(
+                    "current",
+                    targetVersion,
+                    lastErrorKind: null,
+                    consecutiveFailures: 0,
+                    channel: targetChannel);
                 return;
             }
 
             // Canary channel validation: only apply updates matching our assigned channel.
             // Cloud assigns channel (stable/canary/beta) via heartbeat response.
-            var targetChannel = dataEl.TryGetProperty("channel", out var ch) ? ch.GetString() : "stable";
             var myChannel = _lastUpdateChannel ?? _options.UpdateChannel;
             if (!string.Equals(targetChannel, myChannel, StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(targetChannel, "stable", StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogDebug("Update channel mismatch: target={Target}, mine={Mine} — skipping",
                     targetChannel, myChannel);
+                WriteUpdateHealthEvidence(
+                    "skipped_channel",
+                    targetVersion,
+                    lastErrorKind: null,
+                    consecutiveFailures: 0,
+                    channel: targetChannel);
                 return;
             }
 
             _updateInProgress = true;
             _logger.LogInformation("Signed package update: v{Version} ({Count} binaries)",
                 manifest.Version, 3);
+            WriteUpdateHealthEvidence(
+                "applying",
+                targetVersion,
+                lastErrorKind: null,
+                consecutiveFailures: 0,
+                channel: targetChannel);
 
             await SelfUpdater.TryApplyPackageUpdateAsync(manifest, signatureHex ?? "", _logger, ct);
             // If we get here, update failed (TryApplyPackageUpdateAsync exits on success)
+            WriteUpdateHealthEvidence(
+                "failed",
+                targetVersion,
+                lastErrorKind: "apply_returned_without_exit",
+                consecutiveFailures: 1,
+                channel: targetChannel);
             _updateInProgress = false;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Signed update command failed");
+            WriteUpdateHealthEvidence(
+                "failed",
+                targetVersion,
+                lastErrorKind: ex.GetType().Name,
+                consecutiveFailures: 1,
+                channel: targetChannel);
             _updateInProgress = false;
+        }
+    }
+
+    private void WriteUpdateHealthEvidence(
+        string status,
+        string? targetVersion,
+        string? lastErrorKind,
+        int consecutiveFailures,
+        string? channel)
+    {
+        try
+        {
+            RuntimeHealthEvidence.WriteUpdateHealth(
+                RuntimeHealthEvidence.UpdateHealthPath(),
+                status,
+                targetVersion,
+                DateTimeOffset.UtcNow,
+                status is "current" ? DateTimeOffset.UtcNow : null,
+                consecutiveFailures,
+                lastErrorKind,
+                channel ?? _lastUpdateChannel ?? _options.UpdateChannel);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Update health evidence write failed");
         }
     }
 

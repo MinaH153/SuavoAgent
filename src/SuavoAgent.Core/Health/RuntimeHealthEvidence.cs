@@ -10,7 +10,9 @@ public sealed record RuntimeHealthEvidencePayload(
     [property: JsonPropertyName("crashLogs")]
     IReadOnlyList<CrashLogEvidencePayload> CrashLogs,
     [property: JsonPropertyName("cloudAuth")]
-    CloudAuthHealthPayload CloudAuth);
+    CloudAuthHealthPayload CloudAuth,
+    [property: JsonPropertyName("update")]
+    UpdateHealthPayload Update);
 
 public sealed record ConfigSyncHealthPayload(
     [property: JsonPropertyName("present")]
@@ -60,6 +62,24 @@ public sealed record CloudAuthHealthPayload(
     [property: JsonPropertyName("restartRequested")]
     bool RestartRequested);
 
+public sealed record UpdateHealthPayload(
+    [property: JsonPropertyName("present")]
+    bool Present,
+    [property: JsonPropertyName("status")]
+    string Status,
+    [property: JsonPropertyName("targetVersion")]
+    string? TargetVersion,
+    [property: JsonPropertyName("lastAttemptAt")]
+    string? LastAttemptAt,
+    [property: JsonPropertyName("lastSuccessAt")]
+    string? LastSuccessAt,
+    [property: JsonPropertyName("consecutiveFailures")]
+    int ConsecutiveFailures,
+    [property: JsonPropertyName("lastErrorKind")]
+    string? LastErrorKind,
+    [property: JsonPropertyName("channel")]
+    string? Channel);
+
 public static class RuntimeHealthEvidence
 {
     public static string ProgramDataRoot =>
@@ -73,6 +93,9 @@ public static class RuntimeHealthEvidence
     public static string CloudAuthHealthPath(string? root = null) =>
         Path.Combine(root ?? ProgramDataRoot, "cloud-auth-health.json");
 
+    public static string UpdateHealthPath(string? root = null) =>
+        Path.Combine(root ?? ProgramDataRoot, "update-health.json");
+
     public static string LogsDirectory(string? root = null) =>
         Path.Combine(root ?? ProgramDataRoot, "logs");
 
@@ -80,7 +103,8 @@ public static class RuntimeHealthEvidence
         new(
             ReadConfigSyncHealth(ConfigSyncHealthPath(root)),
             ReadCrashLogs(LogsDirectory(root)),
-            ReadCloudAuthHealth(CloudAuthHealthPath(root)));
+            ReadCloudAuthHealth(CloudAuthHealthPath(root)),
+            ReadUpdateHealth(UpdateHealthPath(root)));
 
     public static ConfigSyncHealthPayload ReadConfigSyncHealth(string path)
     {
@@ -178,6 +202,49 @@ public static class RuntimeHealthEvidence
         }
     }
 
+    public static UpdateHealthPayload ReadUpdateHealth(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return new(
+                    Present: false,
+                    Status: "missing",
+                    TargetVersion: null,
+                    LastAttemptAt: null,
+                    LastSuccessAt: null,
+                    ConsecutiveFailures: 0,
+                    LastErrorKind: null,
+                    Channel: null);
+            }
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            return new(
+                Present: true,
+                Status: ReadString(root, "status") ?? "unknown",
+                TargetVersion: ReadNullableString(root, "targetVersion"),
+                LastAttemptAt: ReadString(root, "lastAttemptAt"),
+                LastSuccessAt: ReadNullableString(root, "lastSuccessAt"),
+                ConsecutiveFailures: ReadInt(root, "consecutiveFailures"),
+                LastErrorKind: ReadNullableString(root, "lastErrorKind"),
+                Channel: ReadNullableString(root, "channel"));
+        }
+        catch
+        {
+            return new(
+                Present: true,
+                Status: "unreadable",
+                TargetVersion: null,
+                LastAttemptAt: null,
+                LastSuccessAt: null,
+                ConsecutiveFailures: 0,
+                LastErrorKind: "health_file_unreadable",
+                Channel: null);
+        }
+    }
+
     private static CrashLogEvidencePayload ReadCrashLog(string component, string path)
     {
         try
@@ -268,6 +335,39 @@ public static class RuntimeHealthEvidence
             recoveryAttempted,
             recoveryOutcome,
             restartRequested,
+        };
+
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(payload, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+        }));
+        File.Move(tmp, path, overwrite: true);
+    }
+
+    public static void WriteUpdateHealth(
+        string path,
+        string status,
+        string? targetVersion,
+        DateTimeOffset lastAttemptAt,
+        DateTimeOffset? lastSuccessAt,
+        int consecutiveFailures,
+        string? lastErrorKind,
+        string? channel)
+    {
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(dir))
+            Directory.CreateDirectory(dir);
+
+        var payload = new
+        {
+            status,
+            targetVersion,
+            lastAttemptAt = lastAttemptAt.ToString("o"),
+            lastSuccessAt = lastSuccessAt?.ToString("o"),
+            consecutiveFailures,
+            lastErrorKind,
+            channel,
         };
 
         var tmp = path + ".tmp";

@@ -116,6 +116,9 @@ public sealed class HealthSnapshotTests : IDisposable
             Assert.True(cloudAuth.GetProperty("recoveryAttempted").GetBoolean());
             Assert.Equal("http_404_Not_Found", cloudAuth.GetProperty("recoveryOutcome").GetString());
             Assert.False(cloudAuth.GetProperty("restartRequested").GetBoolean());
+            var update = runtime.GetProperty("update");
+            Assert.False(update.GetProperty("present").GetBoolean());
+            Assert.Equal("missing", update.GetProperty("status").GetString());
 
             var crash = runtime.GetProperty("crashLogs").EnumerateArray()
                 .Single(log => log.GetProperty("component").GetString() == "core");
@@ -126,6 +129,55 @@ public sealed class HealthSnapshotTests : IDisposable
             var serialized = snapshot.GetRawText();
             Assert.DoesNotContain("Jane Doe", serialized);
             Assert.DoesNotContain("System.Exception", serialized);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Take_Includes_UpdateHealthEvidence_WithoutErrorBody()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"suavo_runtime_health_{Guid.NewGuid():N}");
+        RuntimeHealthEvidence.WriteUpdateHealth(
+            RuntimeHealthEvidence.UpdateHealthPath(root),
+            status: "failed",
+            targetVersion: "v3.14.4",
+            lastAttemptAt: DateTimeOffset.Parse("2026-05-06T12:00:00+00:00"),
+            lastSuccessAt: null,
+            consecutiveFailures: 1,
+            lastErrorKind: "apply_returned_without_exit",
+            channel: "stable");
+
+        try
+        {
+            using var services = new ServiceCollection().BuildServiceProvider();
+            var options = new AgentOptions
+            {
+                AgentId = "agent-health-test",
+                Version = "test",
+                PharmacyId = "pharmacy-health-test",
+            };
+
+            var snapshot = new HealthSnapshot(
+                options,
+                _db,
+                services,
+                DateTimeOffset.UtcNow.AddSeconds(-5),
+                root).Take();
+
+            var update = snapshot
+                .GetProperty("runtimeHealth")
+                .GetProperty("update");
+            Assert.True(update.GetProperty("present").GetBoolean());
+            Assert.Equal("failed", update.GetProperty("status").GetString());
+            Assert.Equal("v3.14.4", update.GetProperty("targetVersion").GetString());
+            Assert.Equal("apply_returned_without_exit", update.GetProperty("lastErrorKind").GetString());
+
+            var serialized = snapshot.GetRawText();
+            Assert.DoesNotContain("System.Exception", serialized);
+            Assert.DoesNotContain("Jane Doe", serialized);
         }
         finally
         {
