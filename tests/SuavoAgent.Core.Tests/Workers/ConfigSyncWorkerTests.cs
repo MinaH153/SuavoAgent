@@ -123,11 +123,11 @@ public class ConfigSyncWorkerTests : IDisposable
 
         using var cts = new CancellationTokenSource();
         var task = worker.StartAsync(cts.Token);
-        await Task.Delay(250);
+        using var health = await WaitForHealthStatusAsync(_healthPath, "ok", TimeSpan.FromSeconds(5));
         cts.Cancel();
         try { await task; } catch (OperationCanceledException) { }
 
-        var root = JsonDocument.Parse(File.ReadAllText(_healthPath)).RootElement;
+        var root = health.RootElement;
         Assert.True(client.CallCount >= 2);
         Assert.Equal("ok", root.GetProperty("status").GetString());
         Assert.Equal(0, root.GetProperty("consecutiveFailures").GetInt32());
@@ -172,6 +172,42 @@ public class ConfigSyncWorkerTests : IDisposable
         // Worker should honor cancellation while sleeping between polls
         // without waiting the full configured interval.
         await task.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    private static async Task<JsonDocument> WaitForHealthStatusAsync(
+        string healthPath,
+        string expectedStatus,
+        TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        Exception? lastReadError = null;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(healthPath))
+            {
+                try
+                {
+                    var document = JsonDocument.Parse(await File.ReadAllTextAsync(healthPath));
+                    if (document.RootElement.TryGetProperty("status", out var status)
+                        && status.GetString() == expectedStatus)
+                    {
+                        return document;
+                    }
+
+                    document.Dispose();
+                }
+                catch (Exception ex) when (ex is IOException or JsonException)
+                {
+                    lastReadError = ex;
+                }
+            }
+
+            await Task.Delay(25);
+        }
+
+        throw new TimeoutException(
+            $"Timed out waiting for config-sync health status '{expectedStatus}'. Last read error: {lastReadError?.Message ?? "none"}");
     }
 
     // --- Helpers -------------------------------------------------------------
