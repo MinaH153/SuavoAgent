@@ -148,24 +148,34 @@ public sealed class RxDetectionWorker : BackgroundService
         var baseline = _stateDb.GetCanaryBaseline(pharmacyId, adapterType);
         if (baseline is null)
         {
-            _logger.LogInformation("Canary: no baseline — establishing from current schema");
-            var templateBaseline = _canarySource.GetContractBaseline();
+            _logger.LogInformation("Canary: no baseline — establishing from observed schema");
 
-            // Run full preflight to capture live observed hashes
-            var preflight = await _canarySource.VerifyPreflightAsync(templateBaseline, ct);
-            if (!preflight.IsValid && preflight.Severity == CanarySeverity.Critical)
+            ContractBaseline establishedBaseline;
+            try
             {
-                _logger.LogWarning("Canary: preflight CRITICAL during establishment — cannot establish baseline");
+                establishedBaseline = await _canarySource.EstablishBaselineAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Canary: baseline establishment failed — cannot verify PioneerRx schema");
                 return;
             }
 
-            // Persist baseline built from the template (hashes match current live schema)
-            _stateDb.UpsertCanaryBaseline(pharmacyId, templateBaseline);
+            var preflight = await _canarySource.VerifyPreflightAsync(establishedBaseline, ct);
+            if (!preflight.IsValid)
+            {
+                _logger.LogWarning(
+                    "Canary: observed baseline verification failed during establishment ({Severity})",
+                    preflight.Severity);
+                return;
+            }
+
+            _stateDb.UpsertCanaryBaseline(pharmacyId, establishedBaseline);
             _stateDb.AppendChainedAuditEntry(new AuditEntry(
                 pharmacyId, "canary", "", "established", "baseline_established"));
 
             // First batch syncs normally — no drift possible on establishment cycle
-            var result = await _canarySource.DetectWithCanaryAsync(templateBaseline, ct);
+            var result = await _canarySource.DetectWithCanaryAsync(establishedBaseline, ct);
             if (result.Rxs.Count > 0)
             {
                 var hmacSalt = _options.HmacSalt ?? "[no-hmac-salt]";

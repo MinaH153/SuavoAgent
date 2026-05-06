@@ -467,6 +467,15 @@ public class RxDetectionWorkerTests : IDisposable
         Assert.Contains("Trigger: \"rx_detection_worker.enrich_for_delivery_sync\"", source);
     }
 
+    [Fact]
+    public void CanaryDetection_EstablishesBaselineFromLiveObservedSchema()
+    {
+        var source = ReadRepoFile("src/SuavoAgent.Core/Workers/RxDetectionWorker.cs");
+
+        Assert.Contains("EstablishBaselineAsync(ct)", source);
+        Assert.DoesNotContain("templateBaseline", source);
+    }
+
     private static string ReadRepoFile(string relativePath)
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
