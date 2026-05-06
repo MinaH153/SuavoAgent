@@ -201,7 +201,10 @@ jobs:
           BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}"
           MANIFEST="${BASE_URL}/SuavoAgent.Core.exe|${CORE_SHA}|${BASE_URL}/SuavoAgent.Broker.exe|${BROKER_SHA}|${BASE_URL}/SuavoAgent.Helper.exe|${HELPER_SHA}|${VERSION_NUMERIC}|net8.0|win-x64"
           printf '%s' "$MANIFEST" > "update-manifest-${VERSION}.txt"
-          printf '%s' "$MANIFEST" | openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") | xxd -p -c 256 > "update-manifest-${VERSION}.sig"
+          DER_SIG="$(mktemp)"
+          printf '%s' "$MANIFEST" | openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") -out "$DER_SIG"
+          python3 ../scripts/ecdsa_der_to_p1363.py "$DER_SIG" "update-manifest-${VERSION}.sig"
+          test "$(wc -c < update-manifest-${VERSION}.sig)" -eq 128
 
       - name: Create tag
         env:

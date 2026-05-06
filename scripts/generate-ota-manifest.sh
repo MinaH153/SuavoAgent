@@ -30,6 +30,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 VERSION="${1:-}"
 TAG="${2:-v$VERSION}"
 
@@ -86,8 +88,15 @@ SIG_FILE="/tmp/update-manifest-$TAG.sig"
 printf '%s' "$MANIFEST" > "$MANIFEST_FILE"
 echo "Manifest written: $MANIFEST_FILE"
 
-# Sign with ECDSA P-256 + SHA-256 (agent verifies against embedded public key)
-printf '%s' "$MANIFEST" | openssl dgst -sha256 -sign "$KEY_PATH" | xxd -p -c 256 > "$SIG_FILE"
+# Sign with ECDSA P-256 + SHA-256. OpenSSL emits DER; the .NET updater
+# verifies raw IEEE P1363 r||s bytes, so convert before publishing.
+DER_SIG="$TMP_DIR/update-manifest.der.sig"
+printf '%s' "$MANIFEST" | openssl dgst -sha256 -sign "$KEY_PATH" -out "$DER_SIG"
+python3 "$SCRIPT_DIR/ecdsa_der_to_p1363.py" "$DER_SIG" "$SIG_FILE"
+if [ "$(wc -c < "$SIG_FILE")" -ne 128 ]; then
+    echo "ERROR: P1363 signature must be 128 hex chars" >&2
+    exit 1
+fi
 echo "Signature written: $SIG_FILE"
 
 echo ""
