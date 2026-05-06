@@ -452,9 +452,11 @@ public sealed class RxDetectionWorker : BackgroundService
         string? pharmacyId = null,
         string? agentInstallId = null,
         string? pmsVersion = null,
-        string hashKeyVersion = "local-hmac-v1")
+        string hashKeyVersion = "local-hmac-v1",
+        DateTimeOffset? serializedAtUtc = null)
     {
-        var scanWindowId = $"rxscan-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        var serializedAt = serializedAtUtc ?? DateTimeOffset.UtcNow;
+        var scanWindowId = $"rxscan-{serializedAt.ToUnixTimeMilliseconds()}";
         var candidates = rxs.Select(rx =>
         {
             var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
@@ -535,7 +537,7 @@ public sealed class RxDetectionWorker : BackgroundService
                     };
                 }).ToArray(),
                 totalDetected = rxs.Count,
-                syncedAt = DateTimeOffset.UtcNow.ToString("o")
+                syncedAt = serializedAt.ToString("o")
             },
             sqlConnected = true
         };
