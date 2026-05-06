@@ -50,7 +50,7 @@ $dataDir = "$env:ProgramData\SuavoAgent"
 # Single source of truth for installerVersion in the consent receipt. Bump
 # alongside any tag release so the audit trail reflects which bootstrap
 # wrote the receipt. Two prior literals (3.8.0 / 3.9.1) were left stale.
-$bootstrapVersion = "3.14.3"
+$bootstrapVersion = "3.14.5"
 # Persisted across reinstalls. The cleanup path keeps these so consent +
 # learned-state survive a re-run (Trip A 2026-04-25: pharmacist re-typed
 # consent 4x because state.db AND consent-receipt.json were both wiped).
