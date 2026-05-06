@@ -466,6 +466,22 @@ public class HeartbeatWorkerTests : IDisposable
         Assert.True(_db.GetAuditEntryCount() > countBefore);
     }
 
+    [Fact]
+    public async Task RepairCommand_CloudCommandAlias_RecordsAuditEntryEvenWhenBootstrapMissing()
+    {
+        var countBefore = _db.GetAuditEntryCount();
+
+        var response = BuildResponseJson("repair", new
+        {
+            commandId = "cmd-repair-1",
+            reason = "watchdog_critical"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.True(_db.GetAuditEntryCount() > countBefore);
+    }
+
     // ── Command Dispatch: acknowledge_drift ──
 
     [Fact]
@@ -608,6 +624,28 @@ public class HeartbeatWorkerTests : IDisposable
     {
         var before = _db.GetAuditEntryCount();
         var response = BuildResponseJson("show_intent_cursor", new
+        {
+            x = 120.0,
+            y = 240.0,
+            durationMs = 900,
+            commandId = "cmd-cursor-1",
+            requesterId = "operator-1"
+        });
+
+        await InvokeProcessAsync(response);
+
+        var sent = Assert.Single(_intentCursorClient.Requests);
+        Assert.Equal(120.0, sent.X.GetValueOrDefault());
+        Assert.Equal(240.0, sent.Y.GetValueOrDefault());
+        Assert.Equal(900, sent.DurationMs);
+        Assert.True(_db.GetAuditEntryCount() > before);
+    }
+
+    [Fact]
+    public async Task ShowCursor_CloudCommandAlias_RelaysToHelperAndAudits()
+    {
+        var before = _db.GetAuditEntryCount();
+        var response = BuildResponseJson("show_cursor", new
         {
             x = 120.0,
             y = 240.0,

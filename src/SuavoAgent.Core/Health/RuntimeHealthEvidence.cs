@@ -90,6 +90,9 @@ public static class RuntimeHealthEvidence
     public static string ConfigSyncHealthPath(string? root = null) =>
         Path.Combine(root ?? ProgramDataRoot, "config-sync-health.json");
 
+    public static string LegacyConfigSyncHealthPath(string? root = null) =>
+        Path.Combine(root ?? ProgramDataRoot, "config sync health.json");
+
     public static string CloudAuthHealthPath(string? root = null) =>
         Path.Combine(root ?? ProgramDataRoot, "cloud-auth-health.json");
 
@@ -101,10 +104,18 @@ public static class RuntimeHealthEvidence
 
     public static RuntimeHealthEvidencePayload Collect(string? root = null) =>
         new(
-            ReadConfigSyncHealth(ConfigSyncHealthPath(root)),
+            ReadConfigSyncHealth(ResolveConfigSyncHealthPath(root)),
             ReadCrashLogs(LogsDirectory(root)),
             ReadCloudAuthHealth(CloudAuthHealthPath(root)),
             ReadUpdateHealth(UpdateHealthPath(root)));
+
+    private static string ResolveConfigSyncHealthPath(string? root)
+    {
+        var canonical = ConfigSyncHealthPath(root);
+        return File.Exists(canonical)
+            ? canonical
+            : LegacyConfigSyncHealthPath(root);
+    }
 
     public static ConfigSyncHealthPayload ReadConfigSyncHealth(string path)
     {

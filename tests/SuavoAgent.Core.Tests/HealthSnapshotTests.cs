@@ -137,6 +137,35 @@ public sealed class HealthSnapshotTests : IDisposable
     }
 
     [Fact]
+    public void RuntimeHealthEvidence_Collect_ReadsLegacyConfigSyncHealthFilename()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"suavo_runtime_health_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root, "config sync health.json"), """
+            {
+              "status": "ok",
+              "lastAttemptAt": "2026-05-06T21:11:59.0000000+00:00",
+              "lastSuccessAt": "2026-05-06T21:11:59.0000000+00:00",
+              "consecutiveFailures": 0,
+              "lastErrorKind": null,
+              "lastAppliedOverrideCount": 0
+            }
+            """);
+
+        try
+        {
+            var payload = RuntimeHealthEvidence.Collect(root);
+
+            Assert.True(payload.ConfigSync.Present);
+            Assert.Equal("ok", payload.ConfigSync.Status);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void Take_Includes_UpdateHealthEvidence_WithoutErrorBody()
     {
         var root = Path.Combine(Path.GetTempPath(), $"suavo_runtime_health_{Guid.NewGuid():N}");

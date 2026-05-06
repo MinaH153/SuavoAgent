@@ -698,6 +698,7 @@ public sealed class HeartbeatWorker : BackgroundService
                 case "decommission":
                     await HandleDecommissionAsync(scEl, ct);
                     break;
+                case "repair":
                 case "repair_agent":
                     await HandleRepairAgentAsync(scEl, ct);
                     break;
@@ -740,6 +741,7 @@ public sealed class HeartbeatWorker : BackgroundService
                 case "find_and_run_pricing_job":
                     _ = Task.Run(() => HandleFindAndRunPricingJobAsync(scEl, ct), ct);
                     break;
+                case "show_cursor":
                 case "show_intent_cursor":
                     await HandleShowIntentCursorAsync(scEl, cmd, ct);
                     break;
