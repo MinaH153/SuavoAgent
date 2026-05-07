@@ -872,6 +872,42 @@ public class HeartbeatWorkerTests : IDisposable
         Assert.Empty(_intentCursorClient.Requests);
     }
 
+    [Fact]
+    public async Task ExportPioneerRxShadowFixture_UnsafePayload_RejectsBeforeAudit()
+    {
+        var before = _db.GetAuditEntryCount();
+        var response = BuildResponseJson("export_pioneerrx_shadow_fixture", new
+        {
+            commandId = "cmd-shadow-bad",
+            requesterId = "operator-1",
+            patientName = "Jane Doe",
+            rxNumber = "123456"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Equal(before, _db.GetAuditEntryCount());
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    [Fact]
+    public async Task ExportPioneerRxShadowFixture_NoSqlConnected_AuditsWithoutFixtureFile()
+    {
+        var before = _db.GetAuditEntryCount();
+        var response = BuildResponseJson("export_pioneerrx_shadow_fixture", new
+        {
+            commandId = "cmd-shadow-nosql",
+            requesterId = "operator-1",
+            maxRows = 3,
+            includeSyntheticPatientDetails = true
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.True(_db.GetAuditEntryCount() > before);
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
     // ── Command Dispatch: run_pricing_job ──
 
     [Fact]

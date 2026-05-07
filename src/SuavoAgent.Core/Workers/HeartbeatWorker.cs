@@ -705,6 +705,10 @@ public sealed class HeartbeatWorker : BackgroundService
                 case "collect_health_probe":
                     await HandleCollectHealthProbeAsync(scEl, cmd, ct);
                     break;
+                case "export_pioneerrx_shadow_fixture":
+                    await PioneerRxShadowFixtureCommand.HandleAsync(
+                        scEl, cmd, _options, _serviceProvider, _stateDb, _cloudClient, _logger, ct);
+                    break;
                 case "update":
                     await HandleUpdateAsync(scEl, ct);
                     break;

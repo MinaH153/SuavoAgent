@@ -128,13 +128,13 @@ internal sealed class PioneerRxShadowReplayHarness
         RxNumber: RequiredString(element, "rxNumber"),
         DrugName: OptionalString(element, "drugName"),
         Ndc: OptionalString(element, "ndc"),
-        DateFilled: element.GetProperty("dateFilled").GetDateTime(),
+        DateFilled: OptionalDateTime(element, "dateFilled"),
         Quantity: element.GetProperty("quantity").GetDecimal(),
         StatusGuid: element.GetProperty("statusGuid").GetGuid(),
         DetectedAt: element.GetProperty("detectedAt").GetDateTimeOffset(),
         FillNumber: element.GetProperty("fillNumber").GetInt32(),
         DaysSupply: element.GetProperty("daysSupply").GetInt32(),
-        DrugSchedule: element.GetProperty("drugSchedule").GetInt32(),
+        DrugSchedule: OptionalInt(element, "drugSchedule"),
         Priority: RequiredString(element, "priority"),
         TemperatureRequirement: RequiredString(element, "temperatureRequirement"));
 
@@ -168,6 +168,26 @@ internal sealed class PioneerRxShadowReplayHarness
         }
 
         return value.GetString();
+    }
+
+    private static DateTime? OptionalDateTime(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value) || value.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        return value.GetDateTime();
+    }
+
+    private static int? OptionalInt(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value) || value.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        return value.GetInt32();
     }
 
     private static IReadOnlyList<string> ReadStringArray(JsonElement root, string propertyName)
