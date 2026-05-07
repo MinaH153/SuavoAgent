@@ -28,11 +28,26 @@ public sealed class PhiPatternGuardTests
     [InlineData("AB1234567", "dea")]
     [InlineData("123 Main Street", "street_address")]
     [InlineData("8005551212", "ndc_or_phone")]
+    [InlineData("phone 555-123-4567", "phone")]
+    [InlineData("DOB 04/12/1980", "structured_field")]
+    [InlineData("Policy RX-4455", "structured_field")]
+    [InlineData("MemberId XZ-998812", "structured_field")]
     public void PhiShapes_AreFlagged(string input, string expectedPattern)
     {
         var flagged = PhiPatternGuard.ContainsPotentialPhi(input, out var matched);
         Assert.True(flagged, $"expected '{input}' to be flagged");
         Assert.Equal(expectedPattern, matched);
+    }
+
+    [Fact]
+    public void SyntheticRealShapedPhiCorpus_IsFlagged()
+    {
+        const string input = "Patient Jane Rivera DOB 04/12/1980 phone 555-123-4567 email jane.rivera@example.com address 123 Main Street DEA AB1234567 NPI 1234567890 MemberId XZ-998812 Policy RX-4455";
+
+        var flagged = PhiPatternGuard.ContainsPotentialPhi(input, out var matched);
+
+        Assert.True(flagged);
+        Assert.NotNull(matched);
     }
 
     [Fact]

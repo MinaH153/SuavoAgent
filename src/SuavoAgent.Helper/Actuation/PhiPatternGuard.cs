@@ -24,6 +24,9 @@ public static partial class PhiPatternGuard
     [GeneratedRegex(@"\b\d{10,11}\b", RegexOptions.CultureInvariant)]
     private static partial Regex NdcOrPhonePattern();
 
+    [GeneratedRegex(@"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b", RegexOptions.CultureInvariant)]
+    private static partial Regex PhonePattern();
+
     [GeneratedRegex(@"\b(?:\d{1,5}\s+)?[A-Za-z][A-Za-z0-9\s]*\b(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Lane|Ln|Court|Ct|Place|Pl|Way|Road|Rd)\b\.?", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex StreetAddressPattern();
 
@@ -53,6 +56,7 @@ public static partial class PhiPatternGuard
         // Phone / NDC overlap is acceptable — both are PHI-adjacent enough
         // that we refuse them on the keyboard surface in this phase.
         if (NdcOrPhonePattern().IsMatch(text)) { matchedPattern = "ndc_or_phone"; return true; }
+        if (PhonePattern().IsMatch(text)) { matchedPattern = "phone"; return true; }
 
         matchedPattern = null;
         return false;
