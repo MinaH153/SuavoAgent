@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SuavoAgent.Core.Cloud;
@@ -106,24 +107,8 @@ internal static class PioneerRxShadowFixtureCommand
         }
 
         var schemaCanary = rxWorker.SnapshotSchemaCanaryExportGate();
-        const bool candidateRowsDashboardVisible = false;
-        const bool correctionPathExercised = false;
-        var track2ExitGate = new
-        {
-            zeroForbiddenTokens = replay.ForbiddenTokenHitCount == 0,
-            stableCandidateHashes = replay.StableCandidateHashes,
-            schemaCanaryRecorded = schemaCanary.Recorded,
-            schemaCanaryPassing = schemaCanary.Passing,
-            candidateRowsDashboardVisible,
-            correctionPathExercised,
-            readyForTrack2Exit =
-                replay.ForbiddenTokenHitCount == 0 &&
-                replay.StableCandidateHashes &&
-                schemaCanary.Recorded &&
-                schemaCanary.Passing &&
-                candidateRowsDashboardVisible &&
-                correctionPathExercised
-        };
+        var dashboardEvidence = ReadDashboardEvidence(dataEl);
+        var track2ExitGate = BuildTrack2ExitGate(replay, schemaCanary, dashboardEvidence);
 
         stateDb.AppendChainedAuditEntry(new AuditEntry(
             TaskId: commandId ?? command.Nonce,
@@ -169,6 +154,17 @@ internal static class PioneerRxShadowFixtureCommand
         foreach (var property in element.EnumerateObject())
         {
             var normalized = NormalizeFieldName(property.Name);
+
+            if (normalized == "dashboardevidence")
+            {
+                if (IsBlockedField(property.Name) || !TryReadDashboardEvidence(property.Value, out _))
+                {
+                    return true;
+                }
+
+                continue;
+            }
+
             if (normalized is not ("commandid" or "requesterid" or "maxrows" or "includesyntheticpatientdetails") ||
                 property.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array ||
                 IsBlockedField(property.Name) ||
@@ -181,12 +177,139 @@ internal static class PioneerRxShadowFixtureCommand
         return false;
     }
 
+    internal static PioneerRxShadowDashboardEvidence ReadDashboardEvidence(JsonElement element)
+    {
+        if (!element.TryGetProperty("dashboardEvidence", out var dashboardEvidenceElement))
+        {
+            return PioneerRxShadowDashboardEvidence.Empty;
+        }
+
+        if (!TryReadDashboardEvidence(dashboardEvidenceElement, out var dashboardEvidence))
+        {
+            throw new InvalidOperationException("PioneerRx shadow dashboard evidence must be digest-backed and non-PHI.");
+        }
+
+        return dashboardEvidence;
+    }
+
+    internal static PioneerRxTrack2ExitGate BuildTrack2ExitGate(
+        PioneerRxShadowReplayResult replay,
+        SchemaCanaryExportGate schemaCanary,
+        PioneerRxShadowDashboardEvidence dashboardEvidence)
+    {
+        var zeroForbiddenTokens = replay.ForbiddenTokenHitCount == 0;
+        var candidateRowsDashboardVisible =
+            dashboardEvidence.CandidateRowsVisible &&
+            IsReceiptDigest(dashboardEvidence.CandidateRowsReceiptSha256);
+        var correctionPathExercised =
+            dashboardEvidence.CorrectionPathExercised &&
+            IsReceiptDigest(dashboardEvidence.CorrectionPathReceiptSha256);
+        var dashboardEvidenceRecorded = candidateRowsDashboardVisible && correctionPathExercised;
+
+        return new PioneerRxTrack2ExitGate(
+            ZeroForbiddenTokens: zeroForbiddenTokens,
+            StableCandidateHashes: replay.StableCandidateHashes,
+            SchemaCanaryRecorded: schemaCanary.Recorded,
+            SchemaCanaryPassing: schemaCanary.Passing,
+            CandidateRowsDashboardVisible: candidateRowsDashboardVisible,
+            CorrectionPathExercised: correctionPathExercised,
+            DashboardEvidenceRecorded: dashboardEvidenceRecorded,
+            CandidateRowsReceiptSha256: dashboardEvidence.CandidateRowsReceiptSha256,
+            CorrectionPathReceiptSha256: dashboardEvidence.CorrectionPathReceiptSha256,
+            ReadyForTrack2Exit:
+                zeroForbiddenTokens &&
+                replay.StableCandidateHashes &&
+                schemaCanary.Recorded &&
+                schemaCanary.Passing &&
+                dashboardEvidenceRecorded);
+    }
+
+    private static bool TryReadDashboardEvidence(
+        JsonElement element,
+        out PioneerRxShadowDashboardEvidence dashboardEvidence)
+    {
+        dashboardEvidence = PioneerRxShadowDashboardEvidence.Empty;
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var candidateRowsVisible = false;
+        var correctionPathExercised = false;
+        string? candidateRowsReceiptSha256 = null;
+        string? correctionPathReceiptSha256 = null;
+
+        foreach (var property in element.EnumerateObject())
+        {
+            var normalized = NormalizeFieldName(property.Name);
+            if (IsBlockedField(property.Name))
+            {
+                return false;
+            }
+
+            switch (normalized)
+            {
+                case "candidaterowsvisible":
+                    if (property.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    {
+                        return false;
+                    }
+
+                    candidateRowsVisible = property.Value.ValueKind == JsonValueKind.True;
+                    break;
+                case "correctionpathexercised":
+                    if (property.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    {
+                        return false;
+                    }
+
+                    correctionPathExercised = property.Value.ValueKind == JsonValueKind.True;
+                    break;
+                case "candidaterowsreceiptsha256":
+                    candidateRowsReceiptSha256 = property.Value.ValueKind == JsonValueKind.String
+                        ? property.Value.GetString()
+                        : null;
+                    if (!IsReceiptDigest(candidateRowsReceiptSha256))
+                    {
+                        return false;
+                    }
+
+                    break;
+                case "correctionpathreceiptsha256":
+                    correctionPathReceiptSha256 = property.Value.ValueKind == JsonValueKind.String
+                        ? property.Value.GetString()
+                        : null;
+                    if (!IsReceiptDigest(correctionPathReceiptSha256))
+                    {
+                        return false;
+                    }
+
+                    break;
+                default:
+                    return false;
+            }
+        }
+
+        if ((candidateRowsVisible && candidateRowsReceiptSha256 is null) ||
+            (correctionPathExercised && correctionPathReceiptSha256 is null))
+        {
+            return false;
+        }
+
+        dashboardEvidence = new PioneerRxShadowDashboardEvidence(
+            CandidateRowsVisible: candidateRowsVisible,
+            CorrectionPathExercised: correctionPathExercised,
+            CandidateRowsReceiptSha256: candidateRowsReceiptSha256,
+            CorrectionPathReceiptSha256: correctionPathReceiptSha256);
+        return true;
+    }
+
     private static bool HasUnsafeValue(string normalizedName, JsonElement value)
     {
         return normalizedName switch
         {
             "commandid" or "requesterid" =>
-                value.ValueKind != JsonValueKind.String || value.GetString()?.Length > 128,
+                value.ValueKind != JsonValueKind.String || !IsSafeEnvelopeToken(value.GetString()),
             "maxrows" =>
                 value.ValueKind != JsonValueKind.Number ||
                 !value.TryGetInt32(out var rows) ||
@@ -229,6 +352,14 @@ internal static class PioneerRxShadowFixtureCommand
             "coordinates";
     }
 
+    private static bool IsReceiptDigest(string? value) =>
+        value is { Length: >= 16 and <= 64 } &&
+        value.All(ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsSafeEnvelopeToken(string? value) =>
+        value is { Length: > 0 and <= 128 } &&
+        value.All(ch => IsAsciiLetterOrDigit(ch) || ch is '-' or '_' or '.' or ':');
+
     private static string NormalizeFieldName(string name) =>
         new(name
             .Where(char.IsLetterOrDigit)
@@ -238,11 +369,14 @@ internal static class PioneerRxShadowFixtureCommand
     private static string SafeFileToken(string value)
     {
         var sanitized = new string(value
-            .Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_')
+            .Where(ch => IsAsciiLetterOrDigit(ch) || ch is '-' or '_')
             .Take(64)
             .ToArray());
         return string.IsNullOrWhiteSpace(sanitized) ? "command" : sanitized;
     }
+
+    private static bool IsAsciiLetterOrDigit(char ch) =>
+        ch is >= '0' and <= '9' or >= 'A' and <= 'Z' or >= 'a' and <= 'z';
 
     private static void WriteTextAtomically(string path, string text)
     {
@@ -258,3 +392,42 @@ internal static class PioneerRxShadowFixtureCommand
         }
     }
 }
+
+internal sealed record PioneerRxShadowDashboardEvidence(
+    [property: JsonPropertyName("candidateRowsVisible")]
+    bool CandidateRowsVisible,
+    [property: JsonPropertyName("correctionPathExercised")]
+    bool CorrectionPathExercised,
+    [property: JsonPropertyName("candidateRowsReceiptSha256")]
+    string? CandidateRowsReceiptSha256,
+    [property: JsonPropertyName("correctionPathReceiptSha256")]
+    string? CorrectionPathReceiptSha256)
+{
+    public static PioneerRxShadowDashboardEvidence Empty { get; } = new(
+        CandidateRowsVisible: false,
+        CorrectionPathExercised: false,
+        CandidateRowsReceiptSha256: null,
+        CorrectionPathReceiptSha256: null);
+}
+
+internal sealed record PioneerRxTrack2ExitGate(
+    [property: JsonPropertyName("zeroForbiddenTokens")]
+    bool ZeroForbiddenTokens,
+    [property: JsonPropertyName("stableCandidateHashes")]
+    bool StableCandidateHashes,
+    [property: JsonPropertyName("schemaCanaryRecorded")]
+    bool SchemaCanaryRecorded,
+    [property: JsonPropertyName("schemaCanaryPassing")]
+    bool SchemaCanaryPassing,
+    [property: JsonPropertyName("candidateRowsDashboardVisible")]
+    bool CandidateRowsDashboardVisible,
+    [property: JsonPropertyName("correctionPathExercised")]
+    bool CorrectionPathExercised,
+    [property: JsonPropertyName("dashboardEvidenceRecorded")]
+    bool DashboardEvidenceRecorded,
+    [property: JsonPropertyName("candidateRowsReceiptSha256")]
+    string? CandidateRowsReceiptSha256,
+    [property: JsonPropertyName("correctionPathReceiptSha256")]
+    string? CorrectionPathReceiptSha256,
+    [property: JsonPropertyName("readyForTrack2Exit")]
+    bool ReadyForTrack2Exit);
