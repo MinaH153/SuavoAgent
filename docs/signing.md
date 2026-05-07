@@ -130,6 +130,11 @@ skipped, `release` publishes. Download `SuavoAgent.Core.exe` from the release
 and right-click → Properties → Digital Signatures. You should see
 `Suavo (MKM Technologies LLC)` with a valid timestamp.
 
+The published `field-release-receipt.json` must include a `rollbackArtifact`
+object pointing at the previous non-prerelease release zip and its SHA-256 from
+that release's `checksums.sha256`. The release workflow fails closed if it
+cannot resolve that rollback artifact.
+
 If smoke-test passes, delete the tag + release:
 
 ```bash

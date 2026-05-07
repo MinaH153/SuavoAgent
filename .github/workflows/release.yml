@@ -262,24 +262,57 @@ jobs:
         env:
           VERSION: ${{ needs.build.outputs.version }}
           VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           cd release
           ZIP="suavoagent-${VERSION}-win-x64.zip"
           ZIP_SHA=$(sha256sum "$ZIP" | awk '{print $1}')
-          cat > field-release-receipt.json <<EOF
-          {
-            "releaseTag": "${VERSION}",
-            "version": "${VERSION_NUMERIC}",
-            "sourceCommit": "${GITHUB_SHA}",
-            "artifact": "${ZIP}",
-            "artifactSha256": "${ZIP_SHA}",
-            "authenticode": "required-valid",
-            "checksumSignature": "checksums.sha256.sig",
-            "manifestSignature": "update-manifest-${VERSION}.sig",
-            "track2QueenValidation": "do-not-run-against-older-tags"
+          ROLLBACK_TAG="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft,isPrerelease --jq '[.[] | select(.isDraft == false and .isPrerelease == false and .tagName != env.VERSION)][0].tagName // ""')"
+          if [[ -z "$ROLLBACK_TAG" ]]; then
+            echo "::error::No previous non-prerelease release found for rollback."
+            exit 1
+          fi
+          ROLLBACK_ZIP="suavoagent-${ROLLBACK_TAG}-win-x64.zip"
+          ROLLBACK_TMP="$(mktemp -d)"
+          gh release download "$ROLLBACK_TAG" --repo "$GITHUB_REPOSITORY" --pattern checksums.sha256 --dir "$ROLLBACK_TMP"
+          ROLLBACK_SHA="$(awk -v zip="$ROLLBACK_ZIP" '$2 == zip {print $1}' "$ROLLBACK_TMP/checksums.sha256")"
+          if [[ ! "$ROLLBACK_SHA" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "::error::Previous release $ROLLBACK_TAG does not expose a checksums.sha256 entry for $ROLLBACK_ZIP."
+            exit 1
+          fi
+          export ZIP ZIP_SHA ROLLBACK_TAG ROLLBACK_ZIP ROLLBACK_SHA
+          python3 - <<'PY'
+          import json
+          import os
+
+          version = os.environ["VERSION"]
+          rollback_tag = os.environ["ROLLBACK_TAG"]
+          receipt = {
+              "releaseTag": version,
+              "version": os.environ["VERSION_NUMERIC"],
+              "sourceCommit": os.environ["GITHUB_SHA"],
+              "artifact": os.environ["ZIP"],
+              "artifactSha256": os.environ["ZIP_SHA"],
+              "authenticode": "required-valid",
+              "checksumSignature": "checksums.sha256.sig",
+              "manifestSignature": f"update-manifest-{version}.sig",
+              "track2QueenValidation": "do-not-run-against-older-tags",
+              "rollbackArtifact": {
+                  "releaseTag": rollback_tag,
+                  "artifact": os.environ["ROLLBACK_ZIP"],
+                  "artifactSha256": os.environ["ROLLBACK_SHA"],
+                  "releaseUrl": (
+                      "https://github.com/"
+                      f"{os.environ['GITHUB_REPOSITORY']}/releases/download/{rollback_tag}/"
+                      f"{os.environ['ROLLBACK_ZIP']}"
+                  ),
+              },
           }
-          EOF
+          with open("field-release-receipt.json", "w", encoding="utf-8") as fh:
+              json.dump(receipt, fh, indent=2, sort_keys=True)
+              fh.write("\n")
+          PY
 
       - name: Generate checksums
         run: |
