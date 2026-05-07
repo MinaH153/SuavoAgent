@@ -69,6 +69,14 @@ public class ComplianceBoundaryTests
     }
 
     [Fact]
+    public void Validate_WithDashedDob_Rejects()
+    {
+        var json = """{"data":"DOB 04-12-1980"}""";
+        var (isClean, _) = ComplianceBoundary.Validate(json);
+        Assert.False(isClean);
+    }
+
+    [Fact]
     public void Validate_WithNamePair_Rejects()
     {
         var json = """{"patient":"John Smith"}""";
@@ -105,5 +113,20 @@ public class ComplianceBoundaryTests
         var json = """{"notes":"Patient from 90210"}""";
         var (isClean, _) = ComplianceBoundary.Validate(json);
         Assert.False(isClean);
+    }
+
+    [Fact]
+    public void Validate_SyntheticRealShapedPhiCorpus_Rejects()
+    {
+        var json = """
+        {
+          "data": "Patient Jane Rivera DOB 04/12/1980 phone 555-123-4567 email jane.rivera@example.com address 123 Main Street DEA AB1234567 NPI 1234567890 MemberId XZ-998812 Policy RX-4455 MRN 998877"
+        }
+        """;
+
+        var (isClean, violations) = ComplianceBoundary.Validate(json);
+
+        Assert.False(isClean);
+        Assert.True(violations.Count >= 8, string.Join("; ", violations));
     }
 }
