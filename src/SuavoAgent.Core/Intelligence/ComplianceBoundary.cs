@@ -9,10 +9,14 @@ public static class ComplianceBoundary
         new(@"\b\d{3}-\d{2}-\d{4}\b", RegexOptions.Compiled),                           // SSN
         new(@"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b", RegexOptions.Compiled),               // Phone (10-digit)
         new(@"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", RegexOptions.Compiled),  // Email
-        new(@"\b\d{1,2}/\d{1,2}/\d{2,4}\b", RegexOptions.Compiled),                     // Date (MM/DD/YY or YYYY)
+        new(@"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", RegexOptions.Compiled),                // Date (MM/DD/YY, MM-DD-YYYY)
         new(@"\b[A-Z][a-z]{1,15}\s[A-Z][a-z]{1,20}\b", RegexOptions.Compiled),          // Name pair (First Last)
         new(@"\b\d{5}(-\d{4})?\b", RegexOptions.Compiled),                              // ZIP code
         new(@"\bMRN[:\s#]?\d+\b", RegexOptions.Compiled | RegexOptions.IgnoreCase),      // Medical Record Number
+        new(@"\b\d{1,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,4}\s+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Court|Ct|Way|Place|Pl)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase), // Street address
+        new(@"\b[A-Z]{2}\d{7}\b", RegexOptions.Compiled),                               // DEA number
+        new(@"\bNPI\s*[:#=]?\s*\d{10}\b", RegexOptions.Compiled | RegexOptions.IgnoreCase), // NPI
+        new(@"\b(?:InsuranceId|MemberId|Policy|Subscriber|Group|Plan|RxNumber|Rx)\s*[:#=]?\s*[\w./-]{3,}\b", RegexOptions.Compiled | RegexOptions.IgnoreCase), // Structured Rx/insurance identifiers
         new(@"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", RegexOptions.Compiled),          // IP address (HIPAA identifier #15)
     };
 
