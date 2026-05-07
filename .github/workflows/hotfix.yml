@@ -16,6 +16,24 @@ permissions:
   contents: write
 
 jobs:
+  release-signing-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require signed hotfix configuration
+        env:
+          SIGNING_ENABLED: ${{ vars.SIGNING_ENABLED }}
+          CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
+        run: |
+          set -euo pipefail
+          if [[ "$SIGNING_ENABLED" != "true" ]]; then
+            echo "::error::SIGNING_ENABLED must be set to true before cutting a Queen/field hotfix."
+            exit 1
+          fi
+          if [[ -z "$CERT_THUMBPRINT" ]]; then
+            echo "::error::SIGNING_CERT_THUMBPRINT must be configured before cutting a Queen/field hotfix."
+            exit 1
+          fi
+
   bootstrap-windows-smoke:
     runs-on: windows-latest
     steps:
@@ -40,7 +58,7 @@ jobs:
   # --- Build unsigned binaries on Linux -----------------------------------
   build:
     runs-on: ubuntu-latest
-    needs: bootstrap-windows-smoke
+    needs: [release-signing-preflight, bootstrap-windows-smoke]
     outputs:
       version_numeric: ${{ steps.version.outputs.VERSION_NUMERIC }}
     steps:
@@ -168,7 +186,7 @@ jobs:
     if: |
       always() &&
       needs.build.result == 'success' &&
-      (needs.sign_windows.result == 'success' || needs.sign_passthrough.result == 'success')
+      needs.sign_windows.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

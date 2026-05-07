@@ -5,9 +5,10 @@ bound to a **Yubikey FIPS 140-2 hardware token**. The Yubikey must be
 physically plugged into a self-hosted GitHub Actions runner at release time —
 it cannot leave that machine. EV certs cannot be exported as PFX.
 
-The release and hotfix workflows are pre-wired for signing, but **gated off
-by default** via the `SIGNING_ENABLED` repository variable. Flip the gate
-once the hardware has arrived and the runner is configured (see below).
+The release and hotfix workflows are pre-wired for signing and now **fail
+closed** unless `SIGNING_ENABLED=true` and `SIGNING_CERT_THUMBPRINT` are
+configured. Flip the gate only once the hardware has arrived and the runner is
+configured (see below).
 
 ## State when this doc was written (2026-04-22)
 
@@ -17,8 +18,8 @@ once the hardware has arrived and the runner is configured (see below).
   after validation completes
 - Delivery address: 5310 Fountain Grass Avenue, Bakersfield, CA 93313
 - Until the Yubikey arrives, `SIGNING_ENABLED` is unset (or explicitly `false`)
-  and the `sign_passthrough` job runs. Releases carry the usual SmartScreen
-  "publisher unverified" warning.
+  and Queen/field releases must not be cut. The release preflight exits before
+  any publishable artifact is produced.
 
 ## Activation checklist (when Yubikey arrives)
 
@@ -153,8 +154,8 @@ To disable signing without reverting the workflows:
 SIGNING_ENABLED = false   # or delete the variable
 ```
 
-Next release: `sign_passthrough` runs, releases ship unsigned exactly like
-they do today.
+Next release/hotfix: the preflight fails closed. Do not validate Queen from an
+unsigned pass-through artifact.
 
 ## Future: Azure Trusted Signing migration
 
