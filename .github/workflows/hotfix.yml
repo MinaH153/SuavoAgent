@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release-signing-preflight:
@@ -31,6 +32,20 @@ jobs:
           fi
           if [[ -z "$CERT_THUMBPRINT" ]]; then
             echo "::error::SIGNING_CERT_THUMBPRINT must be configured before cutting a Queen/field hotfix."
+            exit 1
+          fi
+
+      - name: Verify GitHub sees an online signing runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUNNER_COUNT="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runners?per_page=100" \
+              --jq '[.runners[] | select(.status == "online" and (([.labels[].name | ascii_downcase] | index("self-hosted")) != null) and (([.labels[].name | ascii_downcase] | index("windows")) != null) and (([.labels[].name | ascii_downcase] | index("yubikey")) != null))] | length'
+          )"
+          if [[ "${RUNNER_COUNT:-0}" -lt 1 ]]; then
+            echo "::error::No online self-hosted Windows Yubikey signing runner is registered. Register the signing PC runner and rerun before cutting a Queen/field hotfix."
             exit 1
           fi
 
@@ -170,31 +185,61 @@ jobs:
           path: release/
           retention-days: 7
 
-  sign_passthrough:
-    if: ${{ vars.SIGNING_ENABLED != 'true' }}
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download unsigned binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: suavoagent-hotfix-unsigned-${{ inputs.version }}
-          path: release
-
-      - name: Upload as final (unsigned)
-        uses: actions/upload-artifact@v4
-        with:
-          name: suavoagent-hotfix-final-${{ inputs.version }}
-          path: release/
-          retention-days: 7
-
-  # --- Tag + checksums + manifest + release -------------------------------
-  release:
-    needs: [build, sign_windows, sign_passthrough]
+  # --- Windows hotfix artifact smoke --------------------------------------
+  windows-release-smoke:
+    needs: [build, sign_windows]
     if: |
       always() &&
       needs.build.result == 'success' &&
       needs.sign_windows.result == 'success'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download final binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-hotfix-final-${{ inputs.version }}
+          path: release
+
+      - name: Build hotfix release zip
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "suavoagent-${{ inputs.version }}-win-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          $binaries = Get-ChildItem -LiteralPath release -Filter *.exe -File
+          if (-not $binaries -or $binaries.Count -eq 0) {
+            throw "No hotfix binaries found to zip"
+          }
+          $binaries | Compress-Archive -DestinationPath $zip -Force
+
+      - name: Expand zip and run no-PHI hotfix release probe
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "suavoagent-${{ inputs.version }}-win-x64.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP 'suavoagent-hotfix-expanded'
+          if (Test-Path $expanded) { Remove-Item $expanded -Recurse -Force }
+          New-Item -ItemType Directory -Path $expanded -Force | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $expanded -Force
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $expanded -BootstrapPath .\bootstrap.ps1 -RequireAuthenticodeSignature -Json
+
+      - name: Upload smoked hotfix release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-hotfix-smoked-zip-${{ inputs.version }}
+          path: suavoagent-${{ inputs.version }}-win-x64.zip
+          retention-days: 7
+
+  # --- Tag + checksums + manifest + release -------------------------------
+  release:
+    needs: [build, sign_windows, windows-release-smoke]
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      needs.sign_windows.result == 'success' &&
+      needs.windows-release-smoke.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -205,12 +250,74 @@ jobs:
           name: suavoagent-hotfix-final-${{ inputs.version }}
           path: release
 
+      - name: Download smoked hotfix release zip
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-hotfix-smoked-zip-${{ inputs.version }}
+          path: release
+
+      - name: Generate field release receipt
+        env:
+          VERSION: ${{ inputs.version }}
+          VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release
+          ZIP="suavoagent-${VERSION}-win-x64.zip"
+          ZIP_SHA=$(sha256sum "$ZIP" | awk '{print $1}')
+          ROLLBACK_TAG="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft,isPrerelease --jq '[.[] | select(.isDraft == false and .isPrerelease == false and .tagName != env.VERSION)][0].tagName // ""')"
+          if [[ -z "$ROLLBACK_TAG" ]]; then
+            echo "::error::No previous non-prerelease release found for rollback."
+            exit 1
+          fi
+          ROLLBACK_ZIP="suavoagent-${ROLLBACK_TAG}-win-x64.zip"
+          ROLLBACK_TMP="$(mktemp -d)"
+          gh release download "$ROLLBACK_TAG" --repo "$GITHUB_REPOSITORY" --pattern checksums.sha256 --dir "$ROLLBACK_TMP"
+          ROLLBACK_SHA="$(awk -v zip="$ROLLBACK_ZIP" '$2 == zip {print $1}' "$ROLLBACK_TMP/checksums.sha256")"
+          if [[ ! "$ROLLBACK_SHA" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "::error::Previous release $ROLLBACK_TAG does not expose a checksums.sha256 entry for $ROLLBACK_ZIP."
+            exit 1
+          fi
+          export ZIP ZIP_SHA ROLLBACK_TAG ROLLBACK_ZIP ROLLBACK_SHA
+          python3 - <<'PY'
+          import json
+          import os
+
+          version = os.environ["VERSION"]
+          rollback_tag = os.environ["ROLLBACK_TAG"]
+          receipt = {
+              "releaseTag": version,
+              "version": os.environ["VERSION_NUMERIC"],
+              "sourceCommit": os.environ["GITHUB_SHA"],
+              "artifact": os.environ["ZIP"],
+              "artifactSha256": os.environ["ZIP_SHA"],
+              "authenticode": "required-valid",
+              "checksumSignature": "checksums.sha256.sig",
+              "manifestSignature": f"update-manifest-{version}.sig",
+              "track2QueenValidation": "do-not-run-against-older-tags",
+              "rollbackArtifact": {
+                  "releaseTag": rollback_tag,
+                  "artifact": os.environ["ROLLBACK_ZIP"],
+                  "artifactSha256": os.environ["ROLLBACK_SHA"],
+                  "releaseUrl": (
+                      "https://github.com/"
+                      f"{os.environ['GITHUB_REPOSITORY']}/releases/download/{rollback_tag}/"
+                      f"{os.environ['ROLLBACK_ZIP']}"
+                  ),
+              },
+          }
+          with open("field-release-receipt.json", "w", encoding="utf-8") as fh:
+              json.dump(receipt, fh, indent=2, sort_keys=True)
+              fh.write("\n")
+          PY
+
       - name: Generate + sign checksums
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY_PEM }}
         run: |
           cd release
-          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe > checksums.sha256
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe SuavoSetup.exe suavoagent-${{ inputs.version }}-win-x64.zip field-release-receipt.json > checksums.sha256
           openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") -out checksums.sha256.sig checksums.sha256
 
       - name: Generate + sign OTA update manifest
@@ -239,17 +346,6 @@ jobs:
           git tag "$INPUT_VERSION"
           git push origin "$INPUT_VERSION"
 
-      - name: Determine release mode
-        id: mode
-        env:
-          SIGN_RESULT: ${{ needs.sign_windows.result }}
-        run: |
-          if [[ "$SIGN_RESULT" == "success" ]]; then
-            echo "MODE=signed" >> "$GITHUB_OUTPUT"
-          else
-            echo "MODE=unsigned" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -260,13 +356,18 @@ jobs:
 
             Emergency release from hotfix pipeline.
             **Tests:** All passing before release.
-            **Authenticode:** ${{ steps.mode.outputs.MODE == 'signed' && 'Signed (Yubikey EV)' || 'Unsigned (SmartScreen warning expected)' }}
+            **Windows smoke:** Release zip expanded and passed no-PHI binary/bootstrap probe on windows-latest.
+            **Source commit:** ${{ github.sha }}
+            **Checksums:** ECDSA P-256 signed.
+            **Authenticode:** Signed (Yubikey EV).
           files: |
             release/SuavoAgent.Core.exe
             release/SuavoAgent.Broker.exe
             release/SuavoAgent.Helper.exe
             release/SuavoAgent.Watchdog.exe
             release/SuavoSetup.exe
+            release/suavoagent-*-win-x64.zip
+            release/field-release-receipt.json
             release/checksums.sha256
             release/checksums.sha256.sig
             release/update-manifest-v*.txt

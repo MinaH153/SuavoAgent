@@ -11,7 +11,7 @@ This is the evidence checklist for every production SuavoAgent release.
 - Checksum signature: `checksums.sha256.sig`
 - OTA manifest: `update-manifest-vX.Y.Z.txt`
 - OTA manifest signature: `update-manifest-vX.Y.Z.sig`
-- Authenticode mode: `signed` or `unsigned-passthrough`
+- Authenticode mode: `signed`; unsigned passthrough is not a Queen/field release
 - Signing runner: GitHub sees at least one online self-hosted runner with `self-hosted`, `windows`, and `yubikey` labels before build/sign/release work starts
 - Windows release smoke: `windows-release-smoke` passed
 - Bootstrap parse: Windows PowerShell 5.1 parse passed
@@ -24,13 +24,13 @@ This is the evidence checklist for every production SuavoAgent release.
 
 ## No-PHI Windows Probe
 
-Before the release job creates the GitHub release, `windows-release-smoke` downloads the final binaries, builds the release ZIP, expands it on `windows-latest`, and runs:
+Before the release or hotfix job creates the GitHub release, `windows-release-smoke` downloads the final binaries, builds the release ZIP, expands it on `windows-latest`, and runs:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $expanded -BootstrapPath .\bootstrap.ps1 -Json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $expanded -BootstrapPath .\bootstrap.ps1 -RequireAuthenticodeSignature -Json
 ```
 
-The probe validates required binaries, SHA-256 hashability, and the bootstrap repair path. It does not print appsettings values, patient data, Rx numbers, screenshots, or log bodies.
+The probe validates required binaries, Authenticode validity, SHA-256 hashability, and the bootstrap repair path. It does not print appsettings values, patient data, Rx numbers, screenshots, or log bodies.
 
 ## Installed-Machine Probe
 
@@ -44,4 +44,4 @@ The installed-machine probe validates Core, Broker, and Watchdog services; insta
 
 ## Track 2 Field Exit
 
-Queen/PioneerRx field validation must use a signed release at or after `b8f8888279c8960280823c2308a0339fff4a2c74`. The signed shadow export command must include digest-only `releaseEvidence`: release tag, source commit, artifact SHA-256, checksum-signature SHA-256, install receipt SHA-256, and rollback artifact SHA-256. The Track 2 exit gate stays closed until release evidence is recorded, replay has zero forbidden-token hits, candidate hashes are stable, schema canary is recorded and passing, candidate rows are visible in the dashboard, and the correction path has a digest-backed receipt.
+Queen/PioneerRx field validation must use a signed release at or after `dc50433a159b5446bd23722c626885fa47fb010a`. The signed shadow export command must include digest-only `releaseEvidence`: release tag, source commit, artifact SHA-256, checksum-signature SHA-256, install receipt SHA-256, and rollback artifact SHA-256. Normal and hotfix releases must publish `field-release-receipt.json` plus a smoked installer ZIP before they can become Queen-eligible. The Track 2 exit gate stays closed until release evidence is recorded, replay has zero forbidden-token hits, candidate hashes are stable, schema canary is recorded and passing, candidate rows are visible in the dashboard, and the correction path has a digest-backed receipt.
