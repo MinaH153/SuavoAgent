@@ -12,7 +12,7 @@ public sealed class PioneerRxShadowFixtureTests
     public void ShadowFixtureCommand_RequiresDashboardEvidenceReleaseMinimum()
     {
         Assert.Equal(
-            "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "dc50433a159b5446bd23722c626885fa47fb010a",
             PioneerRxShadowFixtureCommand.RequiredTrack2SourceCommitMinimum);
     }
 
@@ -54,7 +54,7 @@ public sealed class PioneerRxShadowFixtureTests
           "includeSyntheticPatientDetails": false,
           "releaseEvidence": {
             "releaseTag": "v3.14.6",
-            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "sourceCommit": "dc50433a159b5446bd23722c626885fa47fb010a",
             "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
             "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
@@ -68,7 +68,7 @@ public sealed class PioneerRxShadowFixtureTests
         var evidence = PioneerRxShadowFixtureCommand.ReadReleaseEvidence(doc.RootElement);
         Assert.True(evidence.Recorded);
         Assert.Equal("v3.14.6", evidence.ReleaseTag);
-        Assert.Equal("b8f8888279c8960280823c2308a0339fff4a2c74", evidence.SourceCommit);
+        Assert.Equal("dc50433a159b5446bd23722c626885fa47fb010a", evidence.SourceCommit);
         Assert.Equal("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", evidence.ArtifactSha256);
         Assert.Equal("1111111111111111111111111111111111111111111111111111111111111111", evidence.ChecksumSignatureSha256);
         Assert.Equal("2222222222222222222222222222222222222222222222222222222222222222", evidence.InstallReceiptSha256);
@@ -125,7 +125,7 @@ public sealed class PioneerRxShadowFixtureTests
           "commandId": "cmd-shadow-proof",
           "releaseEvidence": {
             "releaseTag": "field release for Jane Doe",
-            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "sourceCommit": "dc50433a159b5446bd23722c626885fa47fb010a",
             "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
             "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
@@ -138,7 +138,7 @@ public sealed class PioneerRxShadowFixtureTests
           "commandId": "cmd-shadow-proof",
           "releaseEvidence": {
             "releaseTag": "vfield",
-            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "sourceCommit": "dc50433a159b5446bd23722c626885fa47fb010a",
             "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
             "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
@@ -151,7 +151,7 @@ public sealed class PioneerRxShadowFixtureTests
           "commandId": "cmd-shadow-proof",
           "releaseEvidence": {
             "releaseTag": "v3.14.6",
-            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "sourceCommit": "dc50433a159b5446bd23722c626885fa47fb010a",
             "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
             "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
             "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
@@ -164,7 +164,7 @@ public sealed class PioneerRxShadowFixtureTests
           "commandId": "cmd-shadow-proof",
           "releaseEvidence": {
             "releaseTag": "v3.14.6",
-            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "sourceCommit": "dc50433a159b5446bd23722c626885fa47fb010a",
             "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
             "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
@@ -238,7 +238,7 @@ public sealed class PioneerRxShadowFixtureTests
             CorrectionPathReceiptSha256: "fedcba9876543210fedcba9876543210");
         var releaseEvidence = new PioneerRxShadowReleaseEvidence(
             ReleaseTag: "v3.14.6",
-            SourceCommit: "b8f8888279c8960280823c2308a0339fff4a2c74",
+            SourceCommit: "dc50433a159b5446bd23722c626885fa47fb010a",
             ArtifactSha256: new string('0', 64),
             ChecksumSignatureSha256: new string('1', 64),
             InstallReceiptSha256: new string('2', 64),

@@ -325,20 +325,52 @@ public sealed class BootstrapScriptTests
         Assert.Contains("windows", release);
         Assert.Contains("yubikey", release);
         Assert.Contains("No online self-hosted Windows Yubikey signing runner is registered", release);
+        Assert.DoesNotContain("sign_passthrough:", release);
+        Assert.DoesNotContain("Upload as final (unsigned)", release);
+        Assert.DoesNotContain("MODE=unsigned", release);
         Assert.Contains("Signing runner", releaseGate);
         Assert.Contains("self-hosted", releaseGate);
         Assert.Contains("yubikey", releaseGate);
         Assert.Contains("windows-release-smoke", release);
         Assert.Contains("Test-SuavoAgentReleaseProbe.ps1", release);
+        Assert.Contains("-RequireAuthenticodeSignature", release);
         Assert.Contains("suavoagent-smoked-zip", release);
         Assert.Contains("windows-release-smoke.result == 'success'", release);
         Assert.Contains("Get-ChildItem -LiteralPath release -Filter *.exe -File", release);
         Assert.Contains("| Compress-Archive -DestinationPath $zip -Force", release);
         Assert.DoesNotContain("Compress-Archive -LiteralPath release\\*.exe", release);
         Assert.Contains("Installer ZIP URL", releaseGate);
+        Assert.Contains("unsigned passthrough is not a Queen/field release", releaseGate);
         Assert.Contains("checksums.sha256.sig", releaseGate);
         Assert.Contains("update-manifest-vX.Y.Z.sig", releaseGate);
         Assert.Contains("Production migration evidence", releaseGate);
+    }
+
+    [Fact]
+    public void Hotfix_workflow_preserves_field_release_evidence_gate()
+    {
+        var hotfix = ReadRepoFile(".github/workflows/hotfix.yml");
+
+        Assert.Contains("actions: read", hotfix);
+        Assert.Contains("Verify GitHub sees an online signing runner", hotfix);
+        Assert.Contains("actions/runners", hotfix);
+        Assert.Contains("No online self-hosted Windows Yubikey signing runner is registered", hotfix);
+        Assert.DoesNotContain("sign_passthrough:", hotfix);
+        Assert.DoesNotContain("Upload as final (unsigned)", hotfix);
+        Assert.DoesNotContain("MODE=unsigned", hotfix);
+        Assert.Contains("windows-release-smoke", hotfix);
+        Assert.Contains("Test-SuavoAgentReleaseProbe.ps1", hotfix);
+        Assert.Contains("-RequireAuthenticodeSignature", hotfix);
+        Assert.Contains("suavoagent-hotfix-smoked-zip", hotfix);
+        Assert.Contains("needs.windows-release-smoke.result == 'success'", hotfix);
+        Assert.Contains("field-release-receipt.json", hotfix);
+        Assert.Contains("\"rollbackArtifact\"", hotfix);
+        Assert.Contains("track2QueenValidation", hotfix);
+        Assert.Contains("SuavoSetup.exe suavoagent-${{ inputs.version }}-win-x64.zip field-release-receipt.json", hotfix);
+        Assert.Contains("release/suavoagent-*-win-x64.zip", hotfix);
+        Assert.Contains("release/field-release-receipt.json", hotfix);
+        Assert.Contains("**Authenticode:** Signed (Yubikey EV).", hotfix);
+        Assert.DoesNotContain("Unsigned (SmartScreen warning expected)", hotfix);
     }
 
     [Fact]

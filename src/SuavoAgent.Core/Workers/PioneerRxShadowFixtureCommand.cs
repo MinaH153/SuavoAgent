@@ -13,7 +13,7 @@ namespace SuavoAgent.Core.Workers;
 internal static class PioneerRxShadowFixtureCommand
 {
     internal const string RequiredTrack2SourceCommitMinimum =
-        "b8f8888279c8960280823c2308a0339fff4a2c74";
+        "dc50433a159b5446bd23722c626885fa47fb010a";
 
     public static async Task HandleAsync(
         JsonElement signedCommandElement,

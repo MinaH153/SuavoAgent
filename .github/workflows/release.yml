@@ -181,30 +181,9 @@ jobs:
           path: release/
           retention-days: 7
 
-  # --- Passthrough when signing is disabled -------------------------------
-  # Keeps the release pipeline functional without a Yubikey. Renames the
-  # artifact to the name the release job expects.
-  sign_passthrough:
-    if: ${{ vars.SIGNING_ENABLED != 'true' }}
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download unsigned binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: suavoagent-unsigned-${{ needs.build.outputs.version }}
-          path: release
-
-      - name: Upload as final (unsigned)
-        uses: actions/upload-artifact@v4
-        with:
-          name: suavoagent-final-${{ needs.build.outputs.version }}
-          path: release/
-          retention-days: 7
-
   # --- Windows release artifact smoke -------------------------------------
   windows-release-smoke:
-    needs: [build, sign_windows, sign_passthrough]
+    needs: [build, sign_windows]
     if: |
       always() &&
       needs.build.result == 'success' &&
@@ -251,7 +230,7 @@ jobs:
 
   # --- Checksums, manifest, GitHub release --------------------------------
   release:
-    needs: [build, sign_windows, sign_passthrough, windows-release-smoke]
+    needs: [build, sign_windows, windows-release-smoke]
     if: |
       always() &&
       needs.build.result == 'success' &&
@@ -363,17 +342,6 @@ jobs:
           test "$(wc -c < update-manifest-${VERSION}.sig)" -eq 128
           echo "Manifest bytes: $(wc -c < update-manifest-${VERSION}.txt)"
           echo "Signature bytes: $(wc -c < update-manifest-${VERSION}.sig)"
-
-      - name: Determine release mode
-        id: mode
-        env:
-          SIGN_RESULT: ${{ needs.sign_windows.result }}
-        run: |
-          if [[ "$SIGN_RESULT" == "success" ]]; then
-            echo "MODE=signed" >> "$GITHUB_OUTPUT"
-          else
-            echo "MODE=unsigned" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
