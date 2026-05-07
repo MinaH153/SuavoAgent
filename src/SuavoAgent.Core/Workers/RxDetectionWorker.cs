@@ -490,8 +490,8 @@ public sealed class RxDetectionWorker : BackgroundService
             var localEvidenceId = BuildLocalEvidenceId(rxHash, rx.DetectedAt);
             var patientDelivery = BuildPatientDelivery(pd, hmacSalt);
             var fieldConfidence = BuildCandidateFieldConfidence(rx, pd);
-            var confidence = ComputeCandidateConfidence(fieldConfidence, warnings, schemaVerification);
             var fieldProvenance = BuildCandidateProvenance(rx, pd, source, schemaSignature, localEvidenceId);
+            var confidence = ComputeCandidateConfidence(fieldConfidence, fieldProvenance, schemaVerification);
 
             return new RxOrderCandidate(
                 RxHash: rxHash,
@@ -712,12 +712,24 @@ public sealed class RxDetectionWorker : BackgroundService
 
     private static double ComputeCandidateConfidence(
         IReadOnlyDictionary<string, double> fieldConfidence,
-        IReadOnlyCollection<RxOrderCandidateWarning> warnings,
+        IReadOnlyDictionary<string, RxFieldProvenance> fieldProvenance,
         ContractVerification? schemaVerification)
     {
         var sourceCompleteness = fieldConfidence.Count == 0
             ? 0d
             : fieldConfidence.Values.Select(value => Math.Clamp(value, 0d, 1d)).Average();
+        var provenanceQuality = fieldConfidence.Count == 0
+            ? 0d
+            : fieldConfidence.Keys
+                .Select(key => fieldProvenance.TryGetValue(key, out var provenance)
+                    ? Math.Clamp(provenance.Confidence, 0d, 1d)
+                    : 0d)
+                .Average();
+        var provenanceCoverage = fieldConfidence.Count == 0
+            ? 0d
+            : fieldConfidence.Keys
+                .Select(key => fieldProvenance.ContainsKey(key) ? 1d : 0d)
+                .Average();
         var schemaScore = schemaVerification?.Severity switch
         {
             null => 1.0d,
@@ -726,20 +738,12 @@ public sealed class RxDetectionWorker : BackgroundService
             CanarySeverity.Critical => 0.0d,
             _ => 0.5d,
         };
-        var warningPenalty = warnings.Sum(w => w switch
-        {
-            RxOrderCandidateWarning.MissingDeliveryAddress => 0.08d,
-            RxOrderCandidateWarning.MissingPatientIdentity => 0.08d,
-            RxOrderCandidateWarning.MissingZip5 => 0.04d,
-            RxOrderCandidateWarning.SchemaCanaryDrift => 0.10d,
-            RxOrderCandidateWarning.SchemaCanaryObject => 0.04d,
-            RxOrderCandidateWarning.SchemaCanaryColumn => 0.04d,
-            RxOrderCandidateWarning.SchemaCanaryIndex => 0.03d,
-            RxOrderCandidateWarning.SchemaCanaryType => 0.03d,
-            _ => 0.02d,
-        });
 
-        var confidence = (sourceCompleteness * 0.70d) + (schemaScore * 0.25d) + 0.05d - warningPenalty;
+        var confidence =
+            (sourceCompleteness * 0.55d) +
+            (provenanceQuality * 0.20d) +
+            (provenanceCoverage * 0.10d) +
+            (schemaScore * 0.15d);
         return Math.Clamp(confidence, 0d, 1d);
     }
 
