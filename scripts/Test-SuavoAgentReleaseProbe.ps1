@@ -19,6 +19,7 @@ param(
     [string]$InstallDir = "C:\Program Files\Suavo\Agent",
     [string]$ProgramDataDir = "$env:ProgramData\SuavoAgent",
     [string]$BootstrapPath,
+    [switch]$RequireAuthenticodeSignature,
     [switch]$Json
 )
 
@@ -83,6 +84,23 @@ function Test-ReleaseBinaries {
             -Ok $true `
             -Detail "present" `
             -Metadata @{ bytes = $item.Length; sha256Prefix = Get-HashPrefix $path }
+
+        $signature = Get-AuthenticodeSignature -LiteralPath $path
+        $signatureMetadata = @{
+            status = $signature.Status.ToString()
+            signerThumbprint = if ($signature.SignerCertificate) { $signature.SignerCertificate.Thumbprint } else { $null }
+            signerSubject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
+        }
+        $signatureValid = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+        Add-ProbeResult `
+            -Name "signature:$binary" `
+            -Ok ((-not $RequireAuthenticodeSignature) -or $signatureValid) `
+            -Detail $signature.Status.ToString() `
+            -Metadata $signatureMetadata
+
+        if ($RequireAuthenticodeSignature -and -not $signatureValid) {
+            continue
+        }
     }
 }
 

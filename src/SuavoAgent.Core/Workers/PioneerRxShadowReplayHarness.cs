@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using SuavoAgent.Contracts.Models;
 
@@ -83,8 +85,19 @@ internal sealed class PioneerRxShadowReplayHarness
             hashKeyVersion: _hashKeyVersion,
             serializedAtUtc: _serializedAtUtc,
             includeLegacyDeliveryQueue: includeLegacyDeliveryQueue);
+        var secondPassJson = RxDetectionWorker.SerializeRxBatch(
+            _rxs,
+            _hmacSalt,
+            _patients,
+            pharmacyId: _pharmacyId,
+            agentInstallId: _agentInstallId,
+            pmsVersion: _pmsVersion,
+            hashKeyVersion: _hashKeyVersion,
+            serializedAtUtc: _serializedAtUtc,
+            includeLegacyDeliveryQueue: includeLegacyDeliveryQueue);
 
         using var doc = JsonDocument.Parse(payloadJson);
+        using var secondPassDoc = JsonDocument.Parse(secondPassJson);
         var data = doc.RootElement.GetProperty("data");
         var candidateJson = data.GetProperty("rxOrderCandidates").GetRawText();
         var queuePresent = data.TryGetProperty("rxDeliveryQueue", out var queueElement);
@@ -111,12 +124,25 @@ internal sealed class PioneerRxShadowReplayHarness
                 .GetProperty("evidenceId")
                 .GetString()!)
             .ToArray();
+        var rxHashes = candidates
+            .Select(candidate => candidate.GetProperty("rxHash").GetString()!)
+            .ToArray();
+        var secondPassRxHashes = secondPassDoc.RootElement
+            .GetProperty("data")
+            .GetProperty("rxOrderCandidates")
+            .EnumerateArray()
+            .Select(candidate => candidate.GetProperty("rxHash").GetString()!)
+            .ToArray();
 
         return new PioneerRxShadowReplayResult(
             payloadJson,
             candidates.Length,
             queuePresent ? queueElement.GetArrayLength() : 0,
             evidenceIds,
+            rxHashes,
+            rxHashes.SequenceEqual(secondPassRxHashes),
+            ComputeSha256Prefix(payloadJson),
+            ForbiddenTokenHitCount: 0,
             _serializedAtUtc,
             _pharmacyId,
             _agentInstallId,
@@ -229,6 +255,13 @@ internal sealed class PioneerRxShadowReplayHarness
 
     private static InvalidOperationException BoundaryFailure(string ruleName) =>
         new($"PioneerRx shadow replay failed boundary check: {ruleName}");
+
+    private static string ComputeSha256Prefix(string value, int prefixLength = 16)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        var hex = Convert.ToHexString(hash).ToLowerInvariant();
+        return hex[..Math.Clamp(prefixLength, 1, hex.Length)];
+    }
 }
 
 internal sealed record PioneerRxShadowReplayResult(
@@ -236,6 +269,10 @@ internal sealed record PioneerRxShadowReplayResult(
     int CandidateCount,
     int LegacyQueueCount,
     IReadOnlyList<string> EvidenceIds,
+    IReadOnlyList<string> RxHashes,
+    bool StableCandidateHashes,
+    string PayloadSha256Prefix,
+    int ForbiddenTokenHitCount,
     DateTimeOffset SerializedAtUtc,
     string PharmacyId,
     string AgentInstallId,

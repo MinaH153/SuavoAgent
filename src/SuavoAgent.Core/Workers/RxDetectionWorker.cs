@@ -32,6 +32,7 @@ public sealed class RxDetectionWorker : BackgroundService
     private PioneerRxCanarySource? _canarySource;
     private PioneerRxWritebackEngine? _writebackEngine;
     private CanaryHoldState _holdState = CanaryHoldState.Clear;
+    private SchemaCanaryExportGate? _lastSchemaCanaryExportGate;
     private bool _sqlConnected;
 
     public int DetectionIntervalSeconds { get; set; } = 300;
@@ -40,6 +41,10 @@ public sealed class RxDetectionWorker : BackgroundService
     public bool IsSqlConnected => _sqlConnected;
     public PioneerRxSqlEngine? SqlEngine => _sqlEngine;
     public PioneerRxWritebackEngine? WritebackEngine => _writebackEngine;
+    internal SchemaCanaryExportGate SnapshotSchemaCanaryExportGate() =>
+        _canarySource is null
+            ? SchemaCanaryExportGate.NotRecorded("schema_canary_unavailable")
+            : _lastSchemaCanaryExportGate ?? SchemaCanaryExportGate.NotRecorded("schema_canary_not_recorded");
 
     public RxDetectionWorker(
         ILogger<RxDetectionWorker> logger,
@@ -129,7 +134,8 @@ public sealed class RxDetectionWorker : BackgroundService
                 hmacSalt,
                 patientMap,
                 pharmacyId: _options.PharmacyId,
-                agentInstallId: _options.AgentId);
+                agentInstallId: _options.AgentId,
+                includeLegacyDeliveryQueue: true);
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -162,6 +168,7 @@ public sealed class RxDetectionWorker : BackgroundService
             }
 
             var preflight = await _canarySource.VerifyPreflightAsync(establishedBaseline, ct);
+            RecordSchemaCanaryGate(preflight);
             if (!preflight.IsValid)
             {
                 _logger.LogWarning(
@@ -180,13 +187,15 @@ public sealed class RxDetectionWorker : BackgroundService
             {
                 var hmacSalt = _options.HmacSalt ?? "[no-hmac-salt]";
                 var patientMap = await EnrichPatientDetailsAsync(result.Rxs, hmacSalt, ct);
+                RecordSchemaCanaryGate(result.PostflightVerification);
                 var json = SerializeRxBatch(
                     result.Rxs,
                     hmacSalt,
                     patientMap,
                     schemaVerification: result.PostflightVerification,
                     pharmacyId: _options.PharmacyId,
-                    agentInstallId: _options.AgentId);
+                    agentInstallId: _options.AgentId,
+                    includeLegacyDeliveryQueue: true);
                 if (!await TrySyncPayloadToCloudAsync(json, ct))
                     _stateDb.InsertUnsyncedBatch(json);
             }
@@ -208,6 +217,7 @@ public sealed class RxDetectionWorker : BackgroundService
         // ── Detect with canary ──
         var detection = await _canarySource.DetectWithCanaryAsync(baseline, ct);
         var verification = detection.PostflightVerification;
+        RecordSchemaCanaryGate(verification);
 
         // ── Escalation state machine ──
         _holdState = SchemaCanaryEscalation.Transition(_holdState, verification.Severity);
@@ -256,7 +266,8 @@ public sealed class RxDetectionWorker : BackgroundService
                 patientMap,
                 schemaVerification: detection.PostflightVerification,
                 pharmacyId: _options.PharmacyId,
-                agentInstallId: _options.AgentId);
+                agentInstallId: _options.AgentId,
+                includeLegacyDeliveryQueue: true);
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -464,7 +475,7 @@ public sealed class RxDetectionWorker : BackgroundService
         string? pmsVersion = null,
         string hashKeyVersion = "local-hmac-v1",
         DateTimeOffset? serializedAtUtc = null,
-        bool includeLegacyDeliveryQueue = true)
+        bool includeLegacyDeliveryQueue = false)
     {
         var serializedAt = serializedAtUtc ?? DateTimeOffset.UtcNow;
         var scanWindowId = $"rxscan-{serializedAt.ToUnixTimeMilliseconds()}";
@@ -473,13 +484,13 @@ public sealed class RxDetectionWorker : BackgroundService
             var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
             var rxHash = HashRxNumber(rx.RxNumber, hmacSalt);
             var warnings = BuildCandidateWarnings(pd, schemaVerification);
-            var confidence = Math.Clamp(1.0d - (warnings.Count * 0.2d), 0d, 1d);
             var isControlled = rx.DrugSchedule is >= 2 and <= 5;
             const DetectionSource source = DetectionSource.Sql;
             const string schemaSignature = "pioneerrx.sql.metadata.v1";
             var localEvidenceId = BuildLocalEvidenceId(rxHash, rx.DetectedAt);
             var patientDelivery = BuildPatientDelivery(pd, hmacSalt);
             var fieldConfidence = BuildCandidateFieldConfidence(rx, pd);
+            var confidence = ComputeCandidateConfidence(fieldConfidence, warnings, schemaVerification);
             var fieldProvenance = BuildCandidateProvenance(rx, pd, source, schemaSignature, localEvidenceId);
 
             return new RxOrderCandidate(
@@ -645,6 +656,20 @@ public sealed class RxDetectionWorker : BackgroundService
         return warnings;
     }
 
+    private void RecordSchemaCanaryGate(ContractVerification verification)
+    {
+        _lastSchemaCanaryExportGate = new SchemaCanaryExportGate(
+            Status: verification.Severity == CanarySeverity.None && verification.IsValid ? "pass" : "fail",
+            Severity: verification.Severity.ToString().ToLowerInvariant(),
+            Recorded: true,
+            Passing: verification.Severity == CanarySeverity.None && verification.IsValid,
+            BaselineHash: verification.BaselineHash,
+            ObservedHash: verification.ObservedHash,
+            DriftedComponents: verification.DriftedComponents,
+            Details: verification.Details,
+            RecordedAtUtc: DateTimeOffset.UtcNow.ToString("o"));
+    }
+
     private static List<RxMissingAddressFlag> BuildMissingAddressFlags(RxPatientDetails? pd)
     {
         var flags = new List<RxMissingAddressFlag>();
@@ -685,6 +710,39 @@ public sealed class RxDetectionWorker : BackgroundService
         };
     }
 
+    private static double ComputeCandidateConfidence(
+        IReadOnlyDictionary<string, double> fieldConfidence,
+        IReadOnlyCollection<RxOrderCandidateWarning> warnings,
+        ContractVerification? schemaVerification)
+    {
+        var sourceCompleteness = fieldConfidence.Count == 0
+            ? 0d
+            : fieldConfidence.Values.Select(value => Math.Clamp(value, 0d, 1d)).Average();
+        var schemaScore = schemaVerification?.Severity switch
+        {
+            null => 1.0d,
+            CanarySeverity.None when schemaVerification.IsValid => 1.0d,
+            CanarySeverity.Warning => 0.72d,
+            CanarySeverity.Critical => 0.0d,
+            _ => 0.5d,
+        };
+        var warningPenalty = warnings.Sum(w => w switch
+        {
+            RxOrderCandidateWarning.MissingDeliveryAddress => 0.08d,
+            RxOrderCandidateWarning.MissingPatientIdentity => 0.08d,
+            RxOrderCandidateWarning.MissingZip5 => 0.04d,
+            RxOrderCandidateWarning.SchemaCanaryDrift => 0.10d,
+            RxOrderCandidateWarning.SchemaCanaryObject => 0.04d,
+            RxOrderCandidateWarning.SchemaCanaryColumn => 0.04d,
+            RxOrderCandidateWarning.SchemaCanaryIndex => 0.03d,
+            RxOrderCandidateWarning.SchemaCanaryType => 0.03d,
+            _ => 0.02d,
+        });
+
+        var confidence = (sourceCompleteness * 0.70d) + (schemaScore * 0.25d) + 0.05d - warningPenalty;
+        return Math.Clamp(confidence, 0d, 1d);
+    }
+
     private static Dictionary<string, RxFieldProvenance> BuildCandidateProvenance(
         RxMetadata rx,
         RxPatientDetails? pd,
@@ -717,7 +775,13 @@ public sealed class RxDetectionWorker : BackgroundService
                 Classification: "phi-direct-hmac",
                 EvidenceId: localEvidenceId,
                 Signature: schemaSignature),
-            ["medication.nameHash"] = SqlOperational(string.IsNullOrWhiteSpace(rx.DrugName) ? 0.4d : 1.0d),
+            ["medication.nameHash"] = new(
+                Source: source,
+                SourceDetail: "sql_metadata",
+                Confidence: string.IsNullOrWhiteSpace(rx.DrugName) ? 0.4d : 1.0d,
+                Classification: "phi-direct-hmac",
+                EvidenceId: localEvidenceId,
+                Signature: schemaSignature),
             ["medication.ndc"] = SqlOperational(string.IsNullOrWhiteSpace(rx.Ndc) ? 0.4d : 1.0d),
             ["medication.quantity"] = SqlOperational(rx.Quantity > 0 ? 1.0d : 0.4d),
             ["medication.refills"] = SqlOperational(),
@@ -757,4 +821,27 @@ public sealed class RxDetectionWorker : BackgroundService
             return false;
         }
     }
+}
+
+internal sealed record SchemaCanaryExportGate(
+    string Status,
+    string Severity,
+    bool Recorded,
+    bool Passing,
+    string? BaselineHash,
+    string? ObservedHash,
+    IReadOnlyList<string> DriftedComponents,
+    string? Details,
+    string? RecordedAtUtc)
+{
+    public static SchemaCanaryExportGate NotRecorded(string status) => new(
+        Status: status,
+        Severity: "unknown",
+        Recorded: false,
+        Passing: false,
+        BaselineHash: null,
+        ObservedHash: null,
+        DriftedComponents: Array.Empty<string>(),
+        Details: null,
+        RecordedAtUtc: null);
 }

@@ -21,6 +21,10 @@ public sealed class PioneerRxShadowFixtureTests
         Assert.Equal(1, replay.CandidateCount);
         Assert.Equal(1, replay.LegacyQueueCount);
         Assert.Single(replay.EvidenceIds);
+        Assert.Single(replay.RxHashes);
+        Assert.True(replay.StableCandidateHashes);
+        Assert.Equal(0, replay.ForbiddenTokenHitCount);
+        Assert.Matches("^[a-f0-9]{16}$", replay.PayloadSha256Prefix);
         Assert.Matches("^rxh-[a-f0-9]{16}-[0-9]{10}$", replay.EvidenceIds[0]);
 
         var candidate = root.GetProperty("data").GetProperty("rxOrderCandidates")[0];
@@ -54,6 +58,9 @@ public sealed class PioneerRxShadowFixtureTests
         Assert.Equal(replay.PmsVersion, candidate.GetProperty("provenance").GetProperty("pmsVersion").GetString());
         Assert.Equal(1, replay.CandidateCount);
         Assert.Equal(0, replay.LegacyQueueCount);
+        Assert.True(replay.StableCandidateHashes);
+        Assert.Equal(0, replay.ForbiddenTokenHitCount);
+        Assert.Single(replay.RxHashes);
     }
 
     [Fact]
@@ -123,6 +130,8 @@ public sealed class PioneerRxShadowFixtureTests
 
             Assert.Equal(1, replay.CandidateCount);
             Assert.Equal(0, replay.LegacyQueueCount);
+            Assert.True(replay.StableCandidateHashes);
+            Assert.Matches("^[a-f0-9]{16}$", replay.PayloadSha256Prefix);
             Assert.DoesNotContain("ShadowMed 001", replay.PayloadJson);
             Assert.DoesNotContain("SHADOW-RX-0001", replay.PayloadJson);
         }
