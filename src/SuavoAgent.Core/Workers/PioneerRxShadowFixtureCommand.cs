@@ -111,7 +111,8 @@ internal static class PioneerRxShadowFixtureCommand
 
         var schemaCanary = rxWorker.SnapshotSchemaCanaryExportGate();
         var dashboardEvidence = ReadDashboardEvidence(dataEl);
-        var track2ExitGate = BuildTrack2ExitGate(replay, schemaCanary, dashboardEvidence);
+        var releaseEvidence = ReadReleaseEvidence(dataEl);
+        var track2ExitGate = BuildTrack2ExitGate(replay, schemaCanary, dashboardEvidence, releaseEvidence);
 
         stateDb.AppendChainedAuditEntry(new AuditEntry(
             TaskId: commandId ?? command.Nonce,
@@ -139,7 +140,8 @@ internal static class PioneerRxShadowFixtureCommand
             {
                 agentVersion = options.Version,
                 sourceCommitMinimum = RequiredTrack2SourceCommitMinimum,
-                signedReleaseRequired = true
+                signedReleaseRequired = true,
+                releaseEvidence
             },
             track2ExitGate,
             syntheticPatientDetails = includeSyntheticPatientDetails,
@@ -161,6 +163,16 @@ internal static class PioneerRxShadowFixtureCommand
             if (normalized == "dashboardevidence")
             {
                 if (IsBlockedField(property.Name) || !TryReadDashboardEvidence(property.Value, out _))
+                {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if (normalized == "releaseevidence")
+            {
+                if (IsBlockedField(property.Name) || !TryReadReleaseEvidence(property.Value, out _))
                 {
                     return true;
                 }
@@ -195,10 +207,26 @@ internal static class PioneerRxShadowFixtureCommand
         return dashboardEvidence;
     }
 
+    internal static PioneerRxShadowReleaseEvidence ReadReleaseEvidence(JsonElement element)
+    {
+        if (!element.TryGetProperty("releaseEvidence", out var releaseEvidenceElement))
+        {
+            return PioneerRxShadowReleaseEvidence.Empty;
+        }
+
+        if (!TryReadReleaseEvidence(releaseEvidenceElement, out var releaseEvidence))
+        {
+            throw new InvalidOperationException("PioneerRx shadow release evidence must be digest-backed and non-PHI.");
+        }
+
+        return releaseEvidence;
+    }
+
     internal static PioneerRxTrack2ExitGate BuildTrack2ExitGate(
         PioneerRxShadowReplayResult replay,
         SchemaCanaryExportGate schemaCanary,
-        PioneerRxShadowDashboardEvidence dashboardEvidence)
+        PioneerRxShadowDashboardEvidence dashboardEvidence,
+        PioneerRxShadowReleaseEvidence releaseEvidence)
     {
         var zeroForbiddenTokens = replay.ForbiddenTokenHitCount == 0;
         var candidateRowsDashboardVisible =
@@ -208,6 +236,13 @@ internal static class PioneerRxShadowFixtureCommand
             dashboardEvidence.CorrectionPathExercised &&
             IsReceiptDigest(dashboardEvidence.CorrectionPathReceiptSha256);
         var dashboardEvidenceRecorded = candidateRowsDashboardVisible && correctionPathExercised;
+        var releaseEvidenceRecorded =
+            IsSafeReleaseTag(releaseEvidence.ReleaseTag) &&
+            IsHexDigest(releaseEvidence.SourceCommit, 40) &&
+            IsHexDigest(releaseEvidence.ArtifactSha256, 64) &&
+            IsHexDigest(releaseEvidence.ChecksumSignatureSha256, 64) &&
+            IsHexDigest(releaseEvidence.InstallReceiptSha256, 64) &&
+            IsHexDigest(releaseEvidence.RollbackArtifactSha256, 64);
 
         return new PioneerRxTrack2ExitGate(
             ZeroForbiddenTokens: zeroForbiddenTokens,
@@ -219,12 +254,20 @@ internal static class PioneerRxShadowFixtureCommand
             DashboardEvidenceRecorded: dashboardEvidenceRecorded,
             CandidateRowsReceiptSha256: dashboardEvidence.CandidateRowsReceiptSha256,
             CorrectionPathReceiptSha256: dashboardEvidence.CorrectionPathReceiptSha256,
+            ReleaseEvidenceRecorded: releaseEvidenceRecorded,
+            ReleaseTag: releaseEvidence.ReleaseTag,
+            SourceCommit: releaseEvidence.SourceCommit,
+            ArtifactSha256: releaseEvidence.ArtifactSha256,
+            ChecksumSignatureSha256: releaseEvidence.ChecksumSignatureSha256,
+            InstallReceiptSha256: releaseEvidence.InstallReceiptSha256,
+            RollbackArtifactSha256: releaseEvidence.RollbackArtifactSha256,
             ReadyForTrack2Exit:
                 zeroForbiddenTokens &&
                 replay.StableCandidateHashes &&
                 schemaCanary.Recorded &&
                 schemaCanary.Passing &&
-                dashboardEvidenceRecorded);
+                dashboardEvidenceRecorded &&
+                releaseEvidenceRecorded);
     }
 
     private static bool TryReadDashboardEvidence(
@@ -307,6 +350,107 @@ internal static class PioneerRxShadowFixtureCommand
         return true;
     }
 
+    private static bool TryReadReleaseEvidence(
+        JsonElement element,
+        out PioneerRxShadowReleaseEvidence releaseEvidence)
+    {
+        releaseEvidence = PioneerRxShadowReleaseEvidence.Empty;
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        string? releaseTag = null;
+        string? sourceCommit = null;
+        string? artifactSha256 = null;
+        string? checksumSignatureSha256 = null;
+        string? installReceiptSha256 = null;
+        string? rollbackArtifactSha256 = null;
+
+        foreach (var property in element.EnumerateObject())
+        {
+            var normalized = NormalizeFieldName(property.Name);
+            if (IsBlockedField(property.Name) || property.Value.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            var value = property.Value.GetString();
+            switch (normalized)
+            {
+                case "releasetag":
+                    if (!IsSafeReleaseTag(value))
+                    {
+                        return false;
+                    }
+
+                    releaseTag = value;
+                    break;
+                case "sourcecommit":
+                    if (!IsHexDigest(value, 40))
+                    {
+                        return false;
+                    }
+
+                    sourceCommit = value;
+                    break;
+                case "artifactsha256":
+                    if (!IsHexDigest(value, 64))
+                    {
+                        return false;
+                    }
+
+                    artifactSha256 = value;
+                    break;
+                case "checksumsignaturesha256":
+                    if (!IsHexDigest(value, 64))
+                    {
+                        return false;
+                    }
+
+                    checksumSignatureSha256 = value;
+                    break;
+                case "installreceiptsha256":
+                    if (!IsHexDigest(value, 64))
+                    {
+                        return false;
+                    }
+
+                    installReceiptSha256 = value;
+                    break;
+                case "rollbackartifactsha256":
+                    if (!IsHexDigest(value, 64))
+                    {
+                        return false;
+                    }
+
+                    rollbackArtifactSha256 = value;
+                    break;
+                default:
+                    return false;
+            }
+        }
+
+        if (releaseTag is null ||
+            sourceCommit is null ||
+            artifactSha256 is null ||
+            checksumSignatureSha256 is null ||
+            installReceiptSha256 is null ||
+            rollbackArtifactSha256 is null)
+        {
+            return false;
+        }
+
+        releaseEvidence = new PioneerRxShadowReleaseEvidence(
+            ReleaseTag: releaseTag,
+            SourceCommit: sourceCommit,
+            ArtifactSha256: artifactSha256,
+            ChecksumSignatureSha256: checksumSignatureSha256,
+            InstallReceiptSha256: installReceiptSha256,
+            RollbackArtifactSha256: rollbackArtifactSha256);
+        return true;
+    }
+
     private static bool HasUnsafeValue(string normalizedName, JsonElement value)
     {
         return normalizedName switch
@@ -358,6 +502,17 @@ internal static class PioneerRxShadowFixtureCommand
     private static bool IsReceiptDigest(string? value) =>
         value is { Length: >= 16 and <= 64 } &&
         value.All(ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsHexDigest(string? value, int length) =>
+        value is not null &&
+        value.Length == length &&
+        value.All(ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsSafeReleaseTag(string? value) =>
+        value is { Length: > 1 and <= 64 } &&
+        value[0] == 'v' &&
+        value[1] is >= '0' and <= '9' &&
+        value.Skip(1).All(ch => IsAsciiLetterOrDigit(ch) || ch is '-' or '_' or '.');
 
     private static bool IsSafeEnvelopeToken(string? value) =>
         value is { Length: > 0 and <= 128 } &&
@@ -413,6 +568,38 @@ internal sealed record PioneerRxShadowDashboardEvidence(
         CorrectionPathReceiptSha256: null);
 }
 
+internal sealed record PioneerRxShadowReleaseEvidence(
+    [property: JsonPropertyName("releaseTag")]
+    string? ReleaseTag,
+    [property: JsonPropertyName("sourceCommit")]
+    string? SourceCommit,
+    [property: JsonPropertyName("artifactSha256")]
+    string? ArtifactSha256,
+    [property: JsonPropertyName("checksumSignatureSha256")]
+    string? ChecksumSignatureSha256,
+    [property: JsonPropertyName("installReceiptSha256")]
+    string? InstallReceiptSha256,
+    [property: JsonPropertyName("rollbackArtifactSha256")]
+    string? RollbackArtifactSha256)
+{
+    public static PioneerRxShadowReleaseEvidence Empty { get; } = new(
+        ReleaseTag: null,
+        SourceCommit: null,
+        ArtifactSha256: null,
+        ChecksumSignatureSha256: null,
+        InstallReceiptSha256: null,
+        RollbackArtifactSha256: null);
+
+    [JsonPropertyName("recorded")]
+    public bool Recorded =>
+        ReleaseTag is not null &&
+        SourceCommit is not null &&
+        ArtifactSha256 is not null &&
+        ChecksumSignatureSha256 is not null &&
+        InstallReceiptSha256 is not null &&
+        RollbackArtifactSha256 is not null;
+}
+
 internal sealed record PioneerRxTrack2ExitGate(
     [property: JsonPropertyName("zeroForbiddenTokens")]
     bool ZeroForbiddenTokens,
@@ -432,5 +619,19 @@ internal sealed record PioneerRxTrack2ExitGate(
     string? CandidateRowsReceiptSha256,
     [property: JsonPropertyName("correctionPathReceiptSha256")]
     string? CorrectionPathReceiptSha256,
+    [property: JsonPropertyName("releaseEvidenceRecorded")]
+    bool ReleaseEvidenceRecorded,
+    [property: JsonPropertyName("releaseTag")]
+    string? ReleaseTag,
+    [property: JsonPropertyName("sourceCommit")]
+    string? SourceCommit,
+    [property: JsonPropertyName("artifactSha256")]
+    string? ArtifactSha256,
+    [property: JsonPropertyName("checksumSignatureSha256")]
+    string? ChecksumSignatureSha256,
+    [property: JsonPropertyName("installReceiptSha256")]
+    string? InstallReceiptSha256,
+    [property: JsonPropertyName("rollbackArtifactSha256")]
+    string? RollbackArtifactSha256,
     [property: JsonPropertyName("readyForTrack2Exit")]
     bool ReadyForTrack2Exit);

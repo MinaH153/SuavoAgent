@@ -43,6 +43,38 @@ public sealed class PioneerRxShadowFixtureTests
         Assert.Equal("fedcba9876543210fedcba9876543210", evidence.CorrectionPathReceiptSha256);
     }
 
+    [Fact]
+    public void ShadowFixtureCommand_AllowsOnlyDigestBackedReleaseEvidence()
+    {
+        using var doc = JsonDocument.Parse("""
+        {
+          "commandId": "cmd-shadow-proof",
+          "requesterId": "operator-1",
+          "maxRows": 3,
+          "includeSyntheticPatientDetails": false,
+          "releaseEvidence": {
+            "releaseTag": "v3.14.6",
+            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "rollbackArtifactSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        }
+        """);
+
+        Assert.False(PioneerRxShadowFixtureCommand.ContainsUnsafeField(doc.RootElement));
+
+        var evidence = PioneerRxShadowFixtureCommand.ReadReleaseEvidence(doc.RootElement);
+        Assert.True(evidence.Recorded);
+        Assert.Equal("v3.14.6", evidence.ReleaseTag);
+        Assert.Equal("b8f8888279c8960280823c2308a0339fff4a2c74", evidence.SourceCommit);
+        Assert.Equal("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", evidence.ArtifactSha256);
+        Assert.Equal("1111111111111111111111111111111111111111111111111111111111111111", evidence.ChecksumSignatureSha256);
+        Assert.Equal("2222222222222222222222222222222222222222222222222222222222222222", evidence.InstallReceiptSha256);
+        Assert.Equal("3333333333333333333333333333333333333333333333333333333333333333", evidence.RollbackArtifactSha256);
+    }
+
     [Theory]
     [InlineData("""
         {
@@ -81,6 +113,67 @@ public sealed class PioneerRxShadowFixtureTests
         }
         """)]
     public void ShadowFixtureCommand_RejectsUnsafeDashboardEvidence(string payload)
+    {
+        using var doc = JsonDocument.Parse(payload);
+
+        Assert.True(PioneerRxShadowFixtureCommand.ContainsUnsafeField(doc.RootElement));
+    }
+
+    [Theory]
+    [InlineData("""
+        {
+          "commandId": "cmd-shadow-proof",
+          "releaseEvidence": {
+            "releaseTag": "field release for Jane Doe",
+            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "rollbackArtifactSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        }
+        """)]
+    [InlineData("""
+        {
+          "commandId": "cmd-shadow-proof",
+          "releaseEvidence": {
+            "releaseTag": "vfield",
+            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "rollbackArtifactSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        }
+        """)]
+    [InlineData("""
+        {
+          "commandId": "cmd-shadow-proof",
+          "releaseEvidence": {
+            "releaseTag": "v3.14.6",
+            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
+            "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "rollbackArtifactSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        }
+        """)]
+    [InlineData("""
+        {
+          "commandId": "cmd-shadow-proof",
+          "releaseEvidence": {
+            "releaseTag": "v3.14.6",
+            "sourceCommit": "b8f8888279c8960280823c2308a0339fff4a2c74",
+            "artifactSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "checksumSignatureSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "installReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "rollbackArtifactSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+            "patientName": "Jane Doe"
+          }
+        }
+        """)]
+    public void ShadowFixtureCommand_RejectsUnsafeReleaseEvidence(string payload)
     {
         using var doc = JsonDocument.Parse(payload);
 
@@ -143,11 +236,19 @@ public sealed class PioneerRxShadowFixtureTests
             CorrectionPathExercised: true,
             CandidateRowsReceiptSha256: "0123456789abcdef0123456789abcdef",
             CorrectionPathReceiptSha256: "fedcba9876543210fedcba9876543210");
+        var releaseEvidence = new PioneerRxShadowReleaseEvidence(
+            ReleaseTag: "v3.14.6",
+            SourceCommit: "b8f8888279c8960280823c2308a0339fff4a2c74",
+            ArtifactSha256: new string('0', 64),
+            ChecksumSignatureSha256: new string('1', 64),
+            InstallReceiptSha256: new string('2', 64),
+            RollbackArtifactSha256: new string('3', 64));
 
         var gate = PioneerRxShadowFixtureCommand.BuildTrack2ExitGate(
             replay,
             schemaCanary,
-            dashboardEvidence);
+            dashboardEvidence,
+            releaseEvidence);
 
         Assert.True(gate.ZeroForbiddenTokens);
         Assert.True(gate.StableCandidateHashes);
@@ -156,6 +257,8 @@ public sealed class PioneerRxShadowFixtureTests
         Assert.True(gate.CandidateRowsDashboardVisible);
         Assert.True(gate.CorrectionPathExercised);
         Assert.True(gate.DashboardEvidenceRecorded);
+        Assert.True(gate.ReleaseEvidenceRecorded);
+        Assert.Equal("v3.14.6", gate.ReleaseTag);
         Assert.True(gate.ReadyForTrack2Exit);
     }
 
@@ -190,11 +293,57 @@ public sealed class PioneerRxShadowFixtureTests
         var gate = PioneerRxShadowFixtureCommand.BuildTrack2ExitGate(
             replay,
             schemaCanary,
-            PioneerRxShadowDashboardEvidence.Empty);
+            PioneerRxShadowDashboardEvidence.Empty,
+            PioneerRxShadowReleaseEvidence.Empty);
 
         Assert.False(gate.DashboardEvidenceRecorded);
         Assert.False(gate.CandidateRowsDashboardVisible);
         Assert.False(gate.CorrectionPathExercised);
+        Assert.False(gate.ReleaseEvidenceRecorded);
+        Assert.False(gate.ReadyForTrack2Exit);
+    }
+
+    [Fact]
+    public void Track2ExitGate_StaysBlockedWithoutSignedReleaseEvidence()
+    {
+        var replay = new PioneerRxShadowReplayResult(
+            PayloadJson: "{}",
+            CandidateCount: 1,
+            LegacyQueueCount: 0,
+            EvidenceIds: new[] { "rxh-0123456789abcdef-1770000000" },
+            RxHashes: new[] { "rxh-0123456789abcdef" },
+            StableCandidateHashes: true,
+            PayloadSha256Prefix: "0123456789abcdef",
+            ForbiddenTokenHitCount: 0,
+            SerializedAtUtc: new DateTimeOffset(2026, 5, 7, 12, 0, 0, TimeSpan.Zero),
+            PharmacyId: "pharm-1",
+            AgentInstallId: "agent-1",
+            PmsVersion: "PioneerRx Shadow Export",
+            HashKeyVersion: "fixture-v1");
+        var schemaCanary = new SchemaCanaryExportGate(
+            Status: "passing",
+            Severity: "info",
+            Recorded: true,
+            Passing: true,
+            BaselineHash: "baseline",
+            ObservedHash: "observed",
+            DriftedComponents: Array.Empty<string>(),
+            Details: null,
+            RecordedAtUtc: "2026-05-07T12:00:00.0000000+00:00");
+        var dashboardEvidence = new PioneerRxShadowDashboardEvidence(
+            CandidateRowsVisible: true,
+            CorrectionPathExercised: true,
+            CandidateRowsReceiptSha256: "0123456789abcdef0123456789abcdef",
+            CorrectionPathReceiptSha256: "fedcba9876543210fedcba9876543210");
+
+        var gate = PioneerRxShadowFixtureCommand.BuildTrack2ExitGate(
+            replay,
+            schemaCanary,
+            dashboardEvidence,
+            PioneerRxShadowReleaseEvidence.Empty);
+
+        Assert.True(gate.DashboardEvidenceRecorded);
+        Assert.False(gate.ReleaseEvidenceRecorded);
         Assert.False(gate.ReadyForTrack2Exit);
     }
 
