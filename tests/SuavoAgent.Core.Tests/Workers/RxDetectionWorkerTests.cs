@@ -336,6 +336,67 @@ public class RxDetectionWorkerTests : IDisposable
     }
 
     [Fact]
+    public void SerializeRxBatch_ConfidenceUsesEvidenceNotWarningCount()
+    {
+        var rxs = new List<RxMetadata>
+        {
+            new(
+                RxNumber: "99001",
+                DrugName: "Metformin 500mg",
+                Ndc: "00093-7214-01",
+                DateFilled: DateTime.UtcNow,
+                Quantity: 60m,
+                StatusGuid: Guid.Parse("bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"),
+                DetectedAt: DateTimeOffset.Parse("2026-04-29T12:00:00+00:00"),
+                DaysSupply: 30)
+        };
+        var patientMap = new Dictionary<string, RxPatientDetails>
+        {
+            ["99001"] = new("99001", "Sarah", "M", "7605551234",
+                "456 Oak Ave", "Apt 3B", "Victorville", "CA", "92392")
+        };
+        var objectOnly = new ContractVerification(
+            IsValid: false,
+            Severity: CanarySeverity.Warning,
+            DriftedComponents: new[] { "object" },
+            BaselineHash: "baseline",
+            ObservedHash: "observed",
+            Details: "optional object changed");
+        var manyComponents = new ContractVerification(
+            IsValid: false,
+            Severity: CanarySeverity.Warning,
+            DriftedComponents: new[] { "object", "column", "index", "type" },
+            BaselineHash: "baseline",
+            ObservedHash: "observed",
+            Details: "field-shaped canary warning");
+
+        var objectOnlyCandidate = JsonDocument.Parse(RxDetectionWorker.SerializeRxBatch(
+                rxs,
+                "test-salt",
+                patientMap,
+                objectOnly))
+            .RootElement
+            .GetProperty("data")
+            .GetProperty("rxOrderCandidates")[0];
+        var manyComponentsCandidate = JsonDocument.Parse(RxDetectionWorker.SerializeRxBatch(
+                rxs,
+                "test-salt",
+                patientMap,
+                manyComponents))
+            .RootElement
+            .GetProperty("data")
+            .GetProperty("rxOrderCandidates")[0];
+
+        Assert.NotEqual(
+            objectOnlyCandidate.GetProperty("warnings").GetArrayLength(),
+            manyComponentsCandidate.GetProperty("warnings").GetArrayLength());
+        Assert.Equal(
+            objectOnlyCandidate.GetProperty("confidence").GetDouble(),
+            manyComponentsCandidate.GetProperty("confidence").GetDouble(),
+            precision: 6);
+    }
+
+    [Fact]
     public void CloudSyncFails_EnrichedBatchPersistedToSqlite()
     {
         // Simulate the exact path: serialize enriched batch → persist to SQLite → retrieve intact
