@@ -41,3 +41,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgen
 ```
 
 The installed-machine probe validates Core, Broker, and Watchdog services; installed binary hashes; bootstrap `--repair` readiness; appsettings ACLs needed for LocalService DPAPI sealing; redacted heartbeat prerequisites; a live HMAC GET to `/api/agent/config`; local `config-sync-health.json` and `watchdog-health.json` evidence; and optional `cloud-auth-health.json` recovery evidence. A missing Core/Watchdog health file while the matching service is running fails the probe. A cloud-auth failure is reported as a redacted status/reason such as `http_401_Agent_not_found`; the probe never prints the API key or response body.
+
+## Track 2 Field Exit
+
+Queen/PioneerRx field validation must use a signed release at or after `b8f8888279c8960280823c2308a0339fff4a2c74`. The signed shadow export command must include digest-only `releaseEvidence`: release tag, source commit, artifact SHA-256, checksum-signature SHA-256, install receipt SHA-256, and rollback artifact SHA-256. The Track 2 exit gate stays closed until release evidence is recorded, replay has zero forbidden-token hits, candidate hashes are stable, schema canary is recorded and passing, candidate rows are visible in the dashboard, and the correction path has a digest-backed receipt.
