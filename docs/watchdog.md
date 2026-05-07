@@ -76,6 +76,13 @@ fail, Watchdog invokes `bootstrap.ps1 -Repair`. This re-applies service
 registration, ACLs, and config without touching operator data (SQL creds,
 consent receipt). It's safe to run idempotently.
 
+Signed cloud repair commands use the same service-owned path. Core verifies
+the signed command and writes a non-PHI `watchdog-repair-request.json` marker
+under ProgramData; Watchdog consumes the marker as LocalSystem, invokes
+`bootstrap.ps1 -Repair`, deletes the marker, and includes the sanitized result
+in `watchdog-health.json` for the next heartbeat. Core does not launch the
+repair process directly because Core runs with lower service rights.
+
 ### Tier 4 — Alert
 
 If Watchdog has no remediation path (bootstrap not configured, service
@@ -93,6 +100,7 @@ new WatchdogOptions
     StartTimeout = TimeSpan.FromSeconds(90),
     RepairTimeout = TimeSpan.FromMinutes(5),
     BootstrapPath = @"C:\SuavoAgent\bootstrap.ps1",
+    RepairRequestPath = @"C:\ProgramData\SuavoAgent\watchdog-repair-request.json",
 }
 ```
 

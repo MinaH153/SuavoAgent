@@ -35,13 +35,15 @@ public class WatchdogWorkerTests
     private static WatchdogWorker MakeWorker(
         FakeCommand cmd,
         string? bootstrapPath = null,
-        string? telemetryPath = null)
+        string? telemetryPath = null,
+        string? repairRequestPath = null)
     {
         var opts = new WatchdogOptions
         {
             WatchedServices = new[] { "SuavoAgent.Core" },
             BootstrapPath = bootstrapPath,
-            TelemetryPath = telemetryPath
+            TelemetryPath = telemetryPath,
+            RepairRequestPath = repairRequestPath
         };
         var worker = new WatchdogWorker(NullLogger<WatchdogWorker>.Instance, cmd, opts);
         // Seed ledger via reflection-free helper: call TickOnce with a "Running" observation
@@ -170,6 +172,89 @@ public class WatchdogWorkerTests
         finally
         {
             try { File.Delete(telemetryPath); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Tick_QueuedRemoteRepair_InvokesBootstrapRepairAndDeletesRequest()
+    {
+        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
+        var requestPath = Path.Combine(Path.GetTempPath(), $"watchdog-repair-{Guid.NewGuid():N}.json");
+        var bootstrap = Path.Combine(Path.GetTempPath(), $"bootstrap-{Guid.NewGuid():N}.ps1");
+        File.WriteAllText(bootstrap, "# stub");
+        File.WriteAllText(requestPath, """
+        {
+          "schemaVersion": 1,
+          "commandId": "cmd-repair-queued-1",
+          "reason": "watchdog_critical",
+          "requestedAt": "2026-05-06T23:59:00.0000000Z",
+          "source": "signed_remote_repair"
+        }
+        """);
+
+        var cmd = new FakeCommand();
+        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
+        var worker = MakeWorker(cmd, bootstrap, telemetryPath, requestPath);
+        SeedLedgers(worker);
+
+        try
+        {
+            worker.TickOnce(DateTimeOffset.Parse("2026-05-07T00:00:00Z"));
+
+            Assert.Single(cmd.RepairCalls);
+            Assert.Equal(bootstrap, cmd.RepairCalls[0]);
+            Assert.False(File.Exists(requestPath));
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
+            var remoteRepair = doc.RootElement.GetProperty("remoteRepair");
+            Assert.True(remoteRepair.GetProperty("present").GetBoolean());
+            Assert.Equal("cmd-repair-queued-1", remoteRepair.GetProperty("commandId").GetString());
+            Assert.Equal("watchdog_critical", remoteRepair.GetProperty("reason").GetString());
+            Assert.Equal("repair_completed", remoteRepair.GetProperty("outcome").GetString());
+            Assert.True(remoteRepair.GetProperty("repairInvoked").GetBoolean());
+        }
+        finally
+        {
+            try { File.Delete(telemetryPath); } catch { }
+            try { File.Delete(requestPath); } catch { }
+            try { File.Delete(bootstrap); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Tick_QueuedRemoteRepair_RedactsUnexpectedReasonInTelemetry()
+    {
+        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
+        var requestPath = Path.Combine(Path.GetTempPath(), $"watchdog-repair-{Guid.NewGuid():N}.json");
+        var bootstrap = Path.Combine(Path.GetTempPath(), $"bootstrap-{Guid.NewGuid():N}.ps1");
+        File.WriteAllText(bootstrap, "# stub");
+        File.WriteAllText(requestPath, """
+        {
+          "schemaVersion": 1,
+          "commandId": "cmd-repair-queued-2",
+          "reason": "patient_john_smith",
+          "requestedAt": "2026-05-06T23:59:00.0000000Z"
+        }
+        """);
+
+        var cmd = new FakeCommand();
+        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
+        var worker = MakeWorker(cmd, bootstrap, telemetryPath, requestPath);
+        SeedLedgers(worker);
+
+        try
+        {
+            worker.TickOnce(DateTimeOffset.Parse("2026-05-07T00:00:00Z"));
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
+            var remoteRepair = doc.RootElement.GetProperty("remoteRepair");
+            Assert.Equal("remote_command", remoteRepair.GetProperty("reason").GetString());
+        }
+        finally
+        {
+            try { File.Delete(telemetryPath); } catch { }
+            try { File.Delete(requestPath); } catch { }
+            try { File.Delete(bootstrap); } catch { }
         }
     }
 

@@ -28,6 +28,7 @@ namespace SuavoAgent.Core.Tests.Workers;
 public class HeartbeatWorkerTests : IDisposable
 {
     private readonly string _dbPath;
+    private readonly string _repairRequestPath;
     private readonly AgentStateDb _db;
     private readonly HeartbeatWorker _worker;
     private readonly FakeIntentCursorClient _intentCursorClient = new();
@@ -44,6 +45,7 @@ public class HeartbeatWorkerTests : IDisposable
     public HeartbeatWorkerTests()
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"suavo_hb_{Guid.NewGuid():N}.db");
+        _repairRequestPath = Path.Combine(Path.GetTempPath(), $"suavo_watchdog_repair_{Guid.NewGuid():N}.json");
         _db = new AgentStateDb(_dbPath);
 
         _signingKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -63,6 +65,7 @@ public class HeartbeatWorkerTests : IDisposable
             MachineFingerprint = TestFingerprint,
             PharmacyId = TestPharmacyId,
             HeartbeatIntervalSeconds = 30,
+            WatchdogRepairRequestPath = _repairRequestPath,
         });
 
         _worker = new HeartbeatWorker(
@@ -86,6 +89,7 @@ public class HeartbeatWorkerTests : IDisposable
     {
         _db.Dispose();
         try { File.Delete(_dbPath); } catch { }
+        try { File.Delete(_repairRequestPath); } catch { }
     }
 
     // ── Helpers ──
@@ -480,6 +484,43 @@ public class HeartbeatWorkerTests : IDisposable
         await InvokeProcessAsync(response);
 
         Assert.True(_db.GetAuditEntryCount() > countBefore);
+    }
+
+    [Fact]
+    public async Task RepairAgentCommand_QueuesWatchdogRepairRequest()
+    {
+        var response = BuildResponseJson("repair_agent", new
+        {
+            commandId = "cmd-repair-queued-1",
+            reason = "watchdog_critical"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.True(File.Exists(_repairRequestPath));
+        using var doc = JsonDocument.Parse(File.ReadAllText(_repairRequestPath));
+        var root = doc.RootElement;
+        Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal("cmd-repair-queued-1", root.GetProperty("commandId").GetString());
+        Assert.Equal("watchdog_critical", root.GetProperty("reason").GetString());
+        Assert.Equal(TestAgentId, root.GetProperty("agentId").GetString());
+        Assert.Equal("signed_remote_repair", root.GetProperty("source").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(root.GetProperty("requestedAt").GetString()));
+    }
+
+    [Fact]
+    public async Task RepairAgentCommand_DoesNotPersistFreeformRepairReason()
+    {
+        var response = BuildResponseJson("repair_agent", new
+        {
+            commandId = "cmd-repair-queued-2",
+            reason = "patient_john_smith"
+        });
+
+        await InvokeProcessAsync(response);
+
+        using var doc = JsonDocument.Parse(File.ReadAllText(_repairRequestPath));
+        Assert.Equal("remote_command", doc.RootElement.GetProperty("reason").GetString());
     }
 
     // ── Command Dispatch: acknowledge_drift ──

@@ -9,6 +9,7 @@ public sealed class AgentOptions
     public string? MachineFingerprint { get; set; }
     public int HeartbeatIntervalSeconds { get; set; } = 30;
     public int HeartbeatJitterSeconds { get; set; } = 5;
+    public string? WatchdogRepairRequestPath { get; set; }
     public string Version { get; set; } = "3.9.2";
     public string UpdateChannel { get; set; } = "stable";
     public string? SqlServer { get; set; }

@@ -12,6 +12,7 @@ public sealed class WatchdogOptions
     public TimeSpan RepairTimeout { get; init; } = TimeSpan.FromMinutes(5);
     public string? BootstrapPath { get; init; }
     public string? TelemetryPath { get; init; }
+    public string? RepairRequestPath { get; init; }
 }
 
 public sealed class WatchdogWorker : BackgroundService
@@ -21,6 +22,7 @@ public sealed class WatchdogWorker : BackgroundService
     private readonly WatchdogOptions _options;
     private readonly WatchdogDecisionEngine _engine = new();
     private readonly Dictionary<string, ServiceLedger> _ledgers = new(StringComparer.OrdinalIgnoreCase);
+    private WatchdogRemoteRepairTelemetry? _lastRemoteRepair;
 
     public WatchdogWorker(ILogger<WatchdogWorker> logger, IServiceCommand command, WatchdogOptions options)
     {
@@ -70,6 +72,8 @@ public sealed class WatchdogWorker : BackgroundService
 
     internal void TickOnce(DateTimeOffset now)
     {
+        ProcessQueuedRemoteRepairRequest(now);
+
         var serviceSnapshots = new List<WatchdogServiceTelemetry>();
 
         foreach (var svc in _options.WatchedServices)
@@ -160,7 +164,8 @@ public sealed class WatchdogWorker : BackgroundService
             var payload = new WatchdogTelemetry(
                 Present: true,
                 Timestamp: now.ToString("o"),
-                Services: services);
+                Services: services,
+                RemoteRepair: _lastRemoteRepair);
             var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
             {
                 PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -184,12 +189,130 @@ public sealed class WatchdogWorker : BackgroundService
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "SuavoAgent",
         "watchdog-health.json");
+
+    private void ProcessQueuedRemoteRepairRequest(DateTimeOffset now)
+    {
+        var requestPath = _options.RepairRequestPath ?? DefaultRepairRequestPath();
+        if (!File.Exists(requestPath))
+            return;
+
+        var request = ReadRemoteRepairRequest(requestPath, now);
+        var bootstrap = _options.BootstrapPath;
+        var repairInvoked = false;
+        var outcome = "bootstrap_missing";
+
+        try
+        {
+            if (string.IsNullOrWhiteSpace(bootstrap))
+            {
+                _logger.LogCritical("Remote repair requested but BootstrapPath is not configured");
+            }
+            else if (!File.Exists(bootstrap))
+            {
+                _logger.LogCritical("Remote repair requested but bootstrap script missing at {Path}", bootstrap);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Invoking queued remote bootstrap --repair commandId={CommandId} reason={Reason}",
+                    request.CommandId,
+                    request.Reason);
+                repairInvoked = true;
+                outcome = _command.InvokeRepair(bootstrap, _options.RepairTimeout)
+                    ? "repair_completed"
+                    : "repair_failed";
+            }
+        }
+        catch (Exception ex)
+        {
+            outcome = "repair_exception";
+            _logger.LogError(ex, "Queued remote repair failed");
+        }
+        finally
+        {
+            _lastRemoteRepair = new WatchdogRemoteRepairTelemetry(
+                Present: true,
+                RequestedAt: request.RequestedAt,
+                CompletedAt: now.ToString("o"),
+                CommandId: request.CommandId,
+                Reason: request.Reason,
+                Outcome: outcome,
+                RepairInvoked: repairInvoked);
+
+            try { File.Delete(requestPath); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to delete queued remote repair request"); }
+        }
+    }
+
+    private static RemoteRepairRequest ReadRemoteRepairRequest(string path, DateTimeOffset now)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            return new RemoteRepairRequest(
+                CommandId: ReadRepairString(root, "commandId", "unknown"),
+                Reason: ReadRepairReason(root),
+                RequestedAt: ReadRepairString(root, "requestedAt", now.ToString("o")));
+        }
+        catch
+        {
+            return new RemoteRepairRequest("unknown", "unreadable_request", now.ToString("o"));
+        }
+    }
+
+    private static string ReadRepairString(JsonElement root, string propertyName, string fallback)
+    {
+        if (!root.TryGetProperty(propertyName, out var el) ||
+            el.ValueKind != JsonValueKind.String)
+            return fallback;
+
+        var value = el.GetString();
+        if (string.IsNullOrWhiteSpace(value))
+            return fallback;
+
+        var chars = value
+            .Where(ch => char.IsLetterOrDigit(ch) || ch is '_' or '-' or '.' or ':')
+            .Take(80)
+            .ToArray();
+
+        return chars.Length == 0 ? fallback : new string(chars);
+    }
+
+    private static string ReadRepairReason(JsonElement root)
+    {
+        var reason = ReadRepairString(root, "reason", "remote_command");
+        return reason is
+            "remote_command" or
+            "watchdog_critical" or
+            "cloud_stale" or
+            "install_repair" or
+            "runtime_health_missing" or
+            "operator_requested"
+                ? reason
+                : "remote_command";
+    }
+
+    private static string DefaultRepairRequestPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent",
+        "watchdog-repair-request.json");
 }
 
 internal sealed record WatchdogTelemetry(
     bool Present,
     string Timestamp,
-    IReadOnlyList<WatchdogServiceTelemetry> Services);
+    IReadOnlyList<WatchdogServiceTelemetry> Services,
+    WatchdogRemoteRepairTelemetry? RemoteRepair);
+
+internal sealed record WatchdogRemoteRepairTelemetry(
+    bool Present,
+    string RequestedAt,
+    string CompletedAt,
+    string CommandId,
+    string Reason,
+    string Outcome,
+    bool RepairInvoked);
 
 internal sealed record WatchdogServiceTelemetry(
     string ServiceName,
@@ -202,3 +325,8 @@ internal sealed record WatchdogServiceTelemetry(
     int RepairInvocations,
     bool? RestartAccepted,
     bool? RepairCompleted);
+
+internal sealed record RemoteRepairRequest(
+    string CommandId,
+    string Reason,
+    string RequestedAt);

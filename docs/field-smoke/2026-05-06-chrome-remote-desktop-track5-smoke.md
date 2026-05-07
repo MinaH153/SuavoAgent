@@ -181,6 +181,9 @@ production failure mode:
 - Track 1 repair cannot depend on a normal helper/user shell. It needs a
   service-owned repair path or a signed local repair bootstrap that can run with
   the required service-control rights.
+- Follow-up code path: signed cloud repair now queues
+  `watchdog-repair-request.json`; Watchdog consumes it as LocalSystem and
+  reports the sanitized result through `watchdog-health.json`.
 - Track 4 dashboard should show version drift as two separate facts when known:
   installed local version evidence and cloud-reported heartbeat version. In this
   field pass they diverged: local `3.14.4+...`, cloud `3.13.9`.

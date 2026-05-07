@@ -1414,6 +1414,7 @@ public sealed class HeartbeatWorker : BackgroundService
     {
         var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
         var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+        var reason = WatchdogRepairRequestWriter.ReadReason(dataEl);
 
         async Task AckAsync(bool ok, object? result, string? err)
         {
@@ -1433,39 +1434,20 @@ public sealed class HeartbeatWorker : BackgroundService
             SourceComponent: "heartbeat_worker",
             CaptureReason: "signed_remote_repair"));
 
-        var bootstrapPath = Path.Combine(RuntimeHealthEvidence.ProgramDataRoot, "bootstrap.ps1");
-        if (!File.Exists(bootstrapPath))
-        {
-            _logger.LogWarning("repair_agent: bootstrap.ps1 missing at {Path}", bootstrapPath);
-            await AckAsync(false, new { status = "missing_bootstrap" }, "bootstrap.ps1 missing");
-            return;
-        }
-
         try
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{bootstrapPath}\" --repair",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
-            using var process = Process.Start(psi);
-            if (process is null)
-            {
-                _logger.LogWarning("repair_agent: failed to start powershell repair process");
-                await AckAsync(false, new { status = "start_failed" }, "failed to start repair process");
-                return;
-            }
-
-            _logger.LogWarning("repair_agent: bootstrap --repair started, pid={Pid}", process.Id);
-            await AckAsync(true, new { status = "repair_started", processId = process.Id }, null);
+            var requestPath = WatchdogRepairRequestWriter.Queue(
+                _options.WatchdogRepairRequestPath,
+                commandId,
+                reason,
+                _options.AgentId);
+            _logger.LogWarning("repair_agent: queued LocalSystem Watchdog repair request at {Path}", requestPath);
+            await AckAsync(true, new { status = "queued_for_watchdog" }, null);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "repair_agent: failed to invoke bootstrap --repair");
-            await AckAsync(false, new { status = "start_failed" }, "failed to invoke repair");
+            _logger.LogWarning(ex, "repair_agent: failed to queue Watchdog repair request");
+            await AckAsync(false, new { status = "queue_failed" }, "failed to queue repair");
         }
     }
 
