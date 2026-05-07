@@ -42,6 +42,14 @@ public sealed class AgentOptions
     public int MaxDetectionBatchSize { get; set; } = 100;
 
     /// <summary>
+    /// Explicit break-glass gate for the legacy <c>rxDeliveryQueue</c> sync
+    /// payload, which can carry minimum-necessary delivery PHI. Default false:
+    /// Track 2 field proof uses hash-only <c>rxOrderCandidates</c>; PHI should
+    /// move through explicit audited paths such as <c>/api/agent/patient-details</c>.
+    /// </summary>
+    public bool EnableLegacyPhiDeliveryQueueSync { get; set; } = false;
+
+    /// <summary>
     /// When true, agent runs in learning mode (30-day observation).
     /// When false, uses the existing PioneerRx adapter directly.
     /// </summary>

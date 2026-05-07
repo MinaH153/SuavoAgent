@@ -135,7 +135,7 @@ public sealed class RxDetectionWorker : BackgroundService
                 patientMap,
                 pharmacyId: _options.PharmacyId,
                 agentInstallId: _options.AgentId,
-                includeLegacyDeliveryQueue: true);
+                includeLegacyDeliveryQueue: _options.EnableLegacyPhiDeliveryQueueSync);
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
@@ -195,7 +195,7 @@ public sealed class RxDetectionWorker : BackgroundService
                     schemaVerification: result.PostflightVerification,
                     pharmacyId: _options.PharmacyId,
                     agentInstallId: _options.AgentId,
-                    includeLegacyDeliveryQueue: true);
+                    includeLegacyDeliveryQueue: _options.EnableLegacyPhiDeliveryQueueSync);
                 if (!await TrySyncPayloadToCloudAsync(json, ct))
                     _stateDb.InsertUnsyncedBatch(json);
             }
@@ -267,7 +267,7 @@ public sealed class RxDetectionWorker : BackgroundService
                 schemaVerification: detection.PostflightVerification,
                 pharmacyId: _options.PharmacyId,
                 agentInstallId: _options.AgentId,
-                includeLegacyDeliveryQueue: true);
+                includeLegacyDeliveryQueue: _options.EnableLegacyPhiDeliveryQueueSync);
             if (!await TrySyncPayloadToCloudAsync(json, ct))
                 _stateDb.InsertUnsyncedBatch(json);
         }
