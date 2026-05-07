@@ -12,7 +12,9 @@ public sealed record RuntimeHealthEvidencePayload(
     [property: JsonPropertyName("cloudAuth")]
     CloudAuthHealthPayload CloudAuth,
     [property: JsonPropertyName("update")]
-    UpdateHealthPayload Update);
+    UpdateHealthPayload Update,
+    [property: JsonPropertyName("install")]
+    InstallHealthPayload Install);
 
 public sealed record ConfigSyncHealthPayload(
     [property: JsonPropertyName("present")]
@@ -80,8 +82,39 @@ public sealed record UpdateHealthPayload(
     [property: JsonPropertyName("channel")]
     string? Channel);
 
+public sealed record InstallHealthPayload(
+    [property: JsonPropertyName("present")]
+    bool Present,
+    [property: JsonPropertyName("status")]
+    string Status,
+    [property: JsonPropertyName("binaries")]
+    IReadOnlyList<InstallBinaryEvidencePayload> Binaries,
+    [property: JsonPropertyName("receiptSha256")]
+    string? ReceiptSha256);
+
+public sealed record InstallBinaryEvidencePayload(
+    [property: JsonPropertyName("name")]
+    string Name,
+    [property: JsonPropertyName("exists")]
+    bool Exists,
+    [property: JsonPropertyName("bytes")]
+    long Bytes,
+    [property: JsonPropertyName("sha256")]
+    string? Sha256,
+    [property: JsonPropertyName("sha256Prefix")]
+    string? Sha256Prefix);
+
 public static class RuntimeHealthEvidence
 {
+    private static readonly string[] RequiredInstallBinaries =
+    {
+        "SuavoAgent.Core.exe",
+        "SuavoAgent.Broker.exe",
+        "SuavoAgent.Helper.exe",
+        "SuavoAgent.Watchdog.exe",
+        "SuavoSetup.exe",
+    };
+
     public static string ProgramDataRoot =>
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -102,12 +135,13 @@ public static class RuntimeHealthEvidence
     public static string LogsDirectory(string? root = null) =>
         Path.Combine(root ?? ProgramDataRoot, "logs");
 
-    public static RuntimeHealthEvidencePayload Collect(string? root = null) =>
+    public static RuntimeHealthEvidencePayload Collect(string? root = null, string? installDir = null) =>
         new(
             ReadConfigSyncHealth(ResolveConfigSyncHealthPath(root)),
             ReadCrashLogs(LogsDirectory(root)),
             ReadCloudAuthHealth(CloudAuthHealthPath(root)),
-            ReadUpdateHealth(UpdateHealthPath(root)));
+            ReadUpdateHealth(UpdateHealthPath(root)),
+            ReadInstallHealth(installDir ?? AppContext.BaseDirectory));
 
     private static string ResolveConfigSyncHealthPath(string? root)
     {
@@ -256,6 +290,32 @@ public static class RuntimeHealthEvidence
         }
     }
 
+    public static InstallHealthPayload ReadInstallHealth(string installDir)
+    {
+        var binaries = RequiredInstallBinaries
+            .Select(name => ReadInstallBinary(name, Path.Combine(installDir, name)))
+            .ToArray();
+        var present = binaries.Any(binary => binary.Exists);
+        var complete = binaries.All(binary => binary.Exists && binary.Sha256 is { Length: 64 });
+        var unreadable = binaries.Any(binary => binary.Sha256Prefix == "unreadable");
+        var status = unreadable
+            ? "unreadable"
+            : complete
+                ? "ok"
+                : present
+                    ? "partial"
+                    : "missing";
+        var receiptSha256 = complete
+            ? ReceiptSha256(binaries)
+            : null;
+
+        return new(
+            Present: present,
+            Status: status,
+            Binaries: binaries,
+            ReceiptSha256: receiptSha256);
+    }
+
     private static CrashLogEvidencePayload ReadCrashLog(string component, string path)
     {
         try
@@ -271,13 +331,13 @@ public static class RuntimeHealthEvidence
                     Sha256Prefix: null);
             }
 
-            var hash = Sha256Prefix(path);
+            var hash = Sha256Hex(path);
             return new(
                 Component: component,
                 Exists: true,
                 Bytes: info.Length,
                 LastWriteUtc: info.LastWriteTimeUtc.ToString("o"),
-                Sha256Prefix: hash);
+                Sha256Prefix: hash[..16]);
         }
         catch
         {
@@ -286,6 +346,40 @@ public static class RuntimeHealthEvidence
                 Exists: true,
                 Bytes: 0,
                 LastWriteUtc: null,
+                Sha256Prefix: "unreadable");
+        }
+    }
+
+    private static InstallBinaryEvidencePayload ReadInstallBinary(string name, string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists)
+            {
+                return new(
+                    Name: name,
+                    Exists: false,
+                    Bytes: 0,
+                    Sha256: null,
+                    Sha256Prefix: null);
+            }
+
+            var hash = Sha256Hex(path);
+            return new(
+                Name: name,
+                Exists: true,
+                Bytes: info.Length,
+                Sha256: hash,
+                Sha256Prefix: hash[..16]);
+        }
+        catch
+        {
+            return new(
+                Name: name,
+                Exists: true,
+                Bytes: 0,
+                Sha256: null,
                 Sha256Prefix: "unreadable");
         }
     }
@@ -389,11 +483,20 @@ public static class RuntimeHealthEvidence
         File.Move(tmp, path, overwrite: true);
     }
 
-    private static string Sha256Prefix(string path)
+    private static string Sha256Hex(string path)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         var hash = SHA256.HashData(stream);
-        return Convert.ToHexString(hash).ToLowerInvariant()[..16];
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string ReceiptSha256(IEnumerable<InstallBinaryEvidencePayload> binaries)
+    {
+        var canonical = string.Join(
+            "\u001f",
+            binaries.Select(binary => $"{binary.Name}:{binary.Bytes}:{binary.Sha256}"));
+        return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(canonical)))
+            .ToLowerInvariant();
     }
 
     private static string? ReadString(JsonElement root, string property)
