@@ -166,6 +166,49 @@ public sealed class HealthSnapshotTests : IDisposable
     }
 
     [Fact]
+    public void RuntimeHealthEvidence_Collect_IncludesDigestBackedInstallReceipt()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"suavo_runtime_health_{Guid.NewGuid():N}");
+        var installDir = Path.Combine(Path.GetTempPath(), $"suavo_install_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(installDir);
+        foreach (var binary in new[]
+        {
+            "SuavoAgent.Core.exe",
+            "SuavoAgent.Broker.exe",
+            "SuavoAgent.Helper.exe",
+            "SuavoAgent.Watchdog.exe",
+            "SuavoSetup.exe",
+        })
+        {
+            File.WriteAllText(Path.Combine(installDir, binary), $"binary:{binary}");
+        }
+
+        try
+        {
+            var payload = RuntimeHealthEvidence.Collect(root, installDir);
+
+            Assert.True(payload.Install.Present);
+            Assert.Equal("ok", payload.Install.Status);
+            Assert.Equal(5, payload.Install.Binaries.Count);
+            Assert.Matches("^[a-f0-9]{64}$", payload.Install.ReceiptSha256);
+            Assert.All(payload.Install.Binaries, binary =>
+            {
+                Assert.True(binary.Exists);
+                Assert.True(binary.Bytes > 0);
+                Assert.Matches("^[a-f0-9]{64}$", binary.Sha256);
+                Assert.Matches("^[a-f0-9]{16}$", binary.Sha256Prefix);
+                Assert.DoesNotContain(Path.DirectorySeparatorChar.ToString(), binary.Name);
+            });
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+            try { Directory.Delete(installDir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void Take_Includes_UpdateHealthEvidence_WithoutErrorBody()
     {
         var root = Path.Combine(Path.GetTempPath(), $"suavo_runtime_health_{Guid.NewGuid():N}");
