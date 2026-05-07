@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release-signing-preflight:
@@ -24,6 +25,20 @@ jobs:
           fi
           if [[ -z "$CERT_THUMBPRINT" ]]; then
             echo "::error::SIGNING_CERT_THUMBPRINT must be configured before cutting a Queen/field release."
+            exit 1
+          fi
+
+      - name: Verify GitHub sees an online signing runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUNNER_COUNT="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runners?per_page=100" \
+              --jq '[.runners[] | select(.status == "online" and (([.labels[].name | ascii_downcase] | index("self-hosted")) != null) and (([.labels[].name | ascii_downcase] | index("windows")) != null) and (([.labels[].name | ascii_downcase] | index("yubikey")) != null))] | length'
+          )"
+          if [[ "${RUNNER_COUNT:-0}" -lt 1 ]]; then
+            echo "::error::No online self-hosted Windows Yubikey signing runner is registered. Register the signing PC runner and rerun before cutting a Queen/field release."
             exit 1
           fi
 

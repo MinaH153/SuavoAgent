@@ -319,6 +319,15 @@ public sealed class BootstrapScriptTests
         Assert.Contains("Agent Merge Gate", ci);
         Assert.Contains("needs: [bootstrap-windows-smoke, build-and-test]", ci);
         Assert.Contains("Require agent checks before merge", ci);
+        Assert.Contains("Verify GitHub sees an online signing runner", release);
+        Assert.Contains("actions/runners", release);
+        Assert.Contains("self-hosted", release);
+        Assert.Contains("windows", release);
+        Assert.Contains("yubikey", release);
+        Assert.Contains("No online self-hosted Windows Yubikey signing runner is registered", release);
+        Assert.Contains("Signing runner", releaseGate);
+        Assert.Contains("self-hosted", releaseGate);
+        Assert.Contains("yubikey", releaseGate);
         Assert.Contains("windows-release-smoke", release);
         Assert.Contains("Test-SuavoAgentReleaseProbe.ps1", release);
         Assert.Contains("suavoagent-smoked-zip", release);
