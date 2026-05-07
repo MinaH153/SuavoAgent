@@ -167,7 +167,7 @@ jobs:
     if: |
       always() &&
       needs.build.result == 'success' &&
-      (needs.sign_windows.result == 'success' || needs.sign_passthrough.result == 'success')
+      needs.sign_windows.result == 'success'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -199,7 +199,7 @@ jobs:
           if (Test-Path $expanded) { Remove-Item $expanded -Recurse -Force }
           New-Item -ItemType Directory -Path $expanded -Force | Out-Null
           Expand-Archive -LiteralPath $zip -DestinationPath $expanded -Force
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $expanded -BootstrapPath .\bootstrap.ps1 -Json
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $expanded -BootstrapPath .\bootstrap.ps1 -RequireAuthenticodeSignature -Json
 
       - name: Upload smoked release zip
         uses: actions/upload-artifact@v4
@@ -214,7 +214,7 @@ jobs:
     if: |
       always() &&
       needs.build.result == 'success' &&
-      (needs.sign_windows.result == 'success' || needs.sign_passthrough.result == 'success') &&
+      needs.sign_windows.result == 'success' &&
       needs.windows-release-smoke.result == 'success'
     runs-on: ubuntu-latest
     steps:
@@ -232,10 +232,33 @@ jobs:
           name: suavoagent-smoked-zip-${{ needs.build.outputs.version }}
           path: release
 
+      - name: Generate field release receipt
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
+        run: |
+          set -euo pipefail
+          cd release
+          ZIP="suavoagent-${VERSION}-win-x64.zip"
+          ZIP_SHA=$(sha256sum "$ZIP" | awk '{print $1}')
+          cat > field-release-receipt.json <<EOF
+          {
+            "releaseTag": "${VERSION}",
+            "version": "${VERSION_NUMERIC}",
+            "sourceCommit": "${GITHUB_SHA}",
+            "artifact": "${ZIP}",
+            "artifactSha256": "${ZIP_SHA}",
+            "authenticode": "required-valid",
+            "checksumSignature": "checksums.sha256.sig",
+            "manifestSignature": "update-manifest-${VERSION}.sig",
+            "track2QueenValidation": "do-not-run-against-older-tags"
+          }
+          EOF
+
       - name: Generate checksums
         run: |
           cd release
-          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe SuavoSetup.exe suavoagent-${{ needs.build.outputs.version }}-win-x64.zip > checksums.sha256
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe SuavoSetup.exe suavoagent-${{ needs.build.outputs.version }}-win-x64.zip field-release-receipt.json > checksums.sha256
           cat checksums.sha256
 
       - name: Sign checksums (ECDSA P-256)
@@ -289,8 +312,9 @@ jobs:
 
             **Tests:** All passing
             **Windows smoke:** Release zip expanded and passed no-PHI binary/bootstrap probe on windows-latest
+            **Source commit:** ${{ github.sha }}
             **Checksums:** ECDSA P-256 signed
-            **Authenticode:** ${{ steps.mode.outputs.MODE == 'signed' && 'Signed (Yubikey EV)' || 'Unsigned (SmartScreen warning expected)' }}
+            **Authenticode:** Signed (Yubikey EV)
             **Installer URL:** https://github.com/${{ github.repository }}/releases/download/${{ needs.build.outputs.version }}/suavoagent-${{ needs.build.outputs.version }}-win-x64.zip
 
             ### How to update existing agents
@@ -307,6 +331,7 @@ jobs:
             release/SuavoAgent.Watchdog.exe
             release/SuavoSetup.exe
             release/suavoagent-*-win-x64.zip
+            release/field-release-receipt.json
             release/checksums.sha256
             release/checksums.sha256.sig
             release/update-manifest-v*.txt

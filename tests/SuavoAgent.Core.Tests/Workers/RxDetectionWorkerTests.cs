@@ -48,7 +48,7 @@ public class RxDetectionWorkerTests : IDisposable
                 DateTime.UtcNow, 30m, Guid.NewGuid(), DateTimeOffset.UtcNow)
         };
 
-        var json = RxDetectionWorker.SerializeRxBatch(batch);
+        var json = RxDetectionWorker.SerializeRxBatch(batch, includeLegacyDeliveryQueue: true);
         var doc = JsonDocument.Parse(json);
         var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
 
@@ -73,7 +73,7 @@ public class RxDetectionWorkerTests : IDisposable
                 "123 Main St", null, "El Cajon", "CA", "92020")
         };
 
-        var json = RxDetectionWorker.SerializeRxBatch(batch, "", patientMap);
+        var json = RxDetectionWorker.SerializeRxBatch(batch, "", patientMap, includeLegacyDeliveryQueue: true);
         var doc = JsonDocument.Parse(json);
         var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
 
@@ -93,7 +93,7 @@ public class RxDetectionWorkerTests : IDisposable
                 DateTime.UtcNow, 30m, Guid.NewGuid(), DateTimeOffset.UtcNow)
         };
 
-        var json = RxDetectionWorker.SerializeRxBatch(batch);
+        var json = RxDetectionWorker.SerializeRxBatch(batch, includeLegacyDeliveryQueue: true);
         var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
@@ -126,7 +126,7 @@ public class RxDetectionWorkerTests : IDisposable
                 DateTime.UtcNow, 30m, Guid.NewGuid(), DateTimeOffset.UtcNow)
         };
 
-        var json = RxDetectionWorker.SerializeRxBatch(rxs, "test-salt");
+        var json = RxDetectionWorker.SerializeRxBatch(rxs, "test-salt", includeLegacyDeliveryQueue: true);
         var doc = JsonDocument.Parse(json);
         var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
 
@@ -219,8 +219,7 @@ public class RxDetectionWorkerTests : IDisposable
         var json = RxDetectionWorker.SerializeRxBatch(
             rxs,
             "candidate-only-salt",
-            patientMap,
-            includeLegacyDeliveryQueue: false);
+            patientMap);
         var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         var data = root.GetProperty("data");
@@ -252,7 +251,8 @@ public class RxDetectionWorkerTests : IDisposable
                 DateFilled: DateTime.UtcNow,
                 Quantity: 60m,
                 StatusGuid: Guid.Parse("bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"),
-                DetectedAt: DateTimeOffset.Parse("2026-04-29T12:00:00+00:00"))
+                DetectedAt: DateTimeOffset.Parse("2026-04-29T12:00:00+00:00"),
+                DaysSupply: 30)
         };
         var patientMap = new Dictionary<string, RxPatientDetails>
         {
@@ -355,8 +355,8 @@ public class RxDetectionWorkerTests : IDisposable
                 "789 Pine St", null, "El Cajon", "CA", "92020")
         };
 
-        // This is the exact call RunLegacyDetectionAsync makes before InsertUnsyncedBatch
-        var json = RxDetectionWorker.SerializeRxBatch(batch, "test-salt", patientMap);
+        // This is the exact PHI-bearing call RunLegacyDetectionAsync makes before InsertUnsyncedBatch.
+        var json = RxDetectionWorker.SerializeRxBatch(batch, "test-salt", patientMap, includeLegacyDeliveryQueue: true);
 
         // Simulate cloud sync failure → persist to SQLite (same as line 138 in RxDetectionWorker)
         _stateDb.InsertUnsyncedBatch(json);
@@ -402,7 +402,7 @@ public class RxDetectionWorkerTests : IDisposable
             ["88001"] = new("88001", "Maria", "G", "8585551111",
                 "100 First St", null, "San Diego", "CA", "92101")
         };
-        var json = RxDetectionWorker.SerializeRxBatch(batch, "", patientMap);
+        var json = RxDetectionWorker.SerializeRxBatch(batch, "", patientMap, includeLegacyDeliveryQueue: true);
         _stateDb.InsertUnsyncedBatch(json);
 
         // Verify batch is pending

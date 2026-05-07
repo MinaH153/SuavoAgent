@@ -85,6 +85,45 @@ internal static class PioneerRxShadowFixtureCommand
         var fixturePath = Path.Combine(fixtureDir, fileName);
         WriteTextAtomically(fixturePath, fixtureJson);
         var digestPrefix = PioneerRxShadowFixtureExporter.ComputeSha256Prefix(fixtureJson);
+        PioneerRxShadowReplayResult replay;
+        try
+        {
+            replay = PioneerRxShadowReplayHarness.Load(fixturePath)
+                .Replay(includeLegacyDeliveryQueue: false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "export_pioneerrx_shadow_fixture: replay gate failed");
+            await AckAsync(false, new
+            {
+                status = "replay_failed",
+                fixturePath,
+                rowCount = selected.Length,
+                sha256Prefix = digestPrefix,
+                phiSourceValuesWritten = false
+            }, "PioneerRx shadow fixture replay failed boundary checks");
+            return;
+        }
+
+        var schemaCanary = rxWorker.SnapshotSchemaCanaryExportGate();
+        const bool candidateRowsDashboardVisible = false;
+        const bool correctionPathExercised = false;
+        var track2ExitGate = new
+        {
+            zeroForbiddenTokens = replay.ForbiddenTokenHitCount == 0,
+            stableCandidateHashes = replay.StableCandidateHashes,
+            schemaCanaryRecorded = schemaCanary.Recorded,
+            schemaCanaryPassing = schemaCanary.Passing,
+            candidateRowsDashboardVisible,
+            correctionPathExercised,
+            readyForTrack2Exit =
+                replay.ForbiddenTokenHitCount == 0 &&
+                replay.StableCandidateHashes &&
+                schemaCanary.Recorded &&
+                schemaCanary.Passing &&
+                candidateRowsDashboardVisible &&
+                correctionPathExercised
+        };
 
         stateDb.AppendChainedAuditEntry(new AuditEntry(
             TaskId: commandId ?? command.Nonce,
@@ -104,6 +143,17 @@ internal static class PioneerRxShadowFixtureCommand
             fixturePath,
             rowCount = selected.Length,
             sha256Prefix = digestPrefix,
+            replaySha256Prefix = replay.PayloadSha256Prefix,
+            candidateCount = replay.CandidateCount,
+            candidateHashes = replay.RxHashes,
+            schemaCanary,
+            releaseGate = new
+            {
+                agentVersion = options.Version,
+                sourceCommitMinimum = "bb68d33",
+                signedReleaseRequired = true
+            },
+            track2ExitGate,
             syntheticPatientDetails = includeSyntheticPatientDetails,
             phiSourceValuesWritten = false
         }, null);

@@ -22,6 +22,10 @@ public sealed class PhiPatternGuardTests
     [InlineData("user@example.com", "email")]
     [InlineData("DOB: 1990-04-12", "structured_field")]
     [InlineData("MRN # 12345", "structured_field")]
+    [InlineData("Patient: Mina H", "structured_field")]
+    [InlineData("InsuranceId ABC12345", "structured_field")]
+    [InlineData("NPI: 1234567890", "structured_field")]
+    [InlineData("AB1234567", "dea")]
     [InlineData("123 Main Street", "street_address")]
     [InlineData("8005551212", "ndc_or_phone")]
     public void PhiShapes_AreFlagged(string input, string expectedPattern)

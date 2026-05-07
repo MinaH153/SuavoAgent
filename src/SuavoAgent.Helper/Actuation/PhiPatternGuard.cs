@@ -30,8 +30,11 @@ public static partial class PhiPatternGuard
     [GeneratedRegex(@"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", RegexOptions.CultureInvariant)]
     private static partial Regex EmailPattern();
 
-    [GeneratedRegex(@"\b(MRN|DOB|Rx|RxNumber|InsuranceId)\s*[:#]?\s*\S+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\b(MRN|DOB|Rx|RxNumber|InsuranceId|MemberId|Policy|Patient|PatientName|NPI|DEA)\s*[:#]?\s*\S+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex StructuredFieldPattern();
+
+    [GeneratedRegex(@"\b[A-Z]{2}\d{7}\b", RegexOptions.CultureInvariant)]
+    private static partial Regex DeaPattern();
 
     public static bool ContainsPotentialPhi(string text, out string? matchedPattern)
     {
@@ -43,6 +46,7 @@ public static partial class PhiPatternGuard
 
         if (SsnPattern().IsMatch(text)) { matchedPattern = "ssn"; return true; }
         if (StructuredFieldPattern().IsMatch(text)) { matchedPattern = "structured_field"; return true; }
+        if (DeaPattern().IsMatch(text)) { matchedPattern = "dea"; return true; }
         if (StreetAddressPattern().IsMatch(text)) { matchedPattern = "street_address"; return true; }
         if (EmailPattern().IsMatch(text)) { matchedPattern = "email"; return true; }
 
