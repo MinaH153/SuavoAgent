@@ -132,6 +132,13 @@ function Test-InstalledServices {
     }
 }
 
+function Test-ServiceRunning {
+    param([string]$Name)
+
+    $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    return ($svc -and $svc.Status -eq "Running")
+}
+
 function Test-CrashLogMarkers {
     param([string]$DataDirectory)
 
@@ -282,10 +289,10 @@ function Test-HeartbeatReadiness {
         Add-ProbeResult -Name "heartbeat:config" -Ok $false -Detail "config_unreadable"
     }
 
-    $healthPath = Join-Path $DataDirectory "config-sync-health.json"
-    if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
+    $configSyncHealthPath = Join-Path $DataDirectory "config-sync-health.json"
+    if (Test-Path -LiteralPath $configSyncHealthPath -PathType Leaf) {
         try {
-            $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+            $health = Get-Content -LiteralPath $configSyncHealthPath -Raw | ConvertFrom-Json
             $healthy = [string]$health.status -eq "success" -or [string]$health.status -eq "ok"
             Add-ProbeResult `
                 -Name "heartbeat:config-sync-health" `
@@ -296,7 +303,11 @@ function Test-HeartbeatReadiness {
             Add-ProbeResult -Name "heartbeat:config-sync-health" -Ok $false -Detail "health_unreadable"
         }
     } else {
-        Add-ProbeResult -Name "heartbeat:config-sync-health" -Ok $true -Detail "not_yet_written"
+        Add-ProbeResult `
+            -Name "heartbeat:config-sync-health" `
+            -Ok $false `
+            -Detail $(if (Test-ServiceRunning -Name "SuavoAgent.Core") { "missing_after_service_running" } else { "missing_after_service_not_running" }) `
+            -Metadata @{ serviceName = "SuavoAgent.Core"; valuesRedacted = $true }
     }
 
     $cloudAuthHealthPath = Join-Path $DataDirectory "cloud-auth-health.json"
@@ -321,7 +332,37 @@ function Test-HeartbeatReadiness {
             Add-ProbeResult -Name "heartbeat:cloud-auth-health" -Ok $false -Detail "health_unreadable"
         }
     } else {
-        Add-ProbeResult -Name "heartbeat:cloud-auth-health" -Ok $true -Detail "not_yet_written"
+        Add-ProbeResult `
+            -Name "heartbeat:cloud-auth-health" `
+            -Ok $true `
+            -Detail "no_recovery_evidence" `
+            -Metadata @{ valuesRedacted = $true }
+    }
+
+    $watchdogHealthPath = Join-Path $DataDirectory "watchdog-health.json"
+    if (Test-Path -LiteralPath $watchdogHealthPath -PathType Leaf) {
+        try {
+            $watchdog = Get-Content -LiteralPath $watchdogHealthPath -Raw | ConvertFrom-Json
+            $services = @($watchdog.services)
+            $healthy =
+                [bool]$watchdog.present -and
+                -not [string]::IsNullOrWhiteSpace([string]$watchdog.timestamp) -and
+                $services.Count -gt 0
+
+            Add-ProbeResult `
+                -Name "heartbeat:watchdog-health" `
+                -Ok $healthy `
+                -Detail $(if ($healthy) { "present" } else { "invalid" }) `
+                -Metadata @{ serviceCount = $services.Count; valuesRedacted = $true }
+        } catch {
+            Add-ProbeResult -Name "heartbeat:watchdog-health" -Ok $false -Detail "health_unreadable"
+        }
+    } else {
+        Add-ProbeResult `
+            -Name "heartbeat:watchdog-health" `
+            -Ok $false `
+            -Detail $(if (Test-ServiceRunning -Name "SuavoAgent.Watchdog") { "missing_after_service_running" } else { "missing_after_service_not_running" }) `
+            -Metadata @{ serviceName = "SuavoAgent.Watchdog"; valuesRedacted = $true }
     }
 }
 

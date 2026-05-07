@@ -83,3 +83,111 @@ this pass.
   should write canonical hyphenated health filenames, but read known legacy
   spellings until the field fleet ages out.
 
+## Continuation Smoke - CRD Windows Session
+
+Timestamp: 2026-05-06 late session, same Remote Desktop route. Operator granted
+full workstation permission. Scope stayed non-PHI: no PioneerRx patient screens,
+no raw config secrets, no prescription/order payloads, and no raw log bodies.
+
+### Input/Navigation Evidence
+
+- Chrome Remote Desktop remained connected to `Mina's Windows`.
+- PowerShell accepted direct keypresses after the terminal prompt was focused.
+- Local browser clipboard writes did not reliably become the remote Windows
+  clipboard. `Ctrl+V` pasted the remote clipboard, not the local Codex text.
+- Windows CRD uses `Ctrl+C`/`Ctrl+V`, not macOS Command shortcuts.
+- Shifted symbols must be sent as shifted key chords. Plain `*` arrived as `8`
+  and plain `_` arrived as `-` until the input mapper used `Shift+8` and
+  `Shift+-`.
+- One focus error sent diagnostic text into the Suavo login email field in the
+  browser tab. It was not submitted. This is field evidence that any future
+  actuation path needs active-window verification before typing.
+
+### Local Runtime Evidence
+
+- Remote user context: `queen\queen`.
+- Hostname shown by PowerShell: `minavn8`.
+- Services were running:
+  - `SuavoAgent.Broker`
+  - `SuavoAgent.Core`
+  - `SuavoAgent.Watchdog`
+- Processes were running:
+  - `SuavoAgent.Broker`
+  - `SuavoAgent.Core`
+  - `SuavoAgent.Helper`
+  - `SuavoAgent.Watchdog`
+- Install root discovered by field probing:
+  - `C:\Program Files\Suavo\Agent`
+- ProgramData root discovered:
+  - `C:\ProgramData\SuavoAgent`
+- ProgramData contained:
+  - `download-cache\`
+  - `logs\`
+  - `actuation.json`
+  - `bootstrap.ps1`
+  - `config_overrides.json`
+  - `consent_receipt.json`
+  - `ipc_nonce`
+  - `state.db`, `state.db-shm`, `state.db-wal`
+  - `state.key`
+- ProgramData did not contain:
+  - `config.json`
+  - `config-sync-health.json`
+  - `watchdog-health.json`
+- `actuation.json` was readable and showed the local actuation gate enabled.
+  Treat that as local capability evidence only; cloud command receipt was not
+  proven in this continuation pass.
+- Installed binary product versions visible in PowerShell were `3.14.4+...`
+  for Core, Broker, Helper, and Watchdog.
+
+### Cloud Runtime Evidence
+
+Cloud verification used service-role Supabase access locally, selecting only
+non-PHI operational columns from `agent_instances`.
+
+- `pioneer10` cloud row:
+  - `agent_version`: `3.13.9`
+  - `status`: `offline`
+  - `health_status`: `unknown`
+  - `last_heartbeat_at`: `2026-05-06T23:38:48.589Z`
+  - sanitized stats: `helper.attached=false`, `sql_connected=false`,
+    `pioneerrx_status=not_connected`, writeback counts `0`
+- `Queen` cloud row:
+  - `agent_version`: `3.14.0`
+  - `status`: `offline`
+  - `last_heartbeat_at`: `2026-05-06T17:21:44.859Z`
+
+### Failure Classification
+
+This is not "agent missing" and not "process crashed." It is a stronger
+production failure mode:
+
+- Local services and Helper are alive.
+- Local binaries are newer than the cloud row reports.
+- Cloud heartbeat is stale and still reports old version/config state.
+- Health evidence files that should let the dashboard classify config/watchdog
+  health are absent on the installed box.
+- A normal user PowerShell could not restart the services:
+  - `Restart-Service SuavoAgent.Broker -Force` failed.
+  - `Restart-Service SuavoAgent.Watchdog -Force` failed.
+  - services remained running afterward.
+- UAC elevation could be requested, but an elevated PowerShell did not become a
+  reliable controllable surface through CRD in this pass.
+
+### Product Implications From Continuation
+
+- Track 1 needs an explicit "local alive, cloud stale" classifier. Service
+  liveness alone is false comfort.
+- Track 1 repair cannot depend on a normal helper/user shell. It needs a
+  service-owned repair path or a signed local repair bootstrap that can run with
+  the required service-control rights.
+- Track 4 dashboard should show version drift as two separate facts when known:
+  installed local version evidence and cloud-reported heartbeat version. In this
+  field pass they diverged: local `3.14.4+...`, cloud `3.13.9`.
+- Track 5 remote actuation must never type into arbitrary focused windows. The
+  login-field focus error is a concrete proof that observe/propose/show-cursor
+  must remain the pilot mode until active-window and typed-workflow guards are
+  enforced.
+- The field support tool should prefer short, idempotent, non-PHI commands with
+  visible echo checks. Broad paste and opaque multi-command scripts are brittle
+  through CRD.

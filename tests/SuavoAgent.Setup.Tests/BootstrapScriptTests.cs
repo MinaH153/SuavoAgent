@@ -374,6 +374,21 @@ public sealed class BootstrapScriptTests
     }
 
     [Fact]
+    public void Release_probe_fails_missing_runtime_health_evidence_on_running_services()
+    {
+        var source = ReadRepoFile("scripts/Test-SuavoAgentReleaseProbe.ps1");
+
+        Assert.Contains("config-sync-health.json", source);
+        Assert.Contains("cloud-auth-health.json", source);
+        Assert.Contains("watchdog-health.json", source);
+        Assert.Contains("heartbeat:config-sync-health", source);
+        Assert.Contains("heartbeat:cloud-auth-health", source);
+        Assert.Contains("heartbeat:watchdog-health", source);
+        Assert.Contains("missing_after_service_running", source);
+        Assert.DoesNotContain("not_yet_written", source);
+    }
+
+    [Fact]
     public void Bootstrap_verifies_cloud_hmac_before_printing_install_complete()
     {
         var source = ReadBootstrapScript();

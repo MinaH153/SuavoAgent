@@ -18,6 +18,7 @@ This is the evidence checklist for every production SuavoAgent release.
 - Test evidence: solution tests passed in the release workflow
 - Production migration evidence: migration names, operator, timestamp, and Supabase project ID recorded in the release note or incident log
 - Suavo web post-deploy smoke: `SMOKE_BASE_URL=<production>` passed after cloud route deployment and Supabase migrations, including `/api/agent/register`, `/api/agent/config`, `/api/agent/recover-key`, `/api/agent/sync`, `/api/agent/heartbeat`, and `/api/agent/install-telemetry`
+- Runtime health evidence: running Core must produce `config-sync-health.json`; running Watchdog must produce `watchdog-health.json`; missing evidence on a running service is release-probe failure, not "not yet written."
 - Cloud-auth health evidence: failed `/api/agent/recover-key` attempts write `cloud-auth-health.json`; heartbeat accepts the sanitized `runtimeHealth.cloudAuth` object; dashboard marks `http_401_Agent_not_found` and failed recovery outcomes critical without storing raw cloud response bodies.
 
 ## No-PHI Windows Probe
@@ -38,4 +39,4 @@ For a real pharmacy PC or smoke VM, run from an elevated PowerShell:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode Installed -Json
 ```
 
-The installed-machine probe validates Core, Broker, and Watchdog services; installed binary hashes; bootstrap `--repair` readiness; appsettings ACLs needed for LocalService DPAPI sealing; redacted heartbeat prerequisites; a live HMAC GET to `/api/agent/config`; and local `config-sync-health.json` / `cloud-auth-health.json` evidence. A cloud-auth failure is reported as a redacted status/reason such as `http_401_Agent_not_found`; the probe never prints the API key or response body.
+The installed-machine probe validates Core, Broker, and Watchdog services; installed binary hashes; bootstrap `--repair` readiness; appsettings ACLs needed for LocalService DPAPI sealing; redacted heartbeat prerequisites; a live HMAC GET to `/api/agent/config`; local `config-sync-health.json` and `watchdog-health.json` evidence; and optional `cloud-auth-health.json` recovery evidence. A missing Core/Watchdog health file while the matching service is running fails the probe. A cloud-auth failure is reported as a redacted status/reason such as `http_401_Agent_not_found`; the probe never prints the API key or response body.
