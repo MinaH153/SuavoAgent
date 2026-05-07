@@ -37,6 +37,16 @@ The signing machine must be running Windows 10/11 x64 with:
 - **.NET 8 SDK** — `winget install Microsoft.DotNet.SDK.8`.
 - **Git for Windows** — needed by `actions/checkout`.
 
+After installing prerequisites, keep `SIGNING_ENABLED` unset/false and run the
+local readiness probe from an admin PowerShell:
+
+```powershell
+.\scripts\Test-SigningRunnerReadiness.ps1
+```
+
+This should fail until the Yubikey cert and GitHub Actions runner service are
+both present. Do not cut a tag from a machine that fails this probe.
+
 ### 2. Import the cert and grab its thumbprint
 
 Plug the Yubikey in, then in an admin PowerShell:
@@ -73,8 +83,8 @@ self-hosted,windows,yubikey
 Install it as a Windows service so it survives reboots:
 
 ```powershell
-.\svc.sh install  # run from the runner's folder
-.\svc.sh start
+.\svc.cmd install  # run from the runner's folder
+.\svc.cmd start
 ```
 
 **Runner user account**: must be a local Administrator and must have
@@ -94,6 +104,18 @@ On github.com → **Settings → Secrets and variables → Actions**:
 
 The existing `SIGNING_KEY_PEM` secret stays as-is — it signs `checksums.sha256`
 and the OTA update manifest, not the binaries themselves.
+
+Before flipping `SIGNING_ENABLED=true`, confirm GitHub can see the runner and
+that the local signing cert matches the secret:
+
+```bash
+gh api repos/MinaH153/SuavoAgent/actions/runners \
+  --jq '.runners[] | {name, os, status, labels: [.labels[].name]}'
+```
+
+```powershell
+.\scripts\Test-SigningRunnerReadiness.ps1 -ExpectedThumbprint "<SIGNING_CERT_THUMBPRINT>"
+```
 
 ### 5. Smoke test with a throwaway tag
 
@@ -174,6 +196,8 @@ time (April 2027) the choice is:
 
 - `.github/workflows/release.yml` — tag-triggered release pipeline
 - `.github/workflows/hotfix.yml` — manual-dispatch hotfix pipeline
+- `scripts/Test-SigningRunnerReadiness.ps1` — local/self-hosted runner
+  signing readiness probe
 - `Directory.Build.props` — PE metadata (Company, Copyright, Version)
 - `bootstrap.ps1` — client installer; verifies `checksums.sha256` signature
   (separate ECDSA P-256 key, `SIGNING_KEY_PEM`)
