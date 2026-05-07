@@ -109,11 +109,19 @@ jobs:
     needs: build
     runs-on: [self-hosted, windows, yubikey]
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download unsigned binaries
         uses: actions/download-artifact@v4
         with:
           name: suavoagent-hotfix-unsigned-${{ inputs.version }}
           path: release
+
+      - name: Verify signing runner readiness
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
+        run: .\scripts\Test-SigningRunnerReadiness.ps1 -ExpectedThumbprint $env:CERT_THUMBPRINT -Json
 
       - name: Sign binaries with signtool
         shell: pwsh
