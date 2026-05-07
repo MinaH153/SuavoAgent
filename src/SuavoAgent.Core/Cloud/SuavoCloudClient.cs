@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Learning;
 
 namespace SuavoAgent.Core.Cloud;
 
@@ -91,6 +92,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     public async Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct)
     {
         var body = JsonSerializer.Serialize(payload);
+        OutboundPhiGuard.AssertAllowed(path, body, _options);
         var timestamp = DateTimeOffset.UtcNow.ToString("o");
         var signature = _signer.Sign(timestamp, body);
 
@@ -113,6 +115,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     public async Task<JsonElement?> PostSignedVerifiedAsync(string path, object payload, string publicKeyDer, CancellationToken ct)
     {
         var body = JsonSerializer.Serialize(payload);
+        OutboundPhiGuard.AssertAllowed(path, body, _options);
         var timestamp = DateTimeOffset.UtcNow.ToString("o");
         var signature = _signer.Sign(timestamp, body);
 
@@ -227,4 +230,113 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     }
 
     public void Dispose() => _http.Dispose();
+}
+
+internal static class OutboundPhiGuard
+{
+    private static readonly HashSet<string> BlockedFieldNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "rxnumber",
+        "rx_number",
+        "patientfirstname",
+        "patientlastname",
+        "patientlastinitial",
+        "patientname",
+        "patientphone",
+        "deliveryaddress1",
+        "deliveryaddress2",
+        "deliverycity",
+        "deliverystate",
+        "deliveryzip",
+        "firstname",
+        "lastname",
+        "lastinitial",
+        "phone",
+        "address1",
+        "address2",
+        "streetaddress",
+        "dob",
+        "dateofbirth",
+        "ssn",
+        "mrn",
+        "insuranceid",
+        "memberid",
+        "policy",
+        "rxdeliveryqueue",
+    };
+
+    public static void AssertAllowed(string path, string body, AgentOptions options)
+    {
+        if (IsExplicitPhiPath(path, options))
+            return;
+
+        using var doc = JsonDocument.Parse(body);
+        if (ContainsPhi(doc.RootElement))
+        {
+            throw new InvalidOperationException(
+                $"PHI-classified payload blocked before outbound cloud POST to {path}.");
+        }
+    }
+
+    private static bool IsExplicitPhiPath(string path, AgentOptions options)
+    {
+        if (string.Equals(path, "/api/agent/patient-details", StringComparison.Ordinal))
+            return true;
+
+        return string.Equals(path, "/api/agent/sync", StringComparison.Ordinal) &&
+               options.EnableLegacyPhiDeliveryQueueSync;
+    }
+
+    private static bool ContainsPhi(JsonElement element, string? propertyName = null)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var property in element.EnumerateObject())
+                {
+                    var normalized = NormalizeFieldName(property.Name);
+                    if (BlockedFieldNames.Contains(normalized))
+                        return true;
+                    if (ContainsPhi(property.Value, normalized))
+                        return true;
+                }
+
+                return false;
+
+            case JsonValueKind.Array:
+                return element.EnumerateArray().Any(item => ContainsPhi(item, propertyName));
+
+            case JsonValueKind.String:
+                var value = element.GetString();
+                if (string.IsNullOrWhiteSpace(value) || IsOperationalSafeString(propertyName, value))
+                    return false;
+                return PhiScrubber.ContainsPhi(value);
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool IsOperationalSafeString(string? propertyName, string value)
+    {
+        if (propertyName is not null &&
+            (propertyName.EndsWith("hash", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.EndsWith("sha256", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.Contains("digest", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.Contains("timestamp", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.Contains("capturedat", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.Contains("syncedat", StringComparison.OrdinalIgnoreCase) ||
+             propertyName is "ndc" or "evidenceid" or "scanwindowid" or "schemaversion" or "schemasignature" or
+                 "pms" or "pmsversion" or "status" or "outcome" or "severity" or "source" or "sourcedetail" or
+                 "classification" or "city" or "state" or "zip5" or "priority" or "temperaturerequirement"))
+        {
+            return true;
+        }
+
+        return value.Length <= 96 &&
+               value.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '-' or '.' or ':');
+    }
+
+    private static string NormalizeFieldName(string name) =>
+        new(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 }

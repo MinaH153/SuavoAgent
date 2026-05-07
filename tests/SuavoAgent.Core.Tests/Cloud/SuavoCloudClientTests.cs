@@ -33,6 +33,196 @@ public sealed class SuavoCloudClientTests
         Assert.Contains("reason=Agent not found", ex.Message);
     }
 
+    [Fact]
+    public async Task PostSignedAsync_RejectsPhiShapedPayloadToNonPhiEndpointBeforeSending()
+    {
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions
+            {
+                ApiKey = "agent-secret",
+                CloudUrl = "https://suavollc.com",
+            },
+            handler);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.PostSignedAsync(
+                "/api/agent/heartbeat",
+                new { status = "ok", detail = "Patient: Jane Rivera DOB 04/12/1980 phone 555-123-4567" },
+                CancellationToken.None));
+
+        Assert.Contains("PHI-classified payload", ex.Message);
+        Assert.Equal(0, handler.SendCount);
+    }
+
+    [Fact]
+    public async Task PostSignedAsync_RejectsLegacyRxDeliveryQueueOnSyncByDefault()
+    {
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions
+            {
+                ApiKey = "agent-secret",
+                CloudUrl = "https://suavollc.com",
+            },
+            handler);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.PostSignedAsync(
+                "/api/agent/sync",
+                new
+                {
+                    snapshotType = "rx_delivery_queue",
+                    data = new
+                    {
+                        rxDeliveryQueue = new[]
+                        {
+                            new
+                            {
+                                rxNumber = new string('a', 64),
+                                patientFirstName = "Jane",
+                                patientPhone = "555-123-4567",
+                                deliveryAddress1 = "123 Main Street"
+                            }
+                        }
+                    }
+                },
+                CancellationToken.None));
+
+        Assert.Contains("PHI-classified payload", ex.Message);
+        Assert.Equal(0, handler.SendCount);
+    }
+
+    [Fact]
+    public async Task PostSignedAsync_AllowsHashOnlyCandidateSyncByDefault()
+    {
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions
+            {
+                ApiKey = "agent-secret",
+                CloudUrl = "https://suavollc.com",
+            },
+            handler);
+
+        await client.PostSignedAsync(
+            "/api/agent/sync",
+            new
+            {
+                snapshotType = "rx_delivery_queue",
+                data = new
+                {
+                    rxOrderCandidates = new[]
+                    {
+                        new
+                        {
+                            rxHash = new string('a', 64),
+                            patientDelivery = new
+                            {
+                                phoneHash = new string('b', 64),
+                                zip5 = "92101"
+                            },
+                            provenance = new { evidenceId = "rxh-aaaaaaaaaaaaaaaa-1770000000" }
+                        }
+                    }
+                }
+            },
+            CancellationToken.None);
+
+        Assert.Equal(1, handler.SendCount);
+    }
+
+    [Fact]
+    public async Task PostSignedAsync_AllowsLegacyRxDeliveryQueueOnSyncOnlyWhenExplicitlyEnabled()
+    {
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions
+            {
+                ApiKey = "agent-secret",
+                CloudUrl = "https://suavollc.com",
+                EnableLegacyPhiDeliveryQueueSync = true,
+            },
+            handler);
+
+        await client.PostSignedAsync(
+            "/api/agent/sync",
+            new
+            {
+                snapshotType = "rx_delivery_queue",
+                data = new
+                {
+                    rxDeliveryQueue = new[]
+                    {
+                        new
+                        {
+                            rxNumber = new string('a', 64),
+                            patientFirstName = "Jane",
+                            patientPhone = "555-123-4567",
+                            deliveryAddress1 = "123 Main Street"
+                        }
+                    }
+                }
+            },
+            CancellationToken.None);
+
+        Assert.Equal(1, handler.SendCount);
+    }
+
+    [Fact]
+    public async Task PostSignedAsync_AllowsPatientDetailsPathAsExplicitPhiChannel()
+    {
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions
+            {
+                ApiKey = "agent-secret",
+                CloudUrl = "https://suavollc.com",
+            },
+            handler);
+
+        await client.PostSignedAsync(
+            "/api/agent/patient-details",
+            new
+            {
+                rxNumberHash = new string('a', 64),
+                details = new
+                {
+                    firstName = "Jane",
+                    lastInitial = "R",
+                    phone = "555-123-4567",
+                    address1 = "123 Main Street",
+                    city = "San Diego",
+                    state = "CA",
+                    zip = "92101"
+                },
+                commandId = "cmd_1"
+            },
+            CancellationToken.None);
+
+        Assert.Equal(1, handler.SendCount);
+    }
+
     private sealed class FixedHandler : HttpMessageHandler
     {
         private readonly HttpResponseMessage _response;
@@ -46,5 +236,32 @@ public sealed class SuavoCloudClientTests
             HttpRequestMessage request,
             CancellationToken cancellationToken) =>
             Task.FromResult(_response);
+    }
+
+    private sealed class RecordingHandler : HttpMessageHandler
+    {
+        private readonly HttpResponseMessage _response;
+
+        public RecordingHandler(HttpResponseMessage response)
+        {
+            _response = response;
+        }
+
+        public int SendCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            SendCount++;
+            return Task.FromResult(_response);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                _response.Dispose();
+            base.Dispose(disposing);
+        }
     }
 }

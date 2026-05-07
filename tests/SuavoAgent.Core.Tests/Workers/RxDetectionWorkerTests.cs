@@ -476,6 +476,15 @@ public class RxDetectionWorkerTests : IDisposable
         Assert.DoesNotContain("templateBaseline", source);
     }
 
+    [Fact]
+    public void LiveDetection_GatesLegacyPhiQueueBehindExplicitOption()
+    {
+        var source = ReadRepoFile("src/SuavoAgent.Core/Workers/RxDetectionWorker.cs");
+
+        Assert.DoesNotContain("includeLegacyDeliveryQueue: true);", source);
+        Assert.Contains("includeLegacyDeliveryQueue: _options.EnableLegacyPhiDeliveryQueueSync", source);
+    }
+
     private static string ReadRepoFile(string relativePath)
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

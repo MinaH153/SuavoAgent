@@ -12,4 +12,12 @@ public class AgentOptionsSecurityTests
 
         Assert.False(options.SqlTrustServerCertificate);
     }
+
+    [Fact]
+    public void LegacyPhiDeliveryQueueSync_DefaultsToFalse()
+    {
+        var options = new AgentOptions();
+
+        Assert.False(options.EnableLegacyPhiDeliveryQueueSync);
+    }
 }
