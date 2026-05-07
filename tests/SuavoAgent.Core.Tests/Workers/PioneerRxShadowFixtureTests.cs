@@ -9,6 +9,14 @@ namespace SuavoAgent.Core.Tests.Workers;
 public sealed class PioneerRxShadowFixtureTests
 {
     [Fact]
+    public void ShadowFixtureCommand_RequiresDashboardEvidenceReleaseMinimum()
+    {
+        Assert.Equal(
+            "b8f8888279c8960280823c2308a0339fff4a2c74",
+            PioneerRxShadowFixtureCommand.RequiredTrack2SourceCommitMinimum);
+    }
+
+    [Fact]
     public void ShadowFixtureCommand_AllowsOnlyDigestBackedDashboardEvidence()
     {
         using var doc = JsonDocument.Parse("""
