@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Adapters.PioneerRx;
 using SuavoAgent.Adapters.PioneerRx.Canary;
 using SuavoAgent.Adapters.PioneerRx.Sql;
 using SuavoAgent.Contracts.Canary;
@@ -34,6 +35,8 @@ public sealed class RxDetectionWorker : BackgroundService
     private CanaryHoldState _holdState = CanaryHoldState.Clear;
     private SchemaCanaryExportGate? _lastSchemaCanaryExportGate;
     private bool _sqlConnected;
+    private bool _loggedNoPmsOnce;
+    internal bool LoggedNoPmsOnce => _loggedNoPmsOnce; // test hook
 
     public int DetectionIntervalSeconds { get; set; } = 300;
     public int LastDetectedCount { get; private set; }
@@ -354,6 +357,24 @@ public sealed class RxDetectionWorker : BackgroundService
 
     private async Task TryConnectSqlAsync(CancellationToken ct)
     {
+        // No-PMS short-circuit: skip the 30s SqlConnection.OpenAsync timeout
+        // (+ warning-log noise that counts toward error_event_count_24h) on
+        // sandboxes and dev workstations where PioneerRx isn't installed at
+        // all. Fail-open inside the detector handles the registry-permissions
+        // edge case. We log the skip once per worker lifetime so log volume
+        // stays bounded.
+        if (!PioneerRxInstallDetector.IsInstalled(_logger))
+        {
+            _sqlConnected = false;
+            if (!_loggedNoPmsOnce)
+            {
+                _logger.LogInformation(
+                    "PioneerRx not installed on this host — skipping SQL detection (no-PMS mode)");
+                _loggedNoPmsOnce = true;
+            }
+            return;
+        }
+
         var server = _options.SqlServer ?? "localhost";
         var database = _options.SqlDatabase ?? "PioneerPharmacySystem";
 
