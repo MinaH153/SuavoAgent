@@ -1418,13 +1418,37 @@ public sealed class HeartbeatWorker : BackgroundService
     {
         var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
         var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
-        var reason = WatchdogRepairRequestWriter.ReadReason(dataEl);
 
         async Task AckAsync(bool ok, object? result, string? err)
         {
             if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
             await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
         }
+
+        // Bug 20 — reject unrecognized reasons up front instead of silently
+        // re-mapping to "remote_command". Operator gets a clear NACK that
+        // lists the allowed reasons; the closed-set persisted to the
+        // request file stays HIPAA-clean. Watchdog-side redaction (see
+        // WatchdogWorker) stays as defense-in-depth.
+        var (rawReason, validation) = WatchdogRepairRequestWriter.InspectReason(dataEl);
+        if (validation == WatchdogRepairRequestWriter.ReasonValidation.Rejected)
+        {
+            _logger.LogWarning(
+                "repair_agent: rejecting unknown reason — must be one of [{Allowed}]",
+                string.Join(", ", WatchdogRepairRequestWriter.AllowedReasons));
+            await AckAsync(
+                false,
+                new
+                {
+                    status = "rejected",
+                    rejected_reason = rawReason,
+                    allowed_reasons = WatchdogRepairRequestWriter.AllowedReasons,
+                },
+                "unknown_repair_reason");
+            return;
+        }
+
+        var reason = WatchdogRepairRequestWriter.ReadReason(dataEl);
 
         _stateDb.AppendChainedAuditEntry(new AuditEntry(
             TaskId: _options.AgentId ?? "agent",

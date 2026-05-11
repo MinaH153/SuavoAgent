@@ -509,18 +509,50 @@ public class HeartbeatWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task RepairAgentCommand_DoesNotPersistFreeformRepairReason()
+    public async Task RepairAgentCommand_RejectsFreeformRepairReason()
     {
+        // Bug 20 — pre-fix, an unrecognized reason was silently re-mapped to
+        // "remote_command" and the command appeared to succeed. Now we NACK
+        // up front so the operator gets clear feedback. Watchdog-side
+        // redaction stays as defense-in-depth (see
+        // WatchdogWorkerTests.Tick_QueuedRemoteRepair_RedactsUnexpectedReasonInTelemetry).
+        if (File.Exists(_repairRequestPath)) File.Delete(_repairRequestPath);
+
         var response = BuildResponseJson("repair_agent", new
         {
-            commandId = "cmd-repair-queued-2",
+            commandId = "cmd-repair-rejected-1",
             reason = "patient_john_smith"
         });
 
         await InvokeProcessAsync(response);
 
+        Assert.False(
+            File.Exists(_repairRequestPath),
+            "rejected reason must not result in a queued repair request");
+    }
+
+    [Theory]
+    [InlineData("remote_command")]
+    [InlineData("watchdog_critical")]
+    [InlineData("cloud_stale")]
+    [InlineData("install_repair")]
+    [InlineData("runtime_health_missing")]
+    [InlineData("operator_requested")]
+    public async Task RepairAgentCommand_AcceptsAllAllowedReasons(string reason)
+    {
+        if (File.Exists(_repairRequestPath)) File.Delete(_repairRequestPath);
+
+        var response = BuildResponseJson("repair_agent", new
+        {
+            commandId = $"cmd-allowed-{reason}",
+            reason
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.True(File.Exists(_repairRequestPath));
         using var doc = JsonDocument.Parse(File.ReadAllText(_repairRequestPath));
-        Assert.Equal("remote_command", doc.RootElement.GetProperty("reason").GetString());
+        Assert.Equal(reason, doc.RootElement.GetProperty("reason").GetString());
     }
 
     // ── Command Dispatch: acknowledge_drift ──
