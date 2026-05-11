@@ -5,6 +5,30 @@ namespace SuavoAgent.Core.Workers;
 
 internal static class WatchdogRepairRequestWriter
 {
+    /// Closed set of repair reasons that may be persisted to the watchdog
+    /// request file. Defense-in-depth against PHI ending up in the reason
+    /// field (the watchdog redacts as a last line, but we reject up front
+    /// so the operator gets clear feedback instead of a silent re-map).
+    internal static readonly string[] AllowedReasons =
+    [
+        "remote_command",
+        "watchdog_critical",
+        "cloud_stale",
+        "install_repair",
+        "runtime_health_missing",
+        "operator_requested",
+    ];
+
+    public enum ReasonValidation
+    {
+        /// Caller omitted reason — defaulted to "remote_command".
+        Defaulted,
+        /// Reason matched the allowed set verbatim.
+        Accepted,
+        /// Reason was provided but isn't in the allowed set. Caller must NACK.
+        Rejected,
+    }
+
     public static string Queue(
         string? configuredPath,
         string? commandId,
@@ -49,18 +73,33 @@ internal static class WatchdogRepairRequestWriter
         return NormalizeReason(reasonEl.GetString());
     }
 
+    /// Bug 20 — surface unrecognized reasons to the caller instead of
+    /// silently re-mapping to "remote_command". Returns the JSON value
+    /// (raw, unsanitized) when present so error messages can echo the
+    /// rejected token back to the operator. `null` means the field was
+    /// missing or non-string (callers default to "remote_command").
+    public static (string? raw, ReasonValidation result) InspectReason(JsonElement dataEl)
+    {
+        if (!dataEl.TryGetProperty("reason", out var reasonEl) ||
+            reasonEl.ValueKind != JsonValueKind.String)
+            return (null, ReasonValidation.Defaulted);
+
+        var raw = reasonEl.GetString();
+        if (string.IsNullOrWhiteSpace(raw))
+            return (raw, ReasonValidation.Defaulted);
+
+        var sanitized = SanitizeToken(raw, "");
+        return Array.IndexOf(AllowedReasons, sanitized) >= 0
+            ? (sanitized, ReasonValidation.Accepted)
+            : (raw, ReasonValidation.Rejected);
+    }
+
     private static string NormalizeReason(string? value)
     {
         var reason = SanitizeToken(value, "remote_command");
-        return reason is
-            "remote_command" or
-            "watchdog_critical" or
-            "cloud_stale" or
-            "install_repair" or
-            "runtime_health_missing" or
-            "operator_requested"
-                ? reason
-                : "remote_command";
+        return Array.IndexOf(AllowedReasons, reason) >= 0
+            ? reason
+            : "remote_command";
     }
 
     private static string SanitizeToken(string? value, string fallback)
