@@ -48,9 +48,9 @@ if ($needKeys) {
         #
         # Two observed null-return paths from the curve-named factory
         # `[ECDsa]::Create([ECCurve]::NamedCurves.nistP256)`:
-        #   1. Windows PowerShell 5.1 / .NET Framework 4.x — factory doesn't
+        #   1. Windows PowerShell 5.1 / .NET Framework 4.x: factory doesn't
         #      understand the ECCurve overload.
-        #   2. pwsh 7.6 on Queen (2026-05-12) — CNG named-curve resolution
+        #   2. pwsh 7.6 on Queen (2026-05-12): CNG named-curve resolution
         #      returns null even with the right runtime (suspected FIPS / CNG
         #      provider config quirk).
         # Both manifest as "method on null-valued expression" on the next
