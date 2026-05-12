@@ -37,7 +37,14 @@ param(
     # Re-apply service registration + ACLs without touching operator config,
     # SQL credentials, or consent receipt. Triggered by SuavoAgent.Watchdog
     # when Core/Broker fail to recover via sc.exe start alone.
-    [switch]$Repair
+    [switch]$Repair,
+    # 2026-05-03: founder dogfood / internal sandbox install. Set by the
+    # cloud's /api/agent/quick-install endpoint when the install token's
+    # pharmacy has is_internal_sandbox=true. Auto-fills MKM Internal
+    # consent + skips SQL/PMS prompts (sandbox doesn't run PioneerRx).
+    # Trusted because the cloud already validated the token bears
+    # is_internal_sandbox before passing this flag.
+    [switch]$SandboxBypass
 )
 
 # Auto-log everything -- transcript saved to desktop for debugging
@@ -591,7 +598,67 @@ if ((-not $SkipConsent) -and (Test-Path $cachedConsentPath)) {
     }
 }
 
-if ((-not $SkipConsent) -and (-not $cachedConsent)) {
+# 2026-05-03: install-context pre-fill. When the dashboard provides an
+# install token, fetch operational metadata + skip-prompt list from the
+# cloud so we can pre-fill ceremony prompts (pharmacist confirms instead
+# of types) and skip them entirely for sandbox installs.
+$installContext = $null
+if ($InstallToken -and -not $cachedConsent) {
+    try {
+        $tokenForCtx = if ($InstallToken -is [System.Security.SecureString]) {
+            $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($InstallToken)
+            try { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+            finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+        } else { [string]$InstallToken }
+        $ctxUri = "$CloudUrl/api/agent/install-context?t=$tokenForCtx"
+        $ctxResp = Invoke-RestMethod -Uri $ctxUri -Method Get -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
+        if ($ctxResp.success -and $ctxResp.data) {
+            $installContext = $ctxResp.data
+            Write-Host ""
+            Write-Host "  Pre-filled install context from $($installContext.pharmacy.name)" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host "  Install-context pre-fill unavailable ($($_.Exception.Message)) -- proceeding with full prompts" -ForegroundColor DarkGray
+    }
+}
+
+# 2026-05-03: SandboxBypass auto-consent. When the cloud's quick-install
+# endpoint detects the token's pharmacy is_internal_sandbox=true it appends
+# -SandboxBypass. For sandbox installs we skip the operator/state/agreement
+# prompts and write a sandbox-tagged consent receipt automatically. The
+# HIPAA acknowledgment + agreement-signing requirements don't apply because
+# the sandbox pharmacy has no PHI flowing.
+if ($SandboxBypass -and -not $cachedConsent) {
+    Write-Host ""
+    Write-Host "  +======================================================+" -ForegroundColor Cyan
+    Write-Host "  |     SUAVOAGENT SANDBOX BYPASS (NON-PHI)             |" -ForegroundColor Cyan
+    Write-Host "  +======================================================+" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  This is an MKM-internal sandbox install. Operator pre-filled" -ForegroundColor White
+    Write-Host "  as MKM Internal. No patient data flows; HIPAA prompts skipped." -ForegroundColor White
+    Write-Host ""
+    $authName = if ($installContext -and $installContext.defaults.operator_name) { $installContext.defaults.operator_name } else { "MKM Internal" }
+    $authTitle = if ($installContext -and $installContext.defaults.operator_role) { $installContext.defaults.operator_role } else { "MKM Engineer" }
+    $confirmState = if ($installContext -and $installContext.pharmacy.state) { $installContext.pharmacy.state } else { "CA" }
+    $consentTimestamp = (Get-Date -Format "yyyy-MM-ddTHH:mm:ss.fffZ")
+    $consentReceipt = @{
+        installerVersion = $installerVersion
+        authorizingParty = @{ name = $authName; title = $authTitle }
+        businessState = $confirmState
+        consentTimestamp = $consentTimestamp
+        sandboxBypass = $true
+        machine = $env:COMPUTERNAME
+        osUser = $env:USERNAME
+        terms = "sandbox-bypass-2026-05-03"
+    }
+    try {
+        if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Path $dataDir -Force | Out-Null }
+        $consentReceipt | ConvertTo-Json -Depth 5 | Set-Content -Path $cachedConsentPath -Encoding UTF8
+        Write-Ok "Sandbox consent receipt recorded ($authName / $env:COMPUTERNAME)"
+    } catch {
+        Write-Host "  Could not persist sandbox consent receipt ($($_.Exception.Message)) -- continuing" -ForegroundColor DarkGray
+    }
+} elseif ((-not $SkipConsent) -and (-not $cachedConsent)) {
 Write-Host ""
 Write-Host "  +======================================================+" -ForegroundColor Cyan
 Write-Host "  |         SUAVOAGENT TERMS & CONSENT                  |" -ForegroundColor Cyan
@@ -626,17 +693,35 @@ Write-Host "    3. Agreement to Suavo's Terms of Service and Privacy Policy" -Fo
 Write-Host "    4. Execution of Business Associate Agreement (if healthcare)" -ForegroundColor White
 Write-Host ""
 
-# Collect authorizing party info -- this gets recorded in the consent receipt
-$authName = Read-Host "  Authorizing party full name"
-if ([string]::IsNullOrWhiteSpace($authName)) {
-    Write-Host "  Installation cancelled -- authorizing party name required." -ForegroundColor Red
-    exit 0
-}
-$authTitle = Read-Host "  Title (e.g., Owner, Pharmacy Manager)"
-if ([string]::IsNullOrWhiteSpace($authTitle)) { $authTitle = "Authorized Representative" }
+# Collect authorizing party info -- this gets recorded in the consent receipt.
+# 2026-05-03: when install-context is available, pre-fill the prompts so the
+# pharmacist confirms with [Enter] instead of typing. Default values come
+# from prior pharmacy onboarding (PIC name, license state, etc).
+$ctxOperatorName = if ($installContext -and $installContext.defaults.operator_name) { $installContext.defaults.operator_name } else { $null }
+$ctxOperatorRole = if ($installContext -and $installContext.defaults.operator_role) { $installContext.defaults.operator_role } else { $null }
+$ctxState = if ($installContext -and $installContext.pharmacy.license_state) { $installContext.pharmacy.license_state } else { $null }
 
-$confirmState = Read-Host "  State where this business operates (e.g., CA, NY, TX)"
-if ([string]::IsNullOrWhiteSpace($confirmState)) { $confirmState = "Unknown" }
+$authPrompt = if ($ctxOperatorName) { "  Authorizing party full name [$ctxOperatorName]" } else { "  Authorizing party full name" }
+$authName = Read-Host $authPrompt
+if ([string]::IsNullOrWhiteSpace($authName)) {
+    if ($ctxOperatorName) { $authName = $ctxOperatorName }
+    else {
+        Write-Host "  Installation cancelled -- authorizing party name required." -ForegroundColor Red
+        exit 0
+    }
+}
+
+$titlePrompt = if ($ctxOperatorRole) { "  Title [$ctxOperatorRole]" } else { "  Title (e.g., Owner, Pharmacy Manager)" }
+$authTitle = Read-Host $titlePrompt
+if ([string]::IsNullOrWhiteSpace($authTitle)) {
+    $authTitle = if ($ctxOperatorRole) { $ctxOperatorRole } else { "Authorized Representative" }
+}
+
+$statePrompt = if ($ctxState) { "  State where this business operates [$ctxState]" } else { "  State where this business operates (e.g., CA, NY, TX)" }
+$confirmState = Read-Host $statePrompt
+if ([string]::IsNullOrWhiteSpace($confirmState)) {
+    $confirmState = if ($ctxState) { $ctxState } else { "Unknown" }
+}
 
 # Check if mandatory notice state
 $mandatoryNoticeStates = @("CT","DE","NY")
