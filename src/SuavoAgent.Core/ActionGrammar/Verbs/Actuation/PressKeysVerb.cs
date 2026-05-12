@@ -80,7 +80,7 @@ public sealed class PressKeysVerb : IVerb
         var chords = enumerable.Cast<object?>().Select(o => (string)o!).ToList();
         var interDelay = ctx.Parameters.TryGetValue("inter_chord_delay_ms", out var d) && d is int di ? di : 80;
 
-        var req = new PressKeysRequest(chords, interDelay);
+        var req = new PressKeysRequest(chords, interDelay, ctx.DryRun);
         var result = await gateway.PressKeysAsync(req, ct).ConfigureAwait(false);
         if (!result.Ok)
         {

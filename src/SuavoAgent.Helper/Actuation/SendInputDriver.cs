@@ -44,7 +44,10 @@ public sealed class SendInputDriver
     public async Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(req);
-        if (req.Text is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "text is null", _gate.IsDryRun);
+        // Bug 21 effective-OR: either flag forces dry-run. Real input only fires
+        // when BOTH the cloud workflow AND the local gate agree it's live.
+        var effectiveDryRun = req.DryRun || _gate.IsDryRun;
+        if (req.Text is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "text is null", effectiveDryRun);
 
         if (PhiPatternGuard.ContainsPotentialPhi(req.Text, out var matched))
         {
@@ -52,19 +55,20 @@ public sealed class SendInputDriver
             return ActuationResult.Reject(
                 ActuationRejectionCodes.PhiPatternDetected,
                 $"input matched PHI pattern '{matched}' — sandbox actuation must not type PHI",
-                _gate.IsDryRun);
+                effectiveDryRun);
         }
 
         var rejection = _gate.CheckOrReject();
-        if (rejection is not null) return rejection;
+        if (rejection is not null) return rejection with { DryRun = effectiveDryRun };
 
-        var dryRun = _gate.IsDryRun;
         var evidence = ComputeEvidenceHash("type_text", req.Text);
         var sw = Stopwatch.StartNew();
 
-        if (dryRun)
+        if (effectiveDryRun)
         {
-            _logger.Information("TypeText DRY-RUN: chars={Length} evidence={Evidence}", req.Text.Length, evidence);
+            _logger.Information(
+                "TypeText DRY-RUN: chars={Length} evidence={Evidence} requestDryRun={ReqDR} gateDryRun={GateDR}",
+                req.Text.Length, evidence, req.DryRun, _gate.IsDryRun);
             return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: true, evidence);
         }
 
@@ -106,8 +110,9 @@ public sealed class SendInputDriver
     public async Task<ActuationResult> PressKeysAsync(PressKeysRequest req, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(req);
+        var effectiveDryRun = req.DryRun || _gate.IsDryRun;
         if (req.Chords is null || req.Chords.Count == 0)
-            return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "chords list empty", _gate.IsDryRun);
+            return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "chords list empty", effectiveDryRun);
 
         var parsed = new List<KeyChord>(req.Chords.Count);
         foreach (var chordRaw in req.Chords)
@@ -117,21 +122,22 @@ public sealed class SendInputDriver
                 return ActuationResult.Reject(
                     ActuationRejectionCodes.ChordParseFailure,
                     $"could not parse chord '{chordRaw}'",
-                    _gate.IsDryRun);
+                    effectiveDryRun);
             }
             parsed.Add(chord);
         }
 
         var rejection = _gate.CheckOrReject();
-        if (rejection is not null) return rejection;
+        if (rejection is not null) return rejection with { DryRun = effectiveDryRun };
 
-        var dryRun = _gate.IsDryRun;
         var evidence = ComputeEvidenceHash("press_keys", string.Join(",", req.Chords));
         var sw = Stopwatch.StartNew();
 
-        if (dryRun)
+        if (effectiveDryRun)
         {
-            _logger.Information("PressKeys DRY-RUN: chords=[{Chords}] evidence={Evidence}", string.Join(",", req.Chords), evidence);
+            _logger.Information(
+                "PressKeys DRY-RUN: chords=[{Chords}] evidence={Evidence} requestDryRun={ReqDR} gateDryRun={GateDR}",
+                string.Join(",", req.Chords), evidence, req.DryRun, _gate.IsDryRun);
             return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: true, evidence);
         }
 
@@ -158,18 +164,20 @@ public sealed class SendInputDriver
         return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: false, evidence);
     }
 
-    public Task<ActuationResult> ClickAtAsync(int x, int y, CancellationToken ct)
+    public Task<ActuationResult> ClickAtAsync(int x, int y, bool dryRun, CancellationToken ct)
     {
+        var effectiveDryRun = dryRun || _gate.IsDryRun;
         var rejection = _gate.CheckOrReject();
-        if (rejection is not null) return Task.FromResult(rejection);
+        if (rejection is not null) return Task.FromResult(rejection with { DryRun = effectiveDryRun });
 
-        var dryRun = _gate.IsDryRun;
         var evidence = ComputeEvidenceHash("click_at", $"{x},{y}");
         var sw = Stopwatch.StartNew();
 
-        if (dryRun)
+        if (effectiveDryRun)
         {
-            _logger.Information("ClickAt DRY-RUN: x={X} y={Y} evidence={Evidence}", x, y, evidence);
+            _logger.Information(
+                "ClickAt DRY-RUN: x={X} y={Y} evidence={Evidence} requestDryRun={ReqDR} gateDryRun={GateDR}",
+                x, y, evidence, dryRun, _gate.IsDryRun);
             return Task.FromResult(ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: true, evidence));
         }
 
@@ -188,27 +196,29 @@ public sealed class SendInputDriver
     public Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(req);
+        var effectiveDryRun = req.DryRun || _gate.IsDryRun;
         if (string.IsNullOrWhiteSpace(req.AppKey))
-            return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "appKey is required", _gate.IsDryRun));
+            return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "appKey is required", effectiveDryRun));
 
         if (!ActuationAllowlistedSandboxApps.ProcessNames.TryGetValue(req.AppKey, out var processName))
         {
             return Task.FromResult(ActuationResult.Reject(
                 ActuationRejectionCodes.AppNotInAllowlist,
                 $"appKey '{req.AppKey}' is not in the sandbox allowlist (notepad, calculator)",
-                _gate.IsDryRun));
+                effectiveDryRun));
         }
 
         var rejection = _gate.CheckOrReject();
-        if (rejection is not null) return Task.FromResult(rejection);
+        if (rejection is not null) return Task.FromResult(rejection with { DryRun = effectiveDryRun });
 
-        var dryRun = _gate.IsDryRun;
         var evidence = ComputeEvidenceHash("launch_sandbox_app", processName);
         var sw = Stopwatch.StartNew();
 
-        if (dryRun)
+        if (effectiveDryRun)
         {
-            _logger.Information("LaunchSandboxApp DRY-RUN: process={Process} evidence={Evidence}", processName, evidence);
+            _logger.Information(
+                "LaunchSandboxApp DRY-RUN: process={Process} evidence={Evidence} requestDryRun={ReqDR} gateDryRun={GateDR}",
+                processName, evidence, req.DryRun, _gate.IsDryRun);
             return Task.FromResult(ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: true, evidence));
         }
 

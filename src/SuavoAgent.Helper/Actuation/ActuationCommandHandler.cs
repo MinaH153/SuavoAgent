@@ -68,8 +68,15 @@ public sealed class ActuationCommandHandler
         if (data is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "missing data", _gate.IsDryRun);
         var req = data.Value.Deserialize<ClickByLabelRequest>();
         if (req is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun);
+
+        // Bug 21 effective-OR: as soon as we know the request's dryRun bit,
+        // every rejection from this handler reports the EFFECTIVE state, not
+        // just the gate's. Otherwise a request that asked for dry-run could
+        // be rejected with dryRun=false in the audit row.
+        var effectiveDryRun = req.DryRun || _gate.IsDryRun;
+
         if (string.IsNullOrWhiteSpace(req.Label) || string.IsNullOrWhiteSpace(req.ProcessName))
-            return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "label/processName required", _gate.IsDryRun);
+            return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "label/processName required", effectiveDryRun);
 
         var allowedProcesses = ActuationAllowlistedSandboxApps.ProcessNames.Values
             .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys);
@@ -78,11 +85,11 @@ public sealed class ActuationCommandHandler
             return ActuationResult.Reject(
                 ActuationRejectionCodes.ProcessNotAllowed,
                 $"processName '{req.ProcessName}' not allowed for sandbox actuation",
-                _gate.IsDryRun);
+                effectiveDryRun);
         }
 
         var rejection = _gate.CheckOrReject();
-        if (rejection is not null) return rejection;
+        if (rejection is not null) return rejection with { DryRun = effectiveDryRun };
 
         var mode = req.MatchMode switch
         {
@@ -99,10 +106,10 @@ public sealed class ActuationCommandHandler
             return ActuationResult.Reject(
                 ActuationRejectionCodes.LabelNotFound,
                 $"label '{req.Label}' not found in '{req.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
-                _gate.IsDryRun);
+                effectiveDryRun);
         }
 
-        return await _driver.ClickAtAsync(resolved.X, resolved.Y, ct).ConfigureAwait(false);
+        return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct).ConfigureAwait(false);
     }
 
     private Task<ActuationResult> HandleTypeTextAsync(JsonElement? data, CancellationToken ct)

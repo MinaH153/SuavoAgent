@@ -248,7 +248,8 @@ public sealed class WorkflowExecutor
             Actor: actor,
             Parameters: parameters,
             Services: services,
-            DeadlineUtc: deadline);
+            DeadlineUtc: deadline,
+            DryRun: definition.DryRun);
 
         var sw = Stopwatch.StartNew();
         var dispatch = await _dispatcher.DispatchAsync(verb, verbCtx, ct).ConfigureAwait(false);
@@ -277,7 +278,8 @@ public sealed class WorkflowExecutor
             ErrorDetail: errDetail,
             Params: parameters,
             BeforeState: null,
-            AfterState: dispatch.Output is { Count: > 0 } ? dispatch.Output : null), ct).ConfigureAwait(false);
+            AfterState: dispatch.Output is { Count: > 0 } ? dispatch.Output : null,
+            EffectiveDryRun: ExtractEffectiveDryRun(dispatch.Output)), ct).ConfigureAwait(false);
 
         return dispatch;
     }
@@ -512,5 +514,24 @@ public sealed class WorkflowExecutor
         return idx > 0
             ? (reason[..idx].Trim(), reason[(idx + 1)..].Trim())
             : ("error", reason);
+    }
+
+    // Bug 21: actuation verbs (LaunchSandboxApp, PressKeys, TypeIntoField,
+    // ClickByLabel) emit "dry_run" in their output dictionary from
+    // ActuationResult.DryRun. WorkflowExecutor surfaces it as the audit
+    // row's EffectiveDryRun. Returns null when the verb produced no
+    // output map (Fail) or no "dry_run" key (read-only verbs, future
+    // additions) — null is the audit-chain signal that "effective" is
+    // not meaningful for this row.
+    private static bool? ExtractEffectiveDryRun(IReadOnlyDictionary<string, object?> output)
+    {
+        if (output is null || output.Count == 0) return null;
+        if (!output.TryGetValue("dry_run", out var raw)) return null;
+        return raw switch
+        {
+            bool b => b,
+            string s when bool.TryParse(s, out var parsed) => parsed,
+            _ => null,
+        };
     }
 }

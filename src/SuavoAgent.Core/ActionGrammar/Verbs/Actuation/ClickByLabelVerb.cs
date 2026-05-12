@@ -85,7 +85,7 @@ public sealed class ClickByLabelVerb : IVerb
         var matchMode = ctx.Parameters.TryGetValue("match_mode", out var mm) && mm is string mms ? mms : "exact";
         var timeoutMs = ctx.Parameters.TryGetValue("timeout_ms", out var tm) && tm is int tmi ? tmi : 8000;
 
-        var req = new ClickByLabelRequest(label, processName, matchMode, timeoutMs);
+        var req = new ClickByLabelRequest(label, processName, matchMode, timeoutMs, ctx.DryRun);
         var result = await gateway.ClickByLabelAsync(req, ct).ConfigureAwait(false);
         if (!result.Ok)
         {

@@ -81,7 +81,7 @@ public sealed class TypeIntoFieldVerb : IVerb
         var clearFirst = ctx.Parameters.TryGetValue("clear_first", out var c) && c is bool cb && cb;
         var perKey = ctx.Parameters.TryGetValue("per_key_delay_ms", out var pk) && pk is int pkInt ? pkInt : 25;
 
-        var req = new TypeTextRequest(text, clearFirst, perKey);
+        var req = new TypeTextRequest(text, clearFirst, perKey, ctx.DryRun);
         var result = await gateway.TypeTextAsync(req, ct).ConfigureAwait(false);
         if (!result.Ok)
         {

@@ -16,7 +16,14 @@ public sealed record VerbContext(
     string Actor,
     IReadOnlyDictionary<string, object?> Parameters,
     IServiceProvider Services,
-    DateTimeOffset DeadlineUtc
+    DateTimeOffset DeadlineUtc,
+    // Bug 21 (MinaH153/SuavoAgent#63): workflow-level dry_run flag. Verbs
+    // that drive actuation must pass this into their IPC request DTOs;
+    // SendInputDriver effective-ORs it with ActuationGate.IsDryRun and only
+    // fires real input when BOTH are false. Defaults to false so existing
+    // call sites that construct VerbContext directly (tests, future verbs)
+    // don't silently flip the dry-run semantics.
+    bool DryRun = false
 );
 
 public sealed record VerbPreconditionResult(bool Satisfied, string? FailedPreconditionId, string? Reason)
