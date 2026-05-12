@@ -247,7 +247,7 @@ sc.exe failureflag $serviceCore 1
 
 # Register Broker service.
 #
-# LocalSystem is REQUIRED for this Broker — not a privilege escalation.
+# LocalSystem is REQUIRED for this Broker -- not a privilege escalation.
 # The Broker's primary job is the cross-session launch dance:
 #   WTSQueryUserToken(sessionId)
 #     -> DuplicateTokenEx(SecurityImpersonation, TokenPrimary)
@@ -255,7 +255,7 @@ sc.exe failureflag $serviceCore 1
 #         -> CreateProcessAsUser(... SuavoAgent.Helper.exe ...)
 # `WTSQueryUserToken` is documented as requiring the SE_TCB_NAME privilege
 # ("Caller must be running in the LocalSystem account and must have the
-# SE_TCB_NAME privilege"). NetworkService does NOT hold SeTcbPrivilege —
+# SE_TCB_NAME privilege"). NetworkService does NOT hold SeTcbPrivilege --
 # with that identity the call fails Win32(1314) ERROR_PRIVILEGE_NOT_HELD,
 # Broker silently falls back to the dev-only `Process.Start` path, and
 # Helper ends up in Session 0 as NETWORK SERVICE. From Session 0 Helper

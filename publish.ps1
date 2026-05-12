@@ -17,7 +17,7 @@ $env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
 # variables so the same script runs on Mac dev boxes and Windows agents.
 $suavoHome = if ($env:HOME) { $env:HOME }
              elseif ($env:USERPROFILE) { $env:USERPROFILE }
-             else { throw "publish.ps1: no HOME or USERPROFILE env var — cannot locate .suavo key dir" }
+             else { throw "publish.ps1: no HOME or USERPROFILE env var -- cannot locate .suavo key dir" }
 $suavoKeyDir = Join-Path $suavoHome ".suavo"
 $signingKey = Join-Path $suavoKeyDir "signing-key.pem"
 $signingPub = Join-Path $suavoKeyDir "signing-key.pub.pem"
@@ -46,7 +46,7 @@ if ($needKeys) {
         # `ExportECPrivateKeyPem` / `ExportSubjectPublicKeyInfoPem`, which
         # exist in PowerShell 7+ (built on .NET 6+ / 7+). Windows
         # PowerShell 5.1 ships on .NET Framework 4.x which does NOT have
-        # these methods — `ECDsa.Create(ECCurve)` returns null and the
+        # these methods -- `ECDsa.Create(ECCurve)` returns null and the
         # next line throws an unhelpful "method on null-valued expression"
         # error. Fail fast with an actionable message instead.
         if ($PSVersionTable.PSVersion.Major -lt 7) {
