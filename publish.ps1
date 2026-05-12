@@ -44,18 +44,31 @@ if ($needKeys) {
     } else {
         # Fallback: .NET ECDsa key generation. Requires the .NET 7+ APIs
         # `ExportECPrivateKeyPem` / `ExportSubjectPublicKeyInfoPem`, which
-        # exist in PowerShell 7+ (built on .NET 6+ / 7+). Windows
-        # PowerShell 5.1 ships on .NET Framework 4.x which does NOT have
-        # these methods -- `ECDsa.Create(ECCurve)` returns null and the
-        # next line throws an unhelpful "method on null-valued expression"
-        # error. Fail fast with an actionable message instead.
+        # exist in PowerShell 7+ (built on .NET 6+ / 7+).
+        #
+        # Two observed null-return paths from the curve-named factory
+        # `[ECDsa]::Create([ECCurve]::NamedCurves.nistP256)`:
+        #   1. Windows PowerShell 5.1 / .NET Framework 4.x: factory doesn't
+        #      understand the ECCurve overload.
+        #   2. pwsh 7.6 on Queen (2026-05-12): CNG named-curve resolution
+        #      returns null even with the right runtime (suspected FIPS / CNG
+        #      provider config quirk).
+        # Both manifest as "method on null-valued expression" on the next
+        # `.ExportECPrivateKeyPem()` call, which is opaque to a rebuilder.
+        #
+        # Construct ECDsaCng directly with the key size: that bypasses the
+        # named-curve resolution path and is what `ECDsa.Create(curve)` would
+        # have returned on Windows anyway. ECDsaCng inherits the .NET 7+ PEM
+        # export methods from the base ECDsa class.
         if ($PSVersionTable.PSVersion.Major -lt 7) {
             throw "publish.ps1 key-generation fallback requires PowerShell 7+ (uses .NET 7+ ECDsa PEM APIs not present in Windows PowerShell 5.1). Either install openssl, run this script with pwsh.exe, or pre-create keys at $suavoKeyDir."
         }
-        Write-Host "  openssl not found - using .NET ECDsa key generation" -ForegroundColor Yellow
+        Write-Host "  openssl not found - using .NET ECDsaCng key generation" -ForegroundColor Yellow
         function Export-ECDsaKeyPair([string]$privPath, [string]$pubPath) {
-            $ecdsa = [System.Security.Cryptography.ECDsa]::Create(
-                [System.Security.Cryptography.ECCurve]::NamedCurves.nistP256)
+            $ecdsa = [System.Security.Cryptography.ECDsaCng]::new(256)
+            if (-not $ecdsa) {
+                throw "ECDsaCng(256) constructor returned null on PowerShell $($PSVersionTable.PSVersion). Install openssl (preferred) or pre-create keys at $suavoKeyDir."
+            }
             $privPem = $ecdsa.ExportECPrivateKeyPem()
             $pubPem = $ecdsa.ExportSubjectPublicKeyInfoPem()
             Set-Content -Path $privPath -Value $privPem -Encoding UTF8 -NoNewline
