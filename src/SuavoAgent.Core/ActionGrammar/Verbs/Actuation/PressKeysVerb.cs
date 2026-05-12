@@ -84,7 +84,10 @@ public sealed class PressKeysVerb : IVerb
         var result = await gateway.PressKeysAsync(req, ct).ConfigureAwait(false);
         if (!result.Ok)
         {
-            return VerbExecutionResult.Fail($"{result.RejectionCode}: {result.RejectionReason}");
+            // Preserve effective dry-run state for audit chain (Bug 21 / Codex HIGH-2).
+            return VerbExecutionResult.Fail(
+                $"{result.RejectionCode}: {result.RejectionReason}",
+                new Dictionary<string, object?> { ["dry_run"] = result.DryRun });
         }
         return VerbExecutionResult.Ok(new Dictionary<string, object?>
         {

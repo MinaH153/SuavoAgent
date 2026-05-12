@@ -101,27 +101,46 @@ public sealed class WorkflowExecutorDryRunPropagationTests
     }
 
     [Fact]
-    public async Task AuditRow_EffectiveDryRunIsNull_ForNonActuationOutcomes()
+    public async Task AuditRow_GatewayReject_PreservesEffectiveDryRunFromResult()
     {
-        // When the verb dispatch produces no "dry_run" key in its output
-        // (e.g. a future read-only verb), EffectiveDryRun must be null —
-        // not silently defaulted to false, which would lie to the audit
-        // chain. Today this case is theoretical for actuation verbs (all
-        // emit dry_run), but the contract has to hold for the audit row
-        // schema to grow cleanly.
+        // Codex review of #67 (HIGH-2): the previous behavior asserted
+        // EffectiveDryRun=null on any verb that returned Fail. But the
+        // Helper KNOWS the effective dry-run state at PHI / gate / parse
+        // rejection — it returns it inside ActuationResult.DryRun. The
+        // verb must preserve that in its Fail-output so the audit row
+        // captures the truth instead of an audit blind spot
+        // ("indistinguishable from no-actuation-attempted").
         var harness = new RecordingHarness();
-        harness.Gateway.NextResult = ActuationResult.Reject("gate_paused", "test", dryRun: false);
-        var def = Def("run-reject", dryRun: true, Step("press_keys", "{\"chords\":[\"Enter\"]}"));
+        harness.Gateway.NextResult = ActuationResult.Reject("gate_paused", "test", dryRun: true);
+        var def = Def("run-reject", dryRun: false, Step("press_keys", "{\"chords\":[\"Enter\"]}"));
 
         await harness.Run(def);
 
         Assert.Single(harness.Audit.StepEntries);
         var entry = harness.Audit.StepEntries[0];
-        Assert.True(entry.DryRun);          // requested still recorded
-        // EffectiveDryRun comes from the verb's output dictionary. On a
-        // rejected dispatch the verb returned Fail (no output map), so the
-        // executor should not synthesise an effective value.
-        Assert.Null(entry.EffectiveDryRun);
+        Assert.False(entry.DryRun);             // requested = workflow definition
+        Assert.True(entry.EffectiveDryRun);     // effective = gate forced dry-run
+    }
+
+    [Fact]
+    public async Task AuditRow_ManifestResolutionFailure_RecordsRequestedDryRun()
+    {
+        // Codex review of #67 (HIGH-1): manifest-resolution failures
+        // (unknown verb) previously hardcoded DryRun=false in the audit
+        // entry. A dry-run workflow that hit an unresolved manifest then
+        // wrote an audit row saying "requested live" — chain of custody
+        // lies before any actuation surface is even reached.
+        var harness = new RecordingHarness();
+        var def = Def("run-manifest-miss", dryRun: true, Step("verb_that_does_not_exist", "{}"));
+
+        await harness.Run(def);
+
+        // The manifest-resolution-failed path writes one audit row.
+        Assert.Single(harness.Audit.StepEntries);
+        var entry = harness.Audit.StepEntries[0];
+        Assert.True(entry.DryRun);              // requested = workflow definition (was hardcoded false)
+        Assert.Null(entry.EffectiveDryRun);     // no actuation surface reached — null is honest
+        Assert.Equal("rejected", entry.Outcome);
     }
 
     // ── Harness ─────────────────────────────────────────────────────────────
