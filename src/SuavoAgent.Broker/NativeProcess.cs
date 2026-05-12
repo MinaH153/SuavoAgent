@@ -37,14 +37,31 @@ public static class NativeProcess
                 return null;
             }
 
-            // 2. Duplicate as a primary token (required for CreateProcessAsUser)
+            // 2. Duplicate as a primary token (required for CreateProcessAsUser).
+            //
+            // Bug 22 (surfaced 2026-05-11): the impersonation level on the
+            // duplicated primary token determines what operations the spawned
+            // process can perform on behalf of the user. SecurityIdentification
+            // (level 1) creates a process that can identify the user but
+            // CANNOT inject input or access UI automation across the desktop.
+            // The result is a Helper that visibly runs in the user's session
+            // but hits Win32Exception(5) "Access is denied" on every SendInput
+            // / UIA call. Process.Start works (a child opens on screen) but
+            // no input verb ever lands.
+            //
+            // SecurityImpersonation (level 2) is the canonical Microsoft
+            // pattern for "spawn a desktop-acting process from a service" —
+            // grants exactly the rights Helper needs (input desktop access
+            // + UIA over user-session HWNDs) without escalating to
+            // SecurityDelegation's cross-machine impersonation, which would
+            // be overkill and a privilege expansion.
             var sa = new SECURITY_ATTRIBUTES
             {
                 nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
                 bInheritHandle = false
             };
             if (!DuplicateTokenEx(userToken, 0x02000000 /* MAXIMUM_ALLOWED */,
-                ref sa, SECURITY_IMPERSONATION_LEVEL.SecurityIdentification,
+                ref sa, SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation,
                 TOKEN_TYPE.TokenPrimary, out duplicateToken))
             {
                 logger.LogWarning("DuplicateTokenEx failed: {Error}", Marshal.GetLastWin32Error());
@@ -130,7 +147,13 @@ public static class NativeProcess
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(nint hObject);
 
-    private enum SECURITY_IMPERSONATION_LEVEL { SecurityIdentification = 1 }
+    private enum SECURITY_IMPERSONATION_LEVEL
+    {
+        SecurityAnonymous = 0,
+        SecurityIdentification = 1,
+        SecurityImpersonation = 2,
+        SecurityDelegation = 3,
+    }
     private enum TOKEN_TYPE { TokenPrimary = 1 }
 
     [StructLayout(LayoutKind.Sequential)]
