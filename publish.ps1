@@ -12,7 +12,13 @@ $ErrorActionPreference = "Stop"
 $env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
 
 # ── Auto-generate ECDSA signing keys if missing ──
-$suavoKeyDir = Join-Path $env:HOME ".suavo"
+# $env:HOME is set on macOS/Linux and inside pwsh, but is NOT set on
+# native Windows PowerShell 5.1. Fall back through the standard home-dir
+# variables so the same script runs on Mac dev boxes and Windows agents.
+$suavoHome = if ($env:HOME) { $env:HOME }
+             elseif ($env:USERPROFILE) { $env:USERPROFILE }
+             else { throw "publish.ps1: no HOME or USERPROFILE env var -- cannot locate .suavo key dir" }
+$suavoKeyDir = Join-Path $suavoHome ".suavo"
 $signingKey = Join-Path $suavoKeyDir "signing-key.pem"
 $signingPub = Join-Path $suavoKeyDir "signing-key.pub.pem"
 $cmdKey = Join-Path $suavoKeyDir "cmd-signing-key.pem"
@@ -36,7 +42,16 @@ if ($needKeys) {
             Write-Host "  cmd-signing-key.pem + .pub.pem generated (openssl)" -ForegroundColor Green
         }
     } else {
-        # Fallback: .NET ECDsa (works on any machine with .NET runtime)
+        # Fallback: .NET ECDsa key generation. Requires the .NET 7+ APIs
+        # `ExportECPrivateKeyPem` / `ExportSubjectPublicKeyInfoPem`, which
+        # exist in PowerShell 7+ (built on .NET 6+ / 7+). Windows
+        # PowerShell 5.1 ships on .NET Framework 4.x which does NOT have
+        # these methods -- `ECDsa.Create(ECCurve)` returns null and the
+        # next line throws an unhelpful "method on null-valued expression"
+        # error. Fail fast with an actionable message instead.
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw "publish.ps1 key-generation fallback requires PowerShell 7+ (uses .NET 7+ ECDsa PEM APIs not present in Windows PowerShell 5.1). Either install openssl, run this script with pwsh.exe, or pre-create keys at $suavoKeyDir."
+        }
         Write-Host "  openssl not found - using .NET ECDsa key generation" -ForegroundColor Yellow
         function Export-ECDsaKeyPair([string]$privPath, [string]$pubPath) {
             $ecdsa = [System.Security.Cryptography.ECDsa]::Create(
@@ -156,14 +171,14 @@ foreach ($proj in $projects) {
     if (Test-Path $path) {
         $hash = (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
         $checksums += "$hash  $bin"
-        Write-Host "  $bin: $hash" -ForegroundColor Gray
+        Write-Host "  ${bin}: $hash" -ForegroundColor Gray
     }
 }
 $checksums | Out-File -FilePath $checksumFile -Encoding UTF8
 Write-Host "Checksums written to $checksumFile" -ForegroundColor Green
 
 # ── Sign checksums with ECDSA (if signing key available) ──
-$signingKeyPath = Join-Path $env:HOME ".suavo" "signing-key.pem"
+$signingKeyPath = Join-Path $suavoHome ".suavo" "signing-key.pem"
 if (Test-Path $signingKeyPath) {
     Write-Host "Signing checksums..." -ForegroundColor Yellow
     $sigFile = "$checksumFile.sig"
@@ -179,7 +194,7 @@ if (Test-Path $signingKeyPath) {
 }
 
 # ── Display command signing key info ──
-$cmdKeyPath = Join-Path $env:HOME ".suavo" "cmd-signing-key.pem"
+$cmdKeyPath = Join-Path $suavoHome ".suavo" "cmd-signing-key.pem"
 if (Test-Path $cmdKeyPath) {
     Write-Host "`n--- Command signing key ---" -ForegroundColor Yellow
     Write-Host "Key: $cmdKeyPath" -ForegroundColor Gray
