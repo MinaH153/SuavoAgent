@@ -245,10 +245,31 @@ sc.exe description $serviceCore "Suavo pharmacy agent - core service (SQL, cloud
 sc.exe failure $serviceCore reset= 3600 actions= restart/5000/restart/30000/restart/60000
 sc.exe failureflag $serviceCore 1
 
-# Register Broker service (NetworkService for session detection)
+# Register Broker service.
+#
+# LocalSystem is REQUIRED for this Broker — not a privilege escalation.
+# The Broker's primary job is the cross-session launch dance:
+#   WTSQueryUserToken(sessionId)
+#     -> DuplicateTokenEx(SecurityImpersonation, TokenPrimary)
+#       -> CreateEnvironmentBlock
+#         -> CreateProcessAsUser(... SuavoAgent.Helper.exe ...)
+# `WTSQueryUserToken` is documented as requiring the SE_TCB_NAME privilege
+# ("Caller must be running in the LocalSystem account and must have the
+# SE_TCB_NAME privilege"). NetworkService does NOT hold SeTcbPrivilege —
+# with that identity the call fails Win32(1314) ERROR_PRIVILEGE_NOT_HELD,
+# Broker silently falls back to the dev-only `Process.Start` path, and
+# Helper ends up in Session 0 as NETWORK SERVICE. From Session 0 Helper
+# cannot drive the active user's desktop, so SendInput / UIA / hWnd
+# interaction all return Win32(5) ACCESS_DENIED.
+#
+# That was the second root cause behind Bug 22, surfaced by Queen
+# verification after PR #65 only fixed the token impersonation level.
+# See bug-22-session-0-isolation-helper memory entry + Codex review of
+# #65 ("completeness conditional on Queen actually using the native
+# path vs the SessionWatcher fallback").
 $brokerPath = Join-Path $InstallDir "SuavoAgent.Broker.exe"
 Write-Host "Registering $serviceBroker service..." -ForegroundColor Yellow
-sc.exe create $serviceBroker binPath= "`"$brokerPath`"" start= delayed-auto obj= "NT AUTHORITY\NetworkService"
+sc.exe create $serviceBroker binPath= "`"$brokerPath`"" start= delayed-auto obj= LocalSystem
 sc.exe description $serviceBroker "Suavo pharmacy agent - session broker (launches UI helper)"
 sc.exe failure $serviceBroker reset= 3600 actions= restart/5000/restart/30000/restart/60000
 sc.exe failureflag $serviceBroker 1
