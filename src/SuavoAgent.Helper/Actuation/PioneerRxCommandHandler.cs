@@ -107,7 +107,12 @@ public sealed class PioneerRxCommandHandler
                 $"label '{req.Label}' not found in '{_pioneerConfig.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
                 _gate.IsDryRun);
         }
-        return await _driver.ClickAtAsync(resolved.X, resolved.Y, ct).ConfigureAwait(false);
+        // PioneerRxClickRequest does not yet carry a per-request DryRun (the
+        // verb is a Phase-5.3 scaffold that synthesises dry-run cloud-side
+        // and never reaches the Helper today). Pass false; the driver still
+        // ORs with _gate.IsDryRun. Bug-21 follow-up: extend the PioneerRx
+        // DTOs and verb when the live PMS click flow actually lands.
+        return await _driver.ClickAtAsync(resolved.X, resolved.Y, dryRun: false, ct).ConfigureAwait(false);
     }
 
     private async Task<ActuationResult> HandleTypeAsync(JsonElement? data, CancellationToken ct)

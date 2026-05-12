@@ -29,12 +29,21 @@ public sealed class WorkflowAuditCloudClient : IWorkflowAuditClient
     {
         try
         {
+            // Bug 21 (MinaH153/SuavoAgent#63): `dry_run` is the REQUESTED
+            // value from the workflow definition (alias `requested_dry_run`
+            // for the cloud schema once the supabase migration lands). The
+            // new `effective_dry_run` is what the Helper actually enforced
+            // — the OR of request.DryRun and the local ActuationGate. Null
+            // when the verb did not emit a dry-run output (e.g. dispatch
+            // failures before any actuation call).
             var payload = new
             {
                 step_index = entry.StepIndex,
                 verb_name = entry.VerbName,
                 verb_version = entry.VerbVersion,
                 dry_run = entry.DryRun,
+                requested_dry_run = entry.DryRun,
+                effective_dry_run = entry.EffectiveDryRun,
                 outcome = entry.Outcome,
                 exec_duration_ms = entry.ExecDurationMs,
                 error_kind = entry.ErrorKind,

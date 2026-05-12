@@ -38,26 +38,37 @@ public sealed record ActuationGateState(
     [property: JsonPropertyName("killSwitchTrippedUtc")] DateTimeOffset? KillSwitchTrippedUtc
 );
 
+// Bug 21 (MinaH153/SuavoAgent#63): every actuation request DTO carries an
+// explicit dryRun flag set from the workflow definition. The Helper-side
+// effective dry-run is `request.DryRun || ActuationGate.IsDryRun` — either
+// flag forces dry-run; real input only fires when BOTH are false.
+// Fail-closed: missing field defaults to false (the workflow author had
+// to opt in to live actuation), and the local gate's default
+// (ActuationConfig.DryRun = true) still wins.
 public sealed record ClickByLabelRequest(
     [property: JsonPropertyName("label")] string Label,
     [property: JsonPropertyName("processName")] string ProcessName,
     [property: JsonPropertyName("matchMode")] string MatchMode,
-    [property: JsonPropertyName("timeoutMs")] int TimeoutMs
+    [property: JsonPropertyName("timeoutMs")] int TimeoutMs,
+    [property: JsonPropertyName("dryRun")] bool DryRun = false
 );
 
 public sealed record TypeTextRequest(
     [property: JsonPropertyName("text")] string Text,
     [property: JsonPropertyName("clearFirst")] bool ClearFirst,
-    [property: JsonPropertyName("perKeyDelayMs")] int PerKeyDelayMs
+    [property: JsonPropertyName("perKeyDelayMs")] int PerKeyDelayMs,
+    [property: JsonPropertyName("dryRun")] bool DryRun = false
 );
 
 public sealed record PressKeysRequest(
     [property: JsonPropertyName("chords")] IReadOnlyList<string> Chords,
-    [property: JsonPropertyName("interChordDelayMs")] int InterChordDelayMs
+    [property: JsonPropertyName("interChordDelayMs")] int InterChordDelayMs,
+    [property: JsonPropertyName("dryRun")] bool DryRun = false
 );
 
 public sealed record LaunchSandboxAppRequest(
-    [property: JsonPropertyName("appKey")] string AppKey
+    [property: JsonPropertyName("appKey")] string AppKey,
+    [property: JsonPropertyName("dryRun")] bool DryRun = false
 );
 
 public sealed record ActuationResult(

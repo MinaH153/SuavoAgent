@@ -75,7 +75,7 @@ public sealed class LaunchSandboxAppVerb : IVerb
     {
         var gateway = ctx.Services.GetRequiredService<IActuationGateway>();
         var appKey = (string)ctx.Parameters["app_key"]!;
-        var result = await gateway.LaunchSandboxAppAsync(new LaunchSandboxAppRequest(appKey), ct).ConfigureAwait(false);
+        var result = await gateway.LaunchSandboxAppAsync(new LaunchSandboxAppRequest(appKey, ctx.DryRun), ct).ConfigureAwait(false);
         if (!result.Ok)
         {
             return VerbExecutionResult.Fail($"{result.RejectionCode}: {result.RejectionReason}");
