@@ -309,6 +309,17 @@ public sealed class SendInputDriver
 
     private static int InputSize => Marshal.SizeOf<INPUT>();
 
+    // Wrap every SendInput call so a partial/blocked injection becomes a thrown
+    // Win32Exception instead of silent acceptance — Codex adversarial review of
+    // SuavoAgent#65 (Bug 22) flagged that swallowing the return value was the
+    // diagnostic gap that hid the Identification-vs-Impersonation token bug for
+    // weeks. Exceptions bubble into the existing try/catch in the public verbs.
+    private static void SendInputOrThrow(string verb, INPUT[] inputs)
+    {
+        var sent = SendInput((uint)inputs.Length, inputs, InputSize);
+        SendInputValidator.EnsureFullyInjected(verb, sent, inputs.Length, Marshal.GetLastWin32Error());
+    }
+
     private static void SendUnicodeChar(char ch)
     {
         var down = new INPUT
@@ -319,7 +330,7 @@ public sealed class SendInputDriver
         var up = down;
         up.U.Keyboard.Flags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
         var inputs = new[] { down, up };
-        SendInput(2, inputs, InputSize);
+        SendInputOrThrow("type_text_char", inputs);
     }
 
     private static void SendChord(IReadOnlyList<VirtualKey> modifiers, VirtualKey mainKey)
@@ -337,7 +348,7 @@ public sealed class SendInputDriver
         {
             buffer[idx++] = KeyUp(modifiers[i]);
         }
-        SendInput((uint)buffer.Length, buffer, InputSize);
+        SendInputOrThrow("send_chord", buffer);
     }
 
     private static INPUT KeyDown(VirtualKey vk) => new()
@@ -386,6 +397,6 @@ public sealed class SendInputDriver
         };
 
         var inputs = new[] { move, down, up };
-        SendInput((uint)inputs.Length, inputs, InputSize);
+        SendInputOrThrow("move_and_click", inputs);
     }
 }
