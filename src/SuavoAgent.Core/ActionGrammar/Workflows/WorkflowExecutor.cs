@@ -82,6 +82,24 @@ public sealed class WorkflowExecutor
             definition.Steps.Count,
             definition.DryRun);
 
+        // Bug 23 guard (SuavoLLC/MKM#478): a zero-step definition cannot
+        // legitimately reach the Completed branch — falling through the
+        // while loop with no per-step audit rows writes a chain-of-custody
+        // hole in agent_actuation_audit. Three prod rows on 2026-05-05/06
+        // (38c92afe / 97c53a68 / 1e5bf691) were produced via this path
+        // before the guard existed. Treat as a structural abort, not a
+        // successful run.
+        if (definition.Steps.Count == 0)
+        {
+            _logger.LogError(
+                "WorkflowExecutor: refusing to execute run={RunId} with zero-step definition — workflow={Name}@{Version} (Bug 23 guard)",
+                definition.WorkflowRunId,
+                definition.WorkflowName,
+                definition.WorkflowVersion);
+            await _audit.PostRunCompletedAsync(definition.WorkflowRunId, WorkflowRunOutcome.Aborted, "no_steps_in_definition", ct).ConfigureAwait(false);
+            return new WorkflowExecutionResult(WorkflowRunOutcome.Aborted, "no_steps_in_definition", 0, 0);
+        }
+
         var stepIdIndex = BuildStepIdIndex(definition.Steps);
         var visitCounter = new int[definition.Steps.Count];
         var perStepHistory = new Dictionary<int, StepHistoryEntry>();
