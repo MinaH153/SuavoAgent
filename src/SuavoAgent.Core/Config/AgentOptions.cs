@@ -42,10 +42,19 @@ public sealed class AgentOptions
     public int MaxDetectionBatchSize { get; set; } = 100;
 
     /// <summary>
-    /// Explicit break-glass gate for the legacy <c>rxDeliveryQueue</c> sync
-    /// payload, which can carry minimum-necessary delivery PHI. Default false:
-    /// Track 2 field proof uses hash-only <c>rxOrderCandidates</c>; PHI should
-    /// move through explicit audited paths such as <c>/api/agent/patient-details</c>.
+    /// Opt-in gate for the legacy <c>rxDeliveryQueue</c> shape on the sync
+    /// payload. Default false. Track 2 field proof uses
+    /// <c>rxOrderCandidates</c> exclusively; this shape exists only for
+    /// legacy cloud routes that haven't migrated yet.
+    /// <para>
+    /// Track 3 invariant (Codex CRITICAL #15, closed 2026-05-12): even when
+    /// this is <c>true</c>, the queue ships ONLY operational metadata —
+    /// hashed Rx number, drug name, NDC, fill date, quantity, status GUID,
+    /// detection timestamp. Patient name / phone / address are intentionally
+    /// excluded by <c>RxDetectionWorker.SerializeRxBatch</c>; they flow
+    /// exclusively through the typed signed-command path
+    /// <c>SuavoCloudClient.SendPatientDetailsAsync</c>.
+    /// </para>
     /// </summary>
     public bool EnableLegacyPhiDeliveryQueueSync { get; set; } = false;
 

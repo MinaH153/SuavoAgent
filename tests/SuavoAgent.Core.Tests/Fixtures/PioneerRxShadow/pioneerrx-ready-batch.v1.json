@@ -41,12 +41,12 @@
     "744 Shadow Test Ave"
   ],
   "forbiddenEverywhere": [
-    "SHADOW-RX-0001"
-  ],
-  "minimumNecessaryInQueue": [
-    "ShadowMed",
+    "SHADOW-RX-0001",
     "Ada",
     "6195550100",
     "744 Shadow Test Ave"
+  ],
+  "minimumNecessaryInQueue": [
+    "ShadowMed"
   ]
 }

@@ -40,8 +40,16 @@ public class RxDetectionWorkerTests : IDisposable
     }
 
     [Fact]
-    public void SerializeRxBatch_WithoutPatientDetails_NullsPhiValues()
+    public void SerializeRxBatch_LegacyQueue_NeverShipsPhiFields()
     {
+        // Track 3 invariant (Codex CRITICAL #15, closed 2026-05-12):
+        // the legacy rxDeliveryQueue used to ship patientFirstName /
+        // patientLastInitial / patientPhone / deliveryAddress1-2 /
+        // deliveryCity / deliveryState / deliveryZip cleartext (null or
+        // populated). Cloud's sanitizeSnapshotData stripped them before
+        // insert, but minimum-necessary HIPAA forbids putting them on
+        // the wire at all. Pin the absence so a future regression
+        // re-introducing those keys is a visible diff + failing test.
         var batch = new List<RxMetadata>
         {
             new("12345", "Amoxicillin 500mg", "00093-3109-01",
@@ -52,15 +60,23 @@ public class RxDetectionWorkerTests : IDisposable
         var doc = JsonDocument.Parse(json);
         var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
 
-        // PHI keys present but null when no patient details provided
-        Assert.Equal(JsonValueKind.Null, rx.GetProperty("patientFirstName").ValueKind);
-        Assert.Equal(JsonValueKind.Null, rx.GetProperty("deliveryAddress1").ValueKind);
-        Assert.Equal(JsonValueKind.Null, rx.GetProperty("deliveryCity").ValueKind);
+        Assert.False(rx.TryGetProperty("patientFirstName", out _));
+        Assert.False(rx.TryGetProperty("patientLastInitial", out _));
+        Assert.False(rx.TryGetProperty("patientPhone", out _));
+        Assert.False(rx.TryGetProperty("deliveryAddress1", out _));
+        Assert.False(rx.TryGetProperty("deliveryAddress2", out _));
+        Assert.False(rx.TryGetProperty("deliveryCity", out _));
+        Assert.False(rx.TryGetProperty("deliveryState", out _));
+        Assert.False(rx.TryGetProperty("deliveryZip", out _));
     }
 
     [Fact]
-    public void SerializeRxBatch_WithPatientDetails_IncludesDeliveryData()
+    public void SerializeRxBatch_LegacyQueue_ExcludesPhiEvenWhenPatientDetailsProvided()
     {
+        // Even when a caller pre-populates the patientDetails map (used by
+        // the canonical rxOrderCandidates path for HMAC-hashed delivery),
+        // the legacy rxDeliveryQueue still drops PHI on the floor.
+        // patientDetails is intentionally NOT read by the legacy branch.
         var batch = new List<RxMetadata>
         {
             new("12345", "Amoxicillin 500mg", "00093-3109-01",
@@ -77,11 +93,27 @@ public class RxDetectionWorkerTests : IDisposable
         var doc = JsonDocument.Parse(json);
         var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
 
-        Assert.Equal("John", rx.GetProperty("patientFirstName").GetString());
-        Assert.Equal("D", rx.GetProperty("patientLastInitial").GetString());
-        Assert.Equal("123 Main St", rx.GetProperty("deliveryAddress1").GetString());
-        Assert.Equal("El Cajon", rx.GetProperty("deliveryCity").GetString());
-        Assert.Equal("CA", rx.GetProperty("deliveryState").GetString());
+        Assert.False(rx.TryGetProperty("patientFirstName", out _));
+        Assert.False(rx.TryGetProperty("patientLastInitial", out _));
+        Assert.False(rx.TryGetProperty("patientPhone", out _));
+        Assert.False(rx.TryGetProperty("deliveryAddress1", out _));
+        Assert.False(rx.TryGetProperty("deliveryAddress2", out _));
+        Assert.False(rx.TryGetProperty("deliveryCity", out _));
+        Assert.False(rx.TryGetProperty("deliveryState", out _));
+        Assert.False(rx.TryGetProperty("deliveryZip", out _));
+
+        // Operational fields still present.
+        Assert.Equal("Amoxicillin 500mg", rx.GetProperty("drugName").GetString());
+
+        // Directly-identifying PHI from the patient map (name, phone,
+        // street address) must not surface anywhere in the serialized
+        // payload. City/state/zip5 are documented carryover in the
+        // canonical rxOrderCandidates path (delivery routing metadata,
+        // de-identified by Safe Harbor when paired with name-hash).
+        var payload = doc.RootElement.GetRawText();
+        Assert.DoesNotContain("John", payload);
+        Assert.DoesNotContain("6195551234", payload);
+        Assert.DoesNotContain("123 Main St", payload);
     }
 
     [Fact]
@@ -426,7 +458,9 @@ public class RxDetectionWorkerTests : IDisposable
         var pending = _stateDb.GetPendingBatches();
         Assert.Equal(1, pending.Count);
 
-        // Verify: round-tripped JSON preserves ALL enriched patient fields
+        // Verify: round-tripped JSON preserves operational fields only.
+        // Track 3 invariant — even when the legacy queue is enabled, PHI
+        // is absent (SerializeRxBatch_LegacyQueue_NeverShipsPhiFields).
         var doc = JsonDocument.Parse(pending[0].Payload);
         var queue = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue");
         Assert.Equal(2, queue.GetArrayLength());
@@ -434,19 +468,23 @@ public class RxDetectionWorkerTests : IDisposable
         var rx1 = queue[0];
         Assert.Equal(PhiScrubber.HmacHash("99001", "test-salt"), rx1.GetProperty("rxNumber").GetString());
         Assert.Equal("Metformin 500mg", rx1.GetProperty("drugName").GetString());
-        Assert.Equal("Sarah", rx1.GetProperty("patientFirstName").GetString());
-        Assert.Equal("M", rx1.GetProperty("patientLastInitial").GetString());
-        Assert.Equal("7605551234", rx1.GetProperty("patientPhone").GetString());
-        Assert.Equal("456 Oak Ave", rx1.GetProperty("deliveryAddress1").GetString());
-        Assert.Equal("Apt 3B", rx1.GetProperty("deliveryAddress2").GetString());
-        Assert.Equal("Victorville", rx1.GetProperty("deliveryCity").GetString());
-        Assert.Equal("CA", rx1.GetProperty("deliveryState").GetString());
-        Assert.Equal("92392", rx1.GetProperty("deliveryZip").GetString());
+        Assert.False(rx1.TryGetProperty("patientFirstName", out _));
+        Assert.False(rx1.TryGetProperty("deliveryAddress1", out _));
 
         var rx2 = queue[1];
         Assert.Equal(PhiScrubber.HmacHash("99002", "test-salt"), rx2.GetProperty("rxNumber").GetString());
-        Assert.Equal("Ahmed", rx2.GetProperty("patientFirstName").GetString());
-        Assert.Equal("789 Pine St", rx2.GetProperty("deliveryAddress1").GetString());
+        Assert.False(rx2.TryGetProperty("patientFirstName", out _));
+        Assert.False(rx2.TryGetProperty("deliveryAddress1", out _));
+
+        // Per-name PHI absence at the persisted-payload level — catches any
+        // future caller that smuggles PHI into the legacy shape via another
+        // code path before SQLite persistence.
+        var raw = pending[0].Payload;
+        Assert.DoesNotContain("Sarah", raw);
+        Assert.DoesNotContain("Ahmed", raw);
+        Assert.DoesNotContain("7605551234", raw);
+        Assert.DoesNotContain("456 Oak Ave", raw);
+        Assert.DoesNotContain("789 Pine St", raw);
     }
 
     [Fact]
@@ -544,6 +582,29 @@ public class RxDetectionWorkerTests : IDisposable
 
         Assert.DoesNotContain("includeLegacyDeliveryQueue: true);", source);
         Assert.Contains("includeLegacyDeliveryQueue: _options.EnableLegacyPhiDeliveryQueueSync", source);
+    }
+
+    [Fact]
+    public void RxDetectionWorker_Source_NeverNamesPhiFieldsOnSyncWire()
+    {
+        // Track 3 invariant (Codex CRITICAL #15, closed 2026-05-12): the
+        // worker that owns the agent→cloud sync wire MUST NOT contain
+        // any PHI-shaped field-name literals. Those names belonged to the
+        // pre-2026-05-12 legacy rxDeliveryQueue. Re-introducing one would
+        // re-open the wire-tap exposure that cloud-side
+        // sanitizeSnapshotData silently papered over. PHI delivery
+        // details flow exclusively through SendPatientDetailsAsync
+        // (typed PatientDetailsPayload, signed-command-driven path).
+        var source = ReadRepoFile("src/SuavoAgent.Core/Workers/RxDetectionWorker.cs");
+
+        Assert.DoesNotContain("patientFirstName", source);
+        Assert.DoesNotContain("patientLastInitial", source);
+        Assert.DoesNotContain("patientPhone", source);
+        Assert.DoesNotContain("deliveryAddress1", source);
+        Assert.DoesNotContain("deliveryAddress2", source);
+        Assert.DoesNotContain("deliveryCity", source);
+        Assert.DoesNotContain("deliveryState", source);
+        Assert.DoesNotContain("deliveryZip", source);
     }
 
     private static string ReadRepoFile(string relativePath)
