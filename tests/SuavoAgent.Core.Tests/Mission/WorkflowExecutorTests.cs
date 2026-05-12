@@ -92,6 +92,36 @@ public sealed class WorkflowExecutorTests
         Assert.Equal(WorkflowRunOutcome.Failed, harness.Audit_RunOutcome);
     }
 
+    // Bug 23 (SuavoLLC/MKM#478) — zero-step definitions must abort, never complete.
+    // A workflow definition with no steps cannot produce per-step audit rows; falling
+    // through the executor loop and reporting Completed writes a chain-of-custody
+    // hole. Three prod rows on 2026-05-05/06 reached this state before the guard.
+    [Fact]
+    public async Task ZeroStepDefinition_AbortsWith_NoStepsInDefinition_Reason()
+    {
+        var harness = new ExecutorHarness();
+        var def = new WorkflowDefinitionDto(
+            WorkflowRunId: "run-bug23",
+            WorkflowId: "wf-bug23",
+            WorkflowName: "ZERO_STEP_WORKFLOW",
+            WorkflowVersion: "1.0.0",
+            ManifestSignature: "abc",
+            DryRun: false,
+            Tier: "sandbox",
+            Steps: Array.Empty<WorkflowStepDto>());
+
+        var result = await harness.Executor.ExecuteAsync(
+            def, harness.Provider, harness.Audit, harness.Charter, "ph-1", "test", CancellationToken.None);
+
+        Assert.Equal(WorkflowRunOutcome.Aborted, result.Outcome);
+        Assert.Equal("no_steps_in_definition", result.AbortReason);
+        Assert.Equal(0, result.StepsCompleted);
+        Assert.Equal(0, result.TotalSteps);
+        Assert.Equal(0, harness.Audit_StepCalls);
+        Assert.Equal(WorkflowRunOutcome.Aborted, harness.Audit_RunOutcome);
+        Assert.Equal("no_steps_in_definition", harness.AuditClient.LastAbortReason);
+    }
+
     private static WorkflowStepDto Step(string verb, string paramsJson) =>
         new(verb, "1.0.0", null, JsonDocument.Parse(paramsJson).RootElement, null);
 
