@@ -40,8 +40,17 @@ public sealed record VerbExecutionResult(
 {
     public static VerbExecutionResult Ok(IReadOnlyDictionary<string, object?> output) =>
         new(true, output, null);
+
+    // Bug 21 follow-up (Codex review of #67 HIGH-2): failed actuation
+    // dispatches know the effective dry-run state from the Helper's
+    // ActuationResult.DryRun. Verbs MUST pass that state through to
+    // the audit chain via this overload's `output` — emitting empty
+    // output on failure produces audit rows that are indistinguishable
+    // from "no actuation surface reached", which is an audit blind spot.
     public static VerbExecutionResult Fail(string reason) =>
         new(false, new Dictionary<string, object?>(), reason);
+    public static VerbExecutionResult Fail(string reason, IReadOnlyDictionary<string, object?> output) =>
+        new(false, output, reason);
 }
 
 public sealed record VerbPostconditionResult(bool Satisfied, string? FailedPostconditionId, string? Reason)

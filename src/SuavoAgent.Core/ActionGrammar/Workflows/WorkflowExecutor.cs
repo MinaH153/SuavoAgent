@@ -224,7 +224,7 @@ public sealed class WorkflowExecutor
         var entry = _registry.Resolve(step.Verb, step.ManifestHash, out var failureReason);
         if (entry is null)
         {
-            await PostStepFailureAsync(definition.WorkflowRunId, stepIndex, step, "manifest_resolution_failed", failureReason, ct);
+            await PostStepFailureAsync(definition.WorkflowRunId, stepIndex, step, "manifest_resolution_failed", failureReason, definition.DryRun, ct);
             return new VerbDispatchResult(
                 InvocationId: $"{definition.WorkflowRunId}:{stepIndex}",
                 Verb: step.Verb,
@@ -290,14 +290,22 @@ public sealed class WorkflowExecutor
         WorkflowStepDto step,
         string errKind,
         string? errDetail,
+        bool dryRun,
         CancellationToken ct)
     {
+        // Bug 21 follow-up (Codex review of #67 HIGH-1): this audit row used
+        // to hardcode DryRun=false. A dry-run workflow with an unresolved
+        // manifest then wrote a row saying "requested live" — chain of
+        // custody lied before any actuation surface was reached. Now
+        // reflects the workflow definition's actual requested state.
+        // EffectiveDryRun stays null — no actuation primitive was attempted,
+        // so there is no "effective" enforcement to record.
         await _audit.PostStepAuditAsync(new WorkflowStepAuditEntry(
             WorkflowRunId: runId,
             StepIndex: stepIndex,
             VerbName: step.Verb,
             VerbVersion: step.VerbVersion ?? "?",
-            DryRun: false,
+            DryRun: dryRun,
             Outcome: "rejected",
             ExecDurationMs: null,
             ErrorKind: errKind,

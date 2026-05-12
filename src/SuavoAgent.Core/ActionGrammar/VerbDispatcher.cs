@@ -122,7 +122,11 @@ public sealed class VerbDispatcher
         if (!exec.Succeeded)
         {
             await TryRunInverseAsync(rollback, ctx, ct).ConfigureAwait(false);
-            return FailWithAudit(ctx, meta, rollback, "execution_failed", exec.FailureReason ?? "unspecified");
+            // Bug 21 follow-up (Codex HIGH-2): forward the verb's Fail output
+            // so audit captures the Helper's effective dry_run state. Empty
+            // output would make a gate-rejected dry-run-true run look
+            // indistinguishable from a "no actuation surface reached" row.
+            return FailWithAudit(ctx, meta, rollback, "execution_failed", exec.FailureReason ?? "unspecified", exec.Output);
         }
 
         VerbPostconditionResult postcond;
@@ -278,7 +282,8 @@ public sealed class VerbDispatcher
         VerbMetadata meta,
         VerbRollbackEnvelope rollback,
         string failureCode,
-        string reason)
+        string reason,
+        IReadOnlyDictionary<string, object?>? verbOutput = null)
     {
         ctx.Audit.Append(
             eventType: "verb.failed",
@@ -300,7 +305,7 @@ public sealed class VerbDispatcher
             Outcome: VerbDispatchOutcome.Failed,
             Authz: null,
             RollbackEnvelope: rollback,
-            Output: new Dictionary<string, object?>(),
+            Output: verbOutput ?? new Dictionary<string, object?>(),
             FailureReason: $"{failureCode}: {reason}");
     }
 }
