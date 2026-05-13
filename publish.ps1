@@ -11,6 +11,80 @@ param(
 $ErrorActionPreference = "Stop"
 $env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
 
+# ── suavo-report-crash.exe helper (Diagnostic Mesh PR 4c) ──
+# AOT, stdlib-only crash reporter invoked when dotnet publish fails.
+# Captures exit code + project name + stdout tail + build SHA + publish
+# env shape (parent PS version, Yubikey, SmartCard) into a JSONL marker
+# at %ProgramData%\SuavoAgent\diagnostics\publish-crash.jsonl.
+#
+# Falls back to %TEMP%\suavo-crash-report-failed.<pid>.txt if the tool
+# is missing or itself fails. publish.ps1 preserves the original
+# $LASTEXITCODE either way (no diagnostic failure masks a publish failure).
+function Invoke-SuavoReportCrash {
+    param(
+        [Parameter(Mandatory)][string]$Component,
+        [Parameter(Mandatory)][int]$ExitCode,
+        [string]$Project = "",
+        [string]$StdoutTail = "",
+        [string]$ToolPath = "$PSScriptRoot\publish\SuavoReportCrash\suavo-report-crash.exe",
+        [string]$CertThumbprintRaw = $script:CertThumbprint
+    )
+
+    $originalExit = $ExitCode
+    try {
+        # Build SHA — best-effort
+        $buildSha = ""
+        try { $buildSha = (& git rev-parse --short=12 HEAD 2>$null).Trim() } catch { }
+
+        # Yubikey / SmartCard / parent-PS shape — only meaningful on Windows
+        $yubikey = $false
+        $smartcard = $false
+        if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
+            $yubikey = [bool](Get-PnpDevice -ErrorAction SilentlyContinue |
+                Where-Object { $_.FriendlyName -match 'Yubikey|YubiKey' -and $_.Status -eq 'OK' } |
+                Select-Object -First 1)
+        }
+        if (Get-Command Get-Service -ErrorAction SilentlyContinue) {
+            $svc = Get-Service -Name SCardSvr -ErrorAction SilentlyContinue
+            $smartcard = $svc -and $svc.Status -eq 'Running'
+        }
+
+        if (Test-Path -LiteralPath $ToolPath) {
+            $argv = @(
+                '--component', $Component,
+                '--exit-code', "$originalExit",
+                '--project', $Project,
+                '--stdout-tail', $StdoutTail,
+                '--build-sha', $buildSha,
+                '--publish-pid', "$PID",
+                '--parent-ps-version', "$($PSVersionTable.PSVersion)",
+                '--yubikey', ($yubikey.ToString().ToLowerInvariant()),
+                '--smartcard', ($smartcard.ToString().ToLowerInvariant())
+            )
+            if ($CertThumbprintRaw) {
+                $argv += '--ev-cert-thumbprint'
+                $argv += $CertThumbprintRaw
+            }
+            & $ToolPath @argv | Out-Null
+        } else {
+            # Tool not yet built (likely a first run before its dotnet
+            # publish step) — write a fallback marker so the failure is
+            # still observable to the next agent run / operator.
+            $marker = Join-Path $env:TEMP "suavo-crash-report-failed.$PID.txt"
+            $detail = "tool missing at $ToolPath; originalExit=$originalExit; component=$Component; project=$Project; ts=$([DateTimeOffset]::UtcNow.ToString('o'))"
+            Set-Content -Path $marker -Value $detail -Encoding UTF8 -ErrorAction SilentlyContinue
+        }
+    } catch {
+        # Diagnostic failure must NOT mask the original publish failure.
+        try {
+            $marker = Join-Path $env:TEMP "suavo-crash-report-failed.$PID.txt"
+            Set-Content -Path $marker `
+                -Value "suavo-report-crash invocation failed: $($_.Exception.GetType().FullName): $($_.Exception.Message); originalExit=$originalExit" `
+                -Encoding UTF8 -ErrorAction SilentlyContinue
+        } catch { }
+    }
+}
+
 # ── Auto-generate ECDSA signing keys if missing ──
 # $env:HOME is set on macOS/Linux and inside pwsh, but is NOT set on
 # native Windows PowerShell 5.1. Fall back through the standard home-dir
@@ -102,11 +176,30 @@ $projects = @(
     @{ Name = "Setup";    Path = "src\SuavoAgent.Setup\SuavoAgent.Setup.csproj";   Exe = "SuavoSetup.exe" }
 )
 
+# Build suavo-report-crash.exe FIRST so it's available to capture failures
+# from the main projects' publish steps. AOT publish is best-effort: if it
+# fails (e.g., cross-compile toolchain missing on Mac dev box), the
+# Invoke-SuavoReportCrash helper falls back to the %TEMP% marker path.
+Write-Host "`n[ReportCrash] Building AOT crash reporter..." -ForegroundColor Yellow
+$reportCrashOut = Join-Path $OutputDir "SuavoReportCrash"
+dotnet publish "tools\SuavoReportCrash\SuavoReportCrash.csproj" `
+    -c $Configuration `
+    -r $Runtime `
+    --self-contained `
+    -o $reportCrashOut 2>&1 | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ReportCrash] AOT build FAILED — falling back to %TEMP% marker path on publish failures" -ForegroundColor Yellow
+} else {
+    Write-Host "[ReportCrash] OK — suavo-report-crash.exe at $reportCrashOut" -ForegroundColor Green
+}
+
 foreach ($proj in $projects) {
     Write-Host "`n[$($proj.Name)] Publishing..." -ForegroundColor Yellow
     $outPath = Join-Path $OutputDir $proj.Name
 
-    dotnet publish $proj.Path `
+    # Capture stdout to enable surfacing the tail to the crash reporter
+    # on failure. On success the tail is discarded.
+    $publishOutput = & dotnet publish $proj.Path `
         -c $Configuration `
         -r $Runtime `
         --self-contained `
@@ -115,11 +208,27 @@ foreach ($proj in $projects) {
         -p:EnableCompressionInSingleFile=true `
         -p:DebugType=embedded `
         -p:PublishTrimmed=false `
-        -o $outPath
+        -o $outPath 2>&1
+    $publishExit = $LASTEXITCODE
 
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[$($proj.Name)] PUBLISH FAILED" -ForegroundColor Red
-        exit 1
+    # Always stream to host so the operator sees what dotnet emitted
+    # (matches pre-PR-4c behavior).
+    $publishOutput | ForEach-Object { Write-Host $_ }
+
+    if ($publishExit -ne 0) {
+        Write-Host "[$($proj.Name)] PUBLISH FAILED (exit=$publishExit)" -ForegroundColor Red
+
+        # Last ~20 lines of stdout as crash context (bounded)
+        $tail = ($publishOutput | Select-Object -Last 20) -join "`n"
+        if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
+
+        Invoke-SuavoReportCrash `
+            -Component "Publish" `
+            -ExitCode $publishExit `
+            -Project $proj.Name `
+            -StdoutTail $tail
+
+        exit $publishExit
     }
 
     $exe = Get-ChildItem $outPath -Filter "*.exe" | Select-Object -First 1
