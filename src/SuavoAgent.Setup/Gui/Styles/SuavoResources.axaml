@@ -42,10 +42,11 @@
     <SolidColorBrush x:Key="SuavoTextSubtleBrush" Color="{StaticResource SuavoTextSubtle}" />
 
     <SolidColorBrush x:Key="SuavoSuccessBrush" Color="{StaticResource SuavoSuccess}" />
+    <SolidColorBrush x:Key="SuavoWarningBrush" Color="{StaticResource SuavoWarning}" />
     <SolidColorBrush x:Key="SuavoDangerBrush" Color="{StaticResource SuavoDanger}" />
 
-    <x:Double x:Key="SuavoRadiusSmall">4</x:Double>
-    <x:Double x:Key="SuavoRadiusMedium">8</x:Double>
-    <x:Double x:Key="SuavoRadiusLarge">14</x:Double>
+    <CornerRadius x:Key="SuavoRadiusSmall">4</CornerRadius>
+    <CornerRadius x:Key="SuavoRadiusMedium">8</CornerRadius>
+    <CornerRadius x:Key="SuavoRadiusLarge">14</CornerRadius>
 
 </ResourceDictionary>

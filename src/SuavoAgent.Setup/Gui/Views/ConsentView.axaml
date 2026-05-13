@@ -86,12 +86,12 @@
                         <Border Grid.Row="2" Grid.ColumnSpan="3" Margin="0,12,0,0"
                                 IsVisible="{Binding NoticeBannerText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                                 Background="#2A1E0E"
-                                BorderBrush="{DynamicResource SuavoWarning}"
+                                BorderBrush="{DynamicResource SuavoWarningBrush}"
                                 BorderThickness="1"
                                 CornerRadius="{DynamicResource SuavoRadiusSmall}"
                                 Padding="12,8">
                             <TextBlock Text="{Binding NoticeBannerText}"
-                                       Foreground="{DynamicResource SuavoWarning}"
+                                       Foreground="{DynamicResource SuavoWarningBrush}"
                                        FontSize="12"
                                        TextWrapping="Wrap"/>
                         </Border>
