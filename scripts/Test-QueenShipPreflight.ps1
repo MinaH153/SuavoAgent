@@ -130,7 +130,7 @@ function Test-DotnetSdk {
 
 function Test-YubikeyPresent {
     param(
-        [switch]$Skip,
+        [bool]$Skip = $false,
         [scriptblock]$Resolver = {
             if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
                 Get-PnpDevice -ErrorAction SilentlyContinue |
@@ -158,7 +158,7 @@ function Test-YubikeyPresent {
 
 function Test-EvCertThumbprint {
     param(
-        [switch]$Skip,
+        [bool]$Skip = $false,
         [string]$Thumbprint,
         [scriptblock]$Resolver = {
             param($Tp)
@@ -194,7 +194,7 @@ function Test-EvCertThumbprint {
 
 function Test-SmartCardService {
     param(
-        [switch]$Skip,
+        [bool]$Skip = $false,
         [scriptblock]$Resolver = { Get-Service -Name SCardSvr -ErrorAction SilentlyContinue }
     )
     if ($Skip) {
@@ -250,7 +250,7 @@ function Test-SentryDsn {
 
 function Test-GitTreeClean {
     param(
-        [switch]$Allow,
+        [bool]$Allow = $false,
         [scriptblock]$Resolver = { & git status --porcelain -- src/ 2>$null }
     )
     $status = & $Resolver
