@@ -53,8 +53,12 @@ function Format-EventLine {
         'wire_handler_failed'  { 'DarkRed' }
         default                { 'White' }
     }
-    $ts = $evt.ts.Substring(0, [math]::Min(19, $evt.ts.Length))
-    $fp = if ($evt.fp_v1) { $evt.fp_v1.Substring(0, [math]::Min(60, $evt.fp_v1.Length)) } else { '' }
+    # ConvertFrom-Json in pwsh 7 auto-converts ISO 8601 timestamps to [DateTime].
+    # Stringify before .Substring() — DateTime has no Substring method.
+    $tsStr = if ($evt.ts -is [datetime]) { $evt.ts.ToString('o') } else { [string]$evt.ts }
+    $ts = $tsStr.Substring(0, [math]::Min(19, $tsStr.Length))
+    $fpStr = if ($evt.fp_v1) { [string]$evt.fp_v1 } else { '' }
+    $fp = if ($fpStr) { $fpStr.Substring(0, [math]::Min(60, $fpStr.Length)) } else { '' }
     Write-Host ("{0,-19} [{1,-8}] {2,-22} {3}" -f $ts, $evt.component, $evt.signal_kind, $fp) -ForegroundColor $color
 }
 

@@ -64,11 +64,22 @@ $preflightPath = Join-Path $script:RepoRoot 'scripts\Test-QueenShipPreflight.ps1
 if (-not (Test-Path -LiteralPath $preflightPath)) {
     Add-Result 'preflight-script-exists' 'FAIL' "missing at $preflightPath"
 } else {
-    $preflightOut = & $preflightPath -CertThumbprint $CertThumbprint -Json 2>&1 | Out-String
+    # Per preflight contract: empty CertThumbprint + -SkipSigning = signing-checks SKIP.
+    # Passing -CertThumbprint '' (empty) tripped a param-binding type mismatch in pwsh 7,
+    # so use the documented -SkipSigning path when no cert is supplied.
+    $preflightArgs = if ([string]::IsNullOrWhiteSpace($CertThumbprint)) {
+        @('-SkipSigning', '-Json')
+    } else {
+        @('-CertThumbprint', $CertThumbprint, '-Json')
+    }
+    $preflightOut = & $preflightPath @preflightArgs 2>&1 | Out-String
     $preflight = $null
-    try { $preflight = $preflightOut | ConvertFrom-Json -ErrorAction Stop } catch { }
+    $parseError = $null
+    try { $preflight = $preflightOut | ConvertFrom-Json -ErrorAction Stop } catch { $parseError = $_.Exception.Message }
     if ($null -eq $preflight) {
-        Add-Result 'preflight-runs' 'FAIL' "could not parse preflight output as JSON"
+        Add-Result 'preflight-runs' 'FAIL' "could not parse preflight output as JSON: $parseError"
+        Write-Host "  preflight invoked with: $($preflightArgs -join ' ')" -ForegroundColor DarkGray
+        Write-Host "  preflight raw output (full, $($preflightOut.Length) chars):" -ForegroundColor DarkGray
         Write-Host $preflightOut -ForegroundColor DarkGray
     } else {
         $passCount = ($preflight.results | Where-Object { $_.status -eq 'PASS' }).Count
@@ -89,10 +100,16 @@ Test-Section "2. suavo-report-crash.exe synthetic JSONL"
 # Build the tool standalone (fast — no main projects)
 $crashToolCsproj = Join-Path $script:RepoRoot 'tools\SuavoReportCrash\SuavoReportCrash.csproj'
 $crashToolOut = Join-Path $env:TEMP "suavo-report-crash-smoke-$(Get-Random)"
-& dotnet publish $crashToolCsproj -c Release -r win-x64 --self-contained -o $crashToolOut 2>&1 | Out-Null
+# Capture publish output so we can root-cause on failure (don't swallow with Out-Null)
+$publishLog = Join-Path $env:TEMP "suavo-report-crash-publish-$(Get-Random).log"
+& dotnet publish $crashToolCsproj -c Release -r win-x64 --self-contained -o $crashToolOut *>&1 | Tee-Object -FilePath $publishLog | Out-Null
+$publishExit = $LASTEXITCODE
 $crashExe = Join-Path $crashToolOut 'suavo-report-crash.exe'
 if (-not (Test-Path -LiteralPath $crashExe)) {
-    Add-Result 'crash-tool-built' 'FAIL' "AOT publish failed; exe missing at $crashExe"
+    $tail = (Get-Content -LiteralPath $publishLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+    Add-Result 'crash-tool-built' 'FAIL' "AOT publish failed (exit $publishExit); exe missing at $crashExe"
+    Write-Host "  dotnet publish tail (last 20 lines, full log: $publishLog):" -ForegroundColor DarkGray
+    Write-Host $tail -ForegroundColor DarkGray
 } else {
     $exeSize = [math]::Round((Get-Item $crashExe).Length / 1MB, 1)
     Add-Result 'crash-tool-built' 'PASS' "$crashExe ($exeSize MB AOT native)"
