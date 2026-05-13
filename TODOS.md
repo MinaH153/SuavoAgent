@@ -89,6 +89,32 @@ When closing a TODO, replace with a one-line note + commit SHA / PR reference.
   the post-ship verification half.
 - **Surfaced:** 2026-05-12 /plan-eng-review of Mesh spec v0.2.
 
+### TODO-MESH-4 — Avalonia smoke CI posts MainWindow screenshot as PR artifact
+
+- **What:** Extend `.github/workflows/setup-smoke.yml` so the Avalonia.Headless
+  smoke test captures a framebuffer of the rendered `MainWindow` and uploads
+  it as a PR artifact. PR reviewers can visually inspect the rendered output
+  without running locally.
+- **Why:** Bug 24's class was a *visual* regression (XAML resource binding
+  broken; window failed to render). A test that asserts "window initialized
+  without throwing" passes when the window is visually wrong but
+  constructed. Screenshot gives reviewers the additional visual axis.
+- **Pros:** Catches a class of visual regressions at PR-review time. Speeds
+  up Setup PR review (no local clone-and-run needed).
+- **Cons:** Avalonia.Headless framebuffer capture + PNG encoding +
+  `actions/upload-artifact` wiring is 1-3h vs the 30-min budget per delight
+  opportunity. Adds 1 dependency (likely `Avalonia.Skia` for software
+  renderer).
+- **Effort:** M (1-3h).
+- **Priority:** P3 — nice-to-have, not blocking Phase 1 ship.
+- **Context:** PR 3 ships `tests/SuavoAgent.Setup.Tests/AvaloniaInitSmokeTest.cs`
+  with the `App + MainWindow` construction test. Extend with:
+  `var bitmap = window.RenderToBitmap(); bitmap.Save("smoke-output.png");`
+  Then in workflow: `actions/upload-artifact@v4` with `path: smoke-output.png`.
+- **Depends on:** Mesh PR 3 merged. Revisit when there are 2-3 PRs/week
+  touching Setup (currently low-traffic area).
+- **Surfaced:** 2026-05-13 /plan-ceo-review EXPANSION mode, delight D5.
+
 ---
 
 ## Closed

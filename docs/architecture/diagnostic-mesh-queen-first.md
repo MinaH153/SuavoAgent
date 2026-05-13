@@ -258,12 +258,25 @@ The crash handler is on the hot path of a process that is already dying. Wall-cl
 
 Test gate: 100-iteration determinism harness in `tests/SuavoAgent.Diagnostics.Tests/` asserts handler-local-time p99 < 50ms across synthetic Bug 22 / 23 / 24 reproductions. CI fails the PR if p99 regresses.
 
+### Emit-rate contract — per-component budget
+
+`Wire.Report` is bounded by a per-component emit budget to protect against runaway invariant-violation loops or pathological re-throw chains. Default budget: **10 events/sec per component** (Core, Broker, Helper, Watchdog, Setup). Beyond the budget, events still write to the local `events.jsonl` journal — the audit trail is intact — but are dropped from the Sentry post path. A `mesh.rate_limited_total` counter increments per dropped Sentry post and is itself surfaced via the next `mesh.heartbeat` (see below).
+
+### Self-heartbeat contract — mesh proves itself alive
+
+`Wire.Heartbeat` fires every 5 minutes from a `MeshHeartbeatWorker` (hosted service registered in each long-running entry point's host builder). The heartbeat emits a synthetic `mesh.heartbeat` event through the **full Wire.Report path** (scrub → fingerprint → local journal → Sentry POST), exercising every link continuously. If Queen's `mesh.heartbeat` signal is absent from Sentry for > 30 minutes, Phase A's A1 silent-agent alarm pages Joshua. The mesh's liveness is a continuously-verified claim, not a hopeful assumption.
+
+The heartbeat payload includes: `component`, agent version, time-since-process-start, `mesh.events_emitted_total` counter, `mesh.rate_limited_total` counter, `mesh.sentry_post_success_rate` gauge, `mesh.local_journal_write_rate` gauge, ruleset version in use, whether cached cloud ruleset signature is verified.
+
 ### Failure-mode contract
 
 | Failure | Mesh behavior | Operator visibility |
 |---|---|---|
-| Sentry unreachable | Local `events.jsonl` continues. Fingerprint still computed. On reconnect, last N events flush to Sentry via background queue. Crash handler never blocked. | None in Phase 1. Phase A's A3 path (renamed) consumes the flush. |
-| Sentry SDK init fails | `Wire()` swallows + logs. Existing `WriteCrash` continues. **Process startup is not blocked by diagnostics init.** | Local logs show diagnostics-disabled state. |
+| Sentry unreachable | Local `events.jsonl` continues. Fingerprint still computed. On reconnect, last N events flush to Sentry via background queue. Crash handler never blocked. | `mesh.sentry_post_success_rate` drops in next heartbeat; cloud alert if persistent. |
+| Sentry SDK init fails | `Wire()` swallows + logs. Existing `WriteCrash` continues. **Process startup is not blocked by diagnostics init.** | Local logs show diagnostics-disabled state; first heartbeat tags `sentry_init=false`. |
+| `Diagnostics:Dsn` missing from appsettings / env | Preflight (PR 1) fails fast at publish time. If somehow shipped without DSN, Wire init logs warning + falls back to local-journal-only mode. | Preflight rejects ship; cloud alert if Queen heartbeat lacks Sentry tag. |
+| Runaway emit loop (>10 events/sec/component) | `mesh.rate_limited_total` increments; excess events local-journal-only, dropped from Sentry path. | Operator sees rate-limit counter on heartbeat. |
+| `mesh.heartbeat` absent from Sentry for > 30min | Phase A A1 silent-agent alarm fires + pages Joshua via Twilio + Slack. | High-severity alert. |
 | ruleset-v1.json malformed (embedded resource corrupted) | Fail-closed: fingerprint compute uses ruleset-v0 (hardcoded minimal fallback). Telemetry counter incremented. | Local logs show ruleset-fallback state. **CI MSBuild schema-validation gate prevents this from shipping** (§7 PR 4). |
 | Phase 2 cloud rule push delivers invalid ruleset | Agent rejects via embedded public-key signature verification. Falls back to last-known-good cached ruleset. **Never** falls back to ruleset-v0 unless cache is also corrupt. | Phase 2 surface, not Phase 1. |
 | Crash handler exceeds 50ms p99 budget | Per-stage timeouts above kick in; handler completes in bounded time at cost of degraded fidelity. | CI regression alarm. |
@@ -380,8 +393,30 @@ Idempotency, retention, and timestamp-past-prod-last-applied discipline per [[fe
 | Yubikey reader present (via `Get-PnpDevice` query) | "Insert Yubikey or run with -SkipSigning to publish unsigned." |
 | EV cert thumbprint present in CurrentUser\My (when `$env:SUAVO_CERT_THUMBPRINT` set) | "Set `$env:SUAVO_CERT_THUMBPRINT` to the SHA1 of your code-signing cert, or run with -SkipSigning." |
 | SmartCard service running | "Start-Service SCardSvr; or run with -SkipSigning." |
+| **Sentry DSN present** (either `$env:SUAVO_SENTRY_DSN` set OR `Diagnostics:Dsn` present in `appsettings.json`) | "Set `$env:SUAVO_SENTRY_DSN` to the BAA-covered Sentry DSN, or add `Diagnostics:Dsn` to appsettings.json. Mesh ships in local-journal-only mode without it." |
 | Git tree clean (no uncommitted changes in src/) | "Commit or stash before publishing." |
 | Build cache fresh (`obj/`, `bin/` older than HEAD) | "Run with -CleanFirst or `dotnet clean` if last build > 1d ago." |
+
+**Output — green/red ASCII summary card (D3 delight):** preflight ends with a printed card showing every check + actionable fix-it suggestion. Format:
+
+```
++========================================================+
+|         QUEEN SHIP PREFLIGHT — 2026-05-13              |
++========================================================+
+| [PASS] PowerShell 7.6.0                                |
+| [PASS] .NET SDK 8.0.404                                |
+| [PASS] Yubikey present (vendor=Yubico)                 |
+| [FAIL] EV cert: $env:SUAVO_CERT_THUMBPRINT not set     |
+|   → fix: $env:SUAVO_CERT_THUMBPRINT = '<sha1>'         |
+| [PASS] SmartCard service running                       |
+| [PASS] Sentry DSN present (env)                        |
+| [PASS] Git tree clean                                  |
+| [WARN] Build cache 3d old                              |
+|   → fix: rerun with -CleanFirst                        |
++========================================================+
+| RESULT: 1 FAIL, 1 WARN, 6 PASS — publish aborted.      |
++========================================================+
+```
 
 **Test plan:**
 - Pester unit tests for each check function (mocked registry/cert/service queries).
@@ -545,22 +580,29 @@ if ($LASTEXITCODE -ne 0) {
 ```
 
 **Files (new):**
-- `src/SuavoAgent.Diagnostics/SuavoAgent.Diagnostics.csproj` (refs: Sentry .NET SDK, Microsoft.Extensions.Logging.Abstractions, JsonSchema.Net for ruleset validation)
-- `src/SuavoAgent.Diagnostics/Wire.cs` — public surface: `Wire.AttachUnhandledHooks(component, options)` + `Wire.ReportException(component, ex, stage)` + `Wire.ReportInvariant(id, context)` + `Wire.ReportExitCode(component, exitCode, command)`
+- `src/SuavoAgent.Diagnostics/SuavoAgent.Diagnostics.csproj` (refs: Sentry .NET SDK, Microsoft.Extensions.Logging.Abstractions, Microsoft.Extensions.Hosting.Abstractions for `MeshHeartbeatWorker`, JsonSchema.Net for ruleset validation)
+- `src/SuavoAgent.Diagnostics/Wire.cs` — public surface: `Wire.AttachUnhandledHooks(component, options)` + `Wire.ReportException(component, ex, stage)` + `Wire.ReportInvariant(id, context)` + `Wire.ReportExitCode(component, exitCode, command)` + `Wire.Heartbeat(component)` + `Wire.Report(signal)` (internal unified dispatch)
+- `src/SuavoAgent.Diagnostics/WireOptions.cs` — `LocalCrashLogPath`, `LocalJournalPath`, `Dsn` (read from `IConfiguration` "Diagnostics:Dsn"), `EnableSentry`, `EmitBudgetPerSecond` (default 10), `HeartbeatInterval` (default 5min)
+- `src/SuavoAgent.Diagnostics/EmitBudget.cs` — per-component token-bucket rate limiter; on exhaustion increments `mesh.rate_limited_total` and routes event to local journal only, dropping Sentry POST
+- `src/SuavoAgent.Diagnostics/MeshHeartbeatWorker.cs` — `BackgroundService` registered in Core/Broker/Helper/Watchdog hosts; invokes `Wire.Heartbeat(component)` every 5min, exercising full Wire path. Setup uses an Avalonia `DispatcherTimer` equivalent
 - `src/SuavoAgent.Diagnostics/FingerprintComputer.cs` — fp-v1 algorithm (with 10ms hard timeout)
 - `src/SuavoAgent.Diagnostics/PhiScrubber.cs` — SDK-side scrub (with 10ms hard timeout, fail-closed)
 - `src/SuavoAgent.Diagnostics/LocalJournal.cs` — best-effort `events.jsonl` writer (20ms timeout)
-- `src/SuavoAgent.Diagnostics/RulesetV1.cs` — loads + validates ruleset-v1.json (build-time schema gate; runtime validates again on load)
-- `src/SuavoAgent.Diagnostics/Resources/ruleset-v1.json` — embedded resource. Initial population: Codex's three calibration fingerprints + the canonical invariant catalog seed (only `complete-zero-actuation-log` for Phase 1)
+- `src/SuavoAgent.Diagnostics/RulesetV1.cs` — loads + validates ruleset-v1.json (build-time schema gate; runtime validates again on load). Also reads `calibration_fingerprints` mapping for D2 (Sentry tag `bug-class:bug-22|23|24` set when computed fingerprint matches a calibration entry)
+- `src/SuavoAgent.Diagnostics/Resources/ruleset-v1.json` — embedded resource. Initial population: Codex's three calibration fingerprints + the canonical invariant catalog seed (only `complete-zero-actuation-log` for Phase 1) + `calibration_fingerprints` mapping (bug-class → fingerprint) for D2 operator tag
 - `src/SuavoAgent.Diagnostics/Resources/ruleset-v1.schema.json` — JSON Schema for ruleset-v1.json. Validated at build time via MSBuild target (see csproj below)
-- `src/SuavoAgent.Diagnostics/build/ValidateRulesetSchema.targets` — MSBuild target invoked pre-`EmbedResources` that runs `JsonSchema.Net.Cli` (or equivalent) against `Resources/ruleset-v1.json` using `Resources/ruleset-v1.schema.json`. Build fails on schema violation. Catches malformed JSON at CI time, never at runtime
-- `src/SuavoAgent.Diagnostics/SentrySink.cs` — Sentry SDK wrap with `BeforeSend → PhiScrubber → SetFingerprint`. POST is fire-and-forget; never on the crash handler's critical path
+- `src/SuavoAgent.Diagnostics/build/ValidateRulesetSchema.targets` — MSBuild target invoked pre-`EmbedResources` that runs `JsonSchema.Net.Cli` (pinned) against `Resources/ruleset-v1.json` using `Resources/ruleset-v1.schema.json`. Build fails on schema violation. Catches malformed JSON at CI time, never at runtime
+- `src/SuavoAgent.Diagnostics/SentrySink.cs` — Sentry SDK wrap with `BeforeSend → PhiScrubber → SetFingerprint → SetTag('git_sha', BuildContext.GitSha) → SetTag('bug-class', match?)`. POST is fire-and-forget; never on the crash handler's critical path. Reads DSN from `IConfiguration`
+- `src/SuavoAgent.Diagnostics/BuildContext.cs` — generated at build time via MSBuild target embedding `git rev-parse HEAD` short SHA. Exposed as `BuildContext.GitSha` static. (D1 delight: every fingerprint occurrence ships with git SHA tag.)
 - `src/SuavoAgent.Diagnostics/AvaloniaDispatcherHook.cs` — Avalonia `Dispatcher.UIThread.UnhandledException` hook + `Application.Current.OnUnhandledException` if available
-- `src/SuavoAgent.Diagnostics/tools/SuavoReportCrash.csproj` + `SuavoReportCrash.cs` — tiny CLI tool that publish.ps1 invokes on non-zero `$LASTEXITCODE`. Captures component + exit code + project + recent stdout + build SHA, runs the same Wire dispatch path
+- `src/SuavoAgent.Diagnostics/tools/SuavoReportCrash.csproj` + `SuavoReportCrash.cs` — tiny CLI tool that publish.ps1 invokes on non-zero `$LASTEXITCODE`. Captures component + exit code + project + recent stdout + build SHA + parent PowerShell version, runs the same Wire dispatch path
+- `tools/tail-events.ps1` — D4 delight: 30-line PowerShell that pretty-prints recent `events.jsonl` entries (last N, default 20) with color-coding by `signal_kind` for on-Queen debugging
 - `tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj`
 - `tests/SuavoAgent.Diagnostics.Tests/PhiScrubberTests.cs` — 50+ PHI test corpus
 - `tests/SuavoAgent.Diagnostics.Tests/FingerprintComputerTests.cs` — determinism + Bug 22/23/24 calibrations + 100-iter p99 < 50ms harness
-- `tests/SuavoAgent.Diagnostics.Tests/RulesetV1Tests.cs` — schema validation + signature verification stub
+- `tests/SuavoAgent.Diagnostics.Tests/EmitBudgetTests.cs` — sustained-emit harness: 1000 events/sec inputs verified to result in ≤10 Sentry POSTs/sec/component AND ≥990 local journal writes/sec/component AND `mesh.rate_limited_total` incrementing correctly
+- `tests/SuavoAgent.Diagnostics.Tests/MeshHeartbeatWorkerTests.cs` — heartbeat fires every 5min; payload includes all required counters + gauges; integration test simulates 30min absence + verifies Phase A A1 alarm trigger (stubbed)
+- `tests/SuavoAgent.Diagnostics.Tests/RulesetV1Tests.cs` — schema validation + signature verification stub + calibration_fingerprints mapping correctness
 - `tests/SuavoAgent.Diagnostics.Tests/WireOrderingTests.cs` — Roslyn-based test (or simple reflection scan) that asserts every entry point's `Program.Main` has `Wire.AttachUnhandledHooks` as the literal first statement
 
 **Files (modified):**
@@ -597,9 +639,20 @@ if ($LASTEXITCODE -ne 0) {
 - **`Wire()` idempotency:** calling twice doesn't double-register handlers.
 - **Per-entry-point integration:** for each of 5 entry points, integration test wires + crashes + verifies emit + verifies local fallback + verifies handler-local-time SLA.
 
+**CI gate — `mesh-required-check` consolidated workflow:**
+
+The 4 mesh-Phase-1 PR checks combine into a single GitHub-required check named `mesh-required-check`, triggered on any PR touching:
+- `src/SuavoAgent.Diagnostics/**`
+- `Resources/ruleset-v1.json` or `Resources/ruleset-v1.schema.json`
+- Any of `src/SuavoAgent.{Core,Broker,Helper,Watchdog,Setup}/Program.cs`
+- `Directory.Build.props` / `global.json` / `Directory.Packages.props`
+- `publish.ps1` / `scripts/Test-QueenShipPreflight.ps1`
+
+The check runs (in parallel where possible): (a) AvaloniaInitSmokeTest (PR 3), (b) FingerprintComputer determinism across the 5-config build matrix (PR 4), (c) Pester preflight unit tests (PR 1), (d) MSBuild ruleset schema validation (PR 4), (e) WireOrderingTests Roslyn scan (PR 4), (f) EmitBudgetTests sustained-load harness (PR 4), (g) PhiScrubber 50+ corpus (PR 4). Block merge on any failure.
+
 **Rollout:**
 - Ships behind `Diagnostics:Enabled` config flag, **default `false`** in `appsettings.json`.
-- After PR merges to `main`, flip flag via `ConfigSyncWorker` cloud config push to Queen. Verify 48h on Queen with synthetic crashes + watch Sentry events.
+- After PR merges to `main`, flip flag via `ConfigSyncWorker` cloud config push to Queen. Verify 48h on Queen with synthetic crashes + watch Sentry events for `mesh.heartbeat` arriving every 5min + `bug-class` tags + `git_sha` tags on calibration reproductions.
 - After 48h Queen burn-in, flip default to `true` in `appsettings.json` in a follow-up PR.
 
 ---
@@ -645,4 +698,13 @@ if ($LASTEXITCODE -ne 0) {
   - §7 PR 4 test plan now pins the full CI build matrix (5 configurations including the production R2R + SingleFile target).
   - §7 PR 4 baked in `suavo-report-crash.exe` tool path for publish.ps1 exit-code capture (was Open Q §8.7).
   - §8 Q1 and Q7 reshaped: ordering and tool baseline now answered; remaining open items are recursion safety + native-AOT consideration.
-- Pending: /plan-ceo-review + Codex re-review on §5 encryption + §8 open questions before v1.0 lock.
+- **2026-05-13 v0.3** — /plan-ceo-review EXPANSION mode (3 issues + 4 silent delights + 1 TODO):
+  - §3 (now folded into §4 contracts): Sentry DSN provenance locked to `Diagnostics:Dsn` in appsettings or `$env:SUAVO_SENTRY_DSN` env var. PR 1 preflight verifies presence. Closes the only CRITICAL GAP from CEO threat model.
+  - §4 added Emit-rate contract: per-component `EmitBudget` default 10 events/sec. Excess events still local-journal but dropped from Sentry path. `mesh.rate_limited_total` counter surfaced in heartbeat.
+  - §4 added Self-heartbeat contract: `MeshHeartbeatWorker` fires every 5min through full Wire path. Phase A A1 silent-agent alarm pages Joshua if Queen heartbeat absent > 30min. Mesh proves itself alive continuously.
+  - §7 PR 1 preflight: added Sentry DSN check + green/red ASCII summary card output (D3 delight).
+  - §7 PR 4 file list expanded: WireOptions, EmitBudget.cs token bucket, MeshHeartbeatWorker BackgroundService, BuildContext.cs (git SHA at build time, D1 delight), Sentry tag `bug-class:bug-22|23|24` via calibration_fingerprints mapping (D2 delight), `tools/tail-events.ps1` (D4 delight). New tests: EmitBudgetTests, MeshHeartbeatWorkerTests.
+  - §7 PR 4 + PR 3 consolidated into `mesh-required-check` GitHub-required CI check spanning Avalonia smoke + fingerprint determinism + Pester preflight + ruleset schema + WireOrderingTests + EmitBudgetTests + PhiScrubber corpus.
+  - §10 EXPANSION-mode trajectory locked: 10x version = mesh as agent self-knowledge layer (operations + corrections + cross-tenant pattern transplant + customer-facing transparency). Phase 1 architecture (Option D + signed rules + per-tenant keys) already supports it. Reversibility 4/5.
+  - 1 TODO added: TODO-MESH-4 Avalonia smoke screenshot artifact (D5 deferred — exceeds 30-min delight threshold).
+- Pending: Codex re-review on §5 encryption choice + §8 open questions (recursion safety, native AOT, false-positive corpus, Phase 2 fingerprint re-calibration) before v1.0 lock.
