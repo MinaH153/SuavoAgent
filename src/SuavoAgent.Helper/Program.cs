@@ -2,11 +2,28 @@ using FlaUI.UIA2;
 using Serilog;
 using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Diagnostics;
 using SuavoAgent.Helper;
 using SuavoAgent.Helper.Actuation;
 using SuavoAgent.Helper.Behavioral;
 using SuavoAgent.Helper.SystemObservers;
 using SuavoAgent.Helper.Workflows;
+
+// Diagnostic Mesh: Wire.AttachUnhandledHooks MUST be the literal first
+// executable statement (spec §7 PR 4 wire-ordering invariant; verified
+// by WireOrderingTests). Helper had no pre-existing crash sink; Wire's
+// LocalCrashLogPath fills that gap with a structured journal.
+Wire.AttachUnhandledHooks(WireComponent.Helper, new WireOptions
+{
+    LocalCrashLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent", "logs", "helper-crash.log"),
+    LocalJournalPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent", "diagnostics", "events.jsonl"),
+    Dsn = Environment.GetEnvironmentVariable("SUAVO_SENTRY_DSN"),
+    EnableSentry = true,
+});
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(Environment.GetEnvironmentVariable("SUAVO_DEBUG") == "1"
