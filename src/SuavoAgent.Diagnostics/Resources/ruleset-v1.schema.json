@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.suavo.health/diagnostic-mesh/ruleset-v1.json",
+  "title": "Diagnostic Mesh Ruleset v1",
+  "description": "Schema for ruleset-v1.json per docs/architecture/diagnostic-mesh-queen-first.md v1.0 LOCKED.",
+  "type": "object",
+  "required": [
+    "ruleset_version",
+    "key_id",
+    "signature_alg",
+    "calibration_fingerprints",
+    "invariant_catalog",
+    "candidate_patterns",
+    "patient_names_seed"
+  ],
+  "properties": {
+    "ruleset_version": {
+      "type": "string",
+      "pattern": "^v\\d+\\.\\d+"
+    },
+    "key_id": { "type": "string", "minLength": 1 },
+    "signed_at": { "type": "string" },
+    "expires_at": { "type": ["string", "null"] },
+    "signature_alg": {
+      "type": "string",
+      "enum": ["ECDSA_P256_SHA256"]
+    },
+    "_comment": { "type": "string" },
+    "calibration_fingerprints": {
+      "type": "object",
+      "description": "Bug-class → canonical fp-v1 fingerprint. These are the ONLY entries that count as coverage at launch (spec §8.8 RESOLVED v1.0).",
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "invariant_catalog": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["id", "component", "description", "severity"],
+        "properties": {
+          "id": { "type": "string" },
+          "component": { "type": "string" },
+          "description": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["info", "low", "medium", "high", "critical"]
+          }
+        }
+      }
+    },
+    "candidate_patterns": {
+      "type": "array",
+      "description": "Expected-but-unobserved classes. Dashboard-hidden until observed. counts_as_coverage MUST be false at seed time.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "source",
+          "confidence",
+          "first_observed_at",
+          "observed_count",
+          "counts_as_coverage"
+        ],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "enum": ["seed", "observed", "promoted"] },
+          "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+          "first_observed_at": { "type": ["string", "null"] },
+          "observed_count": { "type": "integer", "minimum": 0 },
+          "counts_as_coverage": { "type": "boolean" },
+          "signal_kind": { "type": ["string", "null"] },
+          "exception_type": { "type": ["string", "null"] },
+          "stable_error_code": { "type": ["string", "null"] },
+          "notes": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "patient_names_seed": {
+      "type": "array",
+      "description": "MUST stay EMPTY in Phase 1 — Census/global dictionaries forbidden (spec §8.2 RESOLVED v1.0).",
+      "maxItems": 0,
+      "items": { "type": "string" }
+    },
+    "signature_base64": { "type": "string" }
+  }
+}
