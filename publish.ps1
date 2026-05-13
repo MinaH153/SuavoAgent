@@ -11,6 +11,23 @@ param(
 $ErrorActionPreference = "Stop"
 $env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
 
+# ── Queen ship preflight: 9 environment checks (Diagnostic Mesh PR 1) ──
+# Runs FIRST so we abort before key generation / dotnet publish when the
+# environment is wrong. No flag, no opt-out. If -CertThumbprint is empty
+# we forward -SkipSigning so the signing checks become SKIP, not FAIL.
+$preflightScript = Join-Path $PSScriptRoot "scripts" "Test-QueenShipPreflight.ps1"
+if (Test-Path -LiteralPath $preflightScript) {
+    $preflightArgs = @{
+        CertThumbprint = $CertThumbprint
+        SkipSigning    = [string]::IsNullOrWhiteSpace($CertThumbprint)
+    }
+    & $preflightScript @preflightArgs
+    # preflight `exit 1` cascades through &; if we reach here, all checks passed
+    # (or only WARNs were emitted).
+} else {
+    Write-Host "WARNING: preflight script missing at $preflightScript -- proceeding unchecked" -ForegroundColor Yellow
+}
+
 # ── suavo-report-crash.exe helper (Diagnostic Mesh PR 4c) ──
 # AOT, stdlib-only crash reporter invoked when dotnet publish fails.
 # Captures exit code + project name + stdout tail + build SHA + publish
