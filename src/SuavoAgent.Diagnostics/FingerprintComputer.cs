@@ -85,6 +85,10 @@ public sealed class FingerprintComputer
         WireSignalKind.UnobservedTask => "unobserved_task",
         WireSignalKind.ExitCode => "exit_code",
         WireSignalKind.Hang => "hang",
+        // Heartbeat reserves a canonical fingerprint shape that cannot
+        // collide with a real crash class. Routed through DispatchNormal
+        // per spec §4 self-heartbeat contract (Codex chunk 1 HIGH).
+        WireSignalKind.Heartbeat => "heartbeat",
         _ => "unknown",
     };
 
@@ -122,6 +126,11 @@ public sealed class FingerprintComputer
     /// </summary>
     private static string ExtractPrimaryFailureSite(WireSignal signal, Stopwatch sw)
     {
+        // Heartbeat: reserved operation identifier (Codex chunk 1 HIGH).
+        if (signal.Kind == WireSignalKind.Heartbeat)
+        {
+            return "mesh.heartbeat";
+        }
         // Invariant violations: site is the catalog id; no stack to walk.
         if (signal.Kind == WireSignalKind.InvariantViolation && signal.InvariantId is { } id)
         {
