@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    suavo-report-crash.exe — Native AOT, stdlib-only crash reporter for
+    publish.ps1 exit-code capture. Per Codex §8.7 RESOLVED v1.0:
+    MUST NOT reference Sentry SDK, JsonSchema.Net, SuavoAgent.Diagnostics,
+    or Avalonia. Dragging any of those into a tiny crash reporter
+    recreates the recursion class it exists to prevent.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SuavoAgent.Tools.ReportCrash</RootNamespace>
+    <AssemblyName>suavo-report-crash</AssemblyName>
+    <AssemblyTitle>SuavoAgent Report Crash Tool</AssemblyTitle>
+    <Description>AOT crash reporter invoked by publish.ps1 on non-zero $LASTEXITCODE.</Description>
+    <NoWarn>CA1416</NoWarn>
+
+    <!-- Native AOT settings — eliminates the CLR fast-fail surface that
+         was Bug 24's parent-process visibility hole. -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StripSymbols>true</StripSymbols>
+    <OptimizationPreference>Size</OptimizationPreference>
+
+    <!--
+      JsonSerializerIsReflectionEnabledByDefault=false enables AOT-safe
+      JSON via source generation (we hand-roll Utf8JsonWriter instead;
+      no reflection-based serialization anywhere in this tool).
+    -->
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+  </PropertyGroup>
+
+</Project>
