@@ -244,14 +244,29 @@ Already covered in §3 (folded for tightness — PHI is so central to fp-v1 it b
 - §164.312(e) transmission safeguards — Sentry .NET SDK uses HTTPS + TLS 1.2+ to the BAA-covered region. SDK-side scrubbing in `BeforeSend` is the LAST line of defense before transmission.
 - §164.312(b) audit controls — every diagnostic event is locally journaled to `%ProgramData%\SuavoAgent\diagnostics\events.jsonl` (rotated daily, 30-day retention) regardless of Sentry outcome. Local journal contains the scrubbed event; raw stack/context is never persisted locally either, because we want the local journal to be safe to ship as a crash bundle if Sentry is unreachable.
 
+### Performance contract — local-first SLA
+
+The crash handler is on the hot path of a process that is already dying. Wall-clock budget is tight; the entire local-side dispatch (PhiScrubber → FingerprintComputer → LocalJournal.Append → startup-crash.log defense-in-depth write) must complete in **< 50ms p99** before any network I/O is initiated.
+
+| Stage | Budget | Behavior on overrun |
+|---|---|---|
+| `PhiScrubber.Sanitize` | < 10ms | Hard timeout via `CancellationToken`. On timeout: drop event entirely (fail-closed PHI safety) and increment counter. |
+| `FingerprintComputer.Compute` | < 10ms | Hard timeout. On timeout: emit `fp-fallback` synthetic fingerprint with component + signal_kind only. |
+| `LocalJournal.Append` (events.jsonl) | < 20ms | Best-effort. On timeout (disk full / slow): write to startup-crash.log fallback only. |
+| `startup-crash.log` defense-in-depth | < 10ms | Always best-effort, swallowed on failure (matches existing `WriteCrash` behavior). |
+| **Sentry POST** | **N/A** | **Fire-and-forget after local completion.** Initiated on a background task; crash handler does not await. Sentry SDK uses its own internal queue + retry. |
+
+Test gate: 100-iteration determinism harness in `tests/SuavoAgent.Diagnostics.Tests/` asserts handler-local-time p99 < 50ms across synthetic Bug 22 / 23 / 24 reproductions. CI fails the PR if p99 regresses.
+
 ### Failure-mode contract
 
 | Failure | Mesh behavior | Operator visibility |
 |---|---|---|
-| Sentry unreachable | Local `events.jsonl` continues. Fingerprint still computed. On reconnect, last N events flush to Sentry. | None in Phase 1. Phase A's A3 path (renamed) consumes the flush. |
+| Sentry unreachable | Local `events.jsonl` continues. Fingerprint still computed. On reconnect, last N events flush to Sentry via background queue. Crash handler never blocked. | None in Phase 1. Phase A's A3 path (renamed) consumes the flush. |
 | Sentry SDK init fails | `Wire()` swallows + logs. Existing `WriteCrash` continues. **Process startup is not blocked by diagnostics init.** | Local logs show diagnostics-disabled state. |
-| ruleset-v1.json malformed (embedded resource corrupted) | Fail-closed: fingerprint compute uses ruleset-v0 (hardcoded minimal fallback). Telemetry counter incremented. | Local logs show ruleset-fallback state. CI gate prevents this from shipping. |
+| ruleset-v1.json malformed (embedded resource corrupted) | Fail-closed: fingerprint compute uses ruleset-v0 (hardcoded minimal fallback). Telemetry counter incremented. | Local logs show ruleset-fallback state. **CI MSBuild schema-validation gate prevents this from shipping** (§7 PR 4). |
 | Phase 2 cloud rule push delivers invalid ruleset | Agent rejects via embedded public-key signature verification. Falls back to last-known-good cached ruleset. **Never** falls back to ruleset-v0 unless cache is also corrupt. | Phase 2 surface, not Phase 1. |
+| Crash handler exceeds 50ms p99 budget | Per-stage timeouts above kick in; handler completes in bounded time at cost of degraded fidelity. | CI regression alarm. |
 
 ---
 
@@ -414,7 +429,20 @@ On Ctrl+C: write "[*] BUILD INTERRUPTED at <project> after <elapsed>s. Re-run wi
 **Files:**
 - `tests/SuavoAgent.Setup.Tests/AvaloniaInitSmokeTest.cs` (NEW)
 - `tests/SuavoAgent.Setup.Tests/SuavoAgent.Setup.Tests.csproj` (MODIFIED: ensure xunit + Avalonia.Headless package refs)
-- `.github/workflows/setup-smoke.yml` (NEW, runs on PRs touching `src/SuavoAgent.Setup/**`)
+- `.github/workflows/setup-smoke.yml` (NEW)
+
+**Workflow trigger filter** — Bug 24's actual cause was an Avalonia package version bump in `Directory.Build.props`, NOT a source change in `src/SuavoAgent.Setup/**`. The trigger MUST fire on all of:
+
+```yaml
+on:
+  pull_request:
+    paths:
+      - 'src/SuavoAgent.Setup/**'
+      - 'src/SuavoAgent.Setup.csproj'
+      - 'Directory.Build.props'      # catches Avalonia package bumps (Bug 24's class)
+      - 'global.json'                # .NET SDK version changes
+      - 'Directory.Packages.props'   # if CentralPackageManagement is adopted later
+```
 
 **Test contents:**
 
@@ -445,45 +473,129 @@ public async Task App_Initializes_Without_Exception()
 - Asserts construction + initialization completes within 5s. Anything longer than 5s is also a failure (catches hang regressions).
 
 **Rollout:**
-- Required check on every PR touching `src/SuavoAgent.Setup/**`. Block merge on failure.
+- Required check on every PR matching the trigger filter above. Block merge on failure.
 
 ### PR 4 — `SuavoAgent.Diagnostics` library + ruleset-v1 + Sentry SDK wrap
 
 **Goal:** every crash on Queen produces a structured fingerprint posted to Sentry with SDK-side PHI scrub. Local fallback unchanged. Calibrated against Bug 22 / Bug 23 / Bug 24 reproductions.
 
+**Wire-ordering invariant — REQUIRED for correctness:**
+
+`Wire.AttachUnhandledHooks(...)` MUST be the **literal first statement** of `Program.Main` (or the file-scoped top-level equivalent) in every entry point. Calls AFTER any framework `Configure()` call (Avalonia, Microsoft.Extensions.Hosting builder, etc.) leak Bug-24-class crashes during framework initialization. The pattern per entry point:
+
+```csharp
+// Core / Broker / Helper / Watchdog (Microsoft.Extensions.Hosting entry points)
+// File-scoped top-level program — line 1, before ANY using-scope or
+// builder.Services call:
+SuavoAgent.Diagnostics.Wire.AttachUnhandledHooks(
+    component: "Core",
+    new WireOptions
+    {
+        LocalCrashLogPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "logs", "startup-crash.log"),
+        LocalJournalPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "diagnostics", "events.jsonl"),
+        EnableSentry = true,  // gated by appsettings later via ConfigSyncWorker
+    });
+
+// ... only NOW: var builder = Host.CreateApplicationBuilder(...);
+```
+
+```csharp
+// Setup (Avalonia GUI installer)
+// Program.cs Main, line 1 — BEFORE BuildAvaloniaApp().StartWithClassicDesktopLifetime():
+SuavoAgent.Diagnostics.Wire.AttachUnhandledHooks("Setup", new WireOptions { ... });
+
+// Wrap AppBuilder.Configure in try/catch so XAML-compilation exceptions
+// during Configure (Bug 24's class) also reach Wire:
+try
+{
+    BuildAvaloniaApp()
+        .StartWithClassicDesktopLifetime(args);
+}
+catch (Exception ex)
+{
+    SuavoAgent.Diagnostics.Wire.ReportException("Setup", ex, stage: "AvaloniaConfigure");
+    throw;  // existing fast-fail behavior preserved
+}
+
+// In BuildAvaloniaApp(), the Avalonia dispatcher hook is installed
+// inside the builder pipeline so dispatcher-thread exceptions also route:
+public static AppBuilder BuildAvaloniaApp() =>
+    AppBuilder.Configure<App>()
+        .UsePlatformDetect()
+        .AfterSetup(_ => SuavoAgent.Diagnostics.AvaloniaDispatcherHook.Install());
+```
+
+```powershell
+# publish.ps1 — equivalent for the build host
+# Exit-code capture is handled by suavo-report-crash.exe (per Open Q §8.7).
+# On any non-zero $LASTEXITCODE from dotnet publish:
+if ($LASTEXITCODE -ne 0) {
+    & "$PSScriptRoot\tools\suavo-report-crash.exe" `
+        --component "Publish" `
+        --exit-code $LASTEXITCODE `
+        --project $proj.Name `
+        --recent-stdout $lastStdoutTail `
+        --build-sha (git rev-parse HEAD)
+    exit 1
+}
+```
+
 **Files (new):**
-- `src/SuavoAgent.Diagnostics/SuavoAgent.Diagnostics.csproj` (refs: Sentry .NET SDK, Microsoft.Extensions.Logging.Abstractions, JsonSchema for ruleset validation)
-- `src/SuavoAgent.Diagnostics/Wire.cs` — public surface: `Wire.AttachUnhandledHooks(component, options)` + `Wire.ReportInvariant(id, context)` + `Wire.ReportExitCode(component, exitCode, command)`
-- `src/SuavoAgent.Diagnostics/FingerprintComputer.cs` — fp-v1 algorithm
-- `src/SuavoAgent.Diagnostics/PhiScrubber.cs` — SDK-side scrub
-- `src/SuavoAgent.Diagnostics/RulesetV1.cs` — loads + validates ruleset-v1.json
+- `src/SuavoAgent.Diagnostics/SuavoAgent.Diagnostics.csproj` (refs: Sentry .NET SDK, Microsoft.Extensions.Logging.Abstractions, JsonSchema.Net for ruleset validation)
+- `src/SuavoAgent.Diagnostics/Wire.cs` — public surface: `Wire.AttachUnhandledHooks(component, options)` + `Wire.ReportException(component, ex, stage)` + `Wire.ReportInvariant(id, context)` + `Wire.ReportExitCode(component, exitCode, command)`
+- `src/SuavoAgent.Diagnostics/FingerprintComputer.cs` — fp-v1 algorithm (with 10ms hard timeout)
+- `src/SuavoAgent.Diagnostics/PhiScrubber.cs` — SDK-side scrub (with 10ms hard timeout, fail-closed)
+- `src/SuavoAgent.Diagnostics/LocalJournal.cs` — best-effort `events.jsonl` writer (20ms timeout)
+- `src/SuavoAgent.Diagnostics/RulesetV1.cs` — loads + validates ruleset-v1.json (build-time schema gate; runtime validates again on load)
 - `src/SuavoAgent.Diagnostics/Resources/ruleset-v1.json` — embedded resource. Initial population: Codex's three calibration fingerprints + the canonical invariant catalog seed (only `complete-zero-actuation-log` for Phase 1)
-- `src/SuavoAgent.Diagnostics/SentrySink.cs` — Sentry SDK wrap with BeforeSend → PhiScrubber → SetFingerprint
+- `src/SuavoAgent.Diagnostics/Resources/ruleset-v1.schema.json` — JSON Schema for ruleset-v1.json. Validated at build time via MSBuild target (see csproj below)
+- `src/SuavoAgent.Diagnostics/build/ValidateRulesetSchema.targets` — MSBuild target invoked pre-`EmbedResources` that runs `JsonSchema.Net.Cli` (or equivalent) against `Resources/ruleset-v1.json` using `Resources/ruleset-v1.schema.json`. Build fails on schema violation. Catches malformed JSON at CI time, never at runtime
+- `src/SuavoAgent.Diagnostics/SentrySink.cs` — Sentry SDK wrap with `BeforeSend → PhiScrubber → SetFingerprint`. POST is fire-and-forget; never on the crash handler's critical path
 - `src/SuavoAgent.Diagnostics/AvaloniaDispatcherHook.cs` — Avalonia `Dispatcher.UIThread.UnhandledException` hook + `Application.Current.OnUnhandledException` if available
+- `src/SuavoAgent.Diagnostics/tools/SuavoReportCrash.csproj` + `SuavoReportCrash.cs` — tiny CLI tool that publish.ps1 invokes on non-zero `$LASTEXITCODE`. Captures component + exit code + project + recent stdout + build SHA, runs the same Wire dispatch path
 - `tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj`
 - `tests/SuavoAgent.Diagnostics.Tests/PhiScrubberTests.cs` — 50+ PHI test corpus
-- `tests/SuavoAgent.Diagnostics.Tests/FingerprintComputerTests.cs` — determinism + Bug 22/23/24 calibrations
+- `tests/SuavoAgent.Diagnostics.Tests/FingerprintComputerTests.cs` — determinism + Bug 22/23/24 calibrations + 100-iter p99 < 50ms harness
 - `tests/SuavoAgent.Diagnostics.Tests/RulesetV1Tests.cs` — schema validation + signature verification stub
+- `tests/SuavoAgent.Diagnostics.Tests/WireOrderingTests.cs` — Roslyn-based test (or simple reflection scan) that asserts every entry point's `Program.Main` has `Wire.AttachUnhandledHooks` as the literal first statement
 
 **Files (modified):**
-- `src/SuavoAgent.Core/Program.cs` — replace the existing `WriteCrash` static methods with `Wire.AttachUnhandledHooks("Core", ...)` call. Local file fallback preserved (Wire's options include `LocalCrashLogPath`).
+- `src/SuavoAgent.Core/Program.cs` — replace the existing `WriteCrash` static methods with `Wire.AttachUnhandledHooks("Core", ...)` as Program.Main literal line 1. Local file fallback preserved (Wire's options include `LocalCrashLogPath` pointing to the existing `startup-crash.log` path).
 - `src/SuavoAgent.Broker/Program.cs` — same
 - `src/SuavoAgent.Helper/Program.cs` — same
 - `src/SuavoAgent.Watchdog/Program.cs` — same
-- `src/SuavoAgent.Setup/Program.cs` + `src/SuavoAgent.Setup/App.axaml.cs` — same + call `AvaloniaDispatcherHook.Install()` after `AppBuilder.Configure<App>()`
-- `publish.ps1` — add `Wire.ReportExitCode("Publish", $LASTEXITCODE, $command)` equivalent (PowerShell-side capture). See Open Question §8.7.
+- `src/SuavoAgent.Setup/Program.cs` + `src/SuavoAgent.Setup/App.axaml.cs` — same + AppBuilder.Configure wrapped in try/catch as shown above + `AvaloniaDispatcherHook.Install()` called from `BuildAvaloniaApp().AfterSetup(...)`
+- `publish.ps1` — on every non-zero `$LASTEXITCODE` invoke `suavo-report-crash.exe` (see PowerShell sample above)
 - `Directory.Build.props` — add ProjectReference to SuavoAgent.Diagnostics for the 5 entry points
 
 **Test plan:**
-- **FingerprintComputer determinism:** same synthetic crash → identical fingerprint across 100 runs, across `Release` + `Debug` configurations, across `PublishReadyToRun=true|false`, across `PublishSingleFile=true|false`. Build matrix in CI.
-- **PHI scrubber corpus:** 50+ test inputs covering patient names, DOBs in 6 formats, Rx#, SSN, file paths with usernames, SQL text with literal values, UIA window titles. Assert post-scrub event contains NONE of the test PHI patterns.
+- **FingerprintComputer determinism — production matrix.** CI build matrix runs the determinism harness in the FULL cross-product:
+
+  | Config | Framework | SelfContained | R2R | SingleFile | Why included |
+  |---|---|---|---|---|---|
+  | `Debug-fxdep` | Debug | false | false | false | Local dev parity |
+  | `Release-fxdep` | Release | false | false | false | Release branch parity |
+  | `Release-self-contained` | Release | true | false | false | Pre-R2R baseline |
+  | `Release-self-contained-R2R` | Release | true | true | false | R2R inlining surface |
+  | **`Release-self-contained-R2R-SingleFile`** | **Release** | **true** | **true** | **true** | **PRODUCTION CONFIG (publish.ps1) — determinism MUST hold here** |
+
+  Same synthetic crash → identical fingerprint across all 5 configurations AND across 100 runs per configuration. PR blocks merge on ANY divergence. The last row is what `publish.ps1` ships; if fingerprints aren't stable there, the mesh is broken in production.
+
+- **PHI scrubber corpus:** 50+ test inputs covering patient names, DOBs in 6 formats, Rx#, SSN, NPI (Luhn-checked), file paths with usernames, SQL text with literal values, UIA window titles. Assert post-scrub event contains NONE of the test PHI patterns.
+- **ruleset-v1.json schema validation:** build-time MSBuild target asserts `Resources/ruleset-v1.json` validates against `Resources/ruleset-v1.schema.json`. CI fails on schema violation. Runtime test also re-validates after embedded-resource load (defense-in-depth).
 - **Bug 22 calibration:** synthetic `Win32Exception(5)` thrown from a `[DllImport]` interop wrapper → fingerprint matches `Helper | win32 | System.ComponentModel.Win32Exception | native_error=5 | operation=SendInput/actuation-token`.
 - **Bug 23 calibration:** call `Wire.ReportInvariant("complete-zero-actuation-log", ...)` → fingerprint matches `Core | invariant_violation | <empty> | <empty> | WorkflowExecutor.Complete | complete-zero-actuation-log`.
 - **Bug 24 calibration:** synthetic Avalonia XAML compilation `InvalidCastException` from `MainWindow.InitializeComponent` → fingerprint matches `Setup | managed_exception | System.InvalidCastException | <empty> | Avalonia.MainWindow.InitializeComponent | resource=MainWindow.axaml`.
-- **Sentry sink with mocked endpoint:** `BeforeSend` invoked, scrubbed event payload + fingerprint tag verified.
-- **Local fallback:** Sentry endpoint unreachable → `events.jsonl` continues, no startup blocking, no thrown exception out of `Wire.AttachUnhandledHooks`.
+- **Wire-ordering invariant:** `WireOrderingTests.cs` scans every entry-point Program.cs and asserts the literal first executable statement is `Wire.AttachUnhandledHooks`. Fails CI if a future PR re-orders.
+- **Local-first time bound:** 100-iter p99 < 50ms harness across Bug 22 / 23 / 24 synthetic reproductions. Asserts `PhiScrubber.Sanitize` < 10ms, `FingerprintComputer.Compute` < 10ms, `LocalJournal.Append` < 20ms, total local dispatch < 50ms BEFORE any Sentry I/O begins.
+- **Sentry sink with mocked endpoint:** `BeforeSend` invoked, scrubbed event payload + fingerprint tag verified. POST is fire-and-forget (asserted by checking the SDK queue depth, not by awaiting POST).
+- **Local fallback:** Sentry endpoint unreachable → `events.jsonl` continues, no startup blocking, no thrown exception out of `Wire.AttachUnhandledHooks`, no crash-handler delay (POST queued, returns immediately).
 - **`Wire()` idempotency:** calling twice doesn't double-register handlers.
-- **Per-entry-point integration:** for each of 5 entry points, integration test wires + crashes + verifies emit + verifies local fallback.
+- **Per-entry-point integration:** for each of 5 entry points, integration test wires + crashes + verifies emit + verifies local fallback + verifies handler-local-time SLA.
 
 **Rollout:**
 - Ships behind `Diagnostics:Enabled` config flag, **default `false`** in `appsettings.json`.
@@ -494,7 +606,7 @@ public async Task App_Initializes_Without_Exception()
 
 ## 8. Open questions (for Codex review + /plan-eng-review + /plan-ceo-review)
 
-1. **Universal Wire() coverage.** Does every entry point — Core, Broker, Helper, Watchdog, Setup — call `Wire.AttachUnhandledHooks` BEFORE any user code? Setup specifically needs to wire BEFORE `AppBuilder.Configure<App>()` because Avalonia XAML compilation can throw during `Configure`. Does this require modifying `Program.Main` to wire diagnostics in a `try` block that catches anything from `Configure` itself?
+1. **Universal Wire() coverage — recursion safety.** The wire-ordering invariant in §7 PR 4 mandates `Wire.AttachUnhandledHooks` as `Program.Main` literal line 1, and Setup wraps AppBuilder.Configure in try/catch. Open for Codex: what if the handler ITSELF throws (e.g., PhiScrubber regex panic, Sentry SDK init AppDomain.UnhandledException recursion)? `WireOrderingTests.cs` catches static ordering but doesn't prove recursion safety. Recommend: nested try/catch inside `Wire.ReportException` with a SentinelException class that explicit-noops on second-entry.
 
 2. **SDK-side scrub completeness.** PHI scrubber test corpus has 50+ patterns. Are there pharmacy-specific patterns we're missing — NDC codes, DEA numbers, prescriber NPIs, insurance member IDs, PioneerRx-specific identifiers? Should ruleset-v1.json's `patient_names_seed` array be populated for Phase 1 (Queen has no patients), or wait for Nadim?
 
@@ -506,7 +618,7 @@ public async Task App_Initializes_Without_Exception()
 
 6. **supabase Vault vs AWS KMS for diagnostic bundles.** Phase 1: Vault is sufficient (bundles are pre-scrubbed at edge). Phase 3 multi-tenant: is KMS-grade key rotation + audited decrypts load-bearing, or does the pre-scrub + RLS + audit_log composition already meet the bar? Codex specifically wanted: "audited decrypt events per row read" comparison.
 
-7. **PowerShell exit-code capture from `publish.ps1`.** How do we surface `0xE0434352` (Bug 24's CLR-unhandled exit code) WITHOUT a CLR runtime present in PowerShell? Need either (a) a special exit-code-to-fingerprint mapping table in ruleset-v1.json, or (b) a tiny C# tool `suavo-report-crash.exe` that publish.ps1 invokes when `$LASTEXITCODE -ne 0`. Recommendation: (b), because the table approach can't capture surrounding context (which project failed, build SHA, recent stdout) — and Bug 24's diagnosis needed all of that.
+7. **`suavo-report-crash.exe` self-defense.** PR 4 now bakes in approach (b) — a tiny CLI tool publish.ps1 invokes on non-zero `$LASTEXITCODE`. Open for Codex: how does the tool itself avoid the same CLR fast-fail class it's meant to capture (Bug 24 recursion)? Recommend: tool ships as native AOT (`PublishAot=true`) to eliminate the CLR-fast-fail surface entirely, OR uses `IL2CPP`-style fallback. Also: should the tool also capture the publish.ps1 PID + parent PowerShell version + Yubikey presence (preflight echoes) so the diagnostic includes the developer's environment shape?
 
 8. **ruleset-v1.json initial population strategy.** Phase 1 ships with the 3 calibration crashes (Bug 22/23/24). Should we also seed a larger set of "things we expect to see" — Win32 errors 5/1326/1450 with named operations, common COM HRESULT classes, .NET fast-fail codes — or wait for real Queen signal? Risk of over-seeding: fingerprints we never see in the wild bloat the rule cache + create false confidence in coverage. Recommendation: ship Phase 1 with ONLY the 3 calibration crashes; expand from real signal.
 
@@ -524,4 +636,13 @@ public async Task App_Initializes_Without_Exception()
 
 ## 10. Change log
 
-- **2026-05-12 v0.1** — Initial draft. Locked architecture: Option D (agent-edge compute + cloud-distributed signed rules). 4 PRs in Phase 1. Codex review consulted on architectural choice + fingerprint algorithm. Pending /plan-eng-review + /plan-ceo-review + Codex re-review on §5 encryption + §8 open questions before v1.0 lock.
+- **2026-05-12 v0.1** — Initial draft. Locked architecture: Option D (agent-edge compute + cloud-distributed signed rules). 4 PRs in Phase 1. Codex review consulted on architectural choice + fingerprint algorithm.
+- **2026-05-12 v0.2** — /plan-eng-review SMALL CHANGE pass (4 issues + 1 critical gap):
+  - §4 added Performance contract: < 50ms p99 local-first SLA before any Sentry I/O, with per-stage timeouts + 100-iter test harness.
+  - §7 PR 3 trigger filter expanded to `Directory.Build.props` + `global.json` + `Directory.Packages.props` (Bug 24's actual cause was a package bump, not a source change in src/SuavoAgent.Setup/**).
+  - §7 PR 4 added explicit Wire-ordering code patterns for all 5 entry points + WireOrderingTests.cs static enforcement.
+  - §7 PR 4 added `Resources/ruleset-v1.schema.json` + MSBuild target for build-time schema validation. Eliminates a runtime failure class at CI time.
+  - §7 PR 4 test plan now pins the full CI build matrix (5 configurations including the production R2R + SingleFile target).
+  - §7 PR 4 baked in `suavo-report-crash.exe` tool path for publish.ps1 exit-code capture (was Open Q §8.7).
+  - §8 Q1 and Q7 reshaped: ordering and tool baseline now answered; remaining open items are recursion safety + native-AOT consideration.
+- Pending: /plan-ceo-review + Codex re-review on §5 encryption + §8 open questions before v1.0 lock.
