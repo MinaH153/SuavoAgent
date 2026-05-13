@@ -14,10 +14,17 @@ namespace SuavoAgent.Diagnostics.Tests;
 /// flags.
 public class FingerprintComputerTests
 {
-    private static FingerprintComputer Computer()
+    // 100ms timeout for calibration / correctness tests — production
+    // contract is 10ms (spec §4) but the first invocation on a cold JIT
+    // (Linux CI runner, fresh test class instance per [Fact]) exceeds
+    // 10ms and falls through to fp-fallback, masking the canonical
+    // fingerprint we're trying to verify. The p99-budget test below
+    // explicitly uses a warmed harness with the production 10ms timeout
+    // to enforce the actual perf contract.
+    private static FingerprintComputer Computer(double timeoutMs = 100)
     {
         var ruleset = RulesetV1.LoadEmbedded();
-        return new FingerprintComputer(ruleset, TimeSpan.FromMilliseconds(10));
+        return new FingerprintComputer(ruleset, TimeSpan.FromMilliseconds(timeoutMs));
     }
 
     // ── Determinism — same signal → same fingerprint across 100 iterations ──
@@ -51,6 +58,13 @@ public class FingerprintComputerTests
             Kind = WireSignalKind.ManagedException,
             Exception = new InvalidOperationException("p99 harness"),
         };
+
+        // JIT warmup — first call into Compute compiles the method.
+        // The production crash path is invoked from a process that has
+        // been running for at least a few seconds, so JIT is already
+        // warm. The 50ms p99 budget applies to the warm-state path,
+        // not the first cold-JIT invocation in this test process.
+        for (int i = 0; i < 10; i++) c.Compute(signal);
 
         var samples = new long[100];
         for (int i = 0; i < 100; i++)
