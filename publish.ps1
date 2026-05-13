@@ -85,6 +85,120 @@ function Invoke-SuavoReportCrash {
     }
 }
 
+# ── dotnet publish heartbeat helpers (Diagnostic Mesh PR 2) ──
+# Replace the silent 8-min "dotnet publish" with per-project [start/elapsed/
+# finish] visibility + 30s heartbeat. Solves the 2026-05-12 failure mode
+# where Joshua Ctrl+C'd a healthy 8-min build thinking it had hung.
+
+function Get-DotnetPublishHint {
+    param([string]$StdoutPath)
+    try {
+        $lines = Get-Content -LiteralPath $StdoutPath -Tail 5 -ErrorAction SilentlyContinue
+        $latest = $lines | Where-Object { $_.Trim() } | Select-Object -Last 1
+        if ($latest) {
+            $trimmed = $latest.Trim()
+            if ($trimmed.Length -gt 60) { $trimmed = $trimmed.Substring(0, 57) + '...' }
+            return " | still compiling ($trimmed)"
+        }
+    } catch {
+        # transient read collisions while dotnet writes are expected; fall through
+    }
+    return " | still compiling..."
+}
+
+function Invoke-DotnetPublishWithHeartbeat {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectName,
+        [Parameter(Mandatory)][string]$ProjectPath,
+        [Parameter(Mandatory)][string]$OutputPath,
+        [Parameter(Mandatory)][string]$Configuration,
+        [Parameter(Mandatory)][string]$Runtime,
+        [Parameter(Mandatory)][datetime]$BatchStart,
+        [int]$HeartbeatSeconds = 30
+    )
+
+    $tag = ("[$ProjectName]").PadRight(11)
+    $offsetSec = [int]((Get-Date) - $BatchStart).TotalSeconds
+    $banner = "$tag start=T+${offsetSec}s"
+    Write-Host "`n$banner | publishing..." -ForegroundColor Yellow
+
+    $stdoutLog = [System.IO.Path]::GetTempFileName()
+    $stderrLog = [System.IO.Path]::GetTempFileName()
+
+    $publishArgs = @(
+        'publish', $ProjectPath,
+        '-c', $Configuration,
+        '-r', $Runtime,
+        '--self-contained',
+        '-p:PublishSingleFile=true',
+        '-p:PublishReadyToRun=true',
+        '-p:EnableCompressionInSingleFile=true',
+        '-p:DebugType=embedded',
+        '-p:PublishTrimmed=false',
+        '-o', $OutputPath
+    )
+
+    $proc = Start-Process -FilePath 'dotnet' `
+        -ArgumentList $publishArgs `
+        -NoNewWindow -PassThru `
+        -RedirectStandardOutput $stdoutLog `
+        -RedirectStandardError $stderrLog
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastHeartbeat = Get-Date
+    $interrupted = $false
+
+    try {
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds 500
+            $now = Get-Date
+            if (($now - $lastHeartbeat).TotalSeconds -ge $HeartbeatSeconds) {
+                $elapsed = [int]$sw.Elapsed.TotalSeconds
+                $hint = Get-DotnetPublishHint -StdoutPath $stdoutLog
+                Write-Host "$banner | elapsed=${elapsed}s$hint" -ForegroundColor DarkGray
+                $lastHeartbeat = $now
+            }
+        }
+    } catch [System.Management.Automation.PipelineStoppedException] {
+        $interrupted = $true
+        throw
+    } finally {
+        if (-not $proc.HasExited) {
+            try { $proc.Kill() } catch { }
+            $interrupted = $true
+        }
+        if ($interrupted) {
+            $elapsed = [int]$sw.Elapsed.TotalSeconds
+            Write-Host "[*] BUILD INTERRUPTED at $ProjectName after ${elapsed}s. Re-run with -CleanFirst if rebuild seems incomplete." -ForegroundColor Red
+        }
+    }
+
+    $sw.Stop()
+    $totalElapsed = [int]$sw.Elapsed.TotalSeconds
+    $exitCode = $proc.ExitCode
+
+    if ($exitCode -ne 0) {
+        Write-Host "$banner | elapsed=${totalElapsed}s | FAILED (exit=$exitCode)" -ForegroundColor Red
+        $stderrTail = Get-Content -LiteralPath $stderrLog -Tail 20 -ErrorAction SilentlyContinue
+        if ($stderrTail) { Write-Host ($stderrTail -join "`n") -ForegroundColor Red }
+        $stdoutTail = Get-Content -LiteralPath $stdoutLog -Tail 5 -ErrorAction SilentlyContinue
+        if ($stdoutTail) { Write-Host ($stdoutTail -join "`n") -ForegroundColor DarkGray }
+        Remove-Item -LiteralPath $stdoutLog, $stderrLog -ErrorAction SilentlyContinue
+        return [pscustomobject]@{ Success = $false; ExitCode = $exitCode; ElapsedSeconds = $totalElapsed }
+    }
+
+    $exe = Get-ChildItem $OutputPath -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $sizeStr = if ($exe) {
+        $sizeMb = [math]::Round($exe.Length / 1MB, 1)
+        " | $($exe.Name) ($sizeMb MB)"
+    } else { "" }
+    Write-Host "$banner | elapsed=${totalElapsed}s | DONE in ${totalElapsed}s$sizeStr" -ForegroundColor Green
+
+    Remove-Item -LiteralPath $stdoutLog, $stderrLog -ErrorAction SilentlyContinue
+    return [pscustomobject]@{ Success = $true; ExitCode = 0; ElapsedSeconds = $totalElapsed }
+}
+
 # ── Auto-generate ECDSA signing keys if missing ──
 # $env:HOME is set on macOS/Linux and inside pwsh, but is NOT set on
 # native Windows PowerShell 5.1. Fall back through the standard home-dir
@@ -193,50 +307,30 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "[ReportCrash] OK -- suavo-report-crash.exe at $reportCrashOut" -ForegroundColor Green
 }
 
+$batchStart = Get-Date
 foreach ($proj in $projects) {
-    Write-Host "`n[$($proj.Name)] Publishing..." -ForegroundColor Yellow
     $outPath = Join-Path $OutputDir $proj.Name
-
-    # Capture stdout to enable surfacing the tail to the crash reporter
-    # on failure. On success the tail is discarded.
-    $publishOutput = & dotnet publish $proj.Path `
-        -c $Configuration `
-        -r $Runtime `
-        --self-contained `
-        -p:PublishSingleFile=true `
-        -p:PublishReadyToRun=true `
-        -p:EnableCompressionInSingleFile=true `
-        -p:DebugType=embedded `
-        -p:PublishTrimmed=false `
-        -o $outPath 2>&1
-    $publishExit = $LASTEXITCODE
-
-    # Always stream to host so the operator sees what dotnet emitted
-    # (matches pre-PR-4c behavior).
-    $publishOutput | ForEach-Object { Write-Host $_ }
-
-    if ($publishExit -ne 0) {
-        Write-Host "[$($proj.Name)] PUBLISH FAILED (exit=$publishExit)" -ForegroundColor Red
-
-        # Last ~20 lines of stdout as crash context (bounded)
-        $tail = ($publishOutput | Select-Object -Last 20) -join "`n"
-        if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
-
+    $result = Invoke-DotnetPublishWithHeartbeat `
+        -ProjectName $proj.Name `
+        -ProjectPath $proj.Path `
+        -OutputPath $outPath `
+        -Configuration $Configuration `
+        -Runtime $Runtime `
+        -BatchStart $batchStart
+    if (-not $result.Success) {
+        # Mesh PR 4c: invoke crash reporter before exit so the failure shows
+        # up in publish-crash.jsonl. Heartbeat helper already streamed
+        # stdout/stderr tail to console; the JSONL marker carries exit code
+        # + project + env shape.
         Invoke-SuavoReportCrash `
             -Component "Publish" `
-            -ExitCode $publishExit `
-            -Project $proj.Name `
-            -StdoutTail $tail
-
-        exit $publishExit
-    }
-
-    $exe = Get-ChildItem $outPath -Filter "*.exe" | Select-Object -First 1
-    if ($exe) {
-        $sizeMb = [math]::Round($exe.Length / 1MB, 1)
-        Write-Host "[$($proj.Name)] OK - $($exe.Name) ($sizeMb MB)" -ForegroundColor Green
+            -ExitCode $result.ExitCode `
+            -Project $proj.Name
+        exit $result.ExitCode
     }
 }
+$batchElapsed = [int]((Get-Date) - $batchStart).TotalSeconds
+Write-Host "`n=== All $($projects.Count) projects published in ${batchElapsed}s ===" -ForegroundColor Cyan
 
 Write-Host "`n=== Publish Complete ===" -ForegroundColor Cyan
 Write-Host "Output: $OutputDir"
