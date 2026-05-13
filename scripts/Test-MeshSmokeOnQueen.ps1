@@ -65,22 +65,21 @@ if (-not (Test-Path -LiteralPath $preflightPath)) {
     Add-Result 'preflight-script-exists' 'FAIL' "missing at $preflightPath"
 } else {
     # Per preflight contract: empty CertThumbprint + -SkipSigning = signing-checks SKIP.
-    # Hashtable splat avoids pwsh 7 array-splat ambiguity where '-Json' was bound
-    # positionally to CleanCacheMaxAgeDays (int) instead of as the Json switch.
-    $preflightArgs = @{ Json = $true }
-    if ([string]::IsNullOrWhiteSpace($CertThumbprint)) {
-        $preflightArgs['SkipSigning'] = $true
+    # Direct named invocation (no splat) matches publish.ps1's working pattern and
+    # sidesteps hashtable-splat type-binding quirks that surfaced "Argument types
+    # do not match" on this exact preflight script in pwsh 7.
+    $preflightOut = if ([string]::IsNullOrWhiteSpace($CertThumbprint)) {
+        & $preflightPath -CertThumbprint '' -SkipSigning -Json 2>&1 | Out-String
     } else {
-        $preflightArgs['CertThumbprint'] = $CertThumbprint
+        & $preflightPath -CertThumbprint $CertThumbprint -Json 2>&1 | Out-String
     }
-    $preflightOut = & $preflightPath @preflightArgs 2>&1 | Out-String
     $preflight = $null
     $parseError = $null
     try { $preflight = $preflightOut | ConvertFrom-Json -ErrorAction Stop } catch { $parseError = $_.Exception.Message }
     if ($null -eq $preflight) {
         Add-Result 'preflight-runs' 'FAIL' "could not parse preflight output as JSON: $parseError"
-        $argsRendered = ($preflightArgs.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '
-        Write-Host "  preflight invoked with: $argsRendered" -ForegroundColor DarkGray
+        $modeRendered = if ([string]::IsNullOrWhiteSpace($CertThumbprint)) { '-SkipSigning -Json' } else { "-CertThumbprint <set> -Json" }
+        Write-Host "  preflight invoked with: $modeRendered" -ForegroundColor DarkGray
         Write-Host "  preflight raw output (full, $($preflightOut.Length) chars):" -ForegroundColor DarkGray
         Write-Host $preflightOut -ForegroundColor DarkGray
     } else {
