@@ -11,7 +11,11 @@ public class PhiScrubberTests
     private static PhiScrubber Scrubber()
     {
         var ruleset = new RulesetV1();
-        return new PhiScrubber(ruleset, TimeSpan.FromMilliseconds(50));
+        // 200ms timeout — production default is 10ms (spec §4 contract).
+        // Tests need headroom for cold JIT on Linux CI runner where the
+        // regex compile + first-match for 13 pharmacy patterns can
+        // exceed 50ms on the first invocation.
+        return new PhiScrubber(ruleset, TimeSpan.FromMilliseconds(200));
     }
 
     // ── PioneerRx-specific identifiers ──

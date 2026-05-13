@@ -15,6 +15,14 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!--
+      Avalonia headless test infrastructure (Mesh PR 3). Catches Bug 24's
+      class: XAML compile / resource-resolution failures in MainWindow that
+      ship green without a UI smoke check. Versions track SuavoAgent.Setup's
+      Avalonia 11.2.0 PackageReferences.
+    -->
+    <PackageReference Include="Avalonia.Headless" Version="11.2.0" />
+    <PackageReference Include="Avalonia.Headless.XUnit" Version="11.2.0" />
   </ItemGroup>
 
   <ItemGroup>
