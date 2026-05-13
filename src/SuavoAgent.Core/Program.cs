@@ -12,13 +12,36 @@ using SuavoAgent.Core.Reasoning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Workers;
+using SuavoAgent.Diagnostics;
+
+// Diagnostic Mesh: Wire.AttachUnhandledHooks MUST be the literal first
+// executable statement (spec §7 PR 4 wire-ordering invariant; verified
+// by WireOrderingTests). Wire's LocalCrashLogPath preserves the existing
+// startup-crash.log file as defense-in-depth; LocalJournalPath adds the
+// structured events.jsonl trail; Sentry is the BAA-covered transport
+// when SUAVO_SENTRY_DSN is set.
+//
+// Why this comes BEFORE the AppDomain handler below: a crash during
+// Wire init still leaves the legacy WriteCrash sink as a fallback, but
+// once Wire is up, both fire and we get structured + plaintext audit
+// of every crash from the same handler.
+Wire.AttachUnhandledHooks(WireComponent.Core, new WireOptions
+{
+    LocalCrashLogPath = Path.Combine(CoreCrashDir(), "startup-crash.log"),
+    LocalJournalPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent", "diagnostics", "events.jsonl"),
+    Dsn = Environment.GetEnvironmentVariable("SUAVO_SENTRY_DSN"),
+    EnableSentry = true,
+});
 
 // Crash sink: before ANY other code runs, wire a last-resort handler that
 // persists unhandled exceptions to a file under ProgramData (writable by
 // LocalService/NetworkService/SYSTEM). Otherwise early-bootstrap failures
 // die silently under service context — the .NET runtime never gets a
 // chance to emit an Application event, so operators see only Windows
-// error 1067 with no underlying cause.
+// error 1067 with no underlying cause. Kept alongside Wire for
+// defense-in-depth: if Wire init fails, this still captures.
 //
 // ProgramData is preferred over SpecialFolder.ApplicationData because
 // the latter resolves to the user-scoped profile (which is empty and
