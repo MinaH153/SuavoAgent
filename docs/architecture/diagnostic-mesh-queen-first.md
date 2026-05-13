@@ -1,7 +1,7 @@
 # Diagnostic Mesh — Queen-first
 
-**Status:** v0.1 draft — pending /plan-eng-review + /plan-ceo-review + Codex re-review on encryption choice and the open-questions list (§8).
-**Locked date:** 2026-05-12
+**Status:** v1.0 **LOCKED** — Codex re-review of §5 + §8 complete (2026-05-13); 8 items resolved, 0 conflicts with locked decisions. Ready for Phase 1 PR 1 implementation.
+**Locked date:** 2026-05-13
 **Scope:** Phase 1 (Queen + SuavoAgent only). Phase 2–6 sketched in §1 for direction-locking; not for implementation in this cycle.
 **Complement to:** [docs/self-healing/phase-a-architecture.md](../self-healing/phase-a-architecture.md) — Phase A owns cloud-side audit substrate (audit_events hash chain, A1 silent-agent alarm, A6 attestation). Mesh owns dev-loop primitives + agent-side fingerprint compute + Sentry/GH-Actions surface. The two layers reference each other and ship independently.
 
@@ -177,7 +177,7 @@ Fields:
 | Module reload changes MVID | Module-version-id changes per build | None — MVID explicitly excluded |
 | Method body changes (bugfix patch) | Hash changes | Method **name** unchanged unless renamed |
 
-Metadata token + MVID are still **captured for symbolication** (so we can resolve to source after the fact) but live in the occurrence payload, not the fingerprint.
+**No-raw-frames invariant (Codex re-review v1.0):** Metadata token, MVID, raw stack frames, file paths, and line numbers are NOT sent to Sentry and NOT stored in `fingerprint_occurrences.context`. Symbolication uses `git_sha`, `component`, `exception_type`, `stable_error_code`, and `primary_failure_site` only. If deeper source reconstruction is needed for a specific occurrence, it is a one-time local Queen pull through the same PHI scrubber — not a standing cloud payload. The forbidden-keys enforcement at the ingest boundary lives in §6.
 
 ### Three calibration fingerprints (worked examples)
 
@@ -226,13 +226,33 @@ Scrub patterns (initial; expand based on signal):
 | DOB-shape | `\b(0?[1-9]\|1[0-2])[-/](0?[1-9]\|[12]\d\|3[01])[-/](19\|20)\d{2}\b` | `[DOB]` |
 | Rx number shape (PioneerRx pattern) | `\bRX\d{6,12}\b` (case-insensitive) | `[RX_NUM]` |
 | NPI shape | `\b\d{10}\b` constrained by NPI Luhn check | `[NPI]` |
-| Patient name dictionary | Loaded from `ruleset-v1.json` patient_names_seed array (will be empty in Phase 1; populated by edge-side detection in Phase 2 from PioneerRx data discovery) | `[PATIENT]` |
+| Patient name dictionary | Loaded from `ruleset-v1.json` patient_names_seed array (MUST be empty in Phase 1 — Queen has no patients; populated only in Phase 2 from tenant-scoped edge-side detection via PioneerRx data discovery; **Census/global-name dictionaries are forbidden** in untagged free text because their false-positive rate redacts common operational words like `May`, `Will`, `King`, `Price`, `Brown`, `White`, `Long`) | `[PATIENT]` |
 | UIA window titles | Any string field tagged `uia_title` in event extra | redacted by allowlist |
 | SQL text | Any field tagged `sql_text` | parameter values stripped via sqlparse |
 
+**Pharmacy-specific patterns (Codex re-review 2026-05-13, v1.0 lock):**
+
+| Pattern class | Regex / mechanism | Sample input | Expected redaction |
+|---|---|---|---|
+| NDC 4-4-2 | `\b\d{4}-\d{4}-\d{2}\b` | `ndc=1234-5678-90` | `ndc=[NDC]` |
+| NDC 5-4-2 | `\b\d{5}-\d{4}-\d{2}\b` | `12345-6789-01 dispensed` | `[NDC] dispensed` |
+| NDC 5-3-2 | `\b\d{5}-\d{3}-\d{2}\b` | `drug 12345-678-90` | `drug [NDC]` |
+| NDC 5-4-1 | `\b\d{5}-\d{4}-\d\b` | `pkg 12345-6789-0` | `pkg [NDC]` |
+| NDC unhyphenated with label | `(?i)\b(ndc\|national[_\s-]?drug[_\s-]?code)\s*[:=]\s*"?\d{10,11}"?` | `"NDC":"12345678901"` | `"NDC":"[NDC]"` |
+| DEA number | `\b[A-Z]{2}\d{7}\b` + DEA checksum validation (1st+3rd+5th digits, 2*(2nd+4th+6th), sum mod 10 == 7th digit) | `prescriber DEA AB1234563` | `prescriber DEA [DEA]` |
+| Prescriber NPI field | `(?i)\b(prescriber_?npi\|provider_?npi\|npi)\s*[:=]\s*"?\d{10}"?` + NPI Luhn | `PrescriberNPI=1234567893` | `PrescriberNPI=[NPI]` |
+| BCBS member ID context | `(?i)\b(bcbs\|blue\s*cross\|member_?id)\b.{0,24}\b[A-Z]{3}\d{6,14}\b` | `BCBS member ABC123456789` | `BCBS member [MEMBER_ID]` |
+| Aetna member ID context | `(?i)\b(aetna\|member_?id)\b.{0,24}\b[Ww]\d{8,12}\b` | `Aetna ID W123456789` | `Aetna ID [MEMBER_ID]` |
+| Cigna member ID context | `(?i)\b(cigna\|member_?id)\b.{0,24}\b[Uu]?\d{9,12}\b` | `Cigna member U123456789` | `Cigna member [MEMBER_ID]` |
+| PioneerRx JSON IDs | `(?i)"(RxNumber\|PatientID\|PrescriberID\|PharmacyChainID)"\s*:\s*"?[^",}\s]+"?` | `"PatientID":"P12345"` | `"PatientID":"[PIONEERRX_ID]"` |
+| PioneerRx XML IDs | `(?i)<(RxNumber\|PatientID\|PrescriberID\|PharmacyChainID)>[^<]+</\1>` | `<RxNumber>RX1234567</RxNumber>` | `<RxNumber>[PIONEERRX_ID]</RxNumber>` |
+| PioneerRx SQL literals | `(?i)\b(RxNumber\|PatientID\|PrescriberID\|PharmacyChainID)\s*=\s*'[^']+'` | `where PatientID='P12345'` | `where PatientID='[PIONEERRX_ID]'` |
+
+All scrub regexes MUST use `RegexOptions.NonBacktracking` to defeat catastrophic-backtracking inputs that could overrun the 10ms `PhiScrubber.Sanitize` budget. On regex compile or match failure, scrubber drops the event extras and proceeds with fingerprint-only signal.
+
 If `PhiScrubber.IsDefinitelyPhi(event)` returns true with high-confidence, the event is **dropped entirely** and only the canonical fingerprint is forwarded with an empty extra. Counter incremented in local telemetry.
 
-The PhiScrubber test corpus (PR 4 test plan) includes >50 known-PHI patterns the scrubber must defeat. CI fails the PR if any test PHI pattern reaches the post-scrub event.
+The PhiScrubber test corpus (PR 4 test plan) includes >50 known-PHI patterns the scrubber must defeat, plus the 13 pharmacy-specific patterns above. CI fails the PR if any test PHI pattern reaches the post-scrub event.
 
 ---
 
@@ -283,7 +303,7 @@ The heartbeat payload includes: `component`, agent version, time-since-process-s
 
 ---
 
-## 5. Encryption scheme recommendation (**FOR CODEX REVIEW**)
+## 5. Encryption scheme — Vault for Phase 1, KMS for Phase 3 (v1.0 locked)
 
 ### Decision: supabase Vault for Phase 1; defer AWS KMS to Phase 3
 
@@ -299,13 +319,21 @@ Phase 1 is single-tenant (Queen-only). Per-tenant encryption keys for diagnostic
 
 Phase 3 (Nadim onboards). At that point Phase A's KMS keyring is likely set up, and the mesh can lean on the same keyring for per-tenant diagnostic-bundle keys. The migration from Vault → KMS is a one-shot re-encrypt of the existing fingerprint_occurrences rows; impact is low.
 
-### Risk to call out for Codex
+### Codex re-review v1.0 — Phase 3 direction LOCKED
 
-supabase Vault is OK for column-level encryption but doesn't equivalently provide:
-- KMS-grade automated key rotation
-- Audited decrypt events per row read
+Phase 3 (Nadim onboards as tenant 1; multi-tenant pre-scrubbed bundles in `fingerprint_occurrences.context`) MUST migrate diagnostic-bundle envelope encryption from Supabase Vault to AWS KMS before multi-tenant bundles land. The composition (pre-scrub at edge + RLS + `audit_log` row-write) is sufficient for §164.502(b) + §164.312(b) + §164.312(e) at Queen-only single-tenant scale, but is NOT sufficient at multi-tenant scale because (a) "pre-scrubbed" is not "non-sensitive" — residual PHI risk remains, (b) app-level read audit is bypassable by service-role/direct-SQL paths, and (c) §164.312(a)(2)(iv) encryption-at-rest is addressable, not optional, once multi-tenant residual-ePHI risk exists.
 
-For Phase 1 (Queen-only, scrubbed-bundles-only), the case to skip these guarantees is straightforward. **For Phase 3 (multi-tenant, real pharmacy operational data) the case is more debatable.** This is the explicit Codex-review item for the encryption section.
+| Guarantee | Supabase Vault | AWS KMS |
+|---|---|---|
+| Key rotation | Gap for automated per-key rotation in this design; requires manual re-key/re-encrypt discipline. | Customer-managed symmetric keys support automatic/on-demand rotation; old key material remains usable for decrypt. |
+| Decrypt audit | Gap at cryptographic boundary; app can write `audit_log`, but Vault view decrypts do not create per-row KMS-style decrypt events. | `Decrypt`/key-use API calls are CloudTrail-auditable; ties decrypts to tenant, role, request ID. |
+| BYOK | Gap for this Phase 1/2 design; not a first-class tenant BYOK control. | Imported key material and external/custom key-store patterns available when needed. |
+| HSM-backed | Supabase-managed backend key separation; acceptable for Phase 1 but opaque at per-key operation level. | KMS keys protected by AWS KMS HSM boundary and managed key lifecycle controls. |
+| Cross-region replication | Database backup/replication preserves Vault ciphertext, but key/region semantics are Supabase-managed. | Multi-Region KMS keys support interoperable decrypt across configured Regions. |
+| IAM granularity | Postgres grants/RLS/service-role discipline; weak separation between app read and decrypt authority. | Key policies, IAM, grants, aliases, and per-principal decrypt permissions. |
+| BAA status | Supabase BAA-covered platform, acceptable if project/account is under BAA and data is configured accordingly. | AWS KMS is HIPAA-eligible under AWS BAA; customer still owns configuration. |
+
+**Directional answer:** Phase 3 should migrate from Vault to KMS because per-decrypt audit and automated key rotation become load-bearing once multi-tenant diagnostic bundles exist. Migration mechanics: one-shot re-encrypt of `fingerprint_occurrences.context` rows under new KMS-backed envelope keys at Nadim onboard; coordinate with Phase A A2 hash-chain anchoring + A6 attestation so audit-chain and encrypt-chain rotate together.
 
 ---
 
@@ -367,6 +395,16 @@ CREATE POLICY "Pharmacies read own occurrences"
 ```
 
 `alias_of` is the cloud-side merge mechanism Codex called out: when a ruleset version bump changes how the same crash fingerprints (e.g., we discover Bug 22's wrapper-stripping logic was too eager and need to re-group), insert the new fingerprint and point its `alias_of` at the old one. The cloud merges occurrence counts for dashboards; the agent never knows.
+
+### `context` JSONB allowlist + forbidden keys (Codex re-review v1.0)
+
+`fingerprint_occurrences.context` JSONB schema is allowlisted, not denylisted, to enforce the no-raw-frames invariant from §3:
+
+**Allowed keys at ingest:** `git_sha`, `ruleset_version`, `agent_version`, `signal_kind`, `agent_session_id`, scrubbed counter values (`mesh.events_emitted_total`, `mesh.rate_limited_total`, `mesh.sentry_post_success_rate`), timeout flags (`phi_scrub_timed_out`, `fingerprint_timed_out`, `local_journal_timed_out`), circuit-breaker state (`sentry_circuit_open`, `last_sentry_post_at`), calibration tags (`bug_class`).
+
+**Forbidden keys at ingest (Edge Function REJECTS occurrence on presence):** `raw_stack`, `stacktrace`, `frames`, `file_path`, `line`, `column`, `mvid`, `metadata_token`, `locals`, `arguments`, `sql_text_raw`, `uia_title_raw`, `request_body`, `response_body`, `connection_string`, `auth_token`.
+
+Enforcement: the Sentry-webhook → fingerprint_occurrences Edge Function (Phase 2) MUST reject any payload containing a forbidden key with a 4xx and surface the violation to `mesh.context_schema_violations_total`. Phase 1 agents are responsible for NOT emitting these keys in the first place via `SuavoAgent.Diagnostics.SentrySink.BeforeSend`; the Phase 2 ingest check is defense-in-depth against future regressions.
 
 Idempotency, retention, and timestamp-past-prod-last-applied discipline per [[feedback-migration-idempotency-before-merge]] and [[feedback-migration-timestamp-past-prod-last-applied]] standing rules.
 
@@ -657,23 +695,88 @@ The check runs (in parallel where possible): (a) AvaloniaInitSmokeTest (PR 3), (
 
 ---
 
-## 8. Open questions (for Codex review + /plan-eng-review + /plan-ceo-review)
+## 8. Resolved questions (was: open questions; all 8 RESOLVED at v1.0 via Codex re-review 2026-05-13)
 
 1. **Universal Wire() coverage — recursion safety.** The wire-ordering invariant in §7 PR 4 mandates `Wire.AttachUnhandledHooks` as `Program.Main` literal line 1, and Setup wraps AppBuilder.Configure in try/catch. Open for Codex: what if the handler ITSELF throws (e.g., PhiScrubber regex panic, Sentry SDK init AppDomain.UnhandledException recursion)? `WireOrderingTests.cs` catches static ordering but doesn't prove recursion safety. Recommend: nested try/catch inside `Wire.ReportException` with a SentinelException class that explicit-noops on second-entry.
 
+   **RESOLVED v1.0 (Codex re-review 2026-05-13).** Runtime recursion contract — `Wire.Report(...)` MUST maintain both `static readonly AsyncLocal<int> WireDepth` and `[ThreadStatic] static bool FatalHandlerActive`:
+   - **Depth 0→1** is the normal path.
+   - **Depth 1→2** is allowed only for handler-self-failure and MUST emit a minimal local-journal-only `mesh.wire_handler_failed` marker. No Sentry POST, no scrub on already-scrubbed payload.
+   - **Depth ≥3** MUST call `Environment.FailFast("SuavoAgent.Diagnostics Wire recursive failure", originalException)` on unhandled-exception paths; silent drop is forbidden because it hides a fatal observability failure.
+
+   Handler catch ordering (fixed, fail-closed PHI safety first):
+   1. `PhiScrubber.Sanitize(...)` first with `RegexOptions.NonBacktracking` and a 10ms timeout; on scrubber failure, drop all extras and continue with fingerprint-only signal.
+   2. `FingerprintComputer.Compute(...)`; on failure, use `fp-fallback:{component}:{signal_kind}`.
+   3. `LocalJournal.Append(...)` only; no Sentry POST, no flush, no SDK close from inside the catch handler.
+   4. Swallow only after the local marker attempt completes or times out.
+
+   **Sentry SDK composition rule:** Wire owns unhandled-exception capture. Sentry must be initialized as a transport sink only, with SDK default `AppDomain.UnhandledException` and `TaskScheduler.UnobservedTaskException` hooks **removed or not installed** (Sentry .NET SDK: `SentryOptions.DisableAppDomainUnhandledExceptionCapture()` + `DisableTaskUnobservedTaskExceptionCapture()`). `BeforeSend` may scrub and tag, but MUST NOT throw; if it throws, the event is dropped and `mesh.sentry_before_send_failed_total` increments. Otherwise Wire and Sentry double-capture the same fatal exception and can recurse through `BeforeSend`.
+
 2. **SDK-side scrub completeness.** PHI scrubber test corpus has 50+ patterns. Are there pharmacy-specific patterns we're missing — NDC codes, DEA numbers, prescriber NPIs, insurance member IDs, PioneerRx-specific identifiers? Should ruleset-v1.json's `patient_names_seed` array be populated for Phase 1 (Queen has no patients), or wait for Nadim?
+
+   **RESOLVED v1.0 (Codex re-review 2026-05-13).** 13 pharmacy-specific patterns added to §3 scrub patterns table: 5 NDC formats (4-4-2, 5-4-2, 5-3-2, 5-4-1, unhyphenated-with-label), DEA with 7th-digit checksum validation, prescriber NPI field-context (more reliable than naked-number Luhn alone), BCBS/Aetna/Cigna member-ID field-context, PioneerRx JSON/XML/SQL identifiers (`RxNumber`, `PatientID`, `PrescriberID`, `PharmacyChainID`). All regexes MUST use `RegexOptions.NonBacktracking`. `patient_names_seed` STAYS EMPTY in Phase 1 — Census/global-name dictionaries are forbidden because their false-positive rate redacts operational words (`May`, `Will`, `King`, `Price`, `Brown`, `White`, `Long`). Name dictionaries are Phase 2 only, tenant-scoped, from edge-side patient discovery.
 
 3. **Offline fingerprint compute.** Verify: agent computes fingerprint + writes local `events.jsonl` with no network, no Sentry, no Supabase. Sentry SDK init failure path is `try`/`catch` at the wire boundary — does this hold for every Wire() invocation pattern?
 
+   **RESOLVED v1.0 (Codex re-review 2026-05-13).** Chaos test matrix — all four failures MUST run **simultaneously** asserting handler-local p99 < 50ms, zero synchronous retries, bounded queue depth, uninterrupted `events.jsonl` writes:
+
+   | Scenario | Exact failure mode | Required .NET bound |
+   |---|---|---|
+   | Sentry TCP-RST mid-POST | Endpoint accepts TCP, then resets during envelope upload; Sentry worker records `HttpRequestException`/`IOException`; event remains local-journaled. | `SentryOptions.ConfigureClient = c => c.Timeout = TimeSpan.FromSeconds(2)`; `MaxQueueItems = 30`; **no `Flush()` on Wire path**. |
+   | DNS timeout for `sentry.io` | Resolver never returns; no crash caller waits for DNS. | `CreateHttpMessageHandler` returns `SocketsHttpHandler` with `ConnectTimeout = 250ms` and a `ConnectCallback` wrapping `Dns.GetHostAddressesAsync(...).WaitAsync(250ms)`. |
+   | Certificate validation failure | Expired/untrusted root produces TLS auth failure; certificate validation stays enabled. | Same `HttpClient.Timeout = 2s`; failure opens `sentry_circuit` for 60s to prevent retry storms. |
+   | Supabase Vault/ruleset cache unreachable | Phase 2 cloud ruleset fetch times out; Phase 1 embedded `ruleset-v1.json` remains authoritative. | Ruleset fetch is never on crash path; cloud ruleset client timeout = 1s; fallback = last-known-good, then embedded v1. |
+
+   **Codex correction (load-bearing):** Sentry .NET SDK has NO public `SentryOptions.SendTimeout` property. Earlier spec wording naming it was wrong. Bound the transport via `ConfigureClient` (sets `HttpClient.Timeout`), `CreateHttpMessageHandler` (sets `SocketsHttpHandler` connect timeout + `ConnectCallback` DNS deadline), `ShutdownTimeout ≤ 250ms`, `FlushTimeout ≤ 250ms`. The `ShutdownTimeout`/`FlushTimeout` knobs are for `suavo-report-crash.exe` only — Wire's unhandled-exception path NEVER calls synchronous flush or close.
+
 4. **Ruleset signing for Phase 2.** Signed rules cached with version + expiry + rollback + max output length + fail-closed behavior to last-known-good ruleset. Phase 2 — but the public-key pinning **must be baked into Phase 1's SuavoAgent.Diagnostics library** because adding the signing public key in Phase 2 requires re-shipping all agent versions. Which keyring? (Suggest: reuse `cmd-signing-key.pub.pem` from `publish.ps1`'s ECDsa key generation.)
+
+   **RESOLVED v1.0 (Codex re-review 2026-05-13) — REVERSED.** Do NOT reuse `cmd-signing-key.pub.pem`. Crypto-domain separation requires a separate ruleset signing key: a command-signing private key controls agent BEHAVIOR; a ruleset-signing key controls diagnostic GROUPING + scrub/fingerprint behavior. One compromise must not own both planes. Phase 1 ships a second ECDsa P-256 keypair:
+   - **Private key:** `ruleset-signing-key` in the same protected signing environment as command signing, but **separate material**.
+   - **Public key:** embedded resource `src/SuavoAgent.Diagnostics/Resources/ruleset-signing-key.pub.pem`.
+   - **Ruleset header fields:** `ruleset_version`, `key_id`, `signed_at`, `expires_at`, `signature_alg = "ECDSA_P256_SHA256"`.
+
+   **Ed25519 rejected** for Phase 1: .NET 8 `System.Security.Cryptography` does not expose a first-class Ed25519 signing API on Windows; adopting it requires NSec or BouncyCastle and adds dependency risk for negligible payload savings on 50-200KB rulesets. P-256 is already in the stack via `publish.ps1`'s ECDsa pattern.
+
+   **Key rotation:** the `key_id` field in the ruleset header is mandatory in Phase 1 so future rotation adds a new embedded public key + accepts both old and new `key_id` during the overlap window — no agent rebuild needed for rotation.
 
 5. **Cloud alias merging.** When a ruleset version bump re-groups Bug 22 and Bug 22-variant-2 into one fingerprint, cloud merges via `alias_of`. Does this require raw stack frames cloud-side to verify the merge is correct, or can we trust the agent-emitted canonical fingerprint? (Codex's answer: no raw frames needed; agent emits canonical, cloud just maintains alias graph.)
 
+   **RESOLVED v1.0 (Codex re-review 2026-05-13) — CONFIRMED.** Prior answer stands. No raw frames cloud-side. Cloud only maintains the `alias_of` graph. Codex caught one dangerous leak: §3's prior wording "Metadata token + MVID are captured for symbolication ... in the occurrence payload" weakened the no-raw-frames invariant for no operational gain. **§3 hardened**: no MVID, no metadata token, no raw frames cloud-side; symbolication uses `git_sha` + `component` + `exception_type` + `stable_error_code` + `primary_failure_site` only. **§6 hardened**: `context` JSONB allowlist + forbidden-keys list enforced at the Phase 2 ingest Edge Function.
+
 6. **supabase Vault vs AWS KMS for diagnostic bundles.** Phase 1: Vault is sufficient (bundles are pre-scrubbed at edge). Phase 3 multi-tenant: is KMS-grade key rotation + audited decrypts load-bearing, or does the pre-scrub + RLS + audit_log composition already meet the bar? Codex specifically wanted: "audited decrypt events per row read" comparison.
+
+   **RESOLVED v1.0 (Codex re-review 2026-05-13).** Phase 3 MUST migrate from Vault to KMS before multi-tenant pre-scrubbed bundles land. Full comparison table + directional answer + migration mechanics in §5. Phase 1 Vault choice stands.
 
 7. **`suavo-report-crash.exe` self-defense.** PR 4 now bakes in approach (b) — a tiny CLI tool publish.ps1 invokes on non-zero `$LASTEXITCODE`. Open for Codex: how does the tool itself avoid the same CLR fast-fail class it's meant to capture (Bug 24 recursion)? Recommend: tool ships as native AOT (`PublishAot=true`) to eliminate the CLR-fast-fail surface entirely, OR uses `IL2CPP`-style fallback. Also: should the tool also capture the publish.ps1 PID + parent PowerShell version + Yubikey presence (preflight echoes) so the diagnostic includes the developer's environment shape?
 
+   **RESOLVED v1.0 (Codex re-review 2026-05-13).** `suavo-report-crash.exe` ships **Native AOT (`PublishAot=true`) AND stdlib-only**. It MUST NOT reference `JsonSchema.Net`, Sentry SDK, Avalonia, or the full `SuavoAgent.Diagnostics` library — dragging schema validation or SDK init into a tiny crash reporter recreates the recursion class it exists to prevent. `JsonSchema.Net` remains build-time-only for `ruleset-v1.json` validation; runtime crash-report schema checks are handwritten: required args present, enum values valid, string lengths bounded, stdout tail capped, JSON written with `System.Text.Json` source generation or `Utf8JsonWriter`.
+
+   **publish.ps1 fallback (preserves original exit code on diagnostic failure):**
+   ```powershell
+   $originalExit = $LASTEXITCODE
+   try {
+     & "$PSScriptRoot\tools\suavo-report-crash.exe" --component Publish --exit-code $originalExit ...
+   } catch {
+     $pid = [System.Diagnostics.Process]::GetCurrentProcess().Id
+     Set-Content -Path "$env:TEMP\suavo-crash-report-failed.$pid.txt" `
+       -Value "suavo-report-crash failed; originalExit=$originalExit; error=$($_.Exception.GetType().FullName)"
+   }
+   exit $originalExit
+   ```
+
+   **Environment shape captured by the tool (YES to context capture):** publish.ps1 PID, parent PowerShell executable + version, YubiKey-present boolean, SmartCard service state, signing mode, EV cert thumbprint **HASH** (SHA-256 of the thumbprint string, not the raw thumbprint). Capture NO private key material, NO certificate subject if it contains personal identity (some EV certs have personal name in subject CN).
+
 8. **ruleset-v1.json initial population strategy.** Phase 1 ships with the 3 calibration crashes (Bug 22/23/24). Should we also seed a larger set of "things we expect to see" — Win32 errors 5/1326/1450 with named operations, common COM HRESULT classes, .NET fast-fail codes — or wait for real Queen signal? Risk of over-seeding: fingerprints we never see in the wild bloat the rule cache + create false confidence in coverage. Recommendation: ship Phase 1 with ONLY the 3 calibration crashes; expand from real signal.
+
+   **RESOLVED v1.0 (Codex re-review 2026-05-13) — SPLIT.** The "only 3 calibrations" recommendation is half right: avoids fake coverage but creates a coverage cliff. The lock is a structural split into two ruleset categories:
+
+   - **`calibration_fingerprints`** — Bug 22 / Bug 23 / Bug 24 only. These are the ONLY entries that count as covered at launch. They populate `fingerprint_registry` immediately and drive A1/A2 alerts.
+   - **`candidate_patterns`** — expected-but-unobserved classes that provide docking points for future real signal without claiming coverage. Phase 1 seeds: Win32 `native_error` 5, 1326, 1450; process exits `0xC0000005`, `0xE0434352`, `0x80004003`; Windows service error `1067`; and 5-7 known Avalonia/PioneerRx exception classes.
+
+   **Required fields per candidate entry:** `source: "seed"`, `confidence: "low"`, `first_observed_at: null`, `observed_count: 0`, `counts_as_coverage: false`.
+
+   **Dashboard enforcement:** candidate patterns are hidden by default, excluded from coverage percentages, excluded from A1/A2 alert thresholds, and promoted to observed only after a real local Wire event matches them. `confidence: low` alone is insufficient; without `counts_as_coverage: false` and `first_observed_at: null`, seeded rules create stale dashboard entries that recreate the false-confidence problem one layer down.
 
 ---
 
@@ -707,4 +810,14 @@ The check runs (in parallel where possible): (a) AvaloniaInitSmokeTest (PR 3), (
   - §7 PR 4 + PR 3 consolidated into `mesh-required-check` GitHub-required CI check spanning Avalonia smoke + fingerprint determinism + Pester preflight + ruleset schema + WireOrderingTests + EmitBudgetTests + PhiScrubber corpus.
   - §10 EXPANSION-mode trajectory locked: 10x version = mesh as agent self-knowledge layer (operations + corrections + cross-tenant pattern transplant + customer-facing transparency). Phase 1 architecture (Option D + signed rules + per-tenant keys) already supports it. Reversibility 4/5.
   - 1 TODO added: TODO-MESH-4 Avalonia smoke screenshot artifact (D5 deferred — exceeds 30-min delight threshold).
-- Pending: Codex re-review on §5 encryption choice + §8 open questions (recursion safety, native AOT, false-positive corpus, Phase 2 fingerprint re-calibration) before v1.0 lock.
+- **2026-05-13 v0.4** — Codex re-review of §5 encryption + §8 open questions complete. 8 items resolved with concrete spec edits, 0 conflicts with locked decisions:
+  - §3 PHI scrub table extended with 13 pharmacy-specific patterns (NDC 4 variants, DEA + checksum, prescriber NPI field-context, BCBS/Aetna/Cigna member IDs, PioneerRx JSON/XML/SQL identifiers). All regexes use `RegexOptions.NonBacktracking`. `patient_names_seed` STAYS EMPTY in Phase 1 — Census/global-name dictionaries forbidden (operational false-positive rate).
+  - §3 no-raw-frames invariant hardened: no MVID, no metadata token, no raw frames cloud-side. Symbolication via `git_sha` + `component` + `exception_type` + `stable_error_code` + `primary_failure_site` only.
+  - §5 Phase 3 direction LOCKED: Vault → KMS migration before multi-tenant pre-scrubbed bundles. Full comparison table + §164.312(a)(2)(iv) reasoning + migration mechanics (one-shot re-encrypt + coordinate with Phase A A2/A6).
+  - §6 `fingerprint_occurrences.context` JSONB allowlist + forbidden-keys enforcement at Phase 2 ingest Edge Function (`raw_stack`, `stacktrace`, `frames`, `file_path`, `line`, `mvid`, `metadata_token`, `locals`, `arguments`, `sql_text_raw`, `uia_title_raw`, `request_body`, `response_body`, `connection_string`, `auth_token`).
+  - §8.1 Wire recursion contract: `AsyncLocal<int> WireDepth` + `[ThreadStatic] FatalHandlerActive`. Depth 0→1 normal, 1→2 degraded local-only, ≥3 `Environment.FailFast`. Handler catch ordering fixed (PhiScrubber → Fingerprint → LocalJournal → swallow). Sentry SDK composition: Wire owns unhandled hooks, SDK's `DisableAppDomainUnhandledExceptionCapture()` + `DisableTaskUnobservedTaskExceptionCapture()` mandatory.
+  - §8.3 chaos test matrix: 4 simultaneous failures (TCP-RST, DNS timeout, cert validation, Vault unreachable). Codex caught load-bearing error: Sentry .NET SDK has NO public `SentryOptions.SendTimeout`; use `ConfigureClient` + `CreateHttpMessageHandler` + `SocketsHttpHandler.ConnectTimeout=250ms` + `ConnectCallback` DNS deadline.
+  - §8.4 ruleset signing key REVERSED — do NOT reuse `cmd-signing-key.pub.pem`. Crypto-domain separation mandates separate ECDsa P-256 keypair (`ruleset-signing-key.pub.pem` embedded resource); Ed25519 rejected (.NET 8 stdlib lacks first-class Ed25519 signing on Windows). `key_id` field added to ruleset header for rotation without agent rebuild.
+  - §8.7 `suavo-report-crash.exe` ships Native AOT + stdlib-only. NO JsonSchema.Net/Sentry SDK/Avalonia at runtime; build-time-only schema validation. publish.ps1 fallback preserves original exit code on diagnostic failure + writes `%TEMP%\suavo-crash-report-failed.<pid>.txt` marker. Captures publish PID + parent PS version + YubiKey + SmartCard + signing mode + **EV cert thumbprint hash** (SHA-256 of thumbprint, not raw).
+  - §8.8 ruleset population SPLIT: `calibration_fingerprints` (Bug 22/23/24 only, counts as coverage) + `candidate_patterns` (5-7 Win32/.NET/Avalonia/PioneerRx seeds with `confidence: low` + `counts_as_coverage: false` + `first_observed_at: null` + `observed_count: 0`). Dashboard excludes candidates from coverage % + alert thresholds.
+- **2026-05-13 v1.0 LOCKED** — All §8 questions resolved, all body sections (§3, §5, §6) updated with Codex's hardened constraints. Status header bumped from draft to LOCKED. Ready for Phase 1 PR 1 implementation per [[feedback-codex-review-every-spec]] standing rule.
