@@ -1,0 +1,62 @@
+name: Setup Smoke
+
+# Mesh PR 3: catches Bug 24's class (Avalonia InvalidCastException at
+# MainWindow.axaml DynamicResource type mismatch) BEFORE merge.
+#
+# Trigger filter expansion per spec section 7 PR 3: Bug 24's actual cause was
+# an Avalonia package version bump in Directory.Build.props, NOT a source
+# change in src/SuavoAgent.Setup/. Triggering on the package files catches
+# that class of regression at PR time, not after release.
+on:
+  pull_request:
+    paths:
+      - 'src/SuavoAgent.Setup/**'
+      - 'tests/SuavoAgent.Setup.Tests/**'
+      - 'Directory.Build.props'
+      - 'global.json'
+      - 'Directory.Packages.props'
+      - '.github/workflows/setup-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/SuavoAgent.Setup/**'
+      - 'tests/SuavoAgent.Setup.Tests/**'
+      - 'Directory.Build.props'
+      - 'global.json'
+      - 'Directory.Packages.props'
+      - '.github/workflows/setup-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  avalonia-init-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore SuavoAgent.Setup.Tests
+        run: dotnet restore tests/SuavoAgent.Setup.Tests/SuavoAgent.Setup.Tests.csproj
+
+      - name: Build Release
+        run: dotnet build tests/SuavoAgent.Setup.Tests/SuavoAgent.Setup.Tests.csproj --no-restore -c Release
+
+      - name: Run Avalonia init smoke
+        run: dotnet test tests/SuavoAgent.Setup.Tests/SuavoAgent.Setup.Tests.csproj --no-build -c Release --filter "FullyQualifiedName~AvaloniaInitSmokeTest" --logger "console;verbosity=detailed"
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: avalonia-smoke-logs
+          path: |
+            tests/SuavoAgent.Setup.Tests/bin/**/*.log
+            tests/SuavoAgent.Setup.Tests/TestResults/**/*
+          if-no-files-found: ignore
+          retention-days: 7
