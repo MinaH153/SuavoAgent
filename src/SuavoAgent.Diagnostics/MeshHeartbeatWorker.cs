@@ -30,26 +30,35 @@ public sealed class MeshHeartbeatWorker : BackgroundService
         try
         {
             // Fire immediately so Phase A A1 alarm sees a heartbeat within
-            // 5min of process start, not 10min.
-            Wire.Heartbeat(_component);
+            // 5min of process start, not 10min. Wrapped in TryHeartbeat so a
+            // first-call exception (e.g., Wire.AttachUnhandledHooks silently
+            // failed → uninitialized statics) does NOT fault ExecuteAsync
+            // and stop the host via BackgroundServiceExceptionBehavior.StopHost
+            // (.NET 8 default) — Codex chunk 4a HIGH.
+            TryHeartbeat();
 
             using var timer = new PeriodicTimer(_interval);
             while (!stoppingToken.IsCancellationRequested && await timer.WaitForNextTickAsync(stoppingToken))
             {
-                try
-                {
-                    Wire.Heartbeat(_component);
-                }
-                catch (Exception ex)
-                {
-                    // Heartbeat must never crash the host. Log + continue.
-                    _logger?.LogWarning(ex, "MeshHeartbeatWorker tick failed (continuing)");
-                }
+                TryHeartbeat();
             }
         }
         catch (OperationCanceledException)
         {
             // expected on host shutdown
+        }
+    }
+
+    private void TryHeartbeat()
+    {
+        try
+        {
+            Wire.Heartbeat(_component);
+        }
+        catch (Exception ex)
+        {
+            // Heartbeat must never crash the host. Log + continue.
+            _logger?.LogWarning(ex, "MeshHeartbeatWorker tick failed (continuing)");
         }
     }
 }

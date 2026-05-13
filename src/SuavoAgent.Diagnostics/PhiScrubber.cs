@@ -21,13 +21,17 @@ public sealed class PhiScrubber
     {
         _ruleset = ruleset;
         _timeout = timeout;
-        _rules = BuildRules();
+        // Per-rule regex timeout = scrubber timeout (Codex chunk 2b HIGH).
+        // No single rule may exceed the overall budget; cumulative budget
+        // enforced by the inter-rule check in Sanitize.
+        _rules = BuildRules(timeout);
     }
 
     /// <summary>
     /// Returns a PHI-scrubbed copy of the input. Hard 10ms budget per spec
-    /// §4 contract; on overrun, returns the input with <c>[SCRUB_TIMEOUT]</c>
-    /// marker and the caller drops the extras (fail-closed).
+    /// §4 contract; on overrun OR on any per-rule exception, returns the
+    /// <c>[SCRUB_TIMEOUT]</c> sentinel and the caller drops the extras
+    /// (fail-closed PHI safety per Codex chunk 2b HIGH).
     /// </summary>
     public string Sanitize(string? input)
     {
@@ -43,7 +47,19 @@ public sealed class PhiScrubber
             }
             try
             {
-                result = rule.Regex.Replace(result, rule.Replacement);
+                if (rule.PostValidator is { } validator)
+                {
+                    // Activate PostValidator via match evaluator: only
+                    // replace matches that pass the checksum/Luhn check.
+                    // Codex chunk 2b MEDIUM: previously dead code, every
+                    // shape-match was redacted regardless of validity.
+                    result = rule.Regex.Replace(result, m =>
+                        validator(m.Value) ? m.Result(rule.Replacement) : m.Value);
+                }
+                else
+                {
+                    result = rule.Regex.Replace(result, rule.Replacement);
+                }
             }
             catch (RegexMatchTimeoutException)
             {
@@ -51,8 +67,11 @@ public sealed class PhiScrubber
             }
             catch
             {
-                // a single rule failing should not nullify the whole scrub;
-                // continue with the next rule
+                // Codex chunk 2b HIGH: fail-closed on ANY rule exception.
+                // The previous fail-open behavior (continue to next rule)
+                // could leak PHI if a rule that was supposed to catch it
+                // threw an unexpected exception.
+                return "[SCRUB_TIMEOUT]";
             }
         }
 
@@ -63,8 +82,15 @@ public sealed class PhiScrubber
             {
                 if (sw.Elapsed > _timeout) return "[SCRUB_TIMEOUT]";
                 if (string.IsNullOrWhiteSpace(name)) continue;
-                result = Regex.Replace(result, $@"\b{Regex.Escape(name)}\b", "[PATIENT]",
-                    RegexOptions.IgnoreCase, _timeout);
+                try
+                {
+                    result = Regex.Replace(result, $@"\b{Regex.Escape(name)}\b", "[PATIENT]",
+                        RegexOptions.IgnoreCase, _timeout);
+                }
+                catch
+                {
+                    return "[SCRUB_TIMEOUT]";
+                }
             }
         }
 
@@ -79,30 +105,54 @@ public sealed class PhiScrubber
     /// </summary>
     public bool IsDefinitelyPhi(string scrubbed)
     {
-        // High-confidence post-scrub PHI shapes that should NEVER appear
-        // after Sanitize. If they do, the corpus has a hole; drop entirely.
+        // Codex chunk 2b HIGH: scrubber sentinels (like [PIONEERRX_ID])
+        // match some of the high-confidence regexes (e.g., PioneerRx-JSON
+        // regex matches "PatientID":"[PIONEERRX_ID]"). Strip sentinels
+        // before checking residual PHI to avoid dropping clean events.
+        var withoutSentinels = ScrubberSentinelPattern.Replace(scrubbed, string.Empty);
         foreach (var rule in _rules.Where(r => r.HighConfidence))
         {
-            if (rule.Regex.IsMatch(scrubbed)) return true;
+            try
+            {
+                if (rule.Regex.IsMatch(withoutSentinels)) return true;
+            }
+            catch
+            {
+                // If the residual check itself throws, conservatively treat
+                // as "definitely PHI" to fail-closed.
+                return true;
+            }
         }
         return false;
     }
 
-    private static List<ScrubRule> BuildRules()
+    /// <summary>
+    /// All scrubber replacement sentinels emitted by the rules in
+    /// <see cref="BuildRules"/>. Used by <see cref="IsDefinitelyPhi"/> to
+    /// distinguish "still has PHI" from "was scrubbed correctly".
+    /// </summary>
+    private static readonly Regex ScrubberSentinelPattern = new(
+        @"\[(?:PIONEERRX_ID|MEMBER_ID|NPI|NDC|DEA|SSN|RX_NUM|USER|DOB|PATIENT|SCRUB_TIMEOUT|SCRUB_FAILED)\]",
+        RegexOptions.Compiled | RegexOptions.NonBacktracking);
+
+    private static List<ScrubRule> BuildRules(TimeSpan timeout)
     {
         var opts = RegexOptions.NonBacktracking | RegexOptions.IgnoreCase;
-        // NonBacktracking does not support backreferences. The XML
-        // matching-tag rule below uses \1 so it falls back to the
-        // standard engine with a timeout; the input class ([^<]+) is
-        // linear so catastrophic-backtracking is not a concern there.
+        // NonBacktracking does not support backreferences (Codex chunk 2b
+        // LOW confirmed via .NET 8 docs; lazy quantifiers ARE supported).
+        // Only the XML matching-tag rule uses \1, so it alone falls back
+        // to the standard engine with a per-rule timeout.
         var optsWithBackref = RegexOptions.IgnoreCase;
-        var timeout = TimeSpan.FromMilliseconds(50);
 
         return new List<ScrubRule>
         {
             // ── PioneerRx field-context (highest selectivity, run first) ──
+            // Codex chunk 2b CRITICAL: previous value class [^",}\s]+
+            // stopped at first space, leaking the rest of quoted values
+            // like "John Doe". Now matches either a full quoted string
+            // (with spaces / commas inside) OR an unquoted compact value.
             new("PioneerRx-JSON",
-                new Regex(@"""(RxNumber|PatientID|PrescriberID|PharmacyChainID)""\s*:\s*""?[^"",}\s]+""?",
+                new Regex(@"""(RxNumber|PatientID|PrescriberID|PharmacyChainID)""\s*:\s*(?:""[^""]*""|[^,}\s]+)",
                     opts, timeout),
                 "\"$1\":\"[PIONEERRX_ID]\"",
                 highConfidence: true),
@@ -119,21 +169,22 @@ public sealed class PhiScrubber
 
             // ── Insurance member IDs (field-context required) ──
             // Lazy .{0,24}? skips filler words between context keyword and
-            // the member-ID-shaped token. NonBacktracking is incompatible
-            // with `.{0,24}?` lazy quantifiers, so these rules fall back to
-            // the standard engine with a 50ms timeout — token shapes are
-            // bounded so catastrophic backtracking is not a concern.
+            // the member-ID-shaped token. Codex chunk 2b LOW corrected:
+            // .NET 8 NonBacktracking DOES support lazy quantifiers (only
+            // backreferences + lookarounds are unsupported), so these
+            // rules now use the NonBacktracking engine for catastrophic-
+            // backtracking immunity.
             new("BCBS-Member",
                 new Regex(@"\b(bcbs|blue\s*cross|member_?id)\b.{0,24}?\b[A-Z]{3}\d{6,14}\b",
-                    optsWithBackref, timeout),
+                    opts, timeout),
                 "$1 [MEMBER_ID]"),
             new("Aetna-Member",
                 new Regex(@"\b(aetna|member_?id)\b.{0,24}?\bW\d{8,12}\b",
-                    optsWithBackref, timeout),
+                    opts, timeout),
                 "$1 [MEMBER_ID]"),
             new("Cigna-Member",
                 new Regex(@"\b(cigna|member_?id)\b.{0,24}?\bU?\d{9,12}\b",
-                    optsWithBackref, timeout),
+                    opts, timeout),
                 "$1 [MEMBER_ID]"),
 
             // ── Prescriber NPI (field-context required, more reliable than naked-Luhn) ──

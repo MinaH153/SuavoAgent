@@ -8,7 +8,8 @@ namespace SuavoAgent.Diagnostics;
 /// enforces this via Roslyn scan.
 ///
 /// Runtime recursion contract (Codex §8.1 RESOLVED v1.0):
-/// - AsyncLocal&lt;int&gt; WireDepth + [ThreadStatic] FatalHandlerActive.
+/// - AsyncLocal&lt;int&gt; WireDepth tracks nested entries across async
+///   continuations.
 /// - Depth 0→1 normal, 1→2 degraded local-journal-only marker,
 ///   ≥3 Environment.FailFast (silent drop forbidden on unhandled paths).
 /// - Handler catch ordering FIXED: PhiScrubber → FingerprintComputer →
@@ -18,7 +19,11 @@ namespace SuavoAgent.Diagnostics;
 public static class Wire
 {
     private static readonly AsyncLocal<int> _wireDepth = new();
-    [ThreadStatic] private static bool _fatalHandlerActive;
+    // _fatalHandlerActive was previously [ThreadStatic] but was dead code —
+    // only set immediately before Environment.FailFast (which terminates
+    // the process synchronously) so the flag has no observable effect.
+    // Removed in Codex chunk 1 LOW. The AsyncLocal depth counter alone
+    // is the recursion guard.
 
     private static WireComponent _component;
     private static WireOptions _options = new();
@@ -39,8 +44,19 @@ public static class Wire
     public static long WireHandlerFailedTotal => Interlocked.Read(ref _wireHandlerFailedTotal);
     public static long FpFallbackTotal => Interlocked.Read(ref _fpFallbackTotal);
     public static long RateLimitedTotal => _budget?.RateLimitedTotal ?? 0;
-    public static long SentryPostSuccessTotal => _sentry?.PostSuccessTotal ?? 0;
-    public static long SentryPostFailedTotal => _sentry?.PostFailedTotal ?? 0;
+    /// <summary>
+    /// Count of Sentry events successfully ENQUEUED into the SDK's worker
+    /// queue. Per Codex chunk 1 HIGH: the SDK posts asynchronously, so
+    /// enqueue success ≠ HTTP POST success. During an outage, events
+    /// enqueue OK but the worker never drains. Heartbeat surfaces this
+    /// as <c>mesh.sentry_enqueued_total</c> + a separate
+    /// <c>mesh.sentry_enqueue_failed_total</c> for SDK-throw cases. True
+    /// transport-success metrics require Sentry's client-report hook
+    /// (deferred to a Phase 2 follow-up).
+    /// </summary>
+    public static long SentryEnqueuedTotal => _sentry?.EnqueuedTotal ?? 0;
+    public static long SentryEnqueueFailedTotal => _sentry?.EnqueueFailedTotal ?? 0;
+    public static long SentryBeforeSendFailedTotal => _sentry?.BeforeSendFailedTotal ?? 0;
     public static bool SentryInitialized => _sentry?.IsInitialized ?? false;
     public static WireComponent Component => _component;
     public static string RulesetVersion => _ruleset.RulesetVersion;
@@ -114,35 +130,40 @@ public static class Wire
     /// <summary>
     /// Synthetic heartbeat — fires every 5min from MeshHeartbeatWorker.
     /// Exercises the full Wire path (scrub → fingerprint → journal →
-    /// Sentry POST). Phase A A1 silent-agent alarm pages Joshua if
-    /// Queen's mesh.heartbeat absent &gt;30min.
+    /// Sentry POST) per spec §4 self-heartbeat contract. Phase A A1
+    /// silent-agent alarm pages Joshua if Queen's mesh.heartbeat absent
+    /// &gt;30min.
     /// </summary>
+    /// <remarks>
+    /// Codex chunk 1 HIGH: previously hand-built fingerprint + manually
+    /// called Sentry/journal, bypassing scrub/fingerprint compute/emit
+    /// budget/crash-log fallback. Now routes through ReportSignal so the
+    /// real crash pipeline is continuously verified. Heartbeat extras
+    /// are attached via ExtraTags on the WireSignal so DispatchNormal's
+    /// Sentry post includes them.
+    /// </remarks>
     public static void Heartbeat(WireComponent component)
     {
-        if (!_initialized || _sentry is null || _fingerprinter is null) return;
+        if (!_initialized) return;
 
-        var fingerprint = $"{component}|heartbeat|||mesh.heartbeat|";
-        var extras = new Dictionary<string, string>
+        ReportSignal(new WireSignal
         {
-            ["mesh.events_emitted_total"] = EventsEmittedTotal.ToString(),
-            ["mesh.rate_limited_total"] = RateLimitedTotal.ToString(),
-            ["mesh.wire_handler_failed_total"] = WireHandlerFailedTotal.ToString(),
-            ["mesh.fp_fallback_total"] = FpFallbackTotal.ToString(),
-            ["mesh.sentry_post_success_total"] = SentryPostSuccessTotal.ToString(),
-            ["mesh.sentry_post_failed_total"] = SentryPostFailedTotal.ToString(),
-            ["mesh.sentry_initialized"] = SentryInitialized.ToString(),
-            ["mesh.ruleset_version"] = _ruleset.RulesetVersion,
-            ["mesh.git_sha"] = BuildContext.DefaultGitSha,
-        };
-        _sentry.CaptureMessage("mesh.heartbeat", fingerprint, component,
-            Sentry.SentryLevel.Info, extras);
-        _journal?.Append(new Dictionary<string, object?>
-        {
-            ["ts"] = DateTimeOffset.UtcNow.ToString("o"),
-            ["signal_kind"] = "heartbeat",
-            ["component"] = component.ToString(),
-            ["fp_v1"] = fingerprint,
-            ["extras"] = extras,
+            Component = component,
+            Kind = WireSignalKind.Heartbeat,
+            Stage = "mesh.heartbeat",
+            ExtraTags = new Dictionary<string, string>
+            {
+                ["mesh.events_emitted_total"] = EventsEmittedTotal.ToString(),
+                ["mesh.rate_limited_total"] = RateLimitedTotal.ToString(),
+                ["mesh.wire_handler_failed_total"] = WireHandlerFailedTotal.ToString(),
+                ["mesh.fp_fallback_total"] = FpFallbackTotal.ToString(),
+                ["mesh.sentry_enqueued_total"] = SentryEnqueuedTotal.ToString(),
+                ["mesh.sentry_enqueue_failed_total"] = SentryEnqueueFailedTotal.ToString(),
+                ["mesh.sentry_before_send_failed_total"] = SentryBeforeSendFailedTotal.ToString(),
+                ["mesh.sentry_initialized"] = SentryInitialized.ToString(),
+                ["mesh.ruleset_version"] = _ruleset.RulesetVersion,
+                ["mesh.git_sha"] = BuildContext.DefaultGitSha,
+            },
         });
     }
 
@@ -153,9 +174,11 @@ public static class Wire
         _wireDepth.Value = depth;
         try
         {
-            if (depth >= 3 && !_fatalHandlerActive)
+            if (depth >= 3)
             {
-                _fatalHandlerActive = true;
+                // Silent drop forbidden on unhandled paths — FailFast
+                // terminates the process synchronously with the original
+                // exception captured.
                 Environment.FailFast(
                     "SuavoAgent.Diagnostics Wire recursive failure (depth>=3)",
                     signal.Exception);
@@ -166,23 +189,46 @@ public static class Wire
             {
                 // Handler-self-failure path: emit minimal local-journal-only
                 // marker; no scrub on already-scrubbed payload, no Sentry.
+                // Codex chunk 1 HIGH: even this best-effort write must be
+                // guarded — Dictionary allocation can OOM, _journal.Append
+                // could rarely escape its own catch on resource exhaustion.
                 Interlocked.Increment(ref _wireHandlerFailedTotal);
-                _journal?.Append(new Dictionary<string, object?>
+                try
                 {
-                    ["ts"] = DateTimeOffset.UtcNow.ToString("o"),
-                    ["signal_kind"] = "wire_handler_failed",
-                    ["component"] = signal.Component.ToString(),
-                    ["depth"] = 2,
-                });
+                    _journal?.Append(new Dictionary<string, object?>
+                    {
+                        ["ts"] = DateTimeOffset.UtcNow.ToString("o"),
+                        ["signal_kind"] = "wire_handler_failed",
+                        ["component"] = signal.Component.ToString(),
+                        ["depth"] = 2,
+                    });
+                }
+                catch
+                {
+                    // Already in degraded state; swallow.
+                }
                 return;
             }
 
-            DispatchNormal(signal);
+            // Codex chunk 1 CRITICAL (reclassified as defense-in-depth):
+            // even though every internal step has its own try/catch, an
+            // outer guard ensures DispatchNormal cannot throw past the
+            // recursion-safety boundary. A static-initializer race or
+            // OOM during step transitions would otherwise propagate to
+            // the AppDomain handler and crash the handler itself.
+            try
+            {
+                DispatchNormal(signal);
+            }
+            catch
+            {
+                Interlocked.Increment(ref _wireHandlerFailedTotal);
+                // Final swallow — depth-1 handler must not propagate.
+            }
         }
         finally
         {
             _wireDepth.Value = Math.Max(0, depth - 1);
-            if (depth == 1) _fatalHandlerActive = false;
         }
     }
 
@@ -225,7 +271,7 @@ public static class Wire
         // 3. LocalJournal — always best-effort, never throws past this boundary
         try
         {
-            _journal?.Append(new Dictionary<string, object?>
+            var journalEntry = new Dictionary<string, object?>
             {
                 ["ts"] = signal.OccurredAtUtc.ToString("o"),
                 ["signal_kind"] = signal.Kind.ToString(),
@@ -238,13 +284,20 @@ public static class Wire
                 ["exit_code"] = signal.ExitCode,
                 ["git_sha"] = BuildContext.DefaultGitSha,
                 ["ruleset_version"] = _ruleset.RulesetVersion,
-            });
+            };
+            if (signal.ExtraTags is { Count: > 0 } extras)
+            {
+                journalEntry["extras"] = extras;
+            }
+            _journal?.Append(journalEntry);
         }
         catch { /* swallow */ }
 
         // 4. Local crash-log defense-in-depth (preserves pre-mesh
-        //    startup-crash.log path)
-        if (!string.IsNullOrEmpty(_options.LocalCrashLogPath))
+        //    startup-crash.log path). Heartbeats skip the crash-log to
+        //    avoid filling it with non-crash markers.
+        if (signal.Kind != WireSignalKind.Heartbeat &&
+            !string.IsNullOrEmpty(_options.LocalCrashLogPath))
         {
             LocalJournal.AppendCrashLog(_options.LocalCrashLogPath,
                 $"[{signal.Component}/{signal.Kind}] fp={fingerprint} msg={scrubbedMessage}");
@@ -256,9 +309,20 @@ public static class Wire
         //    awaited on the crash-handler critical path.
         if (_budget?.TryConsume(signal.Component) == true && _sentry is not null)
         {
+            var sentryLevel = signal.Kind switch
+            {
+                WireSignalKind.Heartbeat => Sentry.SentryLevel.Info,
+                WireSignalKind.InvariantViolation => Sentry.SentryLevel.Error,
+                _ => Sentry.SentryLevel.Error,
+            };
             if (signal.Exception is not null)
             {
-                _sentry.CaptureException(signal.Exception, fingerprint, signal.Component, signal.Stage);
+                _sentry.CaptureException(
+                    signal.Exception,
+                    fingerprint,
+                    signal.Component,
+                    signal.Stage,
+                    signal.ExtraTags);
             }
             else
             {
@@ -266,7 +330,8 @@ public static class Wire
                     scrubbedMessage ?? signal.InvariantId ?? "(no message)",
                     fingerprint,
                     signal.Component,
-                    Sentry.SentryLevel.Error);
+                    sentryLevel,
+                    signal.ExtraTags);
             }
         }
     }
@@ -281,13 +346,23 @@ public static class Wire
 
     private static void OnUnobservedTask(object? sender, UnobservedTaskExceptionEventArgs e)
     {
-        ReportSignal(new WireSignal
+        // Codex chunk 1 MEDIUM: SetObserved MUST run even if ReportSignal
+        // throws (it shouldn't post-fix, but belt-and-suspenders). Without
+        // this, the task would re-fire UnobservedTaskException → double
+        // capture or process termination.
+        try
         {
-            Component = _component,
-            Kind = WireSignalKind.UnobservedTask,
-            Exception = e.Exception,
-            Stage = "TaskScheduler.UnobservedTaskException",
-        });
-        e.SetObserved();
+            ReportSignal(new WireSignal
+            {
+                Component = _component,
+                Kind = WireSignalKind.UnobservedTask,
+                Exception = e.Exception,
+                Stage = "TaskScheduler.UnobservedTaskException",
+            });
+        }
+        finally
+        {
+            e.SetObserved();
+        }
     }
 }

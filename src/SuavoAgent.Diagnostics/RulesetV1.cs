@@ -77,35 +77,64 @@ public sealed class RulesetV1
     /// </summary>
     public static RulesetV1 LoadEmbedded()
     {
-        var asm = typeof(RulesetV1).Assembly;
-        var name = asm.GetManifestResourceNames()
-            .FirstOrDefault(n => n.EndsWith("ruleset-v1.json", StringComparison.Ordinal));
-        if (name is null)
+        try
         {
-            return new RulesetV1(); // fail-closed minimal v0
+            var asm = typeof(RulesetV1).Assembly;
+            var name = asm.GetManifestResourceNames()
+                .FirstOrDefault(n => n.EndsWith("ruleset-v1.json", StringComparison.Ordinal));
+            if (name is null) return FailClosedFallback("manifest-resource-missing");
+
+            using var stream = asm.GetManifestResourceStream(name);
+            if (stream is null) return FailClosedFallback("resource-stream-null");
+
+            var loaded = JsonSerializer.Deserialize<RulesetV1>(stream, JsonOpts);
+            if (loaded is null) return FailClosedFallback("deserialize-returned-null");
+            return loaded;
         }
-        using var stream = asm.GetManifestResourceStream(name);
-        if (stream is null)
+        catch (Exception ex)
         {
-            return new RulesetV1();
+            return FailClosedFallback($"exception:{ex.GetType().Name}");
         }
-        return JsonSerializer.Deserialize<RulesetV1>(stream, JsonOpts) ?? new RulesetV1();
+    }
+
+    /// <summary>
+    /// Spec §4 failure-mode contract: on embedded-resource load failure,
+    /// fingerprint compute uses ruleset-v0 (hardcoded minimal fallback).
+    /// The version label MUST NOT silently claim <c>v1.0</c> — telemetry
+    /// needs to distinguish a real v1.0 from a silent fallback so dashboards
+    /// can alert when the agent is operating without the calibration set
+    /// (Codex chunk 3 HIGH).
+    /// </summary>
+    private static RulesetV1 FailClosedFallback(string reason)
+    {
+        System.Diagnostics.Trace.TraceWarning(
+            "SuavoAgent.Diagnostics: embedded ruleset-v1.json failed to load ({0}); falling back to ruleset-v0 (no calibrations, no candidates).",
+            reason);
+        return new RulesetV1
+        {
+            RulesetVersion = "ruleset-v0",
+            KeyId = "ruleset-v0-fallback",
+            SignedAt = string.Empty,
+            SignatureAlg = "NONE",
+        };
     }
 
     /// <summary>
     /// Stub: verify the ruleset's ECDsa P-256 signature against the
-    /// embedded <c>ruleset-signing-key.pub.pem</c> public key. Phase 2
-    /// implements full signature verification; Phase 1 always returns
-    /// true because the embedded ruleset is trusted by virtue of being
-    /// shipped in the signed assembly itself.
+    /// embedded <c>ruleset-signing-key.pub.pem</c> public key.
     /// </summary>
+    /// <remarks>
+    /// Phase 1: returns true because Authenticode protects the
+    /// EMBEDDED resource only (the publish.ps1-signed assembly carries
+    /// the ruleset bytes as part of the signed PE). The separate
+    /// ruleset-signing ECDsa P-256 key becomes load-bearing in Phase 2,
+    /// when the agent receives signed ruleset deliveries OTA from the
+    /// cloud (cached at runtime, no longer protected by Authenticode).
+    /// At that point this method MUST actually verify <paramref name="signatureBytes"/>
+    /// against the public key. Codex chunk 3 MEDIUM clarification.
+    /// </remarks>
     public bool VerifySignature(byte[]? signatureBytes = null)
     {
-        // Phase 1: trust embedded ruleset (the assembly itself is
-        // Authenticode-signed by publish.ps1; embedded resource is part
-        // of the signed binary, so an additional ECDsa sig is belt+
-        // suspenders that's only load-bearing when we move to cloud OTA
-        // distribution in Phase 2.)
         return true;
     }
 

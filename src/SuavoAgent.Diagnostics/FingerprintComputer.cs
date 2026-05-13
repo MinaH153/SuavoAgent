@@ -85,6 +85,10 @@ public sealed class FingerprintComputer
         WireSignalKind.UnobservedTask => "unobserved_task",
         WireSignalKind.ExitCode => "exit_code",
         WireSignalKind.Hang => "hang",
+        // Heartbeat reserves a canonical fingerprint shape that cannot
+        // collide with a real crash class. Routed through DispatchNormal
+        // per spec §4 self-heartbeat contract (Codex chunk 1 HIGH).
+        WireSignalKind.Heartbeat => "heartbeat",
         _ => "unknown",
     };
 
@@ -100,18 +104,22 @@ public sealed class FingerprintComputer
         }
         if (signal.Exception is { } ex)
         {
-            // HRESULT for COM / unmanaged-native paths
+            // HRESULT for COM / unmanaged-native paths.
             var hr = unchecked((uint)ex.HResult);
-            // Plain System.Exception has HResult 0x80131500 (E_FAIL-ish);
-            // only emit hresult= for derived-class exceptions where it's
-            // load-bearing identity.
-            if (ex.GetType() != typeof(Exception) && hr != 0x80131500)
+            // 0x80131500 is COR_E_EXCEPTION — the default HResult inherited
+            // from System.Exception base class. Many derived exceptions keep
+            // this value (no override), so it carries zero entropy beyond
+            // exception_type. Skip it. Codex chunk 2a LOW fix: comment
+            // previously misidentified this as E_FAIL (which is 0x80004005).
+            if (ex.GetType() != typeof(Exception) && hr != CorEException)
             {
                 return $"hresult=0x{hr:X8}";
             }
         }
         return string.Empty;
     }
+
+    private const uint CorEException = 0x80131500;
 
     /// <summary>
     /// Walk the stack of <c>signal.Exception</c> (or current call site for
@@ -120,8 +128,24 @@ public sealed class FingerprintComputer
     /// — no path, no line, no MVID, no metadata token (Codex §5 hardened
     /// no-raw-frames invariant).
     /// </summary>
+    /// <remarks>
+    /// Stability caveat (Codex chunk 2a CRITICAL #2): stack-derived
+    /// fingerprints are NOT 100% stable across builds with different
+    /// inlining decisions / runtime tiers. If `Foo` is inlined into `Bar`,
+    /// the stack trace shows `Bar`, and we fingerprint `Bar`. For
+    /// must-bucket-deterministically signals (Bug 22's actuation-token,
+    /// Bug 23's invariant_id) prefer <see cref="WireSignal.Stage"/> or
+    /// <see cref="WireSignal.InvariantId"/> over the walked frame. In-app
+    /// cross-assembly inlining is rare in practice; the current shape is
+    /// stable enough for crash bucketing.
+    /// </remarks>
     private static string ExtractPrimaryFailureSite(WireSignal signal, Stopwatch sw)
     {
+        // Heartbeat: reserved operation identifier (Codex chunk 1 HIGH).
+        if (signal.Kind == WireSignalKind.Heartbeat)
+        {
+            return "mesh.heartbeat";
+        }
         // Invariant violations: site is the catalog id; no stack to walk.
         if (signal.Kind == WireSignalKind.InvariantViolation && signal.InvariantId is { } id)
         {
@@ -141,19 +165,36 @@ public sealed class FingerprintComputer
             {
                 var method = frame.GetMethod();
                 if (method is null) continue;
+
+                // Codex chunk 2a CRITICAL #1: async state-machine frames
+                // are reverse-mapped to the user's async method via
+                // AsyncStateMachineAttribute. Without this, a crash in
+                // an `async Task Foo()` body would skip MoveNext (which
+                // looks like a wrapper) and land on System.Threading.Tasks
+                // internals (not in-app), losing the user method identity.
+                var resolved = ResolveAsyncStateMachineMethod(method);
+                if (resolved is not null)
+                {
+                    method = resolved;
+                }
+
                 if (IsWrapperFrame(method)) continue;
                 var asmName = method.DeclaringType?.Assembly.GetName().Name ?? "anonymous";
                 if (!IsInAppAssembly(asmName)) continue;
                 return FormatMethodIdentity(asmName, method);
             }
 
-            // No in-app frame found — return the outermost in-frame even if
-            // wrapper, to keep fingerprint identity rather than empty.
-            var first = frames.Select(f => f.GetMethod()).FirstOrDefault(m => m is not null);
-            if (first is not null)
+            // No in-app frame found — fall back to the first NON-WRAPPER
+            // frame (was: first non-null which often landed on async
+            // builders / runtime internals — Codex chunk 2a MEDIUM #1).
+            foreach (var f in frames)
             {
-                var asmName = first.DeclaringType?.Assembly.GetName().Name ?? "anonymous";
-                return FormatMethodIdentity(asmName, first);
+                var m = f.GetMethod();
+                if (m is null) continue;
+                var rm = ResolveAsyncStateMachineMethod(m) ?? m;
+                if (IsWrapperFrame(rm)) continue;
+                var asmName = rm.DeclaringType?.Assembly.GetName().Name ?? "anonymous";
+                return FormatMethodIdentity(asmName, rm);
             }
         }
         catch
@@ -165,12 +206,61 @@ public sealed class FingerprintComputer
         return string.Empty;
     }
 
+    /// <summary>
+    /// Reverse-map a state-machine MoveNext frame back to the original
+    /// async method that declared it. If <paramref name="frameMethod"/>
+    /// is the MoveNext of a generated <c>IAsyncStateMachine</c>, finds the
+    /// enclosing method whose <c>[AsyncStateMachine]</c> attribute points
+    /// to this state machine type. Returns null if not an async state
+    /// machine frame or if no enclosing method matches.
+    /// </summary>
+    private static MethodBase? ResolveAsyncStateMachineMethod(MethodBase frameMethod)
+    {
+        if (frameMethod.Name != "MoveNext") return null;
+        var stateMachine = frameMethod.DeclaringType;
+        if (stateMachine is null) return null;
+        if (!typeof(System.Runtime.CompilerServices.IAsyncStateMachine).IsAssignableFrom(stateMachine))
+        {
+            return null;
+        }
+
+        var enclosingType = stateMachine.DeclaringType;
+        if (enclosingType is null) return null;
+
+        foreach (var m in enclosingType.GetMethods(
+            BindingFlags.Public | BindingFlags.NonPublic |
+            BindingFlags.Static | BindingFlags.Instance |
+            BindingFlags.DeclaredOnly))
+        {
+            var attr = m.GetCustomAttribute<AsyncStateMachineAttribute>();
+            if (attr is not null && attr.StateMachineType == stateMachine)
+            {
+                return m;
+            }
+        }
+        return null;
+    }
+
+    // Codex chunk 2a MEDIUM #1: expanded wrapper list covers ValueTask
+    // builders, awaiter wrappers, and pooling variants. Async state
+    // machine MoveNext frames are handled separately by
+    // ResolveAsyncStateMachineMethod (reverse-map to user method).
     private static readonly HashSet<string> WrapperTypePrefixes = new(StringComparer.Ordinal)
     {
         "System.Runtime.CompilerServices.AsyncTaskMethodBuilder",
+        "System.Runtime.CompilerServices.AsyncValueTaskMethodBuilder",
+        "System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder",
+        "System.Runtime.CompilerServices.AsyncVoidMethodBuilder",
+        "System.Runtime.CompilerServices.AsyncIteratorMethodBuilder",
         "System.Runtime.CompilerServices.AsyncMethodBuilderCore",
+        "System.Runtime.CompilerServices.TaskAwaiter",
+        "System.Runtime.CompilerServices.ConfiguredTaskAwaitable",
+        "System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable",
+        "System.Runtime.CompilerServices.ValueTaskAwaiter",
         "System.Runtime.ExceptionServices",
         "System.Threading.Tasks.Task",
+        "System.Threading.Tasks.ValueTask",
+        "System.Threading.Tasks.Sources",
         "System.Threading.ExecutionContext",
         "System.Reflection.RuntimeMethodInfo",
     };
@@ -213,17 +303,60 @@ public sealed class FingerprintComputer
 
     private static string FormatMethodIdentity(string assemblyName, MethodBase method)
     {
-        var typeFullName = method.DeclaringType?.FullName ?? "<global>";
-        // Strip generic-instantiation tick suffix (`1, `2, etc.) to keep
-        // identity stable across closed/open generic specializations.
-        typeFullName = StripGenericArity(typeFullName);
+        var declaringType = method.DeclaringType;
+        var typeFullName = declaringType is null
+            ? "<global>"
+            : FormatType(declaringType);
         var methodName = StripGenericArity(method.Name);
         var paramTypes = method.GetParameters()
-            .Select(p => StripGenericArity(p.ParameterType.FullName ?? p.ParameterType.Name))
+            .Select(p => FormatType(p.ParameterType))
             .ToArray();
         var arity = paramTypes.Length;
         var paramsStr = paramTypes.Length == 0 ? string.Empty : string.Join(",", paramTypes);
         return $"{assemblyName}.{typeFullName}.{methodName}({arity}{(paramsStr.Length > 0 ? "," + paramsStr : string.Empty)})";
+    }
+
+    /// <summary>
+    /// Recursively format a Type without assembly-qualified noise (Codex
+    /// chunk 2a MEDIUM #2). <see cref="Type.FullName"/> on closed generic
+    /// args produces strings like
+    /// <c>Dictionary`2[[System.String, System.Private.CoreLib, Version=8.0.0.0, ...]]</c>
+    /// — the Version/Culture/PublicKeyToken payload would shift between
+    /// .NET versions and break "same crash same fingerprint". This builds
+    /// the type identity from <c>GetGenericTypeDefinition</c> +
+    /// <c>GetGenericArguments</c> recursion, never touching FullName for
+    /// generic args.
+    /// </summary>
+    private static string FormatType(Type t)
+    {
+        if (t.IsArray)
+        {
+            var elem = t.GetElementType();
+            return (elem is null ? "<anon>" : FormatType(elem)) + "[]";
+        }
+        if (t.IsByRef)
+        {
+            var elem = t.GetElementType();
+            return (elem is null ? "<anon>" : FormatType(elem)) + "&";
+        }
+        if (t.IsPointer)
+        {
+            var elem = t.GetElementType();
+            return (elem is null ? "<anon>" : FormatType(elem)) + "*";
+        }
+        if (t.IsGenericParameter)
+        {
+            // Generic parameters keep their name (T, TKey, etc.) — stable.
+            return t.Name;
+        }
+        if (!t.IsGenericType)
+        {
+            return StripGenericArity(t.FullName ?? t.Name);
+        }
+        var def = t.GetGenericTypeDefinition();
+        var defName = StripGenericArity(def.FullName ?? def.Name);
+        var args = string.Join(",", t.GetGenericArguments().Select(FormatType));
+        return $"{defName}[{args}]";
     }
 
     private static string StripGenericArity(string name)

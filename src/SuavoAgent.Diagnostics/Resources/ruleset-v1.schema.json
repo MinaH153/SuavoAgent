@@ -7,11 +7,13 @@
   "required": [
     "ruleset_version",
     "key_id",
+    "signed_at",
     "signature_alg",
     "calibration_fingerprints",
     "invariant_catalog",
     "candidate_patterns",
-    "patient_names_seed"
+    "patient_names_seed",
+    "signature_base64"
   ],
   "properties": {
     "ruleset_version": {
@@ -49,7 +51,7 @@
     },
     "candidate_patterns": {
       "type": "array",
-      "description": "Expected-but-unobserved classes. Dashboard-hidden until observed. counts_as_coverage MUST be false at seed time.",
+      "description": "Expected-but-unobserved classes. Dashboard-hidden until observed. counts_as_coverage MUST be false at seed time (spec §8.8 RESOLVED v1.0).",
       "items": {
         "type": "object",
         "required": [
@@ -71,7 +73,23 @@
           "exception_type": { "type": ["string", "null"] },
           "stable_error_code": { "type": ["string", "null"] },
           "notes": { "type": ["string", "null"] }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "source": { "const": "seed" } },
+              "required": ["source"]
+            },
+            "then": {
+              "description": "Seeded candidates MUST be unobserved and uncovered (spec §8.8). Promotion via source=observed/promoted may relax this.",
+              "properties": {
+                "counts_as_coverage": { "const": false },
+                "first_observed_at": { "type": "null" },
+                "observed_count": { "const": 0 }
+              }
+            }
+          }
+        ]
       }
     },
     "patient_names_seed": {

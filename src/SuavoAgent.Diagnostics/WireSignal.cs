@@ -13,6 +13,15 @@ public enum WireSignalKind
     UnobservedTask,
     ExitCode,
     Hang,
+    /// <summary>
+    /// Synthetic mesh.heartbeat signal. Spec §4 self-heartbeat contract:
+    /// every 5min the worker fires a heartbeat through the FULL Wire path
+    /// (scrub → fingerprint → journal → Sentry) so every link is
+    /// continuously verified. FingerprintComputer reserves a canonical
+    /// fingerprint shape for this kind that cannot collide with any
+    /// real crash class (Codex chunk 1 HIGH).
+    /// </summary>
+    Heartbeat,
 }
 
 /// Component enum — field 1 of fp-v1. Fixed: Core / Broker / Helper /

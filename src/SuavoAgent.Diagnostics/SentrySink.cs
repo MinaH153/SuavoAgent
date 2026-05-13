@@ -22,8 +22,14 @@ public sealed class SentrySink : IDisposable
     private readonly IDisposable? _sdkDisposable;
     private bool _initialized;
     private long _beforeSendFailedTotal;
-    private long _postSuccessTotal;
-    private long _postFailedTotal;
+    // Codex chunk 1 HIGH: previously named PostSuccess/PostFailed, but the
+    // Sentry SDK queues asynchronously — CaptureException returns true on
+    // ENQUEUE, not on HTTP POST success. During an outage the queue could
+    // fill silently without any "failed" count. Renamed to make the
+    // semantics explicit. True transport-result metrics require a
+    // Sentry client-report hook (Phase 2 follow-up).
+    private long _enqueuedTotal;
+    private long _enqueueFailedTotal;
 
     public SentrySink(WireOptions options, PhiScrubber scrubber, FingerprintComputer fingerprinter)
     {
@@ -35,8 +41,8 @@ public sealed class SentrySink : IDisposable
 
     public bool IsInitialized => _initialized;
     public long BeforeSendFailedTotal => Interlocked.Read(ref _beforeSendFailedTotal);
-    public long PostSuccessTotal => Interlocked.Read(ref _postSuccessTotal);
-    public long PostFailedTotal => Interlocked.Read(ref _postFailedTotal);
+    public long EnqueuedTotal => Interlocked.Read(ref _enqueuedTotal);
+    public long EnqueueFailedTotal => Interlocked.Read(ref _enqueueFailedTotal);
 
     private IDisposable? TryInit()
     {
@@ -69,6 +75,16 @@ public sealed class SentrySink : IDisposable
                 // burst per component per heartbeat interval at the 10/sec
                 // EmitBudget contract.
                 o.MaxQueueItems = 30;
+
+                // Codex chunk 1 MEDIUM PHI safety: disable breadcrumb
+                // accumulation entirely. Sentry SDK auto-captures
+                // breadcrumbs from Microsoft.Extensions.Logging when the
+                // integration is wired. Any agent code logging PHI
+                // (which it shouldn't, but is possible) would otherwise
+                // carry to Sentry unscrubbed. v1 stance: zero breadcrumbs.
+                // If future fingerprints need breadcrumb context, switch
+                // to a BeforeBreadcrumb scrub hook.
+                o.MaxBreadcrumbs = 0;
 
                 // Shutdown/flush bounded so suavo-report-crash.exe finishes
                 // fast. Wire's unhandled path never calls Flush.
@@ -119,7 +135,7 @@ public sealed class SentrySink : IDisposable
     {
         try
         {
-            // Scrub message + exception messages + breadcrumbs + extras.
+            // Scrub message + exception messages.
             if (!string.IsNullOrEmpty(evt.Message?.Message))
             {
                 evt.Message = new SentryMessage { Message = _scrubber.Sanitize(evt.Message.Message) };
@@ -132,6 +148,21 @@ public sealed class SentrySink : IDisposable
                     {
                         ex.Value = _scrubber.Sanitize(ex.Value);
                     }
+                }
+            }
+
+            // Codex chunk 1 MEDIUM PHI safety: breadcrumb auto-capture is
+            // already disabled via MaxBreadcrumbs=0 in TryInit, so no
+            // breadcrumb scrub is needed here.
+
+            // Scrub string-valued Extra entries (tags are set explicitly
+            // by ApplyScope from non-PHI sources, so they are not
+            // re-scrubbed here).
+            foreach (var key in evt.Extra.Keys.ToList())
+            {
+                if (evt.Extra[key] is string s && !string.IsNullOrEmpty(s))
+                {
+                    evt.SetExtra(key, _scrubber.Sanitize(s));
                 }
             }
 
@@ -163,12 +194,12 @@ public sealed class SentrySink : IDisposable
             {
                 ApplyScope(scope, fingerprint, component, stage, extraTags);
             });
-            Interlocked.Increment(ref _postSuccessTotal);
+            Interlocked.Increment(ref _enqueuedTotal);
             return true;
         }
         catch
         {
-            Interlocked.Increment(ref _postFailedTotal);
+            Interlocked.Increment(ref _enqueueFailedTotal);
             return false;
         }
     }
@@ -187,12 +218,12 @@ public sealed class SentrySink : IDisposable
             {
                 ApplyScope(scope, fingerprint, component, stage: null, extraTags);
             }, level);
-            Interlocked.Increment(ref _postSuccessTotal);
+            Interlocked.Increment(ref _enqueuedTotal);
             return true;
         }
         catch
         {
-            Interlocked.Increment(ref _postFailedTotal);
+            Interlocked.Increment(ref _enqueueFailedTotal);
             return false;
         }
     }
