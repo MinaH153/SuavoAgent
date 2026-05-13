@@ -51,7 +51,7 @@ $ErrorActionPreference = "Stop"
 
 # ── Result helpers ──────────────────────────────────────────────────────────
 
-$script:Results = New-Object System.Collections.Generic.List[object]
+$script:Results = [System.Collections.Generic.List[object]]::new()
 
 function New-PreflightResult {
     param(
@@ -78,7 +78,9 @@ function Add-PreflightResult {
 # ── Individual check functions (each testable in isolation) ─────────────────
 
 function Test-PowerShell7Version {
-    param([Version]$PsVersion = $PSVersionTable.PSVersion)
+    # Untyped param — pwsh 7's $PSVersionTable.PSVersion is [SemanticVersion],
+    # not [System.Version]. The implicit conversion can throw via reflection.
+    param($PsVersion = $PSVersionTable.PSVersion)
     if ($PsVersion.Major -ge 7) {
         return New-PreflightResult -Name "pwsh-version" -Status PASS `
             -Detail ("PowerShell {0}" -f $PsVersion)
