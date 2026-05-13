@@ -33,6 +33,7 @@
   <ItemGroup>
     <ProjectReference Include="..\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
     <ProjectReference Include="..\SuavoAgent.Core\SuavoAgent.Core.csproj" />
+    <ProjectReference Include="..\SuavoAgent.Diagnostics\SuavoAgent.Diagnostics.csproj" />
   </ItemGroup>
 
 </Project>
