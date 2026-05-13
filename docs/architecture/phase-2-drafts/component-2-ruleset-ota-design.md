@@ -45,7 +45,7 @@ Phase 2 work:
 
 **Signing**: cloud Edge Function fetches the ruleset signing private key from supabase Vault on each request (low volume, cache TTL 5min), signs the canonicalized JSON, returns bundle. Per spec §5 — Vault for Phase 1+2, KMS for Phase 3 when per-tenant keys arrive.
 
-**Canonicalization**: agent and cloud must agree on JSON canonicalization. Use RFC 8785 (JSON Canonicalization Scheme) OR a custom "minimal canonical": object keys lexicographically sorted, no insignificant whitespace, UTF-8 NFC, numbers as decimals. Codex re-review must pick one; recommend RFC 8785 for tooling availability.
+**Canonicalization**: **LOCKED to RFC 8785 (JSON Canonicalization Scheme) only.** No custom fallback. RFC 8785 specifies UTF-16 key ordering + ECMAScript number serialization + forbids Unicode normalization — drift from any of these between cloud and agent produces signed-but-rejected bundles (Codex review v1 CRITICAL, Comp 2 chunk A). Use .NET `JCS` library on cloud side; on agent side use a vetted RFC 8785 implementation (the `JsonCanonicalizer` NuGet package or a hand-rolled implementation with the RFC 8785 Appendix B/property-order test vectors as a golden test). Both implementations MUST pass the shared RFC 8785 conformance vectors before code lands.
 
 ## B. Agent-side: extend ConfigSyncWorker
 
@@ -76,35 +76,130 @@ try
     else
     {
         await RulesetSyncStore.SaveAsync(bundle, stoppingToken);
-        Wire.SwapRuleset(bundle.Ruleset);  // new API on Wire
+        Wire.SwapRuleset(bundle.Ruleset);  // publishes a new RulesetRuntime snapshot
     }
 }
 catch (Exception ex) { /* swallow per ConfigSyncWorker contract */ }
 ```
 
-New `Wire.SwapRuleset(RulesetV1)` API:
-- Replaces `Wire._ruleset` under a lock
-- Increments `mesh.ruleset_version_swaps_total` counter for observability
-- Rebuilds `_scrubber` and `_fingerprinter` (both take `_ruleset` in their constructors)
-
-## C. Replace `RulesetV1.VerifySignature()` stub
-
-Current stub at line 137 returns `true`. Phase 2 implementation:
+**Wire RulesetRuntime snapshot pattern** (Codex review v1 HIGH, Comp 2 chunk B): The current Wire reads `_ruleset`, `_scrubber`, and `_fingerprinter` as three INDEPENDENT fields on signal-emit threads. A lock-protected swap of those three fields does NOT make readers observe a consistent generation — under .NET memory model (ECMA-335 §I.12.6.6-§I.12.6.7) a reader can see new-ruleset + old-scrubber + old-fingerprinter mid-swap. Fix:
 
 ```csharp
-public bool VerifySignature(byte[] signatureBytes)
+public sealed record RulesetRuntime(
+    RulesetV1 Ruleset,
+    PhiScrubber Scrubber,
+    FingerprintComputer Fingerprinter);
+
+private static RulesetRuntime _runtime = null!;  // initialized in Initialize()
+
+public static void SwapRuleset(RulesetV1 next)
 {
-    if (signatureBytes is null || signatureBytes.Length == 0) return false;
-    var pubKey = LoadEmbeddedPublicKey();  // ruleset-signing-key.pub.pem
-    using var ecdsa = ECDsa.Create();
-    ecdsa.ImportFromPem(pubKey);
-    var canonicalJson = CanonicalizeForSigning(this);  // RFC 8785
-    var data = Encoding.UTF8.GetBytes(canonicalJson);
-    return ecdsa.VerifyData(data, signatureBytes, HashAlgorithmName.SHA256);
+    // Build OFF-LOCK to avoid lock-order hazards with emit paths re-entering Wire.
+    var nextRuntime = new RulesetRuntime(
+        next,
+        new PhiScrubber(next, _options.ScrubberTimeout),
+        new FingerprintComputer(next, _options.FingerprintTimeout));
+    Volatile.Write(ref _runtime, nextRuntime);   // single publication barrier
+    Interlocked.Increment(ref _meshRulesetSwapsTotal);
+    // Emit POST-publication — no lock held; safe even if EmitMeshSignal re-enters Wire.
+    EmitMeshSignal(SignalKind.RulesetSwapped, "ConfigSyncWorker",
+        $"ruleset_version={next.RulesetVersion} key_id={next.KeyId}");
+}
+
+// In every Wire dispatcher (DispatchNormal etc.):
+public static void DispatchNormal(...)
+{
+    var rt = Volatile.Read(ref _runtime);     // ONE read per signal
+    var scrubbed = rt.Scrubber.Scrub(...);
+    var fp       = rt.Fingerprinter.Compute(...);
+    // ... use rt.Ruleset only — never re-read _runtime mid-dispatch
 }
 ```
 
-Move this method to a new helper class `RulesetSignatureVerifier` so it's testable independently of `RulesetV1` (which is a data model).
+Publication via `Volatile.Write` + reader `Volatile.Read` produces a memory barrier consistent with the .NET memory model; no lock is needed on the read path, eliminating the lock-order risk Codex flagged.
+
+## C. Replace `RulesetV1.VerifySignature()` stub + multi-key trust store
+
+Current stub at line 137 returns `true`. Phase 2 needs both real signature verification AND a `key_id → ECDsa` trust store from day one (Codex review v1 HIGH, Comp 2 chunk C): a single embedded pubkey makes rotation impossible (compromise rotation cannot safely rely on an OTA signed by the compromised old key; normal rotation requires an agent rebuild). Ship multi-key from the start; embed N keys, ruleset bundle's `key_id` selects which.
+
+New file: `src/SuavoAgent.Diagnostics/RulesetSignatureVerifier.cs`:
+
+```csharp
+public sealed class RulesetSignatureVerifier
+{
+    private readonly IReadOnlyDictionary<string, ECDsa> _trustStore;
+
+    public static RulesetSignatureVerifier LoadEmbeddedTrustStore()
+    {
+        // Embedded resources: ruleset-signing-key-<keyId>.pub.pem (1..N keys).
+        // Mirrors SignedCommandVerifier's key_id registry, but with a SEPARATE
+        // set of keys (spec §8.4: ruleset signing keypair MUST NOT overlap
+        // with cmd-signing-key — crypto-domain separation).
+        var asm = typeof(RulesetSignatureVerifier).Assembly;
+        var dict = new Dictionary<string, ECDsa>(StringComparer.Ordinal);
+        foreach (var resName in asm.GetManifestResourceNames()
+                                   .Where(n => n.Contains("ruleset-signing-key-")
+                                            && n.EndsWith(".pub.pem", StringComparison.Ordinal)))
+        {
+            var keyId = ExtractKeyId(resName);  // ruleset-signing-key-<keyId>.pub.pem → <keyId>
+            using var stream = asm.GetManifestResourceStream(resName)!;
+            using var reader = new StreamReader(stream);
+            var pem = reader.ReadToEnd();
+            var ecdsa = ECDsa.Create();
+            ecdsa.ImportFromPem(pem);
+            dict[keyId] = ecdsa;
+        }
+        return new RulesetSignatureVerifier(dict);
+    }
+
+    public VerificationResult Verify(RulesetBundle bundle)
+    {
+        if (bundle.SignatureBytes is null || bundle.SignatureBytes.Length == 0)
+            return new(false, "Missing signature");
+        if (!_trustStore.TryGetValue(bundle.Ruleset.KeyId, out var key))
+            return new(false, $"Unknown key_id: {bundle.Ruleset.KeyId}");
+        if (DateTimeOffset.TryParse(bundle.Ruleset.ExpiresAt, out var exp)
+            && exp < DateTimeOffset.UtcNow)
+            return new(false, "Ruleset expired");
+        var canonicalJson = JsonCanonicalizer.Canonicalize(bundle.Ruleset);  // RFC 8785
+        var data = Encoding.UTF8.GetBytes(canonicalJson);
+        return key.VerifyData(data, bundle.SignatureBytes, HashAlgorithmName.SHA256)
+            ? new(true, null)
+            : new(false, "Signature mismatch");
+    }
+}
+```
+
+The Phase 1 `RulesetV1.VerifySignature()` method is moved here (it's now a stub-removal + redirect). `RulesetV1` stays a pure data model; `RulesetSignatureVerifier` is testable independently with valid/invalid/expired/key-mismatch test vectors.
+
+**Key rotation policy** (Codex review v1 MEDIUM, Comp 2 chunk C — framing correction): Vault supports `ecdsa-p256` key versioning; rotation cadence is **MKM operational policy**, not derived from Vault best practices. Default: annual rotation OR immediate on suspected compromise. Vault stores/signs with the private key version; agent trust is controlled by the embedded multi-key public trust store. Adding a new key_id to the agent trust store requires a normal agent OTA release; emergency rotation can pre-stage a future key_id in the trust store before the cloud starts signing with it.
+
+## D. On-disk persistence — RulesetSyncStore atomic replace
+
+(Codex review v1 MEDIUM, Comp 2 chunk B): `File.Move(temp, final)` only suits FIRST install when no final file exists. For subsequent ruleset updates, use Windows `ReplaceFile` semantics via .NET `File.Replace(temp, final, backup)`, which preserves name identity (open file handles continue working) and gives us a recoverable backup. Sequence:
+
+```csharp
+public async Task SaveAsync(RulesetBundle bundle, CancellationToken ct)
+{
+    var finalPath  = Path.Combine(_dir, "ruleset-current.json");
+    var tempPath   = Path.Combine(_dir, $"ruleset-{Guid.NewGuid():N}.tmp");
+    var backupPath = Path.Combine(_dir, "ruleset-previous.json");
+
+    // Write temp in the SAME directory as final so File.Replace is atomic
+    // (cross-volume moves degrade to copy+delete and lose atomicity).
+    await using (var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+    {
+        await JsonSerializer.SerializeAsync(fs, bundle, ct);
+        await fs.FlushAsync(ct);
+        fs.Flush(flushToDisk: true);  // fsync — survive power loss
+    }
+
+    if (File.Exists(finalPath))
+        File.Replace(tempPath, finalPath, backupPath);  // atomic on NTFS
+    else
+        File.Move(tempPath, finalPath);
+}
+```
 
 ## Failure modes (must be tested)
 

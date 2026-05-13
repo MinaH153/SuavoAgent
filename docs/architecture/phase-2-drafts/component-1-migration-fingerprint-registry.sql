@@ -47,12 +47,62 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'fingerprint_registry_fingerprint_key'
+      AND connamespace = 'public'::regnamespace
+      AND conrelid     = 'public.fingerprint_registry'::regclass
   ) THEN
     ALTER TABLE public.fingerprint_registry
       ADD CONSTRAINT fingerprint_registry_fingerprint_key
       UNIQUE (fingerprint);
   END IF;
+
+  -- alias_of cycle safety (Codex review v1 HIGH, Comp 1 chunk 3):
+  -- The FK alone proves the target exists but doesn't prevent A→B→A cycles.
+  -- Direct CHECK blocks the trivial A→A case. Deeper cycles are caught by
+  -- the constraint trigger below before write commits.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fingerprint_registry_alias_self_chk'
+      AND connamespace = 'public'::regnamespace
+      AND conrelid     = 'public.fingerprint_registry'::regclass
+  ) THEN
+    ALTER TABLE public.fingerprint_registry
+      ADD CONSTRAINT fingerprint_registry_alias_self_chk
+      CHECK (alias_of IS NULL OR alias_of <> id);
+  END IF;
 END $$;
+
+-- Deeper cycle guard: BEFORE INSERT OR UPDATE trigger walks alias_of from
+-- NEW.alias_of and rejects if NEW.id appears in the walk. Bounded by a
+-- hop limit (32) to defend against pathological backfills.
+CREATE OR REPLACE FUNCTION public.fingerprint_registry_no_alias_cycles()
+  RETURNS trigger
+  LANGUAGE plpgsql
+  AS $$
+DECLARE
+  cur BIGINT := NEW.alias_of;
+  hops INT := 0;
+BEGIN
+  WHILE cur IS NOT NULL AND hops < 32 LOOP
+    IF cur = NEW.id THEN
+      RAISE EXCEPTION 'fingerprint_registry: alias_of cycle would form via id=%', NEW.id
+        USING ERRCODE = 'check_violation';
+    END IF;
+    SELECT alias_of INTO cur FROM public.fingerprint_registry WHERE id = cur;
+    hops := hops + 1;
+  END LOOP;
+  IF hops >= 32 THEN
+    RAISE EXCEPTION 'fingerprint_registry: alias_of walk exceeded 32 hops from id=%; refusing to commit', NEW.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS fingerprint_registry_no_alias_cycles_trg
+  ON public.fingerprint_registry;
+CREATE TRIGGER fingerprint_registry_no_alias_cycles_trg
+  BEFORE INSERT OR UPDATE OF alias_of ON public.fingerprint_registry
+  FOR EACH ROW WHEN (NEW.alias_of IS NOT NULL)
+  EXECUTE FUNCTION public.fingerprint_registry_no_alias_cycles();
 
 -- Spec §6 sketched a CHECK constraint enumerating components + signal_kinds.
 -- We use SOFT validation (TEXT + secondary check trigger or app-layer) so
@@ -95,6 +145,8 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'fingerprint_occurrences_sentry_event_id_key'
+      AND connamespace = 'public'::regnamespace
+      AND conrelid     = 'public.fingerprint_occurrences'::regclass
   ) THEN
     ALTER TABLE public.fingerprint_occurrences
       ADD CONSTRAINT fingerprint_occurrences_sentry_event_id_key
@@ -126,17 +178,13 @@ DECLARE
     'sql_text_raw', 'uia_title_raw', 'request_body', 'response_body',
     'connection_string', 'auth_token'
   ];
-  k TEXT;
 BEGIN
   IF ctx IS NULL OR jsonb_typeof(ctx) <> 'object' THEN
     RETURN TRUE;
   END IF;
-  FOREACH k IN ARRAY forbidden LOOP
-    IF ctx ? k THEN
-      RETURN FALSE;
-    END IF;
-  END LOOP;
-  RETURN TRUE;
+  -- ?| is the IMMUTABLE "any key exists" operator — single op vs FOREACH
+  -- loop on the hot path (Codex review v1 MEDIUM, Comp 1 chunk 2).
+  RETURN NOT (ctx ?| forbidden);
 END $$;
 
 DO $$
@@ -144,6 +192,8 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'fingerprint_occurrences_context_no_phi_keys'
+      AND connamespace = 'public'::regnamespace
+      AND conrelid     = 'public.fingerprint_occurrences'::regclass
   ) THEN
     ALTER TABLE public.fingerprint_occurrences
       ADD CONSTRAINT fingerprint_occurrences_context_no_phi_keys
@@ -221,14 +271,167 @@ CREATE POLICY fingerprint_occurrences_service_all
   WITH CHECK (true);
 
 -- Grants — authenticated never writes; service_role inserts via Edge Function.
+-- (Codex review v1 HIGH, Comp 1 chunk 1): RLS policies filter rows AFTER
+-- privileges; the service_role policy alone doesn't grant table or sequence
+-- privileges, so Edge Function inserts would fail without these explicit GRANTs.
 REVOKE INSERT, UPDATE, DELETE ON public.fingerprint_registry    FROM authenticated, anon;
 REVOKE INSERT, UPDATE, DELETE ON public.fingerprint_occurrences FROM authenticated, anon;
 GRANT  SELECT                  ON public.fingerprint_registry    TO authenticated;
 GRANT  SELECT                  ON public.fingerprint_occurrences TO authenticated;
+GRANT  SELECT, INSERT, UPDATE, DELETE ON public.fingerprint_registry    TO service_role;
+GRANT  SELECT, INSERT, UPDATE, DELETE ON public.fingerprint_occurrences TO service_role;
+GRANT  USAGE, SELECT ON SEQUENCE public.fingerprint_registry_id_seq    TO service_role;
+GRANT  USAGE, SELECT ON SEQUENCE public.fingerprint_occurrences_id_seq TO service_role;
 
 COMMENT ON TABLE public.fingerprint_registry IS
   'Mesh Phase 2: one row per unique fp_v1 fingerprint. See docs/architecture/diagnostic-mesh-queen-first.md §6.';
 COMMENT ON TABLE public.fingerprint_occurrences IS
   'Mesh Phase 2: per-pharmacy occurrence of a fingerprint. context JSONB is allowlist-only — see fingerprint_context_no_forbidden_keys() CHECK + Edge Function validation.';
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- GH issue lifecycle: claims + jobs queue
+-- ════════════════════════════════════════════════════════════════════════════
+-- Codex review v1 CRITICAL/HIGH (Comp 3 chunks F + D): GH issue create-race +
+-- repository_dispatch rate-limit (100/hr) cannot be solved by workflow-side
+-- concurrency groups alone. The action decision (create / bump / reopen) MUST
+-- be made in the cloud under a DB-level lock; the workflow only EXECUTES the
+-- already-claimed action.
+
+-- ── fingerprint_issue_links: 1:1 claim row per fingerprint → GH issue ───────
+-- The Edge Function INSERTs ON CONFLICT DO NOTHING to claim creation of a new
+-- GH issue. Only the transaction winner dispatches `create` to GH Actions; all
+-- other concurrent Sentry posts read the (still-NULL or now-populated)
+-- github_issue_number column and dispatch `bump` instead.
+
+CREATE TABLE IF NOT EXISTS public.fingerprint_issue_links (
+  fingerprint_id     BIGINT       PRIMARY KEY REFERENCES public.fingerprint_registry(id) ON DELETE CASCADE,
+  github_issue_number INT,                 -- NULL until GH workflow reports back
+  github_repo        TEXT         NOT NULL, -- 'MinaH153/SuavoAgent' etc.
+  state              TEXT         NOT NULL DEFAULT 'claimed'
+                                  CHECK (state IN ('claimed', 'open', 'closed', 'reopened')),
+  claimed_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  last_action_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS fingerprint_issue_links_open_idx
+  ON public.fingerprint_issue_links (last_action_at DESC)
+  WHERE state IN ('claimed', 'open', 'reopened');
+
+ALTER TABLE public.fingerprint_issue_links ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS fingerprint_issue_links_owner_read
+  ON public.fingerprint_issue_links;
+CREATE POLICY fingerprint_issue_links_owner_read
+  ON public.fingerprint_issue_links
+  FOR SELECT
+  TO authenticated
+  USING (public.is_owner());
+
+DROP POLICY IF EXISTS fingerprint_issue_links_service_all
+  ON public.fingerprint_issue_links;
+CREATE POLICY fingerprint_issue_links_service_all
+  ON public.fingerprint_issue_links
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+REVOKE INSERT, UPDATE, DELETE ON public.fingerprint_issue_links FROM authenticated, anon;
+GRANT  SELECT                  ON public.fingerprint_issue_links TO authenticated;
+GRANT  SELECT, INSERT, UPDATE, DELETE ON public.fingerprint_issue_links TO service_role;
+
+-- ── fingerprint_issue_jobs: durable, coalesced GH dispatch queue ────────────
+-- One pending row per fingerprint per dispatch window. Edge Function UPSERTs
+-- on (fingerprint_id, window_start) so an alert storm of 100s/min for one
+-- fingerprint collapses to one job; the batch worker drains it under the
+-- repository_dispatch 100/hr cap, persisting cursor via last_issue_sync_at /
+-- last_issue_occurrence_id on the registry row (added below).
+
+CREATE TABLE IF NOT EXISTS public.fingerprint_issue_jobs (
+  id                BIGSERIAL    PRIMARY KEY,
+  fingerprint_id    BIGINT       NOT NULL REFERENCES public.fingerprint_registry(id) ON DELETE CASCADE,
+  action            TEXT         NOT NULL CHECK (action IN ('create', 'bump', 'reopen')),
+  window_start      TIMESTAMPTZ  NOT NULL,
+  enqueued_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  dispatched_at     TIMESTAMPTZ,
+  succeeded_at      TIMESTAMPTZ,
+  failure_count     INT          NOT NULL DEFAULT 0,
+  last_error        TEXT,
+  coalesced_count   INT          NOT NULL DEFAULT 1  -- # occurrences folded into this job
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fingerprint_issue_jobs_unique_window'
+      AND connamespace = 'public'::regnamespace
+      AND conrelid     = 'public.fingerprint_issue_jobs'::regclass
+  ) THEN
+    ALTER TABLE public.fingerprint_issue_jobs
+      ADD CONSTRAINT fingerprint_issue_jobs_unique_window
+      UNIQUE (fingerprint_id, window_start);
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS fingerprint_issue_jobs_pending_idx
+  ON public.fingerprint_issue_jobs (enqueued_at)
+  WHERE succeeded_at IS NULL;
+
+ALTER TABLE public.fingerprint_issue_jobs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS fingerprint_issue_jobs_owner_read
+  ON public.fingerprint_issue_jobs;
+CREATE POLICY fingerprint_issue_jobs_owner_read
+  ON public.fingerprint_issue_jobs
+  FOR SELECT
+  TO authenticated
+  USING (public.is_owner());
+
+DROP POLICY IF EXISTS fingerprint_issue_jobs_service_all
+  ON public.fingerprint_issue_jobs;
+CREATE POLICY fingerprint_issue_jobs_service_all
+  ON public.fingerprint_issue_jobs
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+REVOKE INSERT, UPDATE, DELETE ON public.fingerprint_issue_jobs FROM authenticated, anon;
+GRANT  SELECT                  ON public.fingerprint_issue_jobs TO authenticated;
+GRANT  SELECT, INSERT, UPDATE, DELETE ON public.fingerprint_issue_jobs TO service_role;
+GRANT  USAGE, SELECT ON SEQUENCE public.fingerprint_issue_jobs_id_seq TO service_role;
+
+-- ── Sweep cursor columns on fingerprint_registry (Comp 3 MEDIUM) ────────────
+-- Persist per-fingerprint cursor so the recovery sweep advances atomically
+-- after each GH lifecycle action succeeds (idempotent replay).
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name   = 'fingerprint_registry'
+      AND column_name  = 'last_issue_sync_at'
+  ) THEN
+    ALTER TABLE public.fingerprint_registry
+      ADD COLUMN last_issue_sync_at TIMESTAMPTZ;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name   = 'fingerprint_registry'
+      AND column_name  = 'last_issue_occurrence_id'
+  ) THEN
+    ALTER TABLE public.fingerprint_registry
+      ADD COLUMN last_issue_occurrence_id BIGINT REFERENCES public.fingerprint_occurrences(id);
+  END IF;
+END $$;
+
+COMMENT ON TABLE public.fingerprint_issue_links IS
+  'Mesh Phase 2: 1:1 claim row per fingerprint → GH issue. Edge Function INSERT ON CONFLICT DO NOTHING resolves the create/bump/reopen action decision at the DB layer (not workflow-side). See docs/architecture/phase-2-drafts/component-3-* §F.';
+COMMENT ON TABLE public.fingerprint_issue_jobs IS
+  'Mesh Phase 2: coalesced GH dispatch queue. UPSERT on (fingerprint_id, window_start) collapses alert storms into one pending job; batch worker drains under the 100/hr repository_dispatch cap. See docs/architecture/phase-2-drafts/component-3-* §D.';
 
 COMMIT;
