@@ -201,10 +201,14 @@ if (-not (Test-Path -LiteralPath $tailScript)) {
         $line = "{`"ts`":`"$now`",`"signal_kind`":`"$_`",`"component`":`"Core`",`"fp_v1`":`"Core|$_|||smoke.test|`"}"
         $line | Out-File -FilePath $syntheticEventsPath -Append -Encoding utf8
     }
+    $tailLog = Join-Path $env:TEMP "tail-smoke-out-$(Get-Random).log"
     try {
-        # *>&1 captures the information stream (6) where Write-Host writes;
-        # plain 2>&1 only catches stderr and would miss tail-events.ps1's output.
-        $tailOut = & $tailScript -Tail 10 -Path $syntheticEventsPath *>&1 | Out-String
+        # File redirection (*> $file) is the only reliable way to capture
+        # Write-Host output across stream-redirection nuances in pwsh 7.
+        # *>&1 | Out-String drops Information records in some pwsh builds.
+        & $tailScript -Tail 10 -Path $syntheticEventsPath *> $tailLog
+        $tailOut = (Get-Content -LiteralPath $tailLog -Raw -ErrorAction SilentlyContinue)
+        if ($null -eq $tailOut) { $tailOut = '' }
         if ($tailOut -match 'managed_exception' -and $tailOut -match 'heartbeat') {
             Add-Result 'tail-renders' 'PASS' "$($kinds.Count) signal kinds rendered"
         } else {
@@ -214,6 +218,7 @@ if (-not (Test-Path -LiteralPath $tailScript)) {
         Add-Result 'tail-renders' 'FAIL' "tail script threw: $($_.Exception.Message)"
     }
     Remove-Item -LiteralPath $syntheticEventsPath -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tailLog -ErrorAction SilentlyContinue
 }
 
 # ── 4. publish.ps1 end-to-end (optional, ~8 min) ──────────────────────
