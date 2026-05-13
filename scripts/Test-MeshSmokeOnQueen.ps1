@@ -65,12 +65,13 @@ if (-not (Test-Path -LiteralPath $preflightPath)) {
     Add-Result 'preflight-script-exists' 'FAIL' "missing at $preflightPath"
 } else {
     # Per preflight contract: empty CertThumbprint + -SkipSigning = signing-checks SKIP.
-    # Passing -CertThumbprint '' (empty) tripped a param-binding type mismatch in pwsh 7,
-    # so use the documented -SkipSigning path when no cert is supplied.
-    $preflightArgs = if ([string]::IsNullOrWhiteSpace($CertThumbprint)) {
-        @('-SkipSigning', '-Json')
+    # Hashtable splat avoids pwsh 7 array-splat ambiguity where '-Json' was bound
+    # positionally to CleanCacheMaxAgeDays (int) instead of as the Json switch.
+    $preflightArgs = @{ Json = $true }
+    if ([string]::IsNullOrWhiteSpace($CertThumbprint)) {
+        $preflightArgs['SkipSigning'] = $true
     } else {
-        @('-CertThumbprint', $CertThumbprint, '-Json')
+        $preflightArgs['CertThumbprint'] = $CertThumbprint
     }
     $preflightOut = & $preflightPath @preflightArgs 2>&1 | Out-String
     $preflight = $null
@@ -78,7 +79,8 @@ if (-not (Test-Path -LiteralPath $preflightPath)) {
     try { $preflight = $preflightOut | ConvertFrom-Json -ErrorAction Stop } catch { $parseError = $_.Exception.Message }
     if ($null -eq $preflight) {
         Add-Result 'preflight-runs' 'FAIL' "could not parse preflight output as JSON: $parseError"
-        Write-Host "  preflight invoked with: $($preflightArgs -join ' ')" -ForegroundColor DarkGray
+        $argsRendered = ($preflightArgs.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '
+        Write-Host "  preflight invoked with: $argsRendered" -ForegroundColor DarkGray
         Write-Host "  preflight raw output (full, $($preflightOut.Length) chars):" -ForegroundColor DarkGray
         Write-Host $preflightOut -ForegroundColor DarkGray
     } else {
@@ -200,7 +202,9 @@ if (-not (Test-Path -LiteralPath $tailScript)) {
         $line | Out-File -FilePath $syntheticEventsPath -Append -Encoding utf8
     }
     try {
-        $tailOut = & $tailScript -Tail 10 -Path $syntheticEventsPath 2>&1 | Out-String
+        # *>&1 captures the information stream (6) where Write-Host writes;
+        # plain 2>&1 only catches stderr and would miss tail-events.ps1's output.
+        $tailOut = & $tailScript -Tail 10 -Path $syntheticEventsPath *>&1 | Out-String
         if ($tailOut -match 'managed_exception' -and $tailOut -match 'heartbeat') {
             Add-Result 'tail-renders' 'PASS' "$($kinds.Count) signal kinds rendered"
         } else {
