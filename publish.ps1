@@ -11,6 +11,23 @@ param(
 $ErrorActionPreference = "Stop"
 $env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
 
+# ── Queen ship preflight: 9 environment checks (Diagnostic Mesh PR 1) ──
+# Runs FIRST so we abort before key generation / dotnet publish when the
+# environment is wrong. No flag, no opt-out. If -CertThumbprint is empty
+# we forward -SkipSigning so the signing checks become SKIP, not FAIL.
+$preflightScript = Join-Path $PSScriptRoot "scripts" "Test-QueenShipPreflight.ps1"
+if (Test-Path -LiteralPath $preflightScript) {
+    $preflightArgs = @{
+        CertThumbprint = $CertThumbprint
+        SkipSigning    = [string]::IsNullOrWhiteSpace($CertThumbprint)
+    }
+    & $preflightScript @preflightArgs
+    # preflight `exit 1` cascades through &; if we reach here, all checks passed
+    # (or only WARNs were emitted).
+} else {
+    Write-Host "WARNING: preflight script missing at $preflightScript -- proceeding unchecked" -ForegroundColor Yellow
+}
+
 # ── dotnet publish heartbeat helpers (Diagnostic Mesh PR 2) ──
 # Replace the silent 8-min "dotnet publish" with per-project [start/elapsed/
 # finish] visibility + 30s heartbeat. Solves the 2026-05-12 failure mode
