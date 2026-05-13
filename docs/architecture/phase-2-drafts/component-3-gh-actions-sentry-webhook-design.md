@@ -65,7 +65,7 @@ Sentry sends one webhook to a Supabase Edge Function. The Edge Function:
 4. Validate `contexts` keys against forbidden-keys list (defense-in-depth — CHECK constraint in Component 1 also catches; ingest rejects EARLY). Reject 400 + `mesh.context_schema_violations_total++`.
 5. Look up `fingerprint_registry.id` by fingerprint string (resolve `alias_of` chain with cycle-safe walk per Component 1's trigger). UPSERT registry row if first-seen.
 6. INSERT `fingerprint_occurrences` (idempotent on `sentry_event_id` UNIQUE — second post is a no-op).
-7. **Atomic action-decision via DB claim** (Codex review v1 CRITICAL, chunk F — race fix): Workflow-side "search GH, then create" is NOT atomic — two concurrent workflows can both observe no match and both create issues. Move the create/bump/reopen decision into the Edge Function under a DB transaction:
+7. **Atomic action-decision via DB claim** (Codex review v1 CRITICAL, chunk F — race fix; round-2 HIGH adds `claim_expires_at` TTL): Workflow-side "search GH, then create" is NOT atomic — two concurrent workflows can both observe no match and both create issues. Move the create/bump/reopen decision into the Edge Function under a DB transaction:
 
    ```sql
    -- All inside ONE transaction:
@@ -75,12 +75,19 @@ Sentry sends one webhook to a Supabase Edge Function. The Edge Function:
      RETURNING fingerprint_id;
    -- If the INSERT returned a row → THIS request claimed creation → action = 'create'
    -- Else fetch existing row and decide:
-   SELECT state, github_issue_number FROM public.fingerprint_issue_links WHERE fingerprint_id = $1;
-   -- state IN ('open', 'reopened', 'claimed') → action = 'bump'
+   SELECT state, github_issue_number, claim_expires_at
+     FROM public.fingerprint_issue_links
+     WHERE fingerprint_id = $1
+     FOR UPDATE;
+   -- state = 'claimed' AND claim_expires_at < NOW() → previous create failed/stalled →
+   --   bump claim_expires_at + retry action='create' (don't bump-a-NULL)
+   -- state = 'claimed' AND claim_expires_at >= NOW() → another worker still creating → return 200 NoOp
+   --   (the in-flight create will succeed and serve later occurrences)
+   -- state IN ('open', 'reopened') → action = 'bump'
    -- state = 'closed' AND last_action_at < NOW() - INTERVAL '24h' → action = 'reopen'
    ```
 
-   Only the winning INSERTer gets `action = 'create'`; everyone else sees an existing row and bumps. No race window.
+   Round-2 HIGH (Comp 3 chunk F deadlock follow-up): without `claim_expires_at` a failed `create` workflow leaves the link in `state='claimed' AND github_issue_number IS NULL` forever; subsequent bumps target a non-existent issue. The TTL turns 'claimed' into a retryable state — the schema CHECK `(state = 'claimed' AND issue_number IS NULL) OR (other states AND issue_number IS NOT NULL)` plus the no-regression trigger guarantees only `create` (which writes the issue number on success) advances the row past 'claimed'.
 
 8. **Coalesced queue dispatch** (Codex review v1 HIGH, chunk D — rate-limit fix): instead of one `repository_dispatch` per occurrence, UPSERT a `fingerprint_issue_jobs` row keyed by `(fingerprint_id, window_start)`. A 5-minute window: `window_start = date_trunc('minute', NOW()) - (EXTRACT(minute FROM NOW())::int % 5) * INTERVAL '1 minute'`. Storms of 100s/min collapse to one pending job per fingerprint per 5-min window. A background sweep worker (`fingerprint_issue_dispatcher`, Supabase Cron, every 30s) drains pending jobs under the `repository_dispatch` 100/hr budget. Recovery + replay via the `last_issue_sync_at` / `last_issue_occurrence_id` cursor on `fingerprint_registry` (Component 1 added these columns).
 9. Return 200 with `{ "occurrence_id": ..., "registry_id": ..., "claimed_action": "create|bump|reopen", "job_id": ... }`.
@@ -100,41 +107,107 @@ Sentry sends one webhook to a Supabase Edge Function. The Edge Function:
 
 **Key shift from prior draft**: action decision (`create`/`bump`/`reopen`) is already decided by the Edge Function under DB lock. The workflow EXECUTES the pre-claimed action; it does NOT re-decide. This eliminates the create-race entirely (Codex review v1 CRITICAL fix, chunk F).
 
+**Round-2 HIGH (Comp 3): workflow MUST NOT trust the dispatched `client_payload.action`** — a compromised dispatch token could pass arbitrary actions and target any GH issue. The dispatch carries ONLY `job_id`. The workflow's first step is to fetch the authoritative job row from the DB and verify it; the workflow then operates on the DB-derived action + fingerprint_id + window_start + link row.
+
 **Job**:
-1. Parse `client_payload` from dispatch: `job_id`, `fingerprint_id`, `action` (already decided), `fingerprint_string`, `signal_kind`, `component`, `coalesced_count`, `window_start`, `last_pharmacy_id`.
-2. Execute the pre-claimed action via `gh`:
-   - `action = 'create'`: `gh issue create` with title `[mesh] <signal_kind> in <component>` + body containing fingerprint string, last-5-occurrence summary, link to dashboard query. Labels: `mesh-fingerprint`, `bug`, `component:<component>`, `signal:<signal_kind>`. Then update `fingerprint_issue_links.github_issue_number` + `state='open'` via service_role.
-   - `action = 'bump'`: `gh issue comment <issue_number>` (issue_number from `fingerprint_issue_links.github_issue_number`) with `coalesced_count` new occurrences in this window + last_pharmacy_id + timestamp range.
-   - `action = 'reopen'`: `gh issue reopen <issue_number>` + `gh issue comment` with reopen reason + new occurrence summary. Then update `fingerprint_issue_links.state='reopened'`.
-3. On any GH API rate-limit (403 with `X-RateLimit-Remaining: 0`): wait + retry once. If still failing, write `fingerprint_issue_jobs.last_error` + `failure_count++` and let the dispatcher re-queue on next sweep.
-4. On success: UPDATE `fingerprint_issue_jobs.succeeded_at = NOW()` AND advance `fingerprint_registry.last_issue_sync_at + last_issue_occurrence_id` cursor (Codex review v1 MEDIUM, chunk D fix — idempotent replay).
+1. Parse `client_payload` from dispatch — ONLY: `{ "job_id": <bigint> }`. Anything else is ignored.
+2. Fetch the authoritative job row via service_role:
+   ```sql
+   SELECT j.id, j.fingerprint_id, j.action, j.window_start, j.coalesced_count, j.last_occurrence_id,
+          j.dispatched_at, j.succeeded_at,
+          l.github_issue_number, l.github_repo, l.state AS link_state, l.claim_expires_at,
+          r.component, r.signal_kind, r.fingerprint AS fingerprint_string
+     FROM public.fingerprint_issue_jobs j
+     JOIN public.fingerprint_registry  r ON r.id = j.fingerprint_id
+     LEFT JOIN public.fingerprint_issue_links l ON l.fingerprint_id = j.fingerprint_id
+    WHERE j.id = $1;
+   ```
+   Reject (no-op workflow run) if: row missing, `succeeded_at IS NOT NULL` (already done), `failure_count >= 5` (gave up).
+3. Execute the action read FROM THE DB ROW (not the dispatch payload):
+   - `action = 'create'`: `gh issue create` with title `[mesh] <signal_kind> in <component>` + body containing fingerprint string, last-5-occurrence summary (read via `last_occurrence_id`), link to dashboard query. Labels: `mesh-fingerprint`, `bug`, `component:<component>`, `signal:<signal_kind>`. On success: UPDATE `fingerprint_issue_links` SET `github_issue_number=<new>`, `state='open'`, `last_action_at=NOW()` for THIS `fingerprint_id`.
+   - `action = 'bump'`: `gh issue comment <github_issue_number>` with `coalesced_count` new occurrences in this window + timestamp range. Skip when `coalesced_count = 1` (Codex round-2 LOW — singular bump is noise — render a singular variant or skip).
+   - `action = 'reopen'`: `gh issue reopen <github_issue_number>` + comment. UPDATE link `state='reopened'`.
+4. On any GH API rate-limit (403 with `X-RateLimit-Remaining: 0`): wait + retry once. If still failing, write `fingerprint_issue_jobs.last_error` + `failure_count++` and let the dispatcher re-queue on next sweep (the lease expires, the row becomes claimable again).
+5. On success: in a single transaction:
+   ```sql
+   UPDATE public.fingerprint_issue_jobs
+      SET succeeded_at = NOW(), dispatch_lease_until = NULL
+    WHERE id = $job_id;
+
+   -- Round-2 HIGH (Comp 1+3) — GREATEST() guard + cross-fp trigger ensures
+   -- this is monotonic AND points at the right fingerprint.
+   UPDATE public.fingerprint_registry
+      SET last_issue_sync_at       = NOW(),
+          last_issue_occurrence_id = GREATEST(COALESCE(last_issue_occurrence_id, 0), $last_occurrence_id)
+    WHERE id = $fingerprint_id;
+   ```
 
 **No fingerprint search step**: removed. The Edge Function already resolved which issue (if any) corresponds to this fingerprint via `fingerprint_issue_links.github_issue_number`. The workflow just looks up that number from the DB; no `gh issue list` search needed.
 
-**Permissions**: workflow needs `issues: write` + `contents: read`. Repository secret `MESH_DISPATCH_TOKEN` is the token Edge Function uses to call `repository_dispatch` (fine-grained PAT with only `repository_dispatch` scope on this repo). Workflow itself uses `${{ secrets.GITHUB_TOKEN }}` for issue ops.
+**Permissions** (Codex round-2 MEDIUM correction): GitHub's `repository_dispatch` API requires `Contents: write` permission on the target repo, NOT a separate `repository_dispatch` scope. Use one of:
+- Fine-grained PAT with `Contents: write` on `MinaH153/SuavoAgent` only, expires every ≤90 days, stored in Vault as `MESH_DISPATCH_TOKEN`, rotated on suspected exposure.
+- GitHub App installation token (preferred for production): App has `Contents: write` + `Issues: write` only; tokens are short-lived (1h), auto-rotated.
 
-**Concurrency**: still set `concurrency: { group: mesh-fp-${{ github.event.client_payload.fingerprint_id }}, cancel-in-progress: false }` as defense-in-depth, even though the race is now closed at the DB layer.
+Workflow itself uses `${{ secrets.GITHUB_TOKEN }}` for issue ops (auto-scoped to the workflow run, no rotation needed).
+
+**Concurrency**: still set `concurrency: { group: mesh-fp-<DB-derived-fingerprint_id>, cancel-in-progress: false }` as defense-in-depth, keyed on the DB-derived fingerprint_id (NOT the client_payload — same spoofing concern). The DB-level claim is the primary guard.
 
 ## Dispatcher worker (Supabase Cron): `fingerprint_issue_dispatcher`
 
 Runs every 30s. Drains `fingerprint_issue_jobs` queue under the `repository_dispatch` 100/hr cap:
 
 ```sql
--- Atomically claim up to N pending jobs (FIFO by enqueued_at):
+-- Round-2 CRITICAL (Comp 1+3): claim ONLY rows whose lease is NULL/expired;
+-- write a fresh lease so the next 30s tick can't re-dispatch an in-flight job
+-- whose workflow hasn't yet written succeeded_at.
 WITH claimed AS (
   SELECT id FROM public.fingerprint_issue_jobs
    WHERE succeeded_at IS NULL
      AND failure_count < 5
-   ORDER BY enqueued_at
-   LIMIT 50  -- per 30s cycle = 6000/hr max (well under 100/hr per repo with retry buffer)
+     AND (dispatch_lease_until IS NULL OR dispatch_lease_until < NOW())
+   ORDER BY window_start, enqueued_at, id   -- logical-window order (round-2 MEDIUM)
+   LIMIT 50
    FOR UPDATE SKIP LOCKED
 )
-UPDATE public.fingerprint_issue_jobs SET dispatched_at = NOW()
+UPDATE public.fingerprint_issue_jobs
+   SET dispatched_at        = NOW(),
+       dispatch_lease_until = NOW() + INTERVAL '15 minutes'
  WHERE id IN (SELECT id FROM claimed)
-RETURNING id, fingerprint_id, action, coalesced_count, window_start;
+RETURNING id;  -- dispatch ONLY the id; workflow re-fetches authoritative row
 ```
 
-Then POST each as a `repository_dispatch` to GH. The 100/hr GH cap forces an actual throttle: dispatcher caps at 90 dispatches/hr (10% headroom for retries). With coalescing, a fleet-wide storm of even 10k events/hr collapses to ~1 dispatch/fingerprint/window.
+Then POST each as a `repository_dispatch` to GH with payload `{ "event_type": "mesh-fingerprint", "client_payload": { "job_id": <id> } }`. The 100/hr GH cap forces an actual throttle: dispatcher caps at 90 dispatches/hr (10% headroom for retries). With coalescing, a fleet-wide storm of even 10k events/hr collapses to ~1 dispatch/fingerprint/window.
+
+## Replay sweep (Codex round-2 MEDIUM, Comp 3 chunk D)
+
+A separate Supabase Cron `fingerprint_replay_sweep` runs every 5 min and finds occurrences that landed but never got into a job (Edge Function crashed between INSERT occurrence + UPSERT job, etc.). Bounded by the registry cursor for forward-only walk:
+
+```sql
+WITH gaps AS (
+  SELECT o.fingerprint_id, MAX(o.id) AS max_occ_id, COUNT(*) AS gap_count
+    FROM public.fingerprint_occurrences o
+    JOIN public.fingerprint_registry  r ON r.id = o.fingerprint_id
+   WHERE o.id > COALESCE(r.last_issue_occurrence_id, 0)
+     AND NOT EXISTS (
+       SELECT 1 FROM public.fingerprint_issue_jobs j
+        WHERE j.fingerprint_id = o.fingerprint_id
+          AND j.last_occurrence_id >= o.id
+     )
+   GROUP BY o.fingerprint_id
+)
+INSERT INTO public.fingerprint_issue_jobs (fingerprint_id, action, window_start, coalesced_count, last_occurrence_id)
+SELECT g.fingerprint_id,
+       'bump'::text,
+       date_trunc('minute', NOW()) - (EXTRACT(minute FROM NOW())::int % 5) * INTERVAL '1 minute',
+       g.gap_count,
+       g.max_occ_id
+  FROM gaps g
+ON CONFLICT (fingerprint_id, window_start) DO UPDATE
+   SET coalesced_count    = fingerprint_issue_jobs.coalesced_count + EXCLUDED.coalesced_count,
+       last_occurrence_id = GREATEST(fingerprint_issue_jobs.last_occurrence_id, EXCLUDED.last_occurrence_id);
+```
+
+This is idempotent: re-running the sweep without new occurrences is a no-op (the cursor has been advanced after the prior job succeeded).
 
 ## Open questions for Codex re-review (FOCUSED chunks)
 

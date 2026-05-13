@@ -87,7 +87,11 @@ BEGIN
       RAISE EXCEPTION 'fingerprint_registry: alias_of cycle would form via id=%', NEW.id
         USING ERRCODE = 'check_violation';
     END IF;
-    SELECT alias_of INTO cur FROM public.fingerprint_registry WHERE id = cur;
+    -- Round-2 MEDIUM (Comp 1): without FOR UPDATE the walk can miss a cycle
+    -- forming concurrently — two service transactions can set A→B and B→A
+    -- at the same time, each reading the other's pre-image. Row-locking
+    -- the walk serializes the conflict.
+    SELECT alias_of INTO cur FROM public.fingerprint_registry WHERE id = cur FOR UPDATE;
     hops := hops + 1;
   END LOOP;
   IF hops >= 32 THEN
@@ -304,18 +308,69 @@ COMMENT ON TABLE public.fingerprint_occurrences IS
 -- github_issue_number column and dispatch `bump` instead.
 
 CREATE TABLE IF NOT EXISTS public.fingerprint_issue_links (
-  fingerprint_id     BIGINT       PRIMARY KEY REFERENCES public.fingerprint_registry(id) ON DELETE CASCADE,
-  github_issue_number INT,                 -- NULL until GH workflow reports back
-  github_repo        TEXT         NOT NULL, -- 'MinaH153/SuavoAgent' etc.
-  state              TEXT         NOT NULL DEFAULT 'claimed'
-                                  CHECK (state IN ('claimed', 'open', 'closed', 'reopened')),
-  claimed_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  last_action_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  fingerprint_id      BIGINT       PRIMARY KEY REFERENCES public.fingerprint_registry(id) ON DELETE CASCADE,
+  github_issue_number INT,                  -- NULL until GH workflow reports back
+  github_repo         TEXT         NOT NULL, -- 'MinaH153/SuavoAgent' etc.
+  state               TEXT         NOT NULL DEFAULT 'claimed'
+                                   CHECK (state IN ('claimed', 'open', 'closed', 'reopened')),
+  claimed_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  -- Round-2 HIGH (Comp 3): without a TTL on 'claimed', a failed `create`
+  -- leaves state='claimed' + github_issue_number=NULL forever and future
+  -- posts bump-against-NULL. Edge Function treats expired claims as
+  -- create-retryable (state stays 'claimed', it just re-attempts the GH
+  -- create call). Default 15 minutes matches dispatcher lease.
+  claim_expires_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW() + INTERVAL '15 minutes',
+  last_action_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+-- Round-2 MEDIUM (Comp 1): state invariants — 'open'/'closed'/'reopened'
+-- MUST have a github_issue_number; 'claimed' MUST NOT. Catches Edge Function
+-- bugs that would write an inconsistent state row.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fingerprint_issue_links_state_invariant'
+      AND connamespace = 'public'::regnamespace
+      AND conrelid     = 'public.fingerprint_issue_links'::regclass
+  ) THEN
+    ALTER TABLE public.fingerprint_issue_links
+      ADD CONSTRAINT fingerprint_issue_links_state_invariant
+      CHECK (
+        (state = 'claimed' AND github_issue_number IS NULL)
+        OR (state IN ('open', 'closed', 'reopened') AND github_issue_number IS NOT NULL AND github_issue_number > 0)
+      );
+  END IF;
+END $$;
+
+-- Round-2 MEDIUM (Comp 1): forbid regressions back to 'claimed' once an issue
+-- exists. Failed GH ops should advance state forward via the claim_expires_at
+-- TTL, not by clearing the issue number.
+CREATE OR REPLACE FUNCTION public.fingerprint_issue_links_no_state_regression()
+  RETURNS trigger
+  LANGUAGE plpgsql
+  AS $$
+BEGIN
+  IF OLD.state <> 'claimed' AND NEW.state = 'claimed' THEN
+    RAISE EXCEPTION 'fingerprint_issue_links: cannot regress state from % back to claimed (fingerprint_id=%)',
+      OLD.state, NEW.fingerprint_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS fingerprint_issue_links_no_state_regression_trg
+  ON public.fingerprint_issue_links;
+CREATE TRIGGER fingerprint_issue_links_no_state_regression_trg
+  BEFORE UPDATE OF state ON public.fingerprint_issue_links
+  FOR EACH ROW EXECUTE FUNCTION public.fingerprint_issue_links_no_state_regression();
 
 CREATE INDEX IF NOT EXISTS fingerprint_issue_links_open_idx
   ON public.fingerprint_issue_links (last_action_at DESC)
   WHERE state IN ('claimed', 'open', 'reopened');
+CREATE INDEX IF NOT EXISTS fingerprint_issue_links_expired_claim_idx
+  ON public.fingerprint_issue_links (claim_expires_at)
+  WHERE state = 'claimed';
 
 ALTER TABLE public.fingerprint_issue_links ENABLE ROW LEVEL SECURITY;
 
@@ -348,16 +403,29 @@ GRANT  SELECT, INSERT, UPDATE, DELETE ON public.fingerprint_issue_links TO servi
 -- last_issue_occurrence_id on the registry row (added below).
 
 CREATE TABLE IF NOT EXISTS public.fingerprint_issue_jobs (
-  id                BIGSERIAL    PRIMARY KEY,
-  fingerprint_id    BIGINT       NOT NULL REFERENCES public.fingerprint_registry(id) ON DELETE CASCADE,
-  action            TEXT         NOT NULL CHECK (action IN ('create', 'bump', 'reopen')),
-  window_start      TIMESTAMPTZ  NOT NULL,
-  enqueued_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  dispatched_at     TIMESTAMPTZ,
-  succeeded_at      TIMESTAMPTZ,
-  failure_count     INT          NOT NULL DEFAULT 0,
-  last_error        TEXT,
-  coalesced_count   INT          NOT NULL DEFAULT 1  -- # occurrences folded into this job
+  id                   BIGSERIAL    PRIMARY KEY,
+  fingerprint_id       BIGINT       NOT NULL REFERENCES public.fingerprint_registry(id) ON DELETE CASCADE,
+  action               TEXT         NOT NULL CHECK (action IN ('create', 'bump', 'reopen')),
+  window_start         TIMESTAMPTZ  NOT NULL,
+  enqueued_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  -- Round-2 CRITICAL (Comp 1+3): `FOR UPDATE SKIP LOCKED` releases the row
+  -- lock at claim-commit time; the cron's next 30s tick would re-claim the
+  -- same row while the workflow is still mid-flight, causing duplicate
+  -- repository_dispatch + duplicate GH issue ops. Lease defends against that:
+  -- dispatcher claims only rows where lease is NULL/expired and writes a
+  -- new lease 15min into the future.
+  dispatch_lease_until TIMESTAMPTZ,
+  dispatched_at        TIMESTAMPTZ,
+  succeeded_at         TIMESTAMPTZ,
+  failure_count        INT          NOT NULL DEFAULT 0,
+  last_error           TEXT,
+  coalesced_count      INT          NOT NULL DEFAULT 1, -- # occurrences folded into this job
+  -- Round-2 HIGH (Comp 1): cursor advancement needs to know the MAX occurrence
+  -- id rolled into this job. Without it, the worker has no safe way to advance
+  -- last_issue_occurrence_id (querying live max can skip un-dispatched rows;
+  -- using a stale id causes replay). Each UPSERT into this queue must
+  -- GREATEST() this with the latest occurrence id.
+  last_occurrence_id   BIGINT       REFERENCES public.fingerprint_occurrences(id)
 );
 
 DO $$
@@ -374,9 +442,19 @@ BEGIN
   END IF;
 END $$;
 
+-- Round-2 MEDIUM (Comp 1): ORDER BY window_start, enqueued_at, id — Sentry
+-- retries / delayed inserts can land in an older logical window after a
+-- newer one opens; FIFO by enqueued_at alone makes comments + cursor
+-- advancement non-chronological. window_start gives logical order, then
+-- enqueued_at + id for stable tiebreak.
 CREATE INDEX IF NOT EXISTS fingerprint_issue_jobs_pending_idx
-  ON public.fingerprint_issue_jobs (enqueued_at)
+  ON public.fingerprint_issue_jobs (window_start, enqueued_at, id)
   WHERE succeeded_at IS NULL;
+-- Partial index for the dispatcher's lease-aware claim query.
+CREATE INDEX IF NOT EXISTS fingerprint_issue_jobs_claimable_idx
+  ON public.fingerprint_issue_jobs (window_start, enqueued_at)
+  WHERE succeeded_at IS NULL
+    AND failure_count < 5;
 
 ALTER TABLE public.fingerprint_issue_jobs ENABLE ROW LEVEL SECURITY;
 
@@ -428,6 +506,50 @@ BEGIN
       ADD COLUMN last_issue_occurrence_id BIGINT REFERENCES public.fingerprint_occurrences(id);
   END IF;
 END $$;
+
+-- Round-2 HIGH (Comp 1+3): cursor must NEVER regress + must NEVER point at an
+-- occurrence belonging to a different fingerprint. A stale dispatcher can
+-- otherwise write an old occurrence id and we lose forward progress, or
+-- cross-write to the wrong fingerprint and corrupt replay logic.
+CREATE OR REPLACE FUNCTION public.fingerprint_registry_cursor_monotonic()
+  RETURNS trigger
+  LANGUAGE plpgsql
+  AS $$
+DECLARE
+  occ_fp BIGINT;
+BEGIN
+  -- Skip if cursor is being cleared or unchanged
+  IF NEW.last_issue_occurrence_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.last_issue_occurrence_id IS NOT NULL
+     AND NEW.last_issue_occurrence_id < OLD.last_issue_occurrence_id THEN
+    RAISE EXCEPTION 'fingerprint_registry: cursor regression rejected (id=%, % → %)',
+      NEW.id, OLD.last_issue_occurrence_id, NEW.last_issue_occurrence_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  -- Verify the occurrence actually belongs to THIS fingerprint
+  SELECT fingerprint_id INTO occ_fp
+    FROM public.fingerprint_occurrences
+   WHERE id = NEW.last_issue_occurrence_id;
+  IF occ_fp IS NULL THEN
+    RAISE EXCEPTION 'fingerprint_registry: cursor points at non-existent occurrence id=%',
+      NEW.last_issue_occurrence_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF occ_fp <> NEW.id THEN
+    RAISE EXCEPTION 'fingerprint_registry: cursor cross-fingerprint (registry.id=% pointing at occurrence belonging to fingerprint_id=%)',
+      NEW.id, occ_fp
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS fingerprint_registry_cursor_monotonic_trg
+  ON public.fingerprint_registry;
+CREATE TRIGGER fingerprint_registry_cursor_monotonic_trg
+  BEFORE UPDATE OF last_issue_occurrence_id ON public.fingerprint_registry
+  FOR EACH ROW EXECUTE FUNCTION public.fingerprint_registry_cursor_monotonic();
 
 COMMENT ON TABLE public.fingerprint_issue_links IS
   'Mesh Phase 2: 1:1 claim row per fingerprint → GH issue. Edge Function INSERT ON CONFLICT DO NOTHING resolves the create/bump/reopen action decision at the DB layer (not workflow-side). See docs/architecture/phase-2-drafts/component-3-* §F.';

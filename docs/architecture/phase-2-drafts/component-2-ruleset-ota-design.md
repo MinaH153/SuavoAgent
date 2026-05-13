@@ -127,29 +127,74 @@ New file: `src/SuavoAgent.Diagnostics/RulesetSignatureVerifier.cs`:
 ```csharp
 public sealed class RulesetSignatureVerifier
 {
+    private const string KeyResourcePrefix = "ruleset-signing-key-";
+    private const string KeyResourceSuffix = ".pub.pem";
     private readonly IReadOnlyDictionary<string, ECDsa> _trustStore;
 
+    /// <summary>
+    /// Eager-load at startup (Codex round-2 MEDIUM, Comp 2 chunk 2): lazy is
+    /// wrong for a signature trust boundary. Throws if zero keys load OR if any
+    /// PEM import fails — callers must catch + fall back to embedded ruleset,
+    /// keeping OTA disabled until the next agent rebuild.
+    /// </summary>
     public static RulesetSignatureVerifier LoadEmbeddedTrustStore()
     {
-        // Embedded resources: ruleset-signing-key-<keyId>.pub.pem (1..N keys).
+        // Embedded resources: <namespace>.ruleset-signing-key-<keyId>.pub.pem (1..N keys).
         // Mirrors SignedCommandVerifier's key_id registry, but with a SEPARATE
         // set of keys (spec §8.4: ruleset signing keypair MUST NOT overlap
         // with cmd-signing-key — crypto-domain separation).
         var asm = typeof(RulesetSignatureVerifier).Assembly;
         var dict = new Dictionary<string, ECDsa>(StringComparer.Ordinal);
         foreach (var resName in asm.GetManifestResourceNames()
-                                   .Where(n => n.Contains("ruleset-signing-key-")
-                                            && n.EndsWith(".pub.pem", StringComparison.Ordinal)))
+                                   .Where(n => n.EndsWith(KeyResourceSuffix, StringComparison.Ordinal)
+                                            && n.Contains(KeyResourcePrefix, StringComparison.Ordinal)))
         {
-            var keyId = ExtractKeyId(resName);  // ruleset-signing-key-<keyId>.pub.pem → <keyId>
-            using var stream = asm.GetManifestResourceStream(resName)!;
+            var keyId = ExtractKeyId(resName);  // hyphen-safe — last marker + suffix strip
+            using var stream = asm.GetManifestResourceStream(resName)
+                ?? throw new InvalidOperationException($"Embedded resource {resName} unexpectedly null");
             using var reader = new StreamReader(stream);
             var pem = reader.ReadToEnd();
-            var ecdsa = ECDsa.Create();
-            ecdsa.ImportFromPem(pem);
-            dict[keyId] = ecdsa;
+            try
+            {
+                var ecdsa = ECDsa.Create();
+                ecdsa.ImportFromPem(pem);
+                dict[keyId] = ecdsa;
+            }
+            catch (Exception ex)
+            {
+                // Fail-CLOSED on bad PEM — never silently drop a key from the
+                // trust store; that creates a verification gap.
+                throw new InvalidOperationException(
+                    $"Ruleset trust store: failed to import key '{keyId}' from {resName}", ex);
+            }
+        }
+        if (dict.Count == 0)
+        {
+            // Fail-CLOSED — zero keys = no OTA verification possible.
+            throw new InvalidOperationException(
+                $"Ruleset trust store contains zero embedded keys (looked for *{KeyResourcePrefix}<keyId>{KeyResourceSuffix}).");
         }
         return new RulesetSignatureVerifier(dict);
+    }
+
+    /// <summary>
+    /// Extract key_id from a resource name like
+    /// "SuavoAgent.Diagnostics.Resources.ruleset-signing-key-ruleset-v1-key-2026-05-13.pub.pem"
+    /// → "ruleset-v1-key-2026-05-13". Hyphen-safe — uses LAST occurrence of
+    /// prefix marker + suffix strip, not split.
+    /// (Codex round-2 MEDIUM, Comp 2 chunk 2: split-based parsing breaks
+    /// rotation because key_ids contain hyphens.)
+    /// </summary>
+    internal static string ExtractKeyId(string resName)
+    {
+        var lastPrefix = resName.LastIndexOf(KeyResourcePrefix, StringComparison.Ordinal);
+        if (lastPrefix < 0)
+            throw new ArgumentException($"Resource {resName} missing {KeyResourcePrefix}", nameof(resName));
+        var keyIdStart = lastPrefix + KeyResourcePrefix.Length;
+        var keyIdEnd   = resName.Length - KeyResourceSuffix.Length;
+        if (keyIdEnd <= keyIdStart)
+            throw new ArgumentException($"Resource {resName} has empty key_id segment", nameof(resName));
+        return resName.Substring(keyIdStart, keyIdEnd - keyIdStart);
     }
 
     public VerificationResult Verify(RulesetBundle bundle)
@@ -201,6 +246,10 @@ public async Task SaveAsync(RulesetBundle bundle, CancellationToken ct)
 }
 ```
 
+Backup semantic clarification (Codex round-2 LOW, Comp 2 chunk 3): `ruleset-previous.json` is **single-slot rollback state** — each successful `File.Replace` overwrites the prior backup. We intentionally don't keep a history; the embedded ruleset is the always-available fallback if both `current` and `previous` are corrupt.
+
+**Startup orphan-temp sweep** (Codex round-2 LOW, Comp 2 chunk 3): a partial-write crash mid-`File.Replace` can leave `ruleset-*.tmp` files in the directory. `RulesetSyncStore.InitializeAsync()` runs once at startup and deletes any `ruleset-*.tmp` older than 1 hour before the first fetch attempt; younger temps may be in-flight from a sibling process and are left alone.
+
 ## Failure modes (must be tested)
 
 1. **Network unreachable**: keep cached ruleset, no alarm (transient).
@@ -221,7 +270,36 @@ Chunk C (Signature verification): should `LoadEmbeddedPublicKey` also support a 
 
 ## Test coverage
 
-- Unit: `RulesetSignatureVerifier` with valid/invalid/expired signatures (test vectors)
-- Unit: `RulesetSyncStore` atomic-replace + load + corruption recovery
-- Integration: `ConfigSyncWorker` + fake `IRulesetClient` → assert correct swap on success, no swap on verify fail
-- Property: PhiScrubber + FingerprintComputer behavior unchanged after `Wire.SwapRuleset` (golden test using calibration fingerprints from Phase 1)
+(Codex round-2 MEDIUM, Comp 2 chunk 4 — fill the 7-failure-mode gap with a table-driven matrix; add corruption-after-flush + key_id mismatch + concurrent-swap stress.)
+
+**Unit tests**
+- `RulesetSignatureVerifier` valid signature → PASS
+- `RulesetSignatureVerifier` invalid signature → FAIL with `"Signature mismatch"`
+- `RulesetSignatureVerifier` expired ruleset (ExpiresAt < UtcNow) → FAIL with `"Ruleset expired"`
+- `RulesetSignatureVerifier` unknown key_id (cloud signed with `B`, agent trust store has only `A`) → FAIL with `"Unknown key_id: B"`
+- `RulesetSignatureVerifier.ExtractKeyId` golden test: `"...ruleset-signing-key-ruleset-v1-key-2026-05-13.pub.pem"` → `"ruleset-v1-key-2026-05-13"` (hyphen-safe)
+- `RulesetSignatureVerifier.LoadEmbeddedTrustStore` with zero embedded keys → throws `InvalidOperationException`
+- `RulesetSignatureVerifier.LoadEmbeddedTrustStore` with corrupt PEM → throws `InvalidOperationException` (fail-closed, doesn't silently drop)
+- `RulesetSyncStore.SaveAsync` first install (no `current` exists) → `File.Move` path executes
+- `RulesetSyncStore.SaveAsync` subsequent update → `File.Replace` with backup
+- `RulesetSyncStore` startup orphan-temp sweep → 2hr-old `ruleset-*.tmp` deleted, 5min-old preserved
+
+**Failure-mode integration tests** (table-driven against `ConfigSyncWorker` + fake `IRulesetClient`)
+
+| Scenario | Expected outcome |
+|---|---|
+| Network unreachable | keep cached, no alarm, ConsecutiveFailures++ |
+| HTTP 401 (auth fail) | keep cached, alarm `ruleset.auth_failed` |
+| HTTP 500 (cloud down) | keep cached, no alarm, transient |
+| Signature INVALID | keep cached, alarm `ruleset.signature_verify_failed` |
+| Signature key_id mismatch (cloud=B, agent has A only) | keep cached, alarm `ruleset.key_id_unknown` with key_id |
+| Ruleset expired | keep cached, alarm `ruleset.expired` |
+| Disk write fail (read-only FS) | in-memory swap STILL happens; alarm `ruleset.disk_write_failed`; next restart loads embedded |
+| Successful fetch + verify + write | swap happens, mesh.ruleset_version_swaps_total++ |
+| Re-fetch with current_version unchanged (304) | no swap, no alarm |
+
+**Corruption-after-flush test**: write a valid bundle to `ruleset-current.json`, corrupt 1 byte after `Flush(true)`, restart agent → assert verifier rejects, alarms, falls back to embedded.
+
+**Concurrent-swap stress test**: dispatch 100 `Wire.SwapRuleset(A)` and 100 `Wire.SwapRuleset(B)` interleaved across N threads; dispatcher reads `_runtime` 1000× in parallel → assert no reader observes mixed-generation `(Ruleset, Scrubber, Fingerprinter)` (e.g., Ruleset_A with Scrubber_B). Single-publisher (only ConfigSyncWorker calls SwapRuleset) is a separate contract test.
+
+**Property test**: PhiScrubber + FingerprintComputer outputs unchanged for Bug 22/23/24 calibration vectors after `Wire.SwapRuleset` to an identical ruleset (verifies snapshot construction doesn't drift state).
