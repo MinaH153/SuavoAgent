@@ -46,11 +46,15 @@ internal static class Program
     }
 
     // Public so Avalonia's previewer and designer tooling can discover it.
+    // .AfterSetup hook installs the Avalonia dispatcher exception capture
+    // so UI-thread exceptions route through Wire before the dispatcher's
+    // default unhandled path runs (Mesh PR 4d).
     public static AppBuilder BuildAvaloniaApp() =>
         AppBuilder.Configure<Gui.App>()
             .UsePlatformDetect()
             .WithInterFont()
-            .LogToTrace();
+            .LogToTrace()
+            .AfterSetup(_ => SuavoAgent.Setup.Diagnostics.AvaloniaDispatcherHook.Install());
 
     private static bool IsConsoleMode(string[] args) =>
         args.Any(a =>
