@@ -31,10 +31,18 @@ internal static class AvaloniaDispatcherHook
         }
         catch
         {
-            // Dispatcher not available (early init or non-Avalonia caller) —
-            // Wire's AppDomain hook still captures unhandled exceptions, so
-            // this is acceptable degradation.
-            _installed = 0; // allow a future Install() attempt
+            // Intentional one-shot degradation (Codex chunk 4a MEDIUM):
+            // Dispatcher.UIThread is not initialized in design-time / preview
+            // tooling (AppBuilder.SetupWithoutStarting). In production
+            // runtime, AfterSetup fires AFTER dispatcher init, so this catch
+            // is not reached. We reset _installed = 0 so a later explicit
+            // Install() call (e.g., if the host explicitly invokes it after
+            // dispatcher is ready) can succeed — but NO automatic retry is
+            // scheduled. Wire's AppDomain.UnhandledException hook still
+            // captures unhandled exceptions for the agent-side crash trail;
+            // only dispatcher-specific exception capture is lost in this
+            // degraded path.
+            _installed = 0;
         }
     }
 

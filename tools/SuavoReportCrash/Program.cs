@@ -57,9 +57,11 @@ internal static class Program
             var arg = args[i];
             if (!arg.StartsWith("--", StringComparison.Ordinal)) continue;
             var key = arg.Substring(2);
-            var value = (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
-                ? args[++i]
-                : "";
+            // Every supported option takes exactly one value. Always consume
+            // args[i+1] as the value even when it starts with "--" — a stdout
+            // tail like "error CS0123 -- bad" is legitimate diagnostic content
+            // (Codex chunk 4b MEDIUM). Missing trailing arg → empty value.
+            var value = (i + 1 < args.Length) ? args[++i] : "";
             // Cap each value at 4KB to bound the JSONL line size.
             if (value.Length > 4096) value = value.Substring(0, 4096);
             dict[key] = value;
@@ -127,6 +129,14 @@ internal static class Program
     private static bool WriteCrashRecord(CrashRecord record)
     {
         var path = ResolveCrashLogPath();
+        if (path is null)
+        {
+            // Codex chunk 4b MEDIUM: ProgramData unwritable AND TEMP unwritable.
+            // Last-resort stderr emit so publish.ps1 captures the crash in its
+            // own stream rather than losing it entirely.
+            EmitToStderr(record, "no writable diagnostic path (CommonApplicationData + TEMP both failed write-probe)");
+            return false;
+        }
         try
         {
             var dir = Path.GetDirectoryName(path);
@@ -135,21 +145,7 @@ internal static class Program
             using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
             using var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = false });
 
-            writer.WriteStartObject();
-            writer.WriteString("ts", DateTimeOffset.UtcNow.ToString("o"));
-            writer.WriteString("source", "suavo-report-crash");
-            writer.WriteString("component", record.Component);
-            writer.WriteNumber("exit_code", record.ExitCode);
-            writer.WriteString("exit_code_hex", $"0x{(uint)record.ExitCode:X8}");
-            WriteStringIfPresent(writer, "project", record.Project);
-            WriteStringIfPresent(writer, "stdout_tail", record.StdoutTail);
-            WriteStringIfPresent(writer, "build_sha", record.BuildSha);
-            if (record.PublishPid.HasValue) writer.WriteNumber("publish_pid", record.PublishPid.Value);
-            WriteStringIfPresent(writer, "parent_ps_version", record.ParentPsVersion);
-            if (record.YubikeyPresent.HasValue) writer.WriteBoolean("yubikey_present", record.YubikeyPresent.Value);
-            if (record.SmartCardServiceRunning.HasValue) writer.WriteBoolean("smartcard_running", record.SmartCardServiceRunning.Value);
-            WriteStringIfPresent(writer, "ev_cert_thumbprint_hash", record.EvCertThumbprintHash ?? record.EvCertThumbprintHashInput);
-            writer.WriteEndObject();
+            WriteRecordTo(writer, record);
             writer.Flush();
             // Terminate the JSONL line.
             fs.Write(Encoding.UTF8.GetBytes(Environment.NewLine));
@@ -158,7 +154,45 @@ internal static class Program
         catch (Exception ex)
         {
             Console.Error.WriteLine($"ERROR: failed to write crash record to {path}: {ex.GetType().Name}: {ex.Message}");
+            EmitToStderr(record, $"file-write-failed: {ex.GetType().Name}: {ex.Message}");
             return false;
+        }
+    }
+
+    private static void WriteRecordTo(Utf8JsonWriter writer, CrashRecord record)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("ts", DateTimeOffset.UtcNow.ToString("o"));
+        writer.WriteString("source", "suavo-report-crash");
+        writer.WriteString("component", record.Component);
+        writer.WriteNumber("exit_code", record.ExitCode);
+        writer.WriteString("exit_code_hex", $"0x{(uint)record.ExitCode:X8}");
+        WriteStringIfPresent(writer, "project", record.Project);
+        WriteStringIfPresent(writer, "stdout_tail", record.StdoutTail);
+        WriteStringIfPresent(writer, "build_sha", record.BuildSha);
+        if (record.PublishPid.HasValue) writer.WriteNumber("publish_pid", record.PublishPid.Value);
+        WriteStringIfPresent(writer, "parent_ps_version", record.ParentPsVersion);
+        if (record.YubikeyPresent.HasValue) writer.WriteBoolean("yubikey_present", record.YubikeyPresent.Value);
+        if (record.SmartCardServiceRunning.HasValue) writer.WriteBoolean("smartcard_running", record.SmartCardServiceRunning.Value);
+        WriteStringIfPresent(writer, "ev_cert_thumbprint_hash", record.EvCertThumbprintHash ?? record.EvCertThumbprintHashInput);
+        writer.WriteEndObject();
+    }
+
+    private static void EmitToStderr(CrashRecord record, string reason)
+    {
+        try
+        {
+            using var ms = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = false }))
+            {
+                WriteRecordTo(writer, record);
+                writer.Flush();
+            }
+            Console.Error.WriteLine($"SUAVO_REPORT_CRASH_LAST_RESORT reason=\"{reason}\" payload={Encoding.UTF8.GetString(ms.ToArray())}");
+        }
+        catch
+        {
+            // If even stderr fails, we're out of options.
         }
     }
 
@@ -167,18 +201,33 @@ internal static class Program
         if (!string.IsNullOrWhiteSpace(value)) writer.WriteString(name, value);
     }
 
-    private static string ResolveCrashLogPath()
+    private static string? ResolveCrashLogPath()
     {
         var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
         // On non-Windows hosts SpecialFolder maps to /usr/share which
         // exists but is typically NOT writable by an unprivileged user.
-        // We test write access by attempting to create the target subdir
-        // and fall back to TEMP only when that fails.
-        if (string.IsNullOrWhiteSpace(programData) || !TryEnsureWritable(programData))
+        // We test write access by attempting to create the target subdir.
+        if (!string.IsNullOrWhiteSpace(programData) && TryEnsureWritable(programData))
         {
-            programData = Path.GetTempPath();
+            return Path.Combine(programData, "SuavoAgent", "diagnostics", "publish-crash.jsonl");
         }
-        return Path.Combine(programData, "SuavoAgent", "diagnostics", "publish-crash.jsonl");
+
+        // Fall back to TEMP — but PROBE first (Codex chunk 4b MEDIUM).
+        // Locked-down containers / bad TMPDIR / disk-full /tmp can still
+        // fail after /usr/share fails. WriteCrashRecord swallows the
+        // write exception silently, leaving no diagnostic trace.
+        var temp = Path.GetTempPath();
+        if (!string.IsNullOrWhiteSpace(temp) && TryEnsureWritable(temp))
+        {
+            return Path.Combine(temp, "SuavoAgent", "diagnostics", "publish-crash.jsonl");
+        }
+
+        // Last resort: nowhere is writable. Return null and let
+        // WriteCrashRecord emit a stderr-only failure path. The publish.ps1
+        // fallback handler then captures the stderr stream into its own
+        // marker file (which lives in the same TEMP — same fate, but at
+        // least the failure is loud rather than silent).
+        return null;
     }
 
     private static bool TryEnsureWritable(string baseDir)
@@ -187,6 +236,13 @@ internal static class Program
         {
             var probeDir = Path.Combine(baseDir, "SuavoAgent", "diagnostics");
             Directory.CreateDirectory(probeDir);
+            // Belt + suspenders: write a 1-byte probe file then delete.
+            // Directory.CreateDirectory can succeed against a read-only
+            // mount that supports mkdir but not file create (rare but
+            // observed on some FUSE filesystems).
+            var probeFile = Path.Combine(probeDir, $".write-probe.{Environment.ProcessId}");
+            File.WriteAllBytes(probeFile, new byte[] { 0 });
+            File.Delete(probeFile);
             return true;
         }
         catch
