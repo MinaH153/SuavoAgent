@@ -32,11 +32,11 @@ function Invoke-SuavoReportCrash {
 
     $originalExit = $ExitCode
     try {
-        # Build SHA — best-effort
+        # Build SHA -- best-effort
         $buildSha = ""
         try { $buildSha = (& git rev-parse --short=12 HEAD 2>$null).Trim() } catch { }
 
-        # Yubikey / SmartCard / parent-PS shape — only meaningful on Windows
+        # Yubikey / SmartCard / parent-PS shape -- only meaningful on Windows
         $yubikey = $false
         $smartcard = $false
         if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
@@ -68,7 +68,7 @@ function Invoke-SuavoReportCrash {
             & $ToolPath @argv | Out-Null
         } else {
             # Tool not yet built (likely a first run before its dotnet
-            # publish step) — write a fallback marker so the failure is
+            # publish step) -- write a fallback marker so the failure is
             # still observable to the next agent run / operator.
             $marker = Join-Path $env:TEMP "suavo-crash-report-failed.$PID.txt"
             $detail = "tool missing at $ToolPath; originalExit=$originalExit; component=$Component; project=$Project; ts=$([DateTimeOffset]::UtcNow.ToString('o'))"
@@ -188,9 +188,9 @@ dotnet publish "tools\SuavoReportCrash\SuavoReportCrash.csproj" `
     --self-contained `
     -o $reportCrashOut 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[ReportCrash] AOT build FAILED — falling back to %TEMP% marker path on publish failures" -ForegroundColor Yellow
+    Write-Host "[ReportCrash] AOT build FAILED -- falling back to %TEMP% marker path on publish failures" -ForegroundColor Yellow
 } else {
-    Write-Host "[ReportCrash] OK — suavo-report-crash.exe at $reportCrashOut" -ForegroundColor Green
+    Write-Host "[ReportCrash] OK -- suavo-report-crash.exe at $reportCrashOut" -ForegroundColor Green
 }
 
 foreach ($proj in $projects) {
