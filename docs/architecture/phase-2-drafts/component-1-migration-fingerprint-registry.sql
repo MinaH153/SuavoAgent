@@ -346,6 +346,11 @@ END $$;
 -- Round-2 MEDIUM (Comp 1): forbid regressions back to 'claimed' once an issue
 -- exists. Failed GH ops should advance state forward via the claim_expires_at
 -- TTL, not by clearing the issue number.
+--
+-- Round-3 HIGH (Comp 1): ALSO forbid silent github_issue_number rewrites
+-- (123 → 456). The CHECK constraint allows any non-NULL/positive number; a
+-- stale workflow writing the wrong number would corrupt the link. Once set,
+-- the number is permanent for the lifetime of the link row.
 CREATE OR REPLACE FUNCTION public.fingerprint_issue_links_no_state_regression()
   RETURNS trigger
   LANGUAGE plpgsql
@@ -356,13 +361,20 @@ BEGIN
       OLD.state, NEW.fingerprint_id
       USING ERRCODE = 'check_violation';
   END IF;
+  -- Issue-number is write-once. Block 123 → 456 rewrites.
+  IF OLD.github_issue_number IS NOT NULL
+     AND NEW.github_issue_number IS DISTINCT FROM OLD.github_issue_number THEN
+    RAISE EXCEPTION 'fingerprint_issue_links: github_issue_number is write-once (fingerprint_id=%, OLD=%, NEW=%)',
+      NEW.fingerprint_id, OLD.github_issue_number, NEW.github_issue_number
+      USING ERRCODE = 'check_violation';
+  END IF;
   RETURN NEW;
 END $$;
 
 DROP TRIGGER IF EXISTS fingerprint_issue_links_no_state_regression_trg
   ON public.fingerprint_issue_links;
 CREATE TRIGGER fingerprint_issue_links_no_state_regression_trg
-  BEFORE UPDATE OF state ON public.fingerprint_issue_links
+  BEFORE UPDATE ON public.fingerprint_issue_links
   FOR EACH ROW EXECUTE FUNCTION public.fingerprint_issue_links_no_state_regression();
 
 CREATE INDEX IF NOT EXISTS fingerprint_issue_links_open_idx
@@ -403,30 +415,53 @@ GRANT  SELECT, INSERT, UPDATE, DELETE ON public.fingerprint_issue_links TO servi
 -- last_issue_occurrence_id on the registry row (added below).
 
 CREATE TABLE IF NOT EXISTS public.fingerprint_issue_jobs (
-  id                   BIGSERIAL    PRIMARY KEY,
-  fingerprint_id       BIGINT       NOT NULL REFERENCES public.fingerprint_registry(id) ON DELETE CASCADE,
-  action               TEXT         NOT NULL CHECK (action IN ('create', 'bump', 'reopen')),
-  window_start         TIMESTAMPTZ  NOT NULL,
-  enqueued_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  id                    BIGSERIAL    PRIMARY KEY,
+  fingerprint_id        BIGINT       NOT NULL REFERENCES public.fingerprint_registry(id) ON DELETE CASCADE,
+  action                TEXT         NOT NULL CHECK (action IN ('create', 'bump', 'reopen')),
+  window_start          TIMESTAMPTZ  NOT NULL,
+  enqueued_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
   -- Round-2 CRITICAL (Comp 1+3): `FOR UPDATE SKIP LOCKED` releases the row
   -- lock at claim-commit time; the cron's next 30s tick would re-claim the
   -- same row while the workflow is still mid-flight, causing duplicate
   -- repository_dispatch + duplicate GH issue ops. Lease defends against that:
-  -- dispatcher claims only rows where lease is NULL/expired and writes a
-  -- new lease 15min into the future.
-  dispatch_lease_until TIMESTAMPTZ,
-  dispatched_at        TIMESTAMPTZ,
-  succeeded_at         TIMESTAMPTZ,
-  failure_count        INT          NOT NULL DEFAULT 0,
-  last_error           TEXT,
-  coalesced_count      INT          NOT NULL DEFAULT 1, -- # occurrences folded into this job
+  -- dispatcher claims only rows where lease is NULL/expired.
+  --
+  -- Round-3 HIGH (Comp 1): per-action lease TTL — `create` may run the full
+  -- GH retry path (~10 min worst case under rate-limit retries); `bump` is
+  -- fast. Hardcoded 15min for all actions risked dual side effects. Per-action
+  -- TTL + an `attempt_token` (UUID) ties workflow completion to the specific
+  -- attempt; a stale workflow that finishes after lease expiry tries to write
+  -- succeeded_at with its token, but only the CURRENT attempt_token in the
+  -- row is accepted (others rejected by the workflow's UPDATE ... WHERE
+  -- attempt_token = $supplied_token).
+  dispatch_lease_until  TIMESTAMPTZ,
+  dispatch_lease_ttl    INTERVAL,                -- per-action TTL set on claim
+  attempt_token         UUID,                    -- rotated each claim; workflow MUST present this to mark succeeded
+  -- Round-3 MEDIUM (Comp 1): split single dispatched_at into first/last +
+  -- attempt count so re-claims preserve audit trail. Without this, the
+  -- "first dispatch" timestamp is lost on every re-claim and operators
+  -- can't reason about end-to-end latency.
+  first_dispatched_at   TIMESTAMPTZ,
+  last_dispatched_at    TIMESTAMPTZ,
+  dispatch_attempt_count INT         NOT NULL DEFAULT 0,
+  succeeded_at          TIMESTAMPTZ,
+  failure_count         INT          NOT NULL DEFAULT 0,
+  last_error            TEXT,
+  coalesced_count       INT          NOT NULL DEFAULT 1, -- # occurrences folded into this job
   -- Round-2 HIGH (Comp 1): cursor advancement needs to know the MAX occurrence
   -- id rolled into this job. Without it, the worker has no safe way to advance
   -- last_issue_occurrence_id (querying live max can skip un-dispatched rows;
   -- using a stale id causes replay). Each UPSERT into this queue must
   -- GREATEST() this with the latest occurrence id.
-  last_occurrence_id   BIGINT       REFERENCES public.fingerprint_occurrences(id)
+  last_occurrence_id    BIGINT       REFERENCES public.fingerprint_occurrences(id)
 );
+
+-- Per-action TTL guidance (set by dispatcher on claim):
+--   action='create' → 30 minutes (GH retry path + token refresh)
+--   action='bump'   → 5 minutes  (single comment POST)
+--   action='reopen' → 10 minutes (reopen + comment)
+-- These are operational tuning knobs — bump or lower as observed latencies
+-- inform real workflow runtime distributions.
 
 DO $$
 BEGIN
@@ -451,8 +486,13 @@ CREATE INDEX IF NOT EXISTS fingerprint_issue_jobs_pending_idx
   ON public.fingerprint_issue_jobs (window_start, enqueued_at, id)
   WHERE succeeded_at IS NULL;
 -- Partial index for the dispatcher's lease-aware claim query.
+-- Round-3 LOW (Comp 1): match the documented claim sort order (window_start,
+-- enqueued_at, id) so the planner can use this index for the ORDER BY without
+-- a separate sort step. Postgres partial indexes can serve queries with
+-- LITERAL `failure_count < 5` predicates; do NOT parameterize that threshold
+-- in the worker (else this partial becomes unusable).
 CREATE INDEX IF NOT EXISTS fingerprint_issue_jobs_claimable_idx
-  ON public.fingerprint_issue_jobs (window_start, enqueued_at)
+  ON public.fingerprint_issue_jobs (window_start, enqueued_at, id)
   WHERE succeeded_at IS NULL
     AND failure_count < 5;
 
@@ -518,8 +558,18 @@ CREATE OR REPLACE FUNCTION public.fingerprint_registry_cursor_monotonic()
 DECLARE
   occ_fp BIGINT;
 BEGIN
-  -- Skip if cursor is being cleared or unchanged
+  -- Round-3 HIGH (Comp 1): early-return on NULL was a regression bypass —
+  -- it allowed clearing an established cursor (a stale dispatcher writes
+  -- NULL and loses forward progress). Reject NULL when OLD was non-NULL.
+  -- Legitimate admin-repair paths use SET search_path + a server-side
+  -- session var to opt-out (not modeled here; service_role can also
+  -- bypass via DELETE+INSERT if absolutely needed).
   IF NEW.last_issue_occurrence_id IS NULL THEN
+    IF OLD.last_issue_occurrence_id IS NOT NULL THEN
+      RAISE EXCEPTION 'fingerprint_registry: cursor cannot be cleared from non-NULL (id=%, OLD=%, NEW=NULL)',
+        NEW.id, OLD.last_issue_occurrence_id
+        USING ERRCODE = 'check_violation';
+    END IF;
     RETURN NEW;
   END IF;
   IF OLD.last_issue_occurrence_id IS NOT NULL

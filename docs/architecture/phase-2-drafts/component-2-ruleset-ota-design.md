@@ -134,8 +134,14 @@ public sealed class RulesetSignatureVerifier
     /// <summary>
     /// Eager-load at startup (Codex round-2 MEDIUM, Comp 2 chunk 2): lazy is
     /// wrong for a signature trust boundary. Throws if zero keys load OR if any
-    /// PEM import fails — callers must catch + fall back to embedded ruleset,
-    /// keeping OTA disabled until the next agent rebuild.
+    /// PEM import fails.
+    ///
+    /// Round-3 MEDIUM: the explicit caller is `ConfigSyncWorker.InitializeAsync`,
+    /// which wraps this call in try/catch(InvalidOperationException). On throw:
+    /// emit `ruleset.trust_store_load_failed` mesh signal, set
+    /// `_rulesetOtaDisabled = true`, log error, and continue with the embedded
+    /// Phase 1 ruleset. The worker never retries trust-store load (a failed
+    /// load indicates a build problem, not a transient condition).
     /// </summary>
     public static RulesetSignatureVerifier LoadEmbeddedTrustStore()
     {
@@ -284,6 +290,13 @@ Chunk C (Signature verification): should `LoadEmbeddedPublicKey` also support a 
 - `RulesetSyncStore.SaveAsync` subsequent update → `File.Replace` with backup
 - `RulesetSyncStore` startup orphan-temp sweep → 2hr-old `ruleset-*.tmp` deleted, 5min-old preserved
 
+**Startup / cache-state tests** (Codex round-3 HIGH + MED):
+- Fresh install, no `ruleset-current.json` exists → agent loads embedded ruleset, no OTA swap, no alarm. Assert `Wire._runtime.Ruleset.RulesetVersion` equals embedded version.
+- Boot with valid `ruleset-current.json` signed by trusted key_id → cache loaded, swap to cached ruleset, no alarm.
+- **Boot with `ruleset-current.json` signed by ROTATED-OUT key_id** (round-3 HIGH): the cached bundle's key_id is no longer in the embedded trust store. Agent rejects the cache as invalid, alarms `ruleset.cached_key_rotated_out`, falls back to embedded. The cache file is left in place (a future rebuild may restore the key) but `_runtime` points at embedded.
+- Boot with corrupt `ruleset-current.json` (random bytes) → parse fails, alarms, falls back to embedded.
+- Boot with valid cache + corrupt embedded resource → cache loads successfully, no alarm. (Defends against accidental embedded-resource damage during build.)
+
 **Failure-mode integration tests** (table-driven against `ConfigSyncWorker` + fake `IRulesetClient`)
 
 | Scenario | Expected outcome |
@@ -300,6 +313,6 @@ Chunk C (Signature verification): should `LoadEmbeddedPublicKey` also support a 
 
 **Corruption-after-flush test**: write a valid bundle to `ruleset-current.json`, corrupt 1 byte after `Flush(true)`, restart agent → assert verifier rejects, alarms, falls back to embedded.
 
-**Concurrent-swap stress test**: dispatch 100 `Wire.SwapRuleset(A)` and 100 `Wire.SwapRuleset(B)` interleaved across N threads; dispatcher reads `_runtime` 1000× in parallel → assert no reader observes mixed-generation `(Ruleset, Scrubber, Fingerprinter)` (e.g., Ruleset_A with Scrubber_B). Single-publisher (only ConfigSyncWorker calls SwapRuleset) is a separate contract test.
+**Concurrent-swap stress test**: dispatch **≥10,000** `Wire.SwapRuleset(A)` and **≥10,000** `Wire.SwapRuleset(B)` interleaved across N threads (round-3 LOW: prior 100×100 was too low to surface a torn-read consistently); dispatcher reads `_runtime` continuously across ≥4 reader threads → assert no reader observes mixed-generation `(Ruleset, Scrubber, Fingerprinter)` (e.g., Ruleset_A with Scrubber_B). Run for a duration target of ≥30s wall-clock to amortize JIT warmup. Single-publisher (only ConfigSyncWorker calls SwapRuleset) is a separate contract test.
 
 **Property test**: PhiScrubber + FingerprintComputer outputs unchanged for Bug 22/23/24 calibration vectors after `Wire.SwapRuleset` to an identical ruleset (verifies snapshot construction doesn't drift state).
