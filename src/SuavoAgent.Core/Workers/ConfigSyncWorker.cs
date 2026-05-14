@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Health;
+using SuavoAgent.Diagnostics;
 
 namespace SuavoAgent.Core.Workers;
 
@@ -12,6 +13,13 @@ namespace SuavoAgent.Core.Workers;
 /// so IOptionsMonitor-aware consumers pick up changes without a restart.
 /// Simple consumers that read IOptions once at boot pick up changes at
 /// next service restart.
+///
+/// Comp 2.2 — when the optional ruleset OTA dependencies are wired
+/// (<see cref="IRulesetClient"/>, <see cref="RulesetSyncStore"/>,
+/// <see cref="IRulesetVerifier"/>, <see cref="IRulesetSwapper"/>), the
+/// same polling loop also fetches+verifies+swaps the signed ruleset.
+/// Independent retry paths so a ruleset failure doesn't break the
+/// config-override sync (or vice versa) per Comp 2 design §B.
 ///
 /// Never throws out of ExecuteAsync — every iteration is wrapped so a
 /// transient network blip (or broken cloud response) doesn't kill the
@@ -24,20 +32,46 @@ public sealed class ConfigSyncWorker : BackgroundService
     private readonly ConfigSyncOptions _opts;
     private readonly ILogger<ConfigSyncWorker> _logger;
 
+    // Comp 2.2 — optional ruleset OTA deps. All four MUST be supplied
+    // together; if any is null, the ruleset poll is silently skipped (the
+    // agent runs on the embedded Phase 1 ruleset).
+    private readonly IRulesetClient? _rulesetClient;
+    private readonly RulesetSyncStore? _rulesetStore;
+    private readonly IRulesetVerifier? _rulesetVerifier;
+    private readonly IRulesetSwapper? _rulesetSwapper;
+    private string? _currentRulesetETag;
+    private bool _rulesetInitialised;
+
     public ConfigSyncWorker(
         IAgentConfigClient client,
         ConfigOverrideStore store,
         ConfigSyncOptions opts,
-        ILogger<ConfigSyncWorker> logger)
+        ILogger<ConfigSyncWorker> logger,
+        IRulesetClient? rulesetClient = null,
+        RulesetSyncStore? rulesetStore = null,
+        IRulesetVerifier? rulesetVerifier = null,
+        IRulesetSwapper? rulesetSwapper = null)
     {
         _client = client;
         _store = store;
         _opts = opts;
         _logger = logger;
+        _rulesetClient = rulesetClient;
+        _rulesetStore = rulesetStore;
+        _rulesetVerifier = rulesetVerifier;
+        _rulesetSwapper = rulesetSwapper;
     }
+
+    /// <summary>True when all four OTA deps were supplied at construction.</summary>
+    internal bool RulesetOtaEnabled
+        => _rulesetClient is not null
+           && _rulesetStore is not null
+           && _rulesetVerifier is not null
+           && _rulesetSwapper is not null;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await InitializeRulesetCacheAsync(stoppingToken).ConfigureAwait(false);
         while (!stoppingToken.IsCancellationRequested)
         {
             var attemptAt = DateTimeOffset.UtcNow;
@@ -89,11 +123,192 @@ public sealed class ConfigSyncWorker : BackgroundService
                 }
             }
 
+            // Comp 2.2 — independent ruleset poll. Wrapped so a ruleset
+            // failure doesn't break the config-override flow.
+            if (RulesetOtaEnabled)
+            {
+                try
+                {
+                    await PollRulesetAsync(stoppingToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "ConfigSyncWorker: ruleset poll failed (continuing)");
+                }
+            }
+
             try
             {
                 await Task.Delay(_opts.PollInterval, stoppingToken);
             }
             catch (OperationCanceledException) { return; }
+        }
+    }
+
+    /// <summary>
+    /// Once-per-process: sweep orphan temps, load the cached bundle (if
+    /// any), verify its signature, and swap-in the cache only when its
+    /// monotonic version int exceeds the embedded floor. Comp 2 design §B
+    /// cache-vs-embedded boot logic (round-6 HIGH).
+    /// </summary>
+    internal async Task InitializeRulesetCacheAsync(CancellationToken ct)
+    {
+        if (!RulesetOtaEnabled || _rulesetInitialised)
+        {
+            return;
+        }
+        _rulesetInitialised = true;
+
+        try
+        {
+            await _rulesetStore!.InitializeAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "ConfigSyncWorker: ruleset store init failed");
+            return;
+        }
+
+        var cached = _rulesetStore.TryLoadCurrent();
+        if (cached is null)
+        {
+            return;
+        }
+
+        var verify = _rulesetVerifier!.Verify(cached);
+        if (!verify.IsValid)
+        {
+            // Cached bundle no longer trusted (rotated-out key_id, expired,
+            // or corrupted). Alarm + fall back to embedded.
+            _logger.LogWarning(
+                "ConfigSyncWorker: cached ruleset verify failed: {Reason}",
+                verify.FailureReason);
+            Wire.ReportInvariant("ruleset.cache_verify_failed",
+                new Dictionary<string, string>
+                {
+                    ["reason"] = verify.FailureReason ?? "unknown",
+                    ["cached_key_id"] = cached.Ruleset.KeyId,
+                });
+            return;
+        }
+
+        // Cache-vs-embedded: cache wins only on strict greater
+        // ruleset_version_int (round-5 LOW tie-break — equal prefers
+        // embedded, defends against stale-cache-after-rollback).
+        var embeddedInt = _rulesetSwapper!.CurrentVersionInt;
+        var cacheInt = cached.Ruleset.RulesetVersionInt;
+        if (cacheInt > embeddedInt)
+        {
+            _rulesetSwapper.Swap(cached.Ruleset);
+            _currentRulesetETag = string.IsNullOrEmpty(cached.ETag) ? null : cached.ETag;
+            _logger.LogInformation(
+                "ConfigSyncWorker: adopted cached ruleset version_int={CacheInt} (embedded was {EmbeddedInt})",
+                cacheInt, embeddedInt);
+        }
+    }
+
+    /// <summary>
+    /// One ruleset poll iteration: fetch → outcome classify → verify →
+    /// freshness gate → persist → swap. Maps each failure mode to the
+    /// design's preserve-cache / alarm contract (Comp 2 design §B).
+    /// </summary>
+    internal async Task PollRulesetAsync(CancellationToken ct)
+    {
+        if (!RulesetOtaEnabled)
+        {
+            return;
+        }
+
+        var result = await _rulesetClient!.FetchAsync(_currentRulesetETag, ct).ConfigureAwait(false);
+        switch (result.Outcome)
+        {
+            case RulesetFetchOutcome.NotModified:
+                return;
+            case RulesetFetchOutcome.AuthFailed:
+                Wire.ReportInvariant("ruleset.auth_failed",
+                    new Dictionary<string, string>
+                    {
+                        ["kind"] = _rulesetClient.LastFailureKind ?? "unknown",
+                    });
+                return;
+            case RulesetFetchOutcome.Transient:
+                return;  // no alarm — transient network / cloud blip
+            case RulesetFetchOutcome.SchemaInvalid:
+                Wire.ReportInvariant("ruleset.schema_drift",
+                    new Dictionary<string, string>
+                    {
+                        ["kind"] = _rulesetClient.LastFailureKind ?? "unknown",
+                    });
+                return;
+            case RulesetFetchOutcome.Updated:
+                break;
+        }
+
+        var bundle = result.Bundle!;
+
+        var verify = _rulesetVerifier!.Verify(bundle);
+        if (!verify.IsValid)
+        {
+            Wire.ReportInvariant("ruleset.signature_verify_failed",
+                new Dictionary<string, string>
+                {
+                    ["reason"] = verify.FailureReason ?? "unknown",
+                    ["key_id"] = bundle.Ruleset.KeyId,
+                });
+            return;
+        }
+
+        // OTA-time freshness gate (Codex round-8 HIGH): the cloud may
+        // have a bug or accidentally serve a stale/older bundle. Reject
+        // anything that isn't strictly greater than the in-memory version.
+        if (bundle.Ruleset.RulesetVersionInt <= _rulesetSwapper!.CurrentVersionInt)
+        {
+            Wire.ReportInvariant("ruleset.ota_int_regression",
+                new Dictionary<string, string>
+                {
+                    ["cloud_int"] = bundle.Ruleset.RulesetVersionInt.ToString(),
+                    ["agent_int"] = _rulesetSwapper.CurrentVersionInt.ToString(),
+                });
+            return;
+        }
+
+        // Persist before swap so a process crash between swap + save
+        // leaves the disk cache pointing at the OLD (still-valid) bundle.
+        // Disk failure does NOT block swap — the in-memory ruleset advances
+        // and the next restart loads the embedded fallback.
+        var saved = true;
+        try
+        {
+            await _rulesetStore!.SaveAsync(bundle, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            saved = false;
+            _logger.LogWarning(ex,
+                "ConfigSyncWorker: ruleset save failed (in-memory swap will still occur)");
+            Wire.ReportInvariant("ruleset.disk_write_failed",
+                new Dictionary<string, string>
+                {
+                    ["reason"] = ex.GetType().Name,
+                });
+        }
+
+        _rulesetSwapper.Swap(bundle.Ruleset);
+        if (saved)
+        {
+            _currentRulesetETag = string.IsNullOrEmpty(bundle.ETag) ? null : bundle.ETag;
         }
     }
 }

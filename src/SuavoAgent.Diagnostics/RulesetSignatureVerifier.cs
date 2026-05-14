@@ -33,7 +33,17 @@ namespace SuavoAgent.Diagnostics;
 /// RFC 8785 implementation with the Appendix B golden vectors as a gate.
 /// </para>
 /// </remarks>
-public sealed class RulesetSignatureVerifier
+/// <summary>
+/// Abstraction over <see cref="RulesetSignatureVerifier.Verify"/> so workers
+/// can be unit-tested with a recording fake without standing up a real
+/// trust store + signing roundtrip.
+/// </summary>
+public interface IRulesetVerifier
+{
+    RulesetVerificationResult Verify(RulesetBundle bundle);
+}
+
+public sealed class RulesetSignatureVerifier : IRulesetVerifier
 {
     /// <summary>Embedded-resource prefix for trust-store keys.</summary>
     internal const string KeyResourcePrefix = "ruleset-signing-key-";
@@ -158,8 +168,8 @@ public sealed class RulesetSignatureVerifier
 
     /// <summary>
     /// Verify a fetched OTA bundle. Returns
-    /// <see cref="VerificationResult.IsValid"/>=<c>false</c> with a
-    /// non-null <see cref="VerificationResult.FailureReason"/> on every
+    /// <see cref="RulesetVerificationResult.IsValid"/>=<c>false</c> with a
+    /// non-null <see cref="RulesetVerificationResult.FailureReason"/> on every
     /// rejection path (no exception escape on routine verification fails).
     /// </summary>
     /// <remarks>
@@ -168,36 +178,36 @@ public sealed class RulesetSignatureVerifier
     /// check should depend on earlier check's state, but ordering keeps
     /// the cheapest checks first.
     /// </remarks>
-    public VerificationResult Verify(RulesetBundle bundle)
+    public RulesetVerificationResult Verify(RulesetBundle bundle)
     {
         ArgumentNullException.ThrowIfNull(bundle);
         if (bundle.SignatureBytes is null || bundle.SignatureBytes.Length == 0)
         {
-            return VerificationResult.Fail("Missing signature");
+            return RulesetVerificationResult.Fail("Missing signature");
         }
         if (bundle.Ruleset is null)
         {
-            return VerificationResult.Fail("Missing ruleset");
+            return RulesetVerificationResult.Fail("Missing ruleset");
         }
 
         if (!_trustStore.TryGetValue(bundle.Ruleset.KeyId, out var key))
         {
-            return VerificationResult.Fail($"Unknown key_id: {bundle.Ruleset.KeyId}");
+            return RulesetVerificationResult.Fail($"Unknown key_id: {bundle.Ruleset.KeyId}");
         }
 
         if (!string.IsNullOrEmpty(bundle.Ruleset.ExpiresAt)
             && DateTimeOffset.TryParse(bundle.Ruleset.ExpiresAt, out var exp)
             && exp < DateTimeOffset.UtcNow)
         {
-            return VerificationResult.Fail("Ruleset expired");
+            return RulesetVerificationResult.Fail("Ruleset expired");
         }
 
         var canonicalJson = CanonicalizeForSigning(bundle.Ruleset);
         var data = Encoding.UTF8.GetBytes(canonicalJson);
 
         return key.VerifyData(data, bundle.SignatureBytes, HashAlgorithmName.SHA256)
-            ? VerificationResult.Ok()
-            : VerificationResult.Fail("Signature mismatch");
+            ? RulesetVerificationResult.Ok()
+            : RulesetVerificationResult.Fail("Signature mismatch");
     }
 
     /// <summary>
@@ -229,10 +239,10 @@ public sealed class RulesetSignatureVerifier
 }
 
 /// <summary>Outcome of a single ruleset signature verification.</summary>
-public readonly record struct VerificationResult(bool IsValid, string? FailureReason)
+public readonly record struct RulesetVerificationResult(bool IsValid, string? FailureReason)
 {
-    public static VerificationResult Ok() => new(true, null);
-    public static VerificationResult Fail(string reason) => new(false, reason);
+    public static RulesetVerificationResult Ok() => new(true, null);
+    public static RulesetVerificationResult Fail(string reason) => new(false, reason);
 }
 
 /// <summary>
