@@ -235,6 +235,20 @@ try
             configOverridesPath,
             sp.GetRequiredService<ILogger<ConfigOverrideStore>>()));
         builder.Services.AddSingleton(new ConfigSyncOptions());
+
+        // Diagnostic Mesh OTA — wire the Phase 2 ruleset distribution path
+        // (Comp 2.2). Adds IRulesetSwapper / IRulesetVerifier (eager-loads
+        // the embedded trust store) / RulesetSyncStore / IRulesetClient.
+        // ConfigSyncWorker auto-picks these up through its optional
+        // constructor params and exposes RulesetOtaEnabled = true.
+        //
+        // The cloud-side `agent-ruleset` Edge Function (Comp 2A) is not
+        // shipped yet — fetches will classify as Transient (404) and
+        // preserve the embedded Phase 1 ruleset. Heartbeat tags
+        // mesh.ruleset_swaps_total=0 give ops visibility into the
+        // missing endpoint.
+        builder.Services.AddDiagnosticMeshOta(agentOpts);
+
         builder.Services.AddHostedService<ConfigSyncWorker>();
     }
     else
