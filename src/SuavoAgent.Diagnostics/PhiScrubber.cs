@@ -28,6 +28,15 @@ public sealed class PhiScrubber
     }
 
     /// <summary>
+    /// Generation tag from the ruleset the scrubber was built against.
+    /// Used by snapshot-coherence tests (Codex Comp 2 round-4 MED): every
+    /// concurrent reader of <see cref="Wire.CurrentRuntime"/> MUST observe
+    /// <c>rt.Ruleset.RulesetVersion == rt.Scrubber.RulesetVersion ==
+    /// rt.Fingerprinter.RulesetVersion</c>, never a mixed generation.
+    /// </summary>
+    internal string RulesetVersion => _ruleset.RulesetVersion;
+
+    /// <summary>
     /// Returns a PHI-scrubbed copy of the input. Hard 10ms budget per spec
     /// §4 contract; on overrun OR on any per-rule exception, returns the
     /// <c>[SCRUB_TIMEOUT]</c> sentinel and the caller drops the extras

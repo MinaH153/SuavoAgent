@@ -27,9 +27,10 @@ public static class Wire
 
     private static WireComponent _component;
     private static WireOptions _options = new();
-    private static RulesetV1 _ruleset = new();
-    private static PhiScrubber? _scrubber;
-    private static FingerprintComputer? _fingerprinter;
+    // Single immutable snapshot of (ruleset, scrubber, fingerprinter).
+    // Published via Volatile.Write, read via Volatile.Read. See
+    // <see cref="RulesetRuntime"/> + Codex Comp 2 chunk B HIGH RESOLVED.
+    private static RulesetRuntime? _runtime;
     private static LocalJournal? _journal;
     private static EmitBudget? _budget;
     private static SentrySink? _sentry;
@@ -39,10 +40,12 @@ public static class Wire
     private static long _eventsEmittedTotal;
     private static long _wireHandlerFailedTotal;
     private static long _fpFallbackTotal;
+    private static long _rulesetSwapsTotal;
 
     public static long EventsEmittedTotal => Interlocked.Read(ref _eventsEmittedTotal);
     public static long WireHandlerFailedTotal => Interlocked.Read(ref _wireHandlerFailedTotal);
     public static long FpFallbackTotal => Interlocked.Read(ref _fpFallbackTotal);
+    public static long RulesetSwapsTotal => Interlocked.Read(ref _rulesetSwapsTotal);
     public static long RateLimitedTotal => _budget?.RateLimitedTotal ?? 0;
     /// <summary>
     /// Count of Sentry events successfully ENQUEUED into the SDK's worker
@@ -59,7 +62,17 @@ public static class Wire
     public static long SentryBeforeSendFailedTotal => _sentry?.BeforeSendFailedTotal ?? 0;
     public static bool SentryInitialized => _sentry?.IsInitialized ?? false;
     public static WireComponent Component => _component;
-    public static string RulesetVersion => _ruleset.RulesetVersion;
+    public static string RulesetVersion
+        => Volatile.Read(ref _runtime)?.Ruleset.RulesetVersion ?? "ruleset-uninitialized";
+    public static int RulesetVersionInt
+        => Volatile.Read(ref _runtime)?.Ruleset.RulesetVersionInt ?? 0;
+    /// <summary>
+    /// Snapshot of the active ruleset + derived components. Readers take
+    /// ONE <see cref="Volatile.Read{T}(ref T)"/> at the top of their work
+    /// and never re-read mid-dispatch. Public for SentrySink / tests; do
+    /// NOT cache the returned reference across signal boundaries.
+    /// </summary>
+    public static RulesetRuntime? CurrentRuntime => Volatile.Read(ref _runtime);
 
     /// <summary>
     /// Install Wire as the process's unhandled-exception capture point.
@@ -74,12 +87,28 @@ public static class Wire
         {
             _component = component;
             _options = options;
-            _ruleset = RulesetV1.LoadEmbedded();
-            _scrubber = new PhiScrubber(_ruleset, options.ScrubberTimeout);
-            _fingerprinter = new FingerprintComputer(_ruleset, options.FingerprintTimeout);
+
+            // Build the initial RulesetRuntime snapshot OFF-LOCK, then
+            // publish atomically via Volatile.Write. Readers see either
+            // null (uninitialised) or a fully-constructed snapshot —
+            // never a half-built generation.
+            var initialRuleset = RulesetV1.LoadEmbedded();
+            var initialRuntime = new RulesetRuntime(
+                initialRuleset,
+                new PhiScrubber(initialRuleset, options.ScrubberTimeout),
+                new FingerprintComputer(initialRuleset, options.FingerprintTimeout));
+            Volatile.Write(ref _runtime, initialRuntime);
+
             _journal = new LocalJournal(options.LocalJournalPath, options.LocalJournalTimeout);
             _budget = new EmitBudget(options.EmitBudgetPerSecond);
-            _sentry = new SentrySink(options, _scrubber, _fingerprinter);
+            // SentrySink captures the INITIAL scrubber + fingerprinter.
+            // Subsequent SwapRuleset calls do NOT propagate to SentrySink;
+            // its scrub layer is defense-in-depth (Wire.DispatchNormal
+            // pre-scrubs the message before handing it off). The bounded
+            // inconsistency window (≤5min OTA poll) is documented; Comp 2.3
+            // will refactor SentrySink to read fresh from Wire.CurrentRuntime
+            // if operational data shows the gap matters.
+            _sentry = new SentrySink(options, initialRuntime.Scrubber, initialRuntime.Fingerprinter);
 
             AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandled;
             TaskScheduler.UnobservedTaskException += OnUnobservedTask;
@@ -161,10 +190,73 @@ public static class Wire
                 ["mesh.sentry_enqueue_failed_total"] = SentryEnqueueFailedTotal.ToString(),
                 ["mesh.sentry_before_send_failed_total"] = SentryBeforeSendFailedTotal.ToString(),
                 ["mesh.sentry_initialized"] = SentryInitialized.ToString(),
-                ["mesh.ruleset_version"] = _ruleset.RulesetVersion,
+                ["mesh.ruleset_version"] = RulesetVersion,
+                ["mesh.ruleset_version_int"] = RulesetVersionInt.ToString(),
+                ["mesh.ruleset_swaps_total"] = RulesetSwapsTotal.ToString(),
                 ["mesh.git_sha"] = BuildContext.DefaultGitSha,
             },
         });
+    }
+
+    /// <summary>
+    /// Atomically replace the active ruleset + rebuild derived components
+    /// (scrubber, fingerprinter). Called by <c>ConfigSyncWorker</c> after
+    /// a successful OTA fetch + signature verification.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Codex Comp 2 chunk B HIGH RESOLVED. Builds the new
+    /// <see cref="RulesetRuntime"/> OFF-LOCK to avoid lock-order hazards
+    /// with emit paths re-entering Wire, then publishes via
+    /// <see cref="Volatile.Write{T}(ref T, T)"/>. Concurrent readers
+    /// observe the swap as a single atomic transition between two
+    /// fully-constructed generations.
+    /// </para>
+    /// <para>
+    /// Idempotent: a no-op when Wire hasn't been initialised yet
+    /// (<see cref="AttachUnhandledHooks"/> hasn't run); the caller's OTA
+    /// pipeline is expected to be off-by-default until init succeeds.
+    /// </para>
+    /// </remarks>
+    public static void SwapRuleset(RulesetV1 next)
+    {
+        ArgumentNullException.ThrowIfNull(next);
+        if (!_initialized)
+        {
+            // OTA tries to swap before Wire init — silent no-op. Worker
+            // wraps Init in its own readiness check, but belt-and-suspenders.
+            return;
+        }
+
+        var nextRuntime = new RulesetRuntime(
+            next,
+            new PhiScrubber(next, _options.ScrubberTimeout),
+            new FingerprintComputer(next, _options.FingerprintTimeout));
+        Volatile.Write(ref _runtime, nextRuntime);
+        Interlocked.Increment(ref _rulesetSwapsTotal);
+
+        // Emit POST-publication so the recursion-safe ReportSignal path
+        // observes the NEW generation. Heartbeat won't fire here (only
+        // every 5min from MeshHeartbeatWorker); a synthetic InvariantViolation
+        // would also work but pollutes Sentry. Local journal append only.
+        try
+        {
+            _journal?.Append(new Dictionary<string, object?>
+            {
+                ["ts"] = DateTimeOffset.UtcNow.ToString("o"),
+                ["signal_kind"] = "ruleset_swapped",
+                ["component"] = _component.ToString(),
+                ["ruleset_version"] = next.RulesetVersion,
+                ["ruleset_version_int"] = next.RulesetVersionInt,
+                ["key_id"] = next.KeyId,
+                ["ruleset_swaps_total"] = Interlocked.Read(ref _rulesetSwapsTotal),
+            });
+        }
+        catch
+        {
+            // Swap succeeded; journal failure is non-fatal. SwapRuleset
+            // never throws past this boundary.
+        }
     }
 
     private static void ReportSignal(WireSignal signal)
@@ -239,12 +331,20 @@ public static class Wire
     /// </summary>
     private static void DispatchNormal(WireSignal signal)
     {
+        // Codex Comp 2 chunk B HIGH: read the runtime ONCE per signal so
+        // every dependent step (ruleset, scrubber, fingerprinter) comes
+        // from the SAME generation. Re-reading mid-dispatch could observe
+        // a swap-in-progress. The local `rt` is held for the duration of
+        // this signal; a concurrent SwapRuleset only affects the NEXT
+        // signal.
+        var rt = Volatile.Read(ref _runtime);
+
         // 1. PhiScrubber
         string? scrubbedMessage = null;
         try
         {
             var raw = signal.Exception?.Message ?? signal.InvariantId ?? signal.Stage ?? string.Empty;
-            scrubbedMessage = _scrubber?.Sanitize(raw);
+            scrubbedMessage = rt?.Scrubber.Sanitize(raw);
         }
         catch
         {
@@ -255,7 +355,7 @@ public static class Wire
         string fingerprint;
         try
         {
-            fingerprint = _fingerprinter?.Compute(signal)
+            fingerprint = rt?.Fingerprinter.Compute(signal)
                 ?? $"fp-fallback|{signal.Component}|{signal.Kind}";
             if (fingerprint.StartsWith("fp-fallback", StringComparison.Ordinal))
             {
@@ -283,7 +383,7 @@ public static class Wire
                 ["invariant_id"] = signal.InvariantId,
                 ["exit_code"] = signal.ExitCode,
                 ["git_sha"] = BuildContext.DefaultGitSha,
-                ["ruleset_version"] = _ruleset.RulesetVersion,
+                ["ruleset_version"] = rt?.Ruleset.RulesetVersion ?? "ruleset-uninitialized",
             };
             if (signal.ExtraTags is { Count: > 0 } extras)
             {

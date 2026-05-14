@@ -121,19 +121,35 @@ public class RulesetSignatureVerifierTests
         Assert.Contains("at least one key", ex.Message);
     }
 
-    // ── LoadEmbeddedTrustStore — Phase 1 has zero matching resources ──────
+    // ── LoadEmbeddedTrustStore — Comp 2.2 ships a real P-256 pubkey ──────
 
     [Fact]
-    public void LoadEmbeddedTrustStore_with_zero_matching_resources_throws()
+    public void LoadEmbeddedTrustStore_loads_real_embedded_pubkey()
     {
-        // Phase 1 ships `ruleset-signing-key.pub.pem` (no key_id segment).
-        // The multi-key convention `ruleset-signing-key-<key_id>.pub.pem`
-        // matches zero resources, so LoadEmbeddedTrustStore must fail
-        // closed. Comp 2.2 generates real keys to satisfy this.
-        var ex = Assert.Throws<InvalidOperationException>(
-            RulesetSignatureVerifier.LoadEmbeddedTrustStore);
+        // Comp 2.2 key ceremony shipped `ruleset-signing-key-ruleset-v1-key-2026-05-13.pub.pem`
+        // matching the embedded ruleset's KeyId. The matching PRIVATE key
+        // lives in Vault (prod) or the ops keystore (dev); this test does
+        // NOT verify a signature, only that the public key parses and is
+        // registered under the expected key_id.
+        var verifier = RulesetSignatureVerifier.LoadEmbeddedTrustStore();
+        Assert.NotNull(verifier);
 
-        Assert.Contains("zero embedded keys", ex.Message);
+        // Sanity: a Verify call with a known-bad signature still produces
+        // a clean failure path (proving the verifier is functional, not
+        // throwing on a parse-time hazard).
+        var unknownKeyRuleset = new RulesetV1
+        {
+            RulesetVersion = "v1.0",
+            RulesetVersionInt = 10,
+            KeyId = "ruleset-v1-key-2026-05-13",
+            SignedAt = "2026-05-13T00:00:00Z",
+            SignatureAlg = "ECDSA_P256_SHA256",
+        };
+        var bundle = new RulesetBundle(unknownKeyRuleset, new byte[64], ETag: "");
+        var result = verifier.Verify(bundle);
+
+        Assert.False(result.IsValid);
+        Assert.Equal("Signature mismatch", result.FailureReason);
     }
 
     // ── Verify — happy path + each rejection reason ───────────────────────

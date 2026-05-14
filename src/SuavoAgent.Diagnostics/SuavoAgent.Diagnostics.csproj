@@ -46,7 +46,12 @@
          build/ValidateRulesetSchema.targets. -->
     <EmbeddedResource Include="Resources\ruleset-v1.json" />
     <EmbeddedResource Include="Resources\ruleset-v1.schema.json" />
-    <EmbeddedResource Include="Resources\ruleset-signing-key.pub.pem" />
+    <!-- Multi-key trust store. Phase 2 OTA verifies every fetched ruleset
+         against one of N embedded ECDsa P-256 public keys; the bundle's
+         key_id selects which. Resource naming convention:
+         `ruleset-signing-key-<key_id>.pub.pem`. Codex Comp 2 chunk C HIGH
+         RESOLVED. Generate new keys via scripts/generate-ruleset-signing-key.sh. -->
+    <EmbeddedResource Include="Resources\ruleset-signing-key-*.pub.pem" />
   </ItemGroup>
 
   <ItemGroup>
