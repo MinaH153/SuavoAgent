@@ -51,6 +51,12 @@ Phase 2 work:
 4. Cloud Edge Function bundle builder reads + emits `ruleset_version_int` from the source-of-truth ruleset store.
 5. The JSON canonicalizer signs the field in RFC 8785 order.
 
+**Round-8 HIGH (Comp 2 — monotonicity enforcement + OTA-time freshness gate)**:
+- **Cloud-side invariant**: per `key_id`, `ruleset_version_int` is DB-enforced nondecreasing — backed by a sequence per key_id (`ruleset_signing_versions_seq`) or a CHECK trigger on the ruleset store table. The cloud Edge Function bundle builder reads via the monotonic sequence; an accidentally-lower bundle cannot be served.
+- **Agent OTA-time freshness gate**: ConfigSyncWorker's swap path adds `if (bundle.Ruleset.RulesetVersionInt <= Volatile.Read(ref _runtime).Ruleset.RulesetVersionInt) { alarm "ruleset.ota_int_regression"; drop bundle; return; }` BEFORE `RulesetSyncStore.SaveAsync` + `Wire.SwapRuleset`. Defends against cloud-side bugs / accidental rollback delivery.
+
+**Round-8 MEDIUM (Comp 2 — embedded int initial value)**: at Phase 2 code PR cut, embedded `ruleset_version_int` MUST equal the cloud source-of-truth current int (Joshua reads cloud `SELECT MAX(ruleset_version_int) FROM signed_rulesets WHERE key_id = '<current_key>'` and bumps the embedded file accordingly). Future cloud bundles allocate strictly greater ints via the monotonic sequence. The string `ruleset_version` remains display-only and follows semver but is never compared.
+
 **Signing**: cloud Edge Function fetches the ruleset signing private key from supabase Vault on each request (low volume, cache TTL 5min), signs the canonicalized JSON, returns bundle. Per spec §5 — Vault for Phase 1+2, KMS for Phase 3 when per-tenant keys arrive.
 
 **Canonicalization**: **LOCKED to RFC 8785 (JSON Canonicalization Scheme) only.** No custom fallback. RFC 8785 specifies UTF-16 key ordering + ECMAScript number serialization + forbids Unicode normalization — drift from any of these between cloud and agent produces signed-but-rejected bundles (Codex review v1 CRITICAL, Comp 2 chunk A). Use .NET `JCS` library on cloud side; on agent side use a vetted RFC 8785 implementation (the `JsonCanonicalizer` NuGet package or a hand-rolled implementation with the RFC 8785 Appendix B/property-order test vectors as a golden test). Both implementations MUST pass the shared RFC 8785 conformance vectors before code lands.
@@ -155,11 +161,26 @@ public sealed class RulesetSignatureVerifier
     ///   `catch (CryptographicException ex)    // ImportFromPem malformed`
     ///   `catch (IOException ex)               // resource stream read fail`
     ///   `catch (UnauthorizedAccessException ex) // file ACL`
-    ///   `catch (JsonException ex)             // round-7 MED: corrupt cache parse → alarm + fallback`
+    ///   `catch (JsonException ex)             // round-7 MED: corrupt cache parse → alarm + fallback to embedded`
     /// All other exceptions escape and crash the process — supervisor restart
     /// is the right recovery path for process-corruption signals.
     /// OperationCanceledException / TaskCanceledException intentionally NOT
     /// caught — caller wants cancel to propagate.
+    ///
+    /// **Round-8 HIGH (Comp 2 — embedded-parse terminal state)**: JsonException
+    /// in the *cache parse* path falls back to embedded. But if the *embedded*
+    /// resource itself fails JsonException (e.g., build damage), the fallback
+    /// path has nothing to fall back TO. In that scenario the agent fails
+    /// CLOSED at startup:
+    ///   - `_runtime = null` (no ruleset, no scrubber, no fingerprinter)
+    ///   - All `Wire.Dispatch*` paths short-circuit to "diagnostics disabled"
+    ///     mode (no fingerprint emission, no Sentry post; local journal still
+    ///     writes raw events for forensic recovery)
+    ///   - `ruleset.embedded_parse_failed` mesh signal emitted via the local
+    ///     journal path (the only path that doesn't depend on `_runtime`)
+    ///   - Agent supervisor restart loop continues until manual fix
+    /// This is the diagnostics-mesh equivalent of "kernel panic" — the agent
+    /// runs, but no diagnostics flow until the operator ships a fixed build.
     ///
     /// On throw: emit `ruleset.trust_store_load_failed` mesh signal, set
     /// `_rulesetOtaDisabled = true`, log error, and continue with the embedded
@@ -326,7 +347,9 @@ Chunk C (Signature verification): should `LoadEmbeddedPublicKey` also support a 
 
   This handles coordinated cloud+agent releases where cache might lag.
 
-  **Round-7 MEDIUM (Comp 2 — rollback semantics)**: cache-newer-wins is the steady-state rule, but binary rollback (agent self-updates to an OLDER build with a lower `embedded.ruleset_version_int`) leaves the cached newer ruleset adopted on next boot. Policy: **cache freshness wins; rollback is OS/agent-supervisor responsibility, not ruleset-layer**. If an emergency rollback must also revert ruleset, the rollback procedure must either (a) delete `ruleset-current.json` from disk OR (b) write a `ruleset-rollback-epoch.json` sentinel that the loader honors as `max_allowed_ruleset_version_int` for one boot. Document this in the rollback runbook (`docs/runbooks/mesh-rollback.md`); not enforced in code by this draft.
+  **Round-7 MEDIUM + Round-8 MEDIUM (Comp 2 — rollback semantics + ship-gate)**: cache-newer-wins is the steady-state rule, but binary rollback (agent self-updates to an OLDER build with a lower `embedded.ruleset_version_int`) leaves the cached newer ruleset adopted on next boot. Policy: **cache freshness wins; rollback is OS/agent-supervisor responsibility, not ruleset-layer**. If an emergency rollback must also revert ruleset, the rollback procedure must either (a) delete `ruleset-current.json` from disk OR (b) write a `ruleset-rollback-epoch.json` sentinel that the loader honors as `max_allowed_ruleset_version_int` for one boot.
+
+  **Round-8 MEDIUM ship-gate**: Phase 2 code PR is BLOCKED until `docs/runbooks/mesh-rollback.md` lands with concrete cache-delete + rollback-epoch sentinel steps; this draft does not ship without that runbook.
 
 **Failure-mode integration tests** (table-driven against `ConfigSyncWorker` + fake `IRulesetClient`)
 

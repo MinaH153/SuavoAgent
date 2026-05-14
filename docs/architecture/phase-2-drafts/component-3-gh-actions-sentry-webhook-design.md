@@ -221,7 +221,7 @@ The workflow's first step (BEFORE the DB fetch) is HMAC verification against the
        LEFT JOIN public.fingerprint_issue_links l USING (fingerprint_id)
       WHERE j.id = $alerted_job_id;
      ```
-   - (2) Inspect GH issue: was a duplicate created? **Canonical = lowest issue number** unless `fingerprint_issue_links.github_issue_number` already names one (round-7 MED clarification). Edit every non-canonical duplicate body to reference the canonical, then close them.
+   - (2) Inspect GH issue: was a duplicate created? **Canonical = lowest issue number** unless `fingerprint_issue_links.github_issue_number` already names one (round-7 MED clarification). Round-8 MED edge: if the link's issue is CLOSED and the duplicates are open (the link was closed before the stale-completion event), the operator MUST update the link to point at one of the new open issues (lowest number). Use the audited admin RPC `update_fingerprint_issue_link(fingerprint_id, new_issue_number, audit_reason)` (to be defined in a follow-up migration); raw UPDATE on github_issue_number is BLOCKED by the write-once trigger. Edit every non-canonical duplicate body to reference the canonical, then close them.
    - (3) Call `complete_fingerprint_issue_job($job_id, $current_attempt_token, $current_last_occurrence_id)` with values from step 1's query — note the `attempt_token` will be the CURRENT row's (rotated by the re-claim that caused this alarm), NOT the workflow's stale token. The function marks the row succeeded + advances registry cursor atomically.
    - DO NOT advance any cursor; the row's CURRENT attempt_token holder may also have done GH work, and the resulting duplicates need human triage.
    - Mitigations to keep this rate near zero: per-action lease TTL ≥ worst-case workflow runtime (round-3 sized — create=30min), token verification at the START of every GH op for long-running actions.
@@ -379,10 +379,11 @@ BEGIN
     RETURNING fingerprint_id, action INTO v_fingerprint_id, v_action;
     IF NOT FOUND THEN RETURN FALSE; END IF;
 
-    -- Round-7 HIGH #3: if the abandoned job was a 'create' attempt,
-    -- bump the fingerprint-level create kill switch. After 3
-    -- consecutive create failures, suppress create classification for
-    -- 24h + page oncall once.
+    -- Round-7 HIGH #3 + Round-8 MED (Comp 3): symmetric kill switches for
+    -- repeated failures on create OR bump. After 3 consecutive failures of
+    -- the same action class within an active window, suppress that action
+    -- class for 24h + page once. Reopen + bump share the bump counter
+    -- (both write to an existing issue; failure cause is similar).
     IF v_action = 'create' THEN
       UPDATE public.fingerprint_issue_links
          SET create_failure_count    = create_failure_count + 1,
@@ -392,10 +393,19 @@ BEGIN
                ELSE create_suppressed_until
              END
        WHERE fingerprint_id = v_fingerprint_id;
-      -- Caller observes the threshold crossing via subsequent SELECT
-      -- and emits `mesh.create_suppressed_total{fingerprint_id=...}`
-      -- exactly once per arming window.
+    ELSIF v_action IN ('bump', 'reopen') THEN
+      UPDATE public.fingerprint_issue_links
+         SET bump_failure_count    = bump_failure_count + 1,
+             last_bump_failed_at   = NOW(),
+             bump_suppressed_until = CASE
+               WHEN bump_failure_count + 1 >= 3 THEN NOW() + INTERVAL '24 hours'
+               ELSE bump_suppressed_until
+             END
+       WHERE fingerprint_id = v_fingerprint_id;
     END IF;
+    -- Caller observes threshold crossings via subsequent SELECT and emits
+    -- `mesh.{create,bump}_suppressed_total{fingerprint_id=...}` exactly once
+    -- per arming window.
 
     -- Replay sweep (every 5min) auto-picks up the now-uncovered gap
     -- (gated by create_suppressed_until for action='create' paths).
@@ -426,6 +436,8 @@ WITH gaps AS (
          COUNT(*)              AS gap_count,
          l.state               AS link_state,
          l.claim_expires_at,
+         l.create_suppressed_until,    -- round-8 HIGH: create kill switch must be SELECT-ed
+         l.create_failure_count,       -- round-8 HIGH: classifier resets on natural expiry
          l.last_action_at
     FROM public.fingerprint_occurrences o
     JOIN public.fingerprint_registry   r ON r.id = o.fingerprint_id
@@ -482,12 +494,12 @@ classified AS (
            -- reopen_count_window_at, budget_exhausted_notified_at) are in
            -- Comp 1's fingerprint_issue_links table (added in round-7 patch).
            --
-           -- Budget-exhausted alarm (round-7 HIGH #5): emit
-           -- `mesh.reopen_budget_exhausted_total{fingerprint_id=...}` ONCE
-           -- per 24h window. Caller emits the metric only when the RPC
-           -- returned 'noop_budget_exhausted' AND `budget_exhausted_notified_at`
-           -- was NULL pre-call (the RPC sets it atomically). Alert rule fires
-           -- on first occurrence per fingerprint per window.
+           -- Budget-exhausted alarm (round-7 HIGH #5 + round-8 HIGH first/repeat):
+           -- the RPC's return value distinguishes first vs repeat exhaustion
+           -- atomically: 'noop_budget_exhausted_first' (caller emits the
+           -- metric) vs 'noop_budget_exhausted_repeat' (silent). Caller
+           -- cannot race a SELECT-before-RPC to detect first-time itself.
+           -- See updated try_enqueue_reopen_job signature in Comp 1.
            WHEN g.link_state = 'closed'                                THEN 'reopen'
            ELSE NULL
          END AS action
@@ -517,6 +529,42 @@ ON CONFLICT (fingerprint_id, window_start) DO UPDATE
 For action='create' coming from the sweep (rather than first-time ingest), the dispatcher worker also runs the `INSERT INTO fingerprint_issue_links ON CONFLICT DO NOTHING` claim BEFORE dispatching, so the create-race remains protected.
 
 This is idempotent: re-running the sweep without new occurrences is a no-op (the cursor has been advanced after the prior job succeeded).
+
+**Round-8 HIGH (Comp 3 chunk 1) — RPC invocation site for action='reopen'**: the classified `action='reopen'` is INTENT only. Before the INSERT INTO fingerprint_issue_jobs runs for a reopen-classified row, the worker MUST call `public.try_enqueue_reopen_job(fingerprint_id)`:
+
+```typescript
+// Edge Function / sweep worker, Deno pseudo-SQL flow:
+const candidates = await sql`
+  SELECT fingerprint_id, action, min_occ_id, max_occ_id, gap_count
+  FROM ( /* the gaps CTE above produces these */ );
+`;
+
+const toEnqueue = [];
+for (const c of candidates) {
+  // First: reset any naturally-expired kill switches so suppressions
+  // don't carry forward stuck count states.
+  await sql`SELECT public.reset_expired_kill_switches(${c.fingerprint_id});`;
+
+  if (c.action === 'reopen') {
+    const [{ try_enqueue_reopen_job: outcome }] = await sql`
+      SELECT public.try_enqueue_reopen_job(${c.fingerprint_id})
+    `;
+    if (outcome === 'reopen') {
+      toEnqueue.push(c);
+    } else if (outcome === 'noop_budget_exhausted_first') {
+      // Emit one-shot alarm
+      metrics.inc('mesh.reopen_budget_exhausted_total', { fingerprint_id: c.fingerprint_id });
+    }
+    // Other 'noop_*' outcomes are silent skips.
+  } else {
+    toEnqueue.push(c);
+  }
+}
+
+// Then INSERT/UPSERT fingerprint_issue_jobs from `toEnqueue` rows only.
+```
+
+Doing the RPC inside the CTE is NOT feasible (Postgres CTE function calls inside SELECT lists are evaluated lazily and the FOR UPDATE side-effects don't compose well with the outer INSERT). The two-phase per-row invocation above is the correct pattern.
 
 ## Open questions for Codex re-review (FOCUSED chunks)
 

@@ -338,7 +338,14 @@ CREATE TABLE IF NOT EXISTS public.fingerprint_issue_links (
   -- After N consecutive failed creates in claimed state, stop enqueueing.
   create_failure_count       INT          NOT NULL DEFAULT 0,
   last_create_failed_at      TIMESTAMPTZ,
-  create_suppressed_until    TIMESTAMPTZ
+  create_suppressed_until    TIMESTAMPTZ,
+  -- Round-8 MED (Comp 3): mirror kill switch for repeated bump failures
+  -- on open/reopened issues. Same semantics: bump_failure_count++ on
+  -- recover_fingerprint_issue_job(mode='abandon') for action='bump'; at
+  -- >=3 set bump_suppressed_until = NOW() + 24h + page once.
+  bump_failure_count         INT          NOT NULL DEFAULT 0,
+  last_bump_failed_at        TIMESTAMPTZ,
+  bump_suppressed_until      TIMESTAMPTZ
 );
 
 -- Round-2 MEDIUM (Comp 1): state invariants — 'open'/'closed'/'reopened'
@@ -752,7 +759,7 @@ GRANT  EXECUTE ON FUNCTION public.record_fingerprint_issue_job_failure(BIGINT, U
 -- 24h window per fingerprint (round-7 HIGH #5).
 CREATE OR REPLACE FUNCTION public.try_enqueue_reopen_job(
   p_fingerprint_id BIGINT
-) RETURNS TEXT  -- 'reopen' | 'noop_suppressed' | 'noop_budget_exhausted'
+) RETURNS TEXT  -- 'reopen' | 'noop_suppressed' | 'noop_budget_exhausted_first' | 'noop_budget_exhausted_repeat' | 'noop_no_link'
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
@@ -789,18 +796,16 @@ BEGIN
   END IF;
 
   IF v_link.reopen_count_24h >= 3 THEN
-    -- Budget exhausted. Fire alarm ONCE per window per fingerprint
-    -- (round-7 HIGH #5 — without this, the alarm spams per occurrence).
+    -- Budget exhausted. Round-8 HIGH (Comp 3): distinguish first-time from
+    -- repeat in the RETURN value atomically so callers can emit the alarm
+    -- metric without racing a separate SELECT.
     IF v_link.budget_exhausted_notified_at IS NULL THEN
       UPDATE public.fingerprint_issue_links
          SET budget_exhausted_notified_at = v_now
        WHERE fingerprint_id = p_fingerprint_id;
-      -- Caller observes 'noop_budget_exhausted_first' (treated as fire-once
-      -- signal) vs 'noop_budget_exhausted' on subsequent calls. We return
-      -- the latter; the metric increment is the caller's responsibility,
-      -- gated on whether budget_exhausted_notified_at was NULL pre-update.
+      RETURN 'noop_budget_exhausted_first';
     END IF;
-    RETURN 'noop_budget_exhausted';
+    RETURN 'noop_budget_exhausted_repeat';
   END IF;
 
   -- Approve reopen. Increment counter + bump last_action_at.
@@ -815,7 +820,37 @@ REVOKE EXECUTE ON FUNCTION public.try_enqueue_reopen_job(BIGINT) FROM PUBLIC, au
 GRANT  EXECUTE ON FUNCTION public.try_enqueue_reopen_job(BIGINT) TO service_role;
 
 COMMENT ON FUNCTION public.try_enqueue_reopen_job IS
-  'Round-7 HIGH (Comp 3): atomic reopen-budget + operator-override check. Returns reopen/noop_suppressed/noop_budget_exhausted/noop_no_link. Side-effects window reset + count increment + first-time-exhaustion notification stamp.';
+  'Round-7 HIGH + Round-8 HIGH (Comp 3): atomic reopen-budget + operator-override check. Returns reopen/noop_suppressed/noop_budget_exhausted_first/noop_budget_exhausted_repeat/noop_no_link. Side-effects window reset + count increment + first-time-exhaustion notification stamp.';
+
+-- Round-8 HIGH (Comp 3 chunk 3): natural-expiry reset for create/bump kill
+-- switches. Without this, create_failure_count stays at 3 after suppressed_until
+-- expires; the next create attempt fails → count goes to 4 → re-trips the
+-- >=3 check → permanent suppression unless an operator manually resets.
+-- This RPC is called by the classifier (or its caller) when it observes
+-- a kill switch whose suppression has naturally expired: ON ENTRY the
+-- counter is reset to 0 so the fingerprint gets a fresh attempt window.
+CREATE OR REPLACE FUNCTION public.reset_expired_kill_switches(
+  p_fingerprint_id BIGINT
+) RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  UPDATE public.fingerprint_issue_links
+     SET create_failure_count = 0
+   WHERE fingerprint_id = p_fingerprint_id
+     AND create_suppressed_until IS NOT NULL
+     AND create_suppressed_until < NOW();
+  UPDATE public.fingerprint_issue_links
+     SET bump_failure_count = 0
+   WHERE fingerprint_id = p_fingerprint_id
+     AND bump_suppressed_until IS NOT NULL
+     AND bump_suppressed_until < NOW();
+END $$;
+
+REVOKE EXECUTE ON FUNCTION public.reset_expired_kill_switches(BIGINT) FROM PUBLIC, authenticated, anon;
+GRANT  EXECUTE ON FUNCTION public.reset_expired_kill_switches(BIGINT) TO service_role;
 
 -- ── Sweep cursor columns on fingerprint_registry (Comp 3 MEDIUM) ────────────
 -- Persist per-fingerprint cursor so the recovery sweep advances atomically
