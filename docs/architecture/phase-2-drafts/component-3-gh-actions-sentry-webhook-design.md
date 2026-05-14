@@ -196,12 +196,23 @@ The workflow's first step (BEFORE the DB fetch) is HMAC verification against the
    ```
    The cursor advancement is now inside the RPC (round-5 HIGH fix); no separate UPDATE statement needed in the workflow.
 
-   **Workflow exit semantics on RPC=FALSE** (round-5 HIGH, Comp 3 — re-dispatch finding correctly notes that stale completion AFTER GH side effects means we performed GH ops without a valid lease, potentially producing duplicate issues/comments):
-   - Increment `mesh.dispatch_rejected_total{reason="stale_completion"}` counter
-   - Log `job_id, attempt_token, action, github_issue_number` to GH Actions step summary
-   - **`exit 1`** — surface as red in GH Actions UI; sustained rate (>1/hr) PAGES oncall to investigate lease/clock issues
-   - DO NOT advance any cursor; the row's CURRENT attempt_token holder may also have done GH work, and the resulting duplicates need human triage
-   - Mitigations to keep this rate near zero: per-action lease TTL ≥ worst-case workflow runtime (round-3 sized — create=30min), token verification at the START of every GH op for long-running actions
+   **Workflow exit semantics on RPC=FALSE** (round-5 HIGH + round-6 HIGH chunk C — concretize alert source + runbook):
+   - Increment `mesh.dispatch_rejected_total{reason="stale_completion"}` counter (workflow emits via `gh-actions-prometheus-push` step pushing to the org Prometheus gateway).
+   - Log `job_id, attempt_token, action, github_issue_number` to GH Actions step summary.
+   - **`exit 1`** — surface as red in GH Actions UI.
+   - **Alert rule** (Prometheus rule file `mesh-dispatch.rules.yml`):
+     ```yaml
+     - alert: MeshStaleCompletion
+       expr: increase(mesh_dispatch_rejected_total{reason="stale_completion"}[1h]) > 1
+       for: 5m
+       labels: { severity: page, team: mesh }
+       annotations:
+         summary: "Mesh dispatcher producing stale-completion races"
+         runbook: "docs/runbooks/mesh-stale-completion.md"
+     ```
+   - **Triage runbook** (`docs/runbooks/mesh-stale-completion.md` — to ship alongside the workflow): (1) `SELECT job_id, fingerprint_id, action, attempt_token, dispatch_attempt_count, github_issue_number FROM fingerprint_issue_jobs WHERE id = $alerted_job_id;` (2) Inspect GH issue: was a duplicate created? If so, identify the older issue, edit the newer issue body to reference the older one, close the duplicate. (3) Call `complete_fingerprint_issue_job` with the CURRENT attempt_token from step 1 to mark the row succeeded; do not retry GH work.
+   - DO NOT advance any cursor; the row's CURRENT attempt_token holder may also have done GH work, and the resulting duplicates need human triage.
+   - Mitigations to keep this rate near zero: per-action lease TTL ≥ worst-case workflow runtime (round-3 sized — create=30min), token verification at the START of every GH op for long-running actions.
 
 **No fingerprint search step**: removed. The Edge Function already resolved which issue (if any) corresponds to this fingerprint via `fingerprint_issue_links.github_issue_number`. The workflow just looks up that number from the DB; no `gh issue list` search needed.
 
@@ -218,7 +229,7 @@ GitHub's `repository_dispatch` API requires `Contents: write` permission on the 
 
 `scripts/preflight-check-mesh-tokens.ts` runs in CI as a required job before any deploy. Auth path:
 - CI authenticates to Vault via **GitHub OIDC → Vault JWT role** (`mesh-preflight-readonly`) — no static Vault token needed in CI secrets; Vault verifies the OIDC token issuer (`token.actions.githubusercontent.com`) and the repo+workflow claims. This avoids the chicken-and-egg of "secret needed to read secrets".
-- Read-only on `secret/data/mesh/dispatch-token-metadata` (created_at, expires_at, mode).
+- Read-only on `secret/data/mesh/dispatch-token-metadata`. **Round-6 MEDIUM (chunk B)**: this path is KV-v2 user data written by the rotation runbook with explicit `created_at` / `expires_at` / `mode` keys. The preflight script does NOT rely on Vault's built-in `creation_time` / `deletion_time` metadata (different endpoint, different field names, and not updated on user-driven rotation).
 
 Per-environment logic:
 - **prod**: assert `MESH_DISPATCH_AUTH_MODE = "github_app"`. Reject deploy if PAT is configured (prod is GH App only). Skip PAT-age checks entirely.
@@ -300,6 +311,62 @@ For each `(id, attempt_token)` pair the dispatcher then POSTs a `repository_disp
 
 The 100/hr GH cap forces an actual throttle: dispatcher caps at 90 dispatches/hr (10% headroom for retries). With coalescing, a fleet-wide storm of even 10k events/hr collapses to ~1 dispatch/fingerprint/window.
 
+## Dead-job recovery (round-6 HIGH chunk D)
+
+When `failure_count >= 5` the dispatcher stops claiming the row (per Comp 1's claim WHERE clause). Without an explicit recovery path, that fingerprint's issue lifecycle is stuck and new occurrences accumulate without ever surfacing to GitHub. Need an audited recovery RPC, called from a runbook by oncall:
+
+```sql
+CREATE OR REPLACE FUNCTION public.recover_fingerprint_issue_job(
+  p_job_id    BIGINT,
+  p_mode      TEXT,         -- 'retry' or 'abandon'
+  p_audit_reason TEXT        -- free text, recorded in last_error
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_fingerprint_id BIGINT;
+  v_last_occ_id    BIGINT;
+BEGIN
+  IF p_mode NOT IN ('retry', 'abandon') THEN
+    RAISE EXCEPTION 'mode must be ''retry'' or ''abandon''';
+  END IF;
+  -- Atomic recover: clear lease + failure_count, rotate attempt_token, reset
+  -- dispatched_at counters. Row becomes claimable again. OR mark abandoned
+  -- and enqueue a fresh job from the occurrence cursor.
+  IF p_mode = 'retry' THEN
+    UPDATE public.fingerprint_issue_jobs
+       SET failure_count        = 0,
+           last_error           = 'recovered: ' || p_audit_reason,
+           dispatch_lease_until = NULL,
+           attempt_token        = gen_random_uuid()
+     WHERE id = p_job_id AND succeeded_at IS NULL;
+    RETURN FOUND;
+  ELSE
+    -- 'abandon': mark this row succeeded (don't retry), enqueue a replacement
+    -- job from the current occurrence cursor so future occurrences are still
+    -- managed.
+    UPDATE public.fingerprint_issue_jobs
+       SET succeeded_at = NOW(),
+           last_error   = 'abandoned: ' || p_audit_reason
+     WHERE id = p_job_id
+    RETURNING fingerprint_id, last_occurrence_id INTO v_fingerprint_id, v_last_occ_id;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    -- Caller (runbook) is responsible for triggering the replay sweep to
+    -- re-pick up subsequent occurrences via the registry cursor.
+    RETURN TRUE;
+  END IF;
+END $$;
+
+REVOKE EXECUTE ON FUNCTION public.recover_fingerprint_issue_job(BIGINT, TEXT, TEXT) FROM PUBLIC, authenticated, anon;
+GRANT  EXECUTE ON FUNCTION public.recover_fingerprint_issue_job(BIGINT, TEXT, TEXT) TO service_role;
+```
+
+(Schema for this RPC lands in a follow-up Comp 1 migration once Phase 2 has shipped and surfaced real dead-row patterns.)
+
+**Triage runbook** `docs/runbooks/mesh-dead-job.md`: (1) On `mesh.dispatch_failed_total{failure_count>=5}` alert, fetch the row, inspect `last_error` for root cause. (2) If transient (e.g., GH outage, expired Vault token), rotate the underlying cause + call `recover_fingerprint_issue_job(id, 'retry', '<reason>')`. (3) If persistent (e.g., the fingerprint's GH issue was deleted), call `recover_fingerprint_issue_job(id, 'abandon', '<reason>')` + ensure the registry cursor is advanced so the replay sweep picks up new occurrences.
+
 ## Replay sweep (Codex round-2 MEDIUM, Comp 3 chunk D + round-3 HIGH state machine)
 
 A separate Supabase Cron `fingerprint_replay_sweep` runs every 5 min and finds occurrences that landed but never got into a job (Edge Function crashed between INSERT occurrence + UPSERT job, etc.). Bounded by the registry cursor for forward-only walk.
@@ -342,20 +409,21 @@ classified AS (
            -- comments on a closed issue and gets ignored.) Throttle via
            -- the dispatcher's coalesce — repeated reopens within a window
            -- get one reopen + one digest.
-           --
-           -- Round-5 MEDIUM (Comp 3): two-layer reopen control:
-           --   1. Per-fingerprint budget — max 3 reopens / 24h via a
-           --      reopen_count_24h + reopen_count_window_at column on
-           --      fingerprint_issue_links (to be added in a follow-up
-           --      migration; not in scope for this draft). When exceeded,
-           --      occurrences are recorded but issue is NOT reopened;
-           --      mesh.reopen_budget_exhausted_total counter alarms oncall.
-           --   2. Operator override — `do_not_reopen=true` or
-           --      `suppressed_until > NOW()` (operator-only state via an
-           --      audited admin RPC) makes the fingerprint NEVER reopen
-           --      regardless of budget.
-           -- Both compose: budget protects against runaway flap loops;
-           -- override lets operators intentionally silence a known issue.
+           -- Round-5 MEDIUM + Round-6 HIGH (Comp 3 chunk A): two-layer
+           -- reopen control is ENFORCED via the RPC below, not in this
+           -- classification CASE. The classifier sets action='reopen'
+           -- (declarative intent); the dispatcher MUST call
+           -- try_enqueue_reopen_job(fingerprint_id) which atomically
+           -- (under FOR UPDATE on the link row):
+           --   - rejects with action='noop' if do_not_reopen=true OR
+           --     suppressed_until > NOW()
+           --   - rejects with action='noop' if reopen_count_24h >= 3
+           --     (window: reopen_count_window_at < NOW() - INTERVAL '24h'
+           --     resets the window to NOW() before checking)
+           --   - otherwise increments reopen_count_24h, returns 'reopen'
+           -- Schema bits (do_not_reopen bool, suppressed_until ts,
+           -- reopen_count_24h int, reopen_count_window_at ts) land in a
+           -- follow-up migration once Comp 3 spec ships and exercises them.
            WHEN g.link_state = 'closed'                                THEN 'reopen'
            ELSE NULL
          END AS action

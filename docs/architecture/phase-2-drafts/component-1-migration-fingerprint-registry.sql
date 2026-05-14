@@ -541,6 +541,30 @@ BEGIN
         )
       );
   END IF;
+
+  -- Round-6 MEDIUM (Comp 1): first_occurrence_id and last_occurrence_id are
+  -- paired — both NULL (claim-only row before first occurrence folded in)
+  -- OR both NOT NULL with first <= last. Last-only is invalid; without this
+  -- CHECK, a worker writing only last_occurrence_id creates a row that
+  -- silently slips past the digest's BETWEEN range exclusion (BETWEEN
+  -- requires both bounds non-null and produces UNKNOWN otherwise).
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fingerprint_issue_jobs_occurrence_range_paired'
+      AND connamespace = 'public'::regnamespace
+      AND conrelid     = 'public.fingerprint_issue_jobs'::regclass
+  ) THEN
+    ALTER TABLE public.fingerprint_issue_jobs
+      ADD CONSTRAINT fingerprint_issue_jobs_occurrence_range_paired
+      CHECK (
+        (first_occurrence_id IS NULL AND last_occurrence_id IS NULL)
+        OR (
+          first_occurrence_id IS NOT NULL
+          AND last_occurrence_id IS NOT NULL
+          AND first_occurrence_id <= last_occurrence_id
+        )
+      );
+  END IF;
 END $$;
 
 DO $$
@@ -599,13 +623,18 @@ REVOKE INSERT, UPDATE, DELETE ON public.fingerprint_issue_jobs FROM authenticate
 GRANT  SELECT                  ON public.fingerprint_issue_jobs TO authenticated;
 -- Round-5 HIGH (Comp 1): direct UPDATE on `succeeded_at` and `failure_count`
 -- is REVOKED from service_role — those columns are mutated ONLY through the
--- token-checked RPCs (complete_/record_fingerprint_issue_job_failure). All
--- other columns (dispatch_lease_*, attempt_token, dispatched_at counters,
--- coalesced_count, last/first_occurrence_id) remain UPDATE-able for the
--- dispatcher's claim/UPSERT semantics.
+-- token-checked RPCs (complete_/record_fingerprint_issue_job_failure).
+--
+-- Round-6 MEDIUM (Comp 1): identity columns (fingerprint_id, action,
+-- window_start, enqueued_at) are write-once at INSERT and MUST NOT be
+-- UPDATE-able after. Previous GRANT list included them; removed.
+--
+-- Round-6 LOW (Comp 1): future ADD COLUMNs to fingerprint_issue_jobs will
+-- NOT be UPDATE-able by service_role unless the new column is explicitly
+-- added to this GRANT list. This is fail-closed by design — operators
+-- adding columns must explicitly opt in. Document in migration runbooks.
 GRANT  INSERT, DELETE ON public.fingerprint_issue_jobs TO service_role;
-GRANT  UPDATE (fingerprint_id, action, window_start, enqueued_at,
-               dispatch_lease_until, dispatch_lease_ttl, attempt_token,
+GRANT  UPDATE (dispatch_lease_until, dispatch_lease_ttl, attempt_token,
                first_dispatched_at, last_dispatched_at, dispatch_attempt_count,
                coalesced_count, last_occurrence_id, first_occurrence_id, last_error)
          ON public.fingerprint_issue_jobs TO service_role;
