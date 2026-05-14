@@ -377,6 +377,30 @@ CREATE TRIGGER fingerprint_issue_links_no_state_regression_trg
   BEFORE UPDATE ON public.fingerprint_issue_links
   FOR EACH ROW EXECUTE FUNCTION public.fingerprint_issue_links_no_state_regression();
 
+-- Round-4 MEDIUM (Comp 1): INSERT must start at state='claimed' with no
+-- issue_number. Without this, a bug or backfill can INSERT directly into
+-- state='open' with an arbitrary github_issue_number; the write-once
+-- trigger then preserves the bogus mapping forever. Audited backfills
+-- must go through a SECURITY DEFINER admin RPC (not modeled here).
+CREATE OR REPLACE FUNCTION public.fingerprint_issue_links_insert_starts_claimed()
+  RETURNS trigger
+  LANGUAGE plpgsql
+  AS $$
+BEGIN
+  IF NEW.state <> 'claimed' OR NEW.github_issue_number IS NOT NULL THEN
+    RAISE EXCEPTION 'fingerprint_issue_links: INSERT must start with state=''claimed'' and github_issue_number IS NULL (fingerprint_id=%)',
+      NEW.fingerprint_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS fingerprint_issue_links_insert_starts_claimed_trg
+  ON public.fingerprint_issue_links;
+CREATE TRIGGER fingerprint_issue_links_insert_starts_claimed_trg
+  BEFORE INSERT ON public.fingerprint_issue_links
+  FOR EACH ROW EXECUTE FUNCTION public.fingerprint_issue_links_insert_starts_claimed();
+
 CREATE INDEX IF NOT EXISTS fingerprint_issue_links_open_idx
   ON public.fingerprint_issue_links (last_action_at DESC)
   WHERE state IN ('claimed', 'open', 'reopened');
@@ -462,6 +486,26 @@ CREATE TABLE IF NOT EXISTS public.fingerprint_issue_jobs (
 --   action='reopen' → 10 minutes (reopen + comment)
 -- These are operational tuning knobs — bump or lower as observed latencies
 -- inform real workflow runtime distributions.
+--
+-- Round-4 HIGH (Comp 1): bound dispatch_lease_ttl in SQL — 0/negative TTL
+-- causes immediate re-dispatch (duplicate side effects); multi-hour/day TTL
+-- stalls recovery. 1min-1hr bracket covers all reasonable worker times.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fingerprint_issue_jobs_lease_ttl_bounded'
+      AND connamespace = 'public'::regnamespace
+      AND conrelid     = 'public.fingerprint_issue_jobs'::regclass
+  ) THEN
+    ALTER TABLE public.fingerprint_issue_jobs
+      ADD CONSTRAINT fingerprint_issue_jobs_lease_ttl_bounded
+      CHECK (dispatch_lease_ttl IS NULL
+             OR (dispatch_lease_ttl >= INTERVAL '1 minute'
+                 AND dispatch_lease_ttl <= INTERVAL '1 hour'));
+  END IF;
+END $$;
 
 DO $$
 BEGIN
@@ -520,6 +564,41 @@ GRANT  SELECT                  ON public.fingerprint_issue_jobs TO authenticated
 GRANT  SELECT, INSERT, UPDATE, DELETE ON public.fingerprint_issue_jobs TO service_role;
 GRANT  USAGE, SELECT ON SEQUENCE public.fingerprint_issue_jobs_id_seq TO service_role;
 
+-- Round-4 HIGH (Comp 1): completion auth via SECURITY DEFINER RPC. Direct
+-- service_role UPDATE on succeeded_at allows stale workers (re-claimed jobs)
+-- to mark a fresh attempt's row as succeeded, defeating attempt_token entirely.
+-- Workflow MUST go through this RPC; we don't revoke UPDATE entirely (the
+-- dispatcher still needs to claim + write attempt_token on claim) but
+-- successful completion is funneled through token-checked SQL.
+CREATE OR REPLACE FUNCTION public.complete_fingerprint_issue_job(
+  p_job_id           BIGINT,
+  p_attempt_token    UUID,
+  p_last_occurrence_id BIGINT
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  rows_updated INT;
+BEGIN
+  UPDATE public.fingerprint_issue_jobs
+     SET succeeded_at         = NOW(),
+         dispatch_lease_until = NULL,
+         last_occurrence_id   = GREATEST(COALESCE(last_occurrence_id, 0), p_last_occurrence_id)
+   WHERE id             = p_job_id
+     AND attempt_token  = p_attempt_token
+     AND succeeded_at   IS NULL;
+  GET DIAGNOSTICS rows_updated = ROW_COUNT;
+  RETURN rows_updated = 1;
+END $$;
+
+COMMENT ON FUNCTION public.complete_fingerprint_issue_job IS
+  'Round-4 HIGH (Comp 1): only completion path. Returns true iff THIS attempt_token matches the current row + succeeded_at was still NULL. Stale workers (whose attempt_token was rotated by a re-claim) get false and must not advance the registry cursor.';
+
+REVOKE EXECUTE ON FUNCTION public.complete_fingerprint_issue_job(BIGINT, UUID, BIGINT) FROM PUBLIC, authenticated, anon;
+GRANT  EXECUTE ON FUNCTION public.complete_fingerprint_issue_job(BIGINT, UUID, BIGINT) TO service_role;
+
 -- ── Sweep cursor columns on fingerprint_registry (Comp 3 MEDIUM) ────────────
 -- Persist per-fingerprint cursor so the recovery sweep advances atomically
 -- after each GH lifecycle action succeeds (idempotent replay).
@@ -545,6 +624,30 @@ BEGIN
     ALTER TABLE public.fingerprint_registry
       ADD COLUMN last_issue_occurrence_id BIGINT REFERENCES public.fingerprint_occurrences(id);
   END IF;
+
+  -- Round-4 MEDIUM (Comp 3): independent digest cursor for the singleton
+  -- daily-digest cron. last_issue_occurrence_id tracks the main
+  -- create/bump/reopen cursor; last_digest_occurrence_id tracks which
+  -- skipped singletons have been rolled into a digest comment. Without
+  -- this separation, the digest either misses singletons or double-counts.
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name   = 'fingerprint_registry'
+      AND column_name  = 'last_digest_occurrence_id'
+  ) THEN
+    ALTER TABLE public.fingerprint_registry
+      ADD COLUMN last_digest_occurrence_id BIGINT REFERENCES public.fingerprint_occurrences(id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name   = 'fingerprint_registry'
+      AND column_name  = 'last_digest_at'
+  ) THEN
+    ALTER TABLE public.fingerprint_registry
+      ADD COLUMN last_digest_at TIMESTAMPTZ;
+  END IF;
 END $$;
 
 -- Round-2 HIGH (Comp 1+3): cursor must NEVER regress + must NEVER point at an
@@ -561,9 +664,13 @@ BEGIN
   -- Round-3 HIGH (Comp 1): early-return on NULL was a regression bypass —
   -- it allowed clearing an established cursor (a stale dispatcher writes
   -- NULL and loses forward progress). Reject NULL when OLD was non-NULL.
-  -- Legitimate admin-repair paths use SET search_path + a server-side
-  -- session var to opt-out (not modeled here; service_role can also
-  -- bypass via DELETE+INSERT if absolutely needed).
+  --
+  -- Round-4 HIGH (Comp 1): admin-repair path MUST NOT be DELETE+INSERT
+  -- (cascades to occurrences, jobs, links — data loss). The repair path
+  -- is an audited SECURITY DEFINER admin RPC (to be defined separately,
+  -- not in this migration) that takes a session-var bypass key and
+  -- updates last_issue_occurrence_id with explicit logging. Operators
+  -- never run raw UPDATE/DELETE on this table.
   IF NEW.last_issue_occurrence_id IS NULL THEN
     IF OLD.last_issue_occurrence_id IS NOT NULL THEN
       RAISE EXCEPTION 'fingerprint_registry: cursor cannot be cleared from non-NULL (id=%, OLD=%, NEW=NULL)',

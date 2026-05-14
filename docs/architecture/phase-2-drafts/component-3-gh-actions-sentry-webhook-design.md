@@ -126,6 +126,16 @@ The workflow's first step (BEFORE the DB fetch) is HMAC verification against the
 **Job**:
 1. Parse `client_payload`: `{ job_id, attempt_token, signed_at, hmac }`. Reject (exit 0, no-op) if any field is missing.
 2. Verify HMAC against shared secret (Vault: `MESH_DISPATCH_SIGNING_SECRET`). Reject if HMAC mismatch OR `signed_at` is >5 min in past or >60s in future (clock skew tolerance).
+
+   **Round-4 HIGH (Comp 3)**: HMAC-valid-but-stale-`signed_at` must record failure visibly — otherwise the dispatcher re-claims after lease expiry, signs a new payload, workflow rejects again, infinite loop with no DB-visible failure. On stale rejection:
+   ```sql
+   -- Token-checked failure record. Bumps failure_count; eventually
+   -- crosses the failure_count >= 5 threshold and the dispatcher stops
+   -- re-claiming (the job is operationally dead until oncall intervenes).
+   SELECT public.record_fingerprint_issue_job_failure(
+     $job_id, $supplied_attempt_token, 'stale_dispatch_signed_at_outside_window');
+   ```
+   Plus increment `mesh.dispatch_rejected_total{reason="stale_signed_at"}` Prometheus counter; page oncall if rate > 5/min for 5 min (signals dispatcher clock skew or sustained workflow backlog).
 3. Fetch the authoritative job row via service_role:
    ```sql
    SELECT j.id, j.fingerprint_id, j.action, j.window_start, j.coalesced_count, j.last_occurrence_id,
@@ -140,20 +150,31 @@ The workflow's first step (BEFORE the DB fetch) is HMAC verification against the
    Reject (no-op workflow run) if: row missing, `succeeded_at IS NOT NULL` (already done), `failure_count >= 5` (gave up), OR the row's `attempt_token` doesn't match the supplied token (replay of stale dispatch after re-claim).
 3. Execute the action read FROM THE DB ROW (not the dispatch payload):
    - `action = 'create'`: `gh issue create` with title `[mesh] <signal_kind> in <component>` + body containing fingerprint string, last-5-occurrence summary (read via `last_occurrence_id`), link to dashboard query. Labels: `mesh-fingerprint`, `bug`, `component:<component>`, `signal:<signal_kind>`. On success: UPDATE `fingerprint_issue_links` SET `github_issue_number=<new>`, `state='open'`, `last_action_at=NOW()` for THIS `fingerprint_id`.
-   - `action = 'bump'`: bump comment policy (Codex round-3 MEDIUM clarification):
-       - `coalesced_count = 1`: SKIP the comment but still advance the cursor (advance `last_occurrence_id`). The single occurrence is recorded in `fingerprint_occurrences`; it's visible on the dashboard. Adding "1 new occurrence in this 5-min window" to a GH issue is noise.
+   - `action = 'bump'`: bump comment policy (Codex round-3 MEDIUM + round-4 MEDIUM digest cursor):
+       - `coalesced_count = 1`: SKIP the comment but still advance the main cursor (`last_issue_occurrence_id`). The single occurrence is recorded in `fingerprint_occurrences`; it's visible on the dashboard. Adding "1 new occurrence in this 5-min window" to a GH issue is noise.
        - `coalesced_count >= 2`: post comment with count + timestamp range + last_pharmacy_id.
-       - Daily digest (separate cron, runs once/24h per fingerprint with state IN ('open','reopened')): aggregate the skipped singletons since last digest, post a "N occurrences in last 24h" summary if N > 0. Cursor advances on digest success.
+       - Daily digest cron `fingerprint_digest_cron` (runs once/24h per fingerprint with state IN ('open','reopened')): aggregates skipped singletons via the INDEPENDENT `last_digest_occurrence_id` cursor (Comp 1 added this column to fingerprint_registry — see round-4 MEDIUM). Query:
+         ```sql
+         SELECT fingerprint_id, COUNT(*) AS singleton_count, MAX(id) AS max_id,
+                ARRAY_AGG(DISTINCT pharmacy_id ORDER BY pharmacy_id) AS pharmacies,
+                ARRAY_AGG(DISTINCT agent_version) AS agent_versions
+           FROM public.fingerprint_occurrences
+          WHERE id > COALESCE(last_digest_occurrence_id, 0)
+            -- and NOT already covered by a non-skipped bump/create/reopen
+            ...
+         ```
+         Post a "N occurrences in last 24h — top pharmacies: X (12), Y (8), Z (3); agent_versions: 3.14.5, 3.14.6" digest comment if N > 0; advance `last_digest_occurrence_id` + `last_digest_at` AFTER the comment posts. State='claimed' fingerprints (stuck in claim TTL) are SKIPPED by the digest — the operator gets paged via the singleton-flood alarm instead.
    - `action = 'reopen'`: `gh issue reopen <github_issue_number>` + comment. UPDATE link `state='reopened'`.
 4. On any GH API rate-limit (403 with `X-RateLimit-Remaining: 0`): wait + retry once. If still failing, write `fingerprint_issue_jobs.last_error` + `failure_count++` and let the dispatcher re-queue on next sweep (the lease expires, the row becomes claimable again).
-5. On success: in a single transaction:
+5. On success: via the SECURITY DEFINER RPC (Round-4 HIGH (Comp 1+3): direct UPDATE bypasses attempt_token; the RPC enforces `WHERE id=$1 AND attempt_token=$2 AND succeeded_at IS NULL` in SQL):
    ```sql
-   UPDATE public.fingerprint_issue_jobs
-      SET succeeded_at = NOW(), dispatch_lease_until = NULL
-    WHERE id = $job_id;
-
-   -- Round-2 HIGH (Comp 1+3) — GREATEST() guard + cross-fp trigger ensures
-   -- this is monotonic AND points at the right fingerprint.
+   SELECT public.complete_fingerprint_issue_job($job_id, $supplied_attempt_token, $last_occurrence_id);
+   -- Returns TRUE if THIS attempt's row was completed; FALSE means a re-claim
+   -- happened (different attempt_token now) — the workflow MUST NOT advance
+   -- the registry cursor; the live attempt will advance it.
+   ```
+   Only if the RPC returned TRUE, advance the registry cursor (GREATEST + cross-fp trigger enforce monotonicity at schema level):
+   ```sql
    UPDATE public.fingerprint_registry
       SET last_issue_sync_at       = NOW(),
           last_issue_occurrence_id = GREATEST(COALESCE(last_issue_occurrence_id, 0), $last_occurrence_id)
@@ -171,6 +192,22 @@ GitHub's `repository_dispatch` API requires `Contents: write` permission on the 
 
 **Rotation runbook** (Codex round-3 HIGH — policy-only rotation is theater): `docs/runbooks/mesh-dispatch-token-rotation.md` (to be written before Phase 2 prod cutover) specifies: owner = on-call engineer that week; trigger = (a) scheduled quarterly cycle for HMAC signing secret, (b) annual cycle for GH App key, (c) immediate on suspected compromise; verification = post-rotation smoke that fires a synthetic dispatch + asserts workflow succeeds.
 
+**Round-4 MEDIUM (Comp 3) — deploy preflight gate**: a CI check (`scripts/preflight-check-mesh-tokens.ts`) reads Vault token metadata at deploy time and fails dev/staging deploys when:
+- PAT age > 90d (hard fail; deploy blocked until rotation)
+- PAT age 70-90d (warning surfaced in PR / Slack)
+- PAT age > 85d (additional pager alert, independent of deploy)
+
+The deploy gate enforces what the alerts can only signal.
+
+**Round-4 MEDIUM (Comp 3) — workflow secret scoping**: the workflow MUST use protected environment secrets (`environment: mesh-prod`), pin all GH Action invocations to commit SHAs (not tags), require code-owner review on `.github/workflows/mesh-*` and `supabase/functions/mesh-*` changes, and declare narrow job permissions:
+```yaml
+permissions:
+  contents: read
+  issues: write
+  # NO id-token, NO packages, NO actions
+```
+This shrinks the blast radius if a workflow file is ever compromised.
+
 Workflow itself uses `${{ secrets.GITHUB_TOKEN }}` for issue ops (auto-scoped to the workflow run, no rotation needed).
 
 **Concurrency**: still set `concurrency: { group: mesh-fp-<DB-derived-fingerprint_id>, cancel-in-progress: false }` as defense-in-depth, keyed on the DB-derived fingerprint_id (NOT the client_payload — same spoofing concern). The DB-level claim is the primary guard.
@@ -183,8 +220,11 @@ Runs every 30s. Drains `fingerprint_issue_jobs` queue under the `repository_disp
 -- Round-2 CRITICAL (Comp 1+3): claim ONLY rows whose lease is NULL/expired;
 -- write a fresh lease so the next 30s tick can't re-dispatch an in-flight job
 -- whose workflow hasn't yet written succeeded_at.
+-- Round-3 HIGH (Comp 1): rotate attempt_token + bump dispatch_attempt_count
+-- on each claim. Round-4 HIGH (Comp 3): RETURN attempt_token so dispatcher
+-- can sign the full HMAC payload (not just job_id).
 WITH claimed AS (
-  SELECT id FROM public.fingerprint_issue_jobs
+  SELECT id, action FROM public.fingerprint_issue_jobs
    WHERE succeeded_at IS NULL
      AND failure_count < 5
      AND (dispatch_lease_until IS NULL OR dispatch_lease_until < NOW())
@@ -192,14 +232,43 @@ WITH claimed AS (
    LIMIT 50
    FOR UPDATE SKIP LOCKED
 )
-UPDATE public.fingerprint_issue_jobs
-   SET dispatched_at        = NOW(),
-       dispatch_lease_until = NOW() + INTERVAL '15 minutes'
- WHERE id IN (SELECT id FROM claimed)
-RETURNING id;  -- dispatch ONLY the id; workflow re-fetches authoritative row
+UPDATE public.fingerprint_issue_jobs j
+   SET dispatch_lease_ttl     = CASE c.action
+                                  WHEN 'create' THEN INTERVAL '30 minutes'
+                                  WHEN 'reopen' THEN INTERVAL '10 minutes'
+                                  ELSE              INTERVAL '5 minutes'
+                                END,
+       dispatch_lease_until   = NOW() + (CASE c.action
+                                           WHEN 'create' THEN INTERVAL '30 minutes'
+                                           WHEN 'reopen' THEN INTERVAL '10 minutes'
+                                           ELSE              INTERVAL '5 minutes'
+                                         END),
+       attempt_token          = gen_random_uuid(),
+       first_dispatched_at    = COALESCE(j.first_dispatched_at, NOW()),
+       last_dispatched_at     = NOW(),
+       dispatch_attempt_count = j.dispatch_attempt_count + 1
+  FROM claimed c
+ WHERE j.id = c.id
+RETURNING j.id, j.attempt_token;  -- both go into the signed payload
 ```
 
-Then POST each as a `repository_dispatch` to GH with payload `{ "event_type": "mesh-fingerprint", "client_payload": { "job_id": <id> } }`. The 100/hr GH cap forces an actual throttle: dispatcher caps at 90 dispatches/hr (10% headroom for retries). With coalescing, a fleet-wide storm of even 10k events/hr collapses to ~1 dispatch/fingerprint/window.
+For each `(id, attempt_token)` pair the dispatcher then POSTs a `repository_dispatch` with the full signed payload:
+
+```jsonc
+{
+  "event_type": "mesh-fingerprint",
+  "client_payload": {
+    "job_id": <id>,
+    "attempt_token": "<uuid>",
+    "signed_at": "<ISO 8601 UTC>",
+    "hmac": "<base64 HMAC-SHA256(job_id|attempt_token|signed_at, MESH_DISPATCH_SIGNING_SECRET)>"
+  }
+}
+```
+
+(Round-4 HIGH (Comp 3): the round-3 prose declared this payload but the actual SQL still emitted `RETURNING id`. Now wired.)
+
+The 100/hr GH cap forces an actual throttle: dispatcher caps at 90 dispatches/hr (10% headroom for retries). With coalescing, a fleet-wide storm of even 10k events/hr collapses to ~1 dispatch/fingerprint/window.
 
 ## Replay sweep (Codex round-2 MEDIUM, Comp 3 chunk D + round-3 HIGH state machine)
 
@@ -236,8 +305,13 @@ classified AS (
            -- claimed + active → another worker mid-flight → skip (NULL classified → filtered out below)
            WHEN g.link_state = 'claimed'                               THEN NULL
            WHEN g.link_state IN ('open', 'reopened')                   THEN 'bump'
-           WHEN g.link_state = 'closed' AND g.last_action_at < NOW() - INTERVAL '24h' THEN 'reopen'
-           WHEN g.link_state = 'closed'                                THEN 'bump'  -- recently closed, surface activity
+           -- Round-4 MEDIUM (Comp 3): ANY post-close occurrence is a signal
+           -- that the bug isn't fixed; reopen + comment is the right
+           -- treatment. (Prior version bumped on "recent" closures, which
+           -- comments on a closed issue and gets ignored.) Throttle via
+           -- the dispatcher's coalesce — repeated reopens within a window
+           -- get one reopen + one digest.
+           WHEN g.link_state = 'closed'                                THEN 'reopen'
            ELSE NULL
          END AS action
     FROM gaps g
