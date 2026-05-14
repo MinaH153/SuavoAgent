@@ -329,21 +329,21 @@ CREATE TABLE IF NOT EXISTS public.fingerprint_issue_links (
   -- Round-7 HIGH #1 (Comp 3): reopen-budget enforcement state.
   -- try_enqueue_reopen_job() (defined below) atomically checks + updates
   -- these under FOR UPDATE on the link row.
-  reopen_count_24h           INT          NOT NULL DEFAULT 0,
+  reopen_count_24h           INT          NOT NULL DEFAULT 0 CHECK (reopen_count_24h >= 0),
   reopen_count_window_at     TIMESTAMPTZ,        -- start of current 24h window
   do_not_reopen              BOOLEAN      NOT NULL DEFAULT FALSE,
   suppressed_until           TIMESTAMPTZ,        -- operator-set
   budget_exhausted_notified_at TIMESTAMPTZ,      -- round-7 HIGH #5: first-event-only alarm
   -- Round-7 HIGH #3 (Comp 3): fingerprint-level kill switch for create loops.
   -- After N consecutive failed creates in claimed state, stop enqueueing.
-  create_failure_count       INT          NOT NULL DEFAULT 0,
+  create_failure_count       INT          NOT NULL DEFAULT 0 CHECK (create_failure_count >= 0),
   last_create_failed_at      TIMESTAMPTZ,
   create_suppressed_until    TIMESTAMPTZ,
   -- Round-8 MED (Comp 3): mirror kill switch for repeated bump failures
   -- on open/reopened issues. Same semantics: bump_failure_count++ on
   -- recover_fingerprint_issue_job(mode='abandon') for action='bump'; at
   -- >=3 set bump_suppressed_until = NOW() + 24h + page once.
-  bump_failure_count         INT          NOT NULL DEFAULT 0,
+  bump_failure_count         INT          NOT NULL DEFAULT 0 CHECK (bump_failure_count >= 0),
   last_bump_failed_at        TIMESTAMPTZ,
   bump_suppressed_until      TIMESTAMPTZ
 );
@@ -751,6 +751,16 @@ GRANT  EXECUTE ON FUNCTION public.record_fingerprint_issue_job_failure(BIGINT, U
 -- should be enqueued; 'noop' otherwise (budget exhausted / suppressed /
 -- do_not_reopen). Callers (Edge Function ingest + replay sweep) use the
 -- returned action; this function does NOT enqueue the job itself.
+--
+-- Round-8 MED (Comp 1): KNOWN ACCEPTABLE LEAK — if the caller returns
+-- 'reopen' but then fails to INSERT INTO fingerprint_issue_jobs (e.g.,
+-- transient DB error), the counter has been incremented but no job
+-- enqueued. Worst-case impact: 1-slot-per-failure leak in the 3/24h
+-- budget. At observed dispatcher failure rates (<0.1%), the leak is
+-- bounded and self-resets on 24h window rotation. Atomic-with-INSERT
+-- would require this RPC to take all job parameters, significantly
+-- larger interface. Accepted as design trade-off; revisit if leak rate
+-- becomes operationally visible via mesh.reopen_count_24h time-series.
 --
 -- Side effect: on 'reopen', atomically increments reopen_count_24h
 -- (resetting the window if older than 24h) and updates last_action_at.
