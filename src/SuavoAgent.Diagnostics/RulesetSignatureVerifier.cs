@@ -211,27 +211,44 @@ public sealed class RulesetSignatureVerifier : IRulesetVerifier
     }
 
     /// <summary>
-    /// TODO (Comp 2.2): replace with RFC 8785 (JSON Canonicalization Scheme)
-    /// using the <c>JsonCanonicalizer</c> NuGet package or a hand-rolled
-    /// implementation gated by the Appendix B / property-order golden test
-    /// vectors. The cloud-side signer uses <c>.NET JCS</c>; drift between
-    /// the two implementations (UTF-16 ordering, ECMAScript number
-    /// serialization, Unicode normalization) produces signed-but-rejected
-    /// bundles (Codex chunk A CRITICAL).
+    /// RFC 8785 (JSON Canonicalization Scheme) for signature input.
     /// </summary>
     /// <remarks>
-    /// The Comp 2.1 placeholder uses <see cref="JsonSerializer.Serialize"/>
-    /// with a stable, order-preserving option set. This is sufficient for
-    /// SELF-roundtrip tests in this PR (sign + verify with the SAME
-    /// canonicaliser) but is NOT wire-compatible with the cloud's RFC 8785
-    /// output. <b>Do not enable the OTA wire path until this is replaced.</b>
+    /// <para>
+    /// Comp 2.2 part 5 — Codex chunk A CRITICAL RESOLVED. The placeholder
+    /// is gone; this now invokes the <c>JsonCanonicalizer</c> reference
+    /// implementation (NuGet, v1.0.0). Cloud-side (Comp 2A) uses the
+    /// matching <c>canonicalize</c> npm package; both consume the same
+    /// RFC 8785 Appendix B test vectors as a wire-compat gate.
+    /// </para>
+    /// <para>
+    /// Serialisation pipeline:
+    /// <list type="number">
+    /// <item><see cref="JsonSerializer.Serialize"/> emits the bundle's
+    /// payload-shape JSON (property names per
+    /// <see cref="JsonPropertyNameAttribute"/>, null-omitting).</item>
+    /// <item><c>JsonCanonicalizer.GetEncodedString()</c> applies RFC 8785:
+    /// sorts object members by UTF-16 code-unit order, normalises numbers
+    /// via ECMAScript ToString, escapes strings per RFC 8259 §7.</item>
+    /// </list>
+    /// The output is what both ends sign / verify.
+    /// </para>
     /// </remarks>
     internal static string CanonicalizeForSigning(RulesetV1 ruleset)
     {
-        return JsonSerializer.Serialize(ruleset, PlaceholderCanonicalOptions);
+        var payloadJson = JsonSerializer.Serialize(ruleset, PayloadJsonOptions);
+        return new global::Org.Webpki.JsonCanonicalizer.JsonCanonicalizer(payloadJson).GetEncodedString();
     }
 
-    private static readonly JsonSerializerOptions PlaceholderCanonicalOptions = new()
+    /// <summary>
+    /// RFC 8785 canonicalisation applied to a JSON string (used by golden
+    /// vector tests). Production code calls
+    /// <see cref="CanonicalizeForSigning(RulesetV1)"/> instead.
+    /// </summary>
+    internal static string CanonicalizeJsonString(string json)
+        => new global::Org.Webpki.JsonCanonicalizer.JsonCanonicalizer(json).GetEncodedString();
+
+    private static readonly JsonSerializerOptions PayloadJsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = false,

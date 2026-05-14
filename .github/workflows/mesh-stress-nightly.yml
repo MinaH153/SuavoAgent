@@ -1,0 +1,62 @@
+name: Mesh Stress Nightly
+
+# Nightly concurrent-swap stress test for the RulesetRuntime snapshot
+# pattern (Comp 2.2 Wire refactor). Codex Comp 2 chunk 4 round-5 MED
+# acceptance criteria: 10,000 swaps + 30s wall-clock + zero mixed-generation
+# observations, run nightly on Windows runners to amortise JIT warmup and
+# expose memory-model regressions before they reach prod.
+#
+# PR CI runs the smoke variant (1s wall-clock, no Category trait) via
+# mesh-required-check.yml. This workflow runs ONLY the [Trait(Category=Stress)]
+# variant.
+#
+# CODEOWNERS entry: /.github/workflows/mesh-stress-*.yml @MinaH153
+# (replace with @SuavoLLC/mesh-oncall when the team handle is created —
+# round-7 LOW.)
+#
+# Failure handling:
+#   - Single nightly failure → workflow red, no page (transient runner flake
+#     possible under contention)
+#   - 2 consecutive nightly failures → manual oncall investigation; consult
+#     `docs/architecture/diagnostic-mesh-queen-first.md` §4 for the memory
+#     model contract this test enforces
+
+on:
+  schedule:
+    # 09:23 UTC ≈ 02:23 PT — runs before the daily PT engineering window.
+    - cron: '23 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    name: RulesetRuntime concurrent-swap stress
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj
+
+      - name: Build Release
+        run: dotnet build tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj --no-restore -c Release
+
+      - name: Run Mesh stress suite (Category=Stress)
+        run: dotnet test tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj --no-build -c Release --filter "Category=Stress" --logger "console;verbosity=detailed" --logger "trx;LogFileName=stress.trx"
+
+      - name: Upload TRX on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-trx
+          path: |
+            tests/SuavoAgent.Diagnostics.Tests/TestResults/*.trx
+          retention-days: 14

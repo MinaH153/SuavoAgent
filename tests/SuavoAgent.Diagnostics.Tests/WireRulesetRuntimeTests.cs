@@ -149,6 +149,76 @@ public class WireRulesetRuntimeTests
         Assert.True(Wire.RulesetSwapsTotal > 0,
             $"Expected at least one swap completed; counter shows {Wire.RulesetSwapsTotal}.");
     }
+
+    /// <summary>
+    /// Nightly stress variant of the concurrent-swap test (Codex Comp 2
+    /// chunk 4 round-5 MED acceptance criteria). Runs 30s wall-clock with
+    /// 4 reader threads + 1 swapper, expects ≥10,000 swaps. Filtered by
+    /// <c>Category=Stress</c> trait so it runs in
+    /// <c>.github/workflows/mesh-stress-nightly.yml</c> only — NOT in PR CI
+    /// (which runs the 1s smoke variant above).
+    /// </summary>
+    [Fact]
+    [Trait("Category", "Stress")]
+    public async Task Stress_Concurrent_swap_storm_10k_swaps_30s_no_mixed_generation()
+    {
+        EnsureWireInitialised();
+
+        var rulesetA = new RulesetV1
+        {
+            RulesetVersion = "v100.A",
+            RulesetVersionInt = 100,
+            KeyId = "stress-A",
+            SignedAt = "2026-05-14T00:00:00Z",
+            SignatureAlg = "ECDSA_P256_SHA256",
+        };
+        var rulesetB = new RulesetV1
+        {
+            RulesetVersion = "v200.B",
+            RulesetVersionInt = 200,
+            KeyId = "stress-B",
+            SignedAt = "2026-05-14T00:00:00Z",
+            SignatureAlg = "ECDSA_P256_SHA256",
+        };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var flags = new StressFlags();
+        var swapsAtStart = Wire.RulesetSwapsTotal;
+
+        var swapper = Task.Run(() =>
+        {
+            var i = 0;
+            while (!cts.IsCancellationRequested)
+            {
+                Wire.SwapRuleset((i++ & 1) == 0 ? rulesetA : rulesetB);
+            }
+        });
+
+        var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var rt = Wire.CurrentRuntime;
+                if (rt is null) continue;
+                if (rt.Ruleset.RulesetVersion != rt.Scrubber.RulesetVersion
+                    || rt.Ruleset.RulesetVersion != rt.Fingerprinter.RulesetVersion)
+                {
+                    Interlocked.Exchange(ref flags.MixedGenerationDetected, 1);
+                    return;
+                }
+                Interlocked.Increment(ref flags.IterationsObserved);
+            }
+        })).ToArray();
+
+        await Task.WhenAll(readers.Concat(new[] { swapper }));
+
+        Assert.Equal(0, Volatile.Read(ref flags.MixedGenerationDetected));
+        var swapsCompleted = Wire.RulesetSwapsTotal - swapsAtStart;
+        Assert.True(swapsCompleted >= 10000,
+            $"Stress acceptance: expected ≥10,000 swaps in 30s; got {swapsCompleted}.");
+        Assert.True(flags.IterationsObserved >= 10000,
+            $"Stress acceptance: expected ≥10,000 concurrent reads; got {flags.IterationsObserved}.");
+    }
 }
 
 /// <summary>

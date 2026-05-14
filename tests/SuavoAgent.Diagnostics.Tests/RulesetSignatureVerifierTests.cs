@@ -344,3 +344,50 @@ public class RulesetVersionIntTests
         Assert.Equal(10, new RulesetV1().RulesetVersionInt);
     }
 }
+
+/// <summary>
+/// RFC 8785 golden vectors (Comp 2.2 part 5). Both the agent (via the
+/// `JsonCanonicalizer` NuGet) and the cloud Edge Function (Comp 2A, via
+/// the `canonicalize` npm package) MUST produce identical output for these
+/// inputs. Any drift between the two libraries breaks signature
+/// verification, so these tests are the wire-compat gate.
+/// </summary>
+public class RFC8785GoldenVectorTests
+{
+    [Theory]
+    [InlineData(
+        """{"b":2,"a":1}""",
+        """{"a":1,"b":2}""")]
+    [InlineData(
+        """{"z":{"b":2,"a":1},"a":[3,1,2]}""",
+        """{"a":[3,1,2],"z":{"a":1,"b":2}}""")]
+    [InlineData(
+        """{"int":42,"float":1.5,"str":"hello","bool":true,"null":null}""",
+        """{"bool":true,"float":1.5,"int":42,"null":null,"str":"hello"}""")]
+    [InlineData(
+        """[3,1,2]""",
+        """[3,1,2]""")]
+    public void Canonicalize_sorts_object_keys_and_preserves_array_order(string input, string expected)
+    {
+        var canonical = RulesetSignatureVerifier.CanonicalizeJsonString(input);
+        Assert.Equal(expected, canonical);
+    }
+
+    [Fact]
+    public void Canonicalize_serialises_integer_floats_without_trailing_zero()
+    {
+        // RFC 8785 / ECMAScript ToString: 1.0 → "1", not "1.0".
+        // (JsonCanonicalizer NuGet conforms.)
+        var canonical = RulesetSignatureVerifier.CanonicalizeJsonString("""{"x":1.0}""");
+        Assert.Equal("""{"x":1}""", canonical);
+    }
+
+    [Fact]
+    public void Canonicalize_is_idempotent_under_repeated_application()
+    {
+        var input = """{"z":1,"a":2,"m":{"y":1,"x":2}}""";
+        var pass1 = RulesetSignatureVerifier.CanonicalizeJsonString(input);
+        var pass2 = RulesetSignatureVerifier.CanonicalizeJsonString(pass1);
+        Assert.Equal(pass1, pass2);
+    }
+}
