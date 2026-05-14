@@ -30,6 +30,7 @@
     <!-- Sentry .NET SDK 4.x — BAA-covered transport sink for crash signals.
          Wire owns unhandled hooks; Sentry is transport-only (no SDK
          AppDomain/UnobservedTask hooks). -->
+    <PackageReference Include="JsonCanonicalizer" Version="1.0.0" />
     <PackageReference Include="Sentry" Version="4.13.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.1" />
@@ -46,7 +47,18 @@
          build/ValidateRulesetSchema.targets. -->
     <EmbeddedResource Include="Resources\ruleset-v1.json" />
     <EmbeddedResource Include="Resources\ruleset-v1.schema.json" />
-    <EmbeddedResource Include="Resources\ruleset-signing-key.pub.pem" />
+    <!-- Multi-key trust store. Phase 2 OTA verifies every fetched ruleset
+         against one of N embedded ECDsa P-256 public keys; the bundle's
+         key_id selects which. Resource naming convention:
+         `ruleset-signing-key-<key_id>.pub.pem`. Codex Comp 2 chunk C HIGH
+         RESOLVED. Generate new keys via scripts/generate-ruleset-signing-key.sh. -->
+    <EmbeddedResource Include="Resources\ruleset-signing-key-*.pub.pem" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Tests need access to internal helpers (ExtractKeyId,
+         CanonicalizeForSigning) on RulesetSignatureVerifier. -->
+    <InternalsVisibleTo Include="SuavoAgent.Diagnostics.Tests" />
   </ItemGroup>
 
   <!--
@@ -55,10 +67,7 @@
     BeforeCompile so the compiler sees the generated file.
   -->
   <Target Name="EmbedGitSha" BeforeTargets="BeforeCompile">
-    <Exec Command="git rev-parse --short=12 HEAD"
-          ConsoleToMSBuild="true"
-          IgnoreExitCode="true"
-          StandardOutputImportance="Low">
+    <Exec Command="git rev-parse --short=12 HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low">
       <Output TaskParameter="ConsoleOutput" PropertyName="GitShaShort" />
     </Exec>
     <PropertyGroup>
@@ -68,9 +77,7 @@
     <ItemGroup>
       <BuildContextGenerated Include="$(IntermediateOutputPath)BuildContext.Generated.cs" />
     </ItemGroup>
-    <WriteLinesToFile File="$(IntermediateOutputPath)BuildContext.Generated.cs"
-                      Lines="// &lt;auto-generated/&gt;%0Anamespace SuavoAgent.Diagnostics%3B%0A%0Apublic static partial class BuildContext%0A%7B%0A    public const string GitSha = &quot;$(GitShaShortSafe)&quot;%3B%0A    public const string BuildTimestampUtc = &quot;$([System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))&quot;%3B%0A%7D%0A"
-                      Overwrite="true" />
+    <WriteLinesToFile File="$(IntermediateOutputPath)BuildContext.Generated.cs" Lines="// &lt;auto-generated/&gt;%0Anamespace SuavoAgent.Diagnostics%3B%0A%0Apublic static partial class BuildContext%0A%7B%0A    public const string GitSha = &quot;$(GitShaShortSafe)&quot;%3B%0A    public const string BuildTimestampUtc = &quot;$([System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))&quot;%3B%0A%7D%0A" Overwrite="true" />
     <ItemGroup>
       <Compile Include="$(IntermediateOutputPath)BuildContext.Generated.cs" />
     </ItemGroup>

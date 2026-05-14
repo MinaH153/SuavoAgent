@@ -26,6 +26,15 @@ public sealed class FingerprintComputer
     }
 
     /// <summary>
+    /// Generation tag from the ruleset the fingerprinter was built against.
+    /// Used by snapshot-coherence tests (Codex Comp 2 round-4 MED): every
+    /// concurrent reader of <see cref="Wire.CurrentRuntime"/> MUST observe
+    /// <c>rt.Ruleset.RulesetVersion == rt.Scrubber.RulesetVersion ==
+    /// rt.Fingerprinter.RulesetVersion</c>, never a mixed generation.
+    /// </summary>
+    internal string RulesetVersion => _ruleset.RulesetVersion;
+
+    /// <summary>
     /// Compute fp-v1 for a signal. Hard 10ms budget per spec §4 contract;
     /// on overrun, returns synthetic fp-fallback fingerprint preserving
     /// component + signal_kind only.

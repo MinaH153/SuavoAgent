@@ -13,6 +13,17 @@ public sealed class RulesetV1
     [JsonPropertyName("ruleset_version")]
     public string RulesetVersion { get; set; } = "v1.0";
 
+    /// <summary>
+    /// Monotonic integer version. Phase 2 OTA freshness gate compares
+    /// against this (NOT the string <c>ruleset_version</c>, which is
+    /// display-only and lexicographically unsafe — e.g. <c>"v1.10" &lt;
+    /// "v1.9"</c> under string compare). Cloud-side bundle builder allocates
+    /// strictly greater ints via a monotonic sequence per key_id. Codex
+    /// Comp 2 round-6 HIGH + round-7 HIGH RESOLVED.
+    /// </summary>
+    [JsonPropertyName("ruleset_version_int")]
+    public int RulesetVersionInt { get; set; } = 10;
+
     [JsonPropertyName("key_id")]
     public string KeyId { get; set; } = "ruleset-v1-key-2026-05-13";
 
@@ -113,6 +124,10 @@ public sealed class RulesetV1
         return new RulesetV1
         {
             RulesetVersion = "ruleset-v0",
+            // Fallback int is intentionally 0 so any real cloud bundle (always >= 1
+            // by the monotonic sequence) wins the OTA freshness gate. The version
+            // string is "ruleset-v0" so dashboards distinguish fallback from real.
+            RulesetVersionInt = 0,
             KeyId = "ruleset-v0-fallback",
             SignedAt = string.Empty,
             SignatureAlg = "NONE",
