@@ -164,6 +164,11 @@ CREATE INDEX IF NOT EXISTS fingerprint_occurrences_fingerprint_idx
   ON public.fingerprint_occurrences (fingerprint_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS fingerprint_occurrences_ingested_idx
   ON public.fingerprint_occurrences (ingested_at DESC);
+-- Round-5 MEDIUM (Comp 1): digest cursor range scan needs (fingerprint_id, id).
+-- Existing (fingerprint_id, occurred_at DESC) doesn't help when filtering by
+-- id > last_digest_occurrence_id since id and occurred_at aren't collinear.
+CREATE INDEX IF NOT EXISTS fingerprint_occurrences_fingerprint_id_cursor_idx
+  ON public.fingerprint_occurrences (fingerprint_id, id);
 
 -- ── Defense-in-depth: CHECK constraint on forbidden context keys ────────────
 -- Spec §6 forbidden-keys list. App layer rejects first; this catches drift
@@ -477,7 +482,14 @@ CREATE TABLE IF NOT EXISTS public.fingerprint_issue_jobs (
   -- last_issue_occurrence_id (querying live max can skip un-dispatched rows;
   -- using a stale id causes replay). Each UPSERT into this queue must
   -- GREATEST() this with the latest occurrence id.
-  last_occurrence_id    BIGINT       REFERENCES public.fingerprint_occurrences(id)
+  last_occurrence_id    BIGINT       REFERENCES public.fingerprint_occurrences(id),
+  -- Round-5 HIGH (Comp 3): digest cron needs to exclude occurrences ALREADY
+  -- folded into a non-skipped bump/create/reopen. A bare last_occurrence_id
+  -- comparison miscounts because older singletons before this job's range
+  -- get falsely treated as covered. (first_occurrence_id, last_occurrence_id)
+  -- specifies the actual occurrence range covered by THIS job; digest excludes
+  -- only rows where occurrence_id BETWEEN first AND last.
+  first_occurrence_id   BIGINT       REFERENCES public.fingerprint_occurrences(id)
 );
 
 -- Per-action TTL guidance (set by dispatcher on claim):
@@ -504,6 +516,30 @@ BEGIN
       CHECK (dispatch_lease_ttl IS NULL
              OR (dispatch_lease_ttl >= INTERVAL '1 minute'
                  AND dispatch_lease_ttl <= INTERVAL '1 hour'));
+  END IF;
+
+  -- Round-5 HIGH (Comp 1): bounding dispatch_lease_ttl alone is insufficient —
+  -- the dispatcher could write a valid 30min TTL but a divergent multi-day
+  -- dispatch_lease_until. Enforce that lease_until = last_dispatched_at +
+  -- lease_ttl (with 5sec slack for clock skew across the UPDATE).
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fingerprint_issue_jobs_lease_until_matches_ttl'
+      AND connamespace = 'public'::regnamespace
+      AND conrelid     = 'public.fingerprint_issue_jobs'::regclass
+  ) THEN
+    ALTER TABLE public.fingerprint_issue_jobs
+      ADD CONSTRAINT fingerprint_issue_jobs_lease_until_matches_ttl
+      CHECK (
+        dispatch_lease_until IS NULL
+        OR (
+          dispatch_lease_ttl  IS NOT NULL
+          AND last_dispatched_at IS NOT NULL
+          AND abs(
+                EXTRACT(EPOCH FROM ((dispatch_lease_until - last_dispatched_at) - dispatch_lease_ttl))
+              ) <= 5
+        )
+      );
   END IF;
 END $$;
 
@@ -561,19 +597,76 @@ CREATE POLICY fingerprint_issue_jobs_service_all
 
 REVOKE INSERT, UPDATE, DELETE ON public.fingerprint_issue_jobs FROM authenticated, anon;
 GRANT  SELECT                  ON public.fingerprint_issue_jobs TO authenticated;
-GRANT  SELECT, INSERT, UPDATE, DELETE ON public.fingerprint_issue_jobs TO service_role;
+-- Round-5 HIGH (Comp 1): direct UPDATE on `succeeded_at` and `failure_count`
+-- is REVOKED from service_role — those columns are mutated ONLY through the
+-- token-checked RPCs (complete_/record_fingerprint_issue_job_failure). All
+-- other columns (dispatch_lease_*, attempt_token, dispatched_at counters,
+-- coalesced_count, last/first_occurrence_id) remain UPDATE-able for the
+-- dispatcher's claim/UPSERT semantics.
+GRANT  INSERT, DELETE ON public.fingerprint_issue_jobs TO service_role;
+GRANT  UPDATE (fingerprint_id, action, window_start, enqueued_at,
+               dispatch_lease_until, dispatch_lease_ttl, attempt_token,
+               first_dispatched_at, last_dispatched_at, dispatch_attempt_count,
+               coalesced_count, last_occurrence_id, first_occurrence_id, last_error)
+         ON public.fingerprint_issue_jobs TO service_role;
 GRANT  USAGE, SELECT ON SEQUENCE public.fingerprint_issue_jobs_id_seq TO service_role;
 
--- Round-4 HIGH (Comp 1): completion auth via SECURITY DEFINER RPC. Direct
--- service_role UPDATE on succeeded_at allows stale workers (re-claimed jobs)
--- to mark a fresh attempt's row as succeeded, defeating attempt_token entirely.
--- Workflow MUST go through this RPC; we don't revoke UPDATE entirely (the
--- dispatcher still needs to claim + write attempt_token on claim) but
--- successful completion is funneled through token-checked SQL.
+-- Round-4 HIGH (Comp 1): completion auth via SECURITY DEFINER RPC.
+-- Round-5 HIGH (Comp 1): RPC must ALSO update fingerprint_registry cursor
+-- in the same transaction; otherwise a workflow crash between RPC success
+-- and the separate registry UPDATE leaves the cursor stale (replay sweep
+-- doesn't know to advance it). One transaction, two table updates, atomic.
 CREATE OR REPLACE FUNCTION public.complete_fingerprint_issue_job(
-  p_job_id           BIGINT,
-  p_attempt_token    UUID,
+  p_job_id             BIGINT,
+  p_attempt_token      UUID,
   p_last_occurrence_id BIGINT
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  rows_updated     INT;
+  v_fingerprint_id BIGINT;
+BEGIN
+  -- Step 1: token-checked job completion. Captures fingerprint_id for step 2.
+  UPDATE public.fingerprint_issue_jobs
+     SET succeeded_at         = NOW(),
+         dispatch_lease_until = NULL,
+         last_occurrence_id   = GREATEST(COALESCE(last_occurrence_id, 0), p_last_occurrence_id)
+   WHERE id             = p_job_id
+     AND attempt_token  = p_attempt_token
+     AND succeeded_at   IS NULL
+   RETURNING fingerprint_id INTO v_fingerprint_id;
+
+  GET DIAGNOSTICS rows_updated = ROW_COUNT;
+  IF rows_updated <> 1 THEN
+    RETURN FALSE;  -- stale attempt — caller MUST NOT advance any cursor.
+  END IF;
+
+  -- Step 2: atomically advance registry cursor in the SAME transaction.
+  -- GREATEST + cursor monotonicity trigger together enforce no regression.
+  UPDATE public.fingerprint_registry
+     SET last_issue_sync_at       = NOW(),
+         last_issue_occurrence_id = GREATEST(COALESCE(last_issue_occurrence_id, 0), p_last_occurrence_id)
+   WHERE id = v_fingerprint_id;
+
+  RETURN TRUE;
+END $$;
+
+COMMENT ON FUNCTION public.complete_fingerprint_issue_job IS
+  'Round-4 HIGH (Comp 1): only completion path. Returns true iff THIS attempt_token matches the current row + succeeded_at was still NULL. Stale workers (whose attempt_token was rotated by a re-claim) get false and must not advance the registry cursor. Round-5 HIGH (Comp 1): updates fingerprint_registry cursor atomically in the same transaction — workflow crash window between RPC success and separate cursor write is closed.';
+
+REVOKE EXECUTE ON FUNCTION public.complete_fingerprint_issue_job(BIGINT, UUID, BIGINT) FROM PUBLIC, authenticated, anon;
+GRANT  EXECUTE ON FUNCTION public.complete_fingerprint_issue_job(BIGINT, UUID, BIGINT) TO service_role;
+
+-- Round-5 HIGH (Comp 1): companion failure-record RPC referenced by Comp 3
+-- for stale-dispatch + GH-API-failure recording. Token-checked same as
+-- completion so stale attempts can't poison the row.
+CREATE OR REPLACE FUNCTION public.record_fingerprint_issue_job_failure(
+  p_job_id        BIGINT,
+  p_attempt_token UUID,
+  p_reason        TEXT
 ) RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -583,21 +676,21 @@ DECLARE
   rows_updated INT;
 BEGIN
   UPDATE public.fingerprint_issue_jobs
-     SET succeeded_at         = NOW(),
-         dispatch_lease_until = NULL,
-         last_occurrence_id   = GREATEST(COALESCE(last_occurrence_id, 0), p_last_occurrence_id)
-   WHERE id             = p_job_id
-     AND attempt_token  = p_attempt_token
-     AND succeeded_at   IS NULL;
+     SET failure_count        = failure_count + 1,
+         last_error           = p_reason,
+         dispatch_lease_until = NULL          -- release lease so next sweep can re-claim
+   WHERE id            = p_job_id
+     AND attempt_token = p_attempt_token
+     AND succeeded_at  IS NULL;
   GET DIAGNOSTICS rows_updated = ROW_COUNT;
   RETURN rows_updated = 1;
 END $$;
 
-COMMENT ON FUNCTION public.complete_fingerprint_issue_job IS
-  'Round-4 HIGH (Comp 1): only completion path. Returns true iff THIS attempt_token matches the current row + succeeded_at was still NULL. Stale workers (whose attempt_token was rotated by a re-claim) get false and must not advance the registry cursor.';
+COMMENT ON FUNCTION public.record_fingerprint_issue_job_failure IS
+  'Round-5 HIGH (Comp 1+3): token-checked failure record. Workflow / Edge Function call this on GH API failure, HMAC mismatch with valid token, stale signed_at, etc. Bumps failure_count; at >=5 the dispatcher stops re-claiming.';
 
-REVOKE EXECUTE ON FUNCTION public.complete_fingerprint_issue_job(BIGINT, UUID, BIGINT) FROM PUBLIC, authenticated, anon;
-GRANT  EXECUTE ON FUNCTION public.complete_fingerprint_issue_job(BIGINT, UUID, BIGINT) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.record_fingerprint_issue_job_failure(BIGINT, UUID, TEXT) FROM PUBLIC, authenticated, anon;
+GRANT  EXECUTE ON FUNCTION public.record_fingerprint_issue_job_failure(BIGINT, UUID, TEXT) TO service_role;
 
 -- ── Sweep cursor columns on fingerprint_registry (Comp 3 MEDIUM) ────────────
 -- Persist per-fingerprint cursor so the recovery sweep advances atomically

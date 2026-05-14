@@ -153,33 +153,55 @@ The workflow's first step (BEFORE the DB fetch) is HMAC verification against the
    - `action = 'bump'`: bump comment policy (Codex round-3 MEDIUM + round-4 MEDIUM digest cursor):
        - `coalesced_count = 1`: SKIP the comment but still advance the main cursor (`last_issue_occurrence_id`). The single occurrence is recorded in `fingerprint_occurrences`; it's visible on the dashboard. Adding "1 new occurrence in this 5-min window" to a GH issue is noise.
        - `coalesced_count >= 2`: post comment with count + timestamp range + last_pharmacy_id.
-       - Daily digest cron `fingerprint_digest_cron` (runs once/24h per fingerprint with state IN ('open','reopened')): aggregates skipped singletons via the INDEPENDENT `last_digest_occurrence_id` cursor (Comp 1 added this column to fingerprint_registry — see round-4 MEDIUM). Query:
+       - Daily digest cron `fingerprint_digest_cron` (runs once/24h per fingerprint with state IN ('open','reopened')): aggregates skipped singletons via the INDEPENDENT `last_digest_occurrence_id` cursor (Comp 1 added this + `first_occurrence_id` job column for the exclusion range). Concrete query (round-5 HIGH — chunk D ellipsis concretized):
          ```sql
-         SELECT fingerprint_id, COUNT(*) AS singleton_count, MAX(id) AS max_id,
-                ARRAY_AGG(DISTINCT pharmacy_id ORDER BY pharmacy_id) AS pharmacies,
-                ARRAY_AGG(DISTINCT agent_version) AS agent_versions
-           FROM public.fingerprint_occurrences
-          WHERE id > COALESCE(last_digest_occurrence_id, 0)
-            -- and NOT already covered by a non-skipped bump/create/reopen
-            ...
+         SELECT o.fingerprint_id, COUNT(*) AS singleton_count, MAX(o.id) AS max_id,
+                ARRAY_AGG(DISTINCT o.pharmacy_id ORDER BY o.pharmacy_id) AS pharmacies,
+                ARRAY_AGG(DISTINCT o.agent_version) AS agent_versions
+           FROM public.fingerprint_occurrences o
+           JOIN public.fingerprint_registry   r ON r.id = o.fingerprint_id
+          WHERE o.id > COALESCE(r.last_digest_occurrence_id, 0)
+            AND r.id IN ( -- only for fingerprints with an active GH issue
+              SELECT fingerprint_id FROM public.fingerprint_issue_links
+               WHERE state IN ('open', 'reopened')
+            )
+            -- Exclude occurrences ALREADY covered by a non-skipped job:
+            -- create/reopen always covers exactly its range; bump covers its
+            -- range when coalesced_count >= 2 (singleton bumps are SKIPPED
+            -- by Comp 3's policy and remain digest-eligible).
+            AND NOT EXISTS (
+              SELECT 1 FROM public.fingerprint_issue_jobs j
+               WHERE j.fingerprint_id = o.fingerprint_id
+                 AND j.succeeded_at IS NOT NULL
+                 AND j.first_occurrence_id IS NOT NULL
+                 AND j.last_occurrence_id  IS NOT NULL
+                 AND o.id BETWEEN j.first_occurrence_id AND j.last_occurrence_id
+                 AND (
+                   j.action IN ('create', 'reopen')
+                   OR (j.action = 'bump' AND j.coalesced_count >= 2)
+                 )
+            )
+          GROUP BY o.fingerprint_id;
          ```
-         Post a "N occurrences in last 24h — top pharmacies: X (12), Y (8), Z (3); agent_versions: 3.14.5, 3.14.6" digest comment if N > 0; advance `last_digest_occurrence_id` + `last_digest_at` AFTER the comment posts. State='claimed' fingerprints (stuck in claim TTL) are SKIPPED by the digest — the operator gets paged via the singleton-flood alarm instead.
+         Post a "N occurrences in last 24h — top pharmacies: X (12), Y (8), Z (3); agent_versions: 3.14.5, 3.14.6" digest comment if N > 0; advance `last_digest_occurrence_id` + `last_digest_at` AFTER the comment posts. State='claimed' fingerprints (stuck in claim TTL) are SKIPPED by the JOIN above — the operator gets paged via the singleton-flood alarm instead.
    - `action = 'reopen'`: `gh issue reopen <github_issue_number>` + comment. UPDATE link `state='reopened'`.
 4. On any GH API rate-limit (403 with `X-RateLimit-Remaining: 0`): wait + retry once. If still failing, write `fingerprint_issue_jobs.last_error` + `failure_count++` and let the dispatcher re-queue on next sweep (the lease expires, the row becomes claimable again).
-5. On success: via the SECURITY DEFINER RPC (Round-4 HIGH (Comp 1+3): direct UPDATE bypasses attempt_token; the RPC enforces `WHERE id=$1 AND attempt_token=$2 AND succeeded_at IS NULL` in SQL):
+5. On success: via the SECURITY DEFINER RPC (round-4 HIGH + round-5 HIGH atomic cursor update):
    ```sql
    SELECT public.complete_fingerprint_issue_job($job_id, $supplied_attempt_token, $last_occurrence_id);
-   -- Returns TRUE if THIS attempt's row was completed; FALSE means a re-claim
-   -- happened (different attempt_token now) — the workflow MUST NOT advance
-   -- the registry cursor; the live attempt will advance it.
+   -- Returns TRUE if THIS attempt's row was completed AND the registry cursor
+   -- was atomically advanced in the same transaction; FALSE means a re-claim
+   -- happened (different attempt_token now). Workflow MUST NOT do any further
+   -- cursor writes — the live attempt's RPC call will handle them.
    ```
-   Only if the RPC returned TRUE, advance the registry cursor (GREATEST + cross-fp trigger enforce monotonicity at schema level):
-   ```sql
-   UPDATE public.fingerprint_registry
-      SET last_issue_sync_at       = NOW(),
-          last_issue_occurrence_id = GREATEST(COALESCE(last_issue_occurrence_id, 0), $last_occurrence_id)
-    WHERE id = $fingerprint_id;
-   ```
+   The cursor advancement is now inside the RPC (round-5 HIGH fix); no separate UPDATE statement needed in the workflow.
+
+   **Workflow exit semantics on RPC=FALSE** (round-5 HIGH, Comp 3 — re-dispatch finding correctly notes that stale completion AFTER GH side effects means we performed GH ops without a valid lease, potentially producing duplicate issues/comments):
+   - Increment `mesh.dispatch_rejected_total{reason="stale_completion"}` counter
+   - Log `job_id, attempt_token, action, github_issue_number` to GH Actions step summary
+   - **`exit 1`** — surface as red in GH Actions UI; sustained rate (>1/hr) PAGES oncall to investigate lease/clock issues
+   - DO NOT advance any cursor; the row's CURRENT attempt_token holder may also have done GH work, and the resulting duplicates need human triage
+   - Mitigations to keep this rate near zero: per-action lease TTL ≥ worst-case workflow runtime (round-3 sized — create=30min), token verification at the START of every GH op for long-running actions
 
 **No fingerprint search step**: removed. The Edge Function already resolved which issue (if any) corresponds to this fingerprint via `fingerprint_issue_links.github_issue_number`. The workflow just looks up that number from the DB; no `gh issue list` search needed.
 
@@ -192,10 +214,18 @@ GitHub's `repository_dispatch` API requires `Contents: write` permission on the 
 
 **Rotation runbook** (Codex round-3 HIGH — policy-only rotation is theater): `docs/runbooks/mesh-dispatch-token-rotation.md` (to be written before Phase 2 prod cutover) specifies: owner = on-call engineer that week; trigger = (a) scheduled quarterly cycle for HMAC signing secret, (b) annual cycle for GH App key, (c) immediate on suspected compromise; verification = post-rotation smoke that fires a synthetic dispatch + asserts workflow succeeds.
 
-**Round-4 MEDIUM (Comp 3) — deploy preflight gate**: a CI check (`scripts/preflight-check-mesh-tokens.ts`) reads Vault token metadata at deploy time and fails dev/staging deploys when:
-- PAT age > 90d (hard fail; deploy blocked until rotation)
-- PAT age 70-90d (warning surfaced in PR / Slack)
-- PAT age > 85d (additional pager alert, independent of deploy)
+**Round-4 MEDIUM (Comp 3) — deploy preflight gate** (round-5 MEDIUM concretized):
+
+`scripts/preflight-check-mesh-tokens.ts` runs in CI as a required job before any deploy. Auth path:
+- CI authenticates to Vault via **GitHub OIDC → Vault JWT role** (`mesh-preflight-readonly`) — no static Vault token needed in CI secrets; Vault verifies the OIDC token issuer (`token.actions.githubusercontent.com`) and the repo+workflow claims. This avoids the chicken-and-egg of "secret needed to read secrets".
+- Read-only on `secret/data/mesh/dispatch-token-metadata` (created_at, expires_at, mode).
+
+Per-environment logic:
+- **prod**: assert `MESH_DISPATCH_AUTH_MODE = "github_app"`. Reject deploy if PAT is configured (prod is GH App only). Skip PAT-age checks entirely.
+- **dev / staging**: validate `created_at` and `expires_at`:
+  - age > 90d → hard fail (deploy blocked)
+  - age 70-90d → warning in PR comment + Slack
+  - age > 85d → page (independent of deploy gate, fires from a separate alerting cron)
 
 The deploy gate enforces what the alerts can only signal.
 
@@ -280,6 +310,7 @@ A separate Supabase Cron `fingerprint_replay_sweep` runs every 5 min and finds o
 WITH gaps AS (
   SELECT o.fingerprint_id,
          MAX(o.id)            AS max_occ_id,
+         MIN(o.id)            AS min_occ_id,   -- round-5 HIGH: digest needs range start
          COUNT(*)              AS gap_count,
          l.state               AS link_state,
          l.claim_expires_at,
@@ -311,22 +342,44 @@ classified AS (
            -- comments on a closed issue and gets ignored.) Throttle via
            -- the dispatcher's coalesce — repeated reopens within a window
            -- get one reopen + one digest.
+           --
+           -- Round-5 MEDIUM (Comp 3): two-layer reopen control:
+           --   1. Per-fingerprint budget — max 3 reopens / 24h via a
+           --      reopen_count_24h + reopen_count_window_at column on
+           --      fingerprint_issue_links (to be added in a follow-up
+           --      migration; not in scope for this draft). When exceeded,
+           --      occurrences are recorded but issue is NOT reopened;
+           --      mesh.reopen_budget_exhausted_total counter alarms oncall.
+           --   2. Operator override — `do_not_reopen=true` or
+           --      `suppressed_until > NOW()` (operator-only state via an
+           --      audited admin RPC) makes the fingerprint NEVER reopen
+           --      regardless of budget.
+           -- Both compose: budget protects against runaway flap loops;
+           -- override lets operators intentionally silence a known issue.
            WHEN g.link_state = 'closed'                                THEN 'reopen'
            ELSE NULL
          END AS action
     FROM gaps g
 )
-INSERT INTO public.fingerprint_issue_jobs (fingerprint_id, action, window_start, coalesced_count, last_occurrence_id)
+INSERT INTO public.fingerprint_issue_jobs (
+  fingerprint_id, action, window_start, coalesced_count,
+  first_occurrence_id, last_occurrence_id
+)
 SELECT c.fingerprint_id,
        c.action,
        date_trunc('minute', NOW()) - (EXTRACT(minute FROM NOW())::int % 5) * INTERVAL '1 minute',
        c.gap_count,
+       c.min_occ_id,                                     -- round-5 HIGH: range start for digest exclusion
        c.max_occ_id
   FROM classified c
  WHERE c.action IS NOT NULL  -- skip in-flight claimed rows
 ON CONFLICT (fingerprint_id, window_start) DO UPDATE
-   SET coalesced_count    = fingerprint_issue_jobs.coalesced_count + EXCLUDED.coalesced_count,
-       last_occurrence_id = GREATEST(fingerprint_issue_jobs.last_occurrence_id, EXCLUDED.last_occurrence_id);
+   SET coalesced_count     = fingerprint_issue_jobs.coalesced_count + EXCLUDED.coalesced_count,
+       last_occurrence_id  = GREATEST(fingerprint_issue_jobs.last_occurrence_id, EXCLUDED.last_occurrence_id),
+       first_occurrence_id = LEAST(
+         COALESCE(fingerprint_issue_jobs.first_occurrence_id, EXCLUDED.first_occurrence_id),
+         EXCLUDED.first_occurrence_id
+       );
 ```
 
 For action='create' coming from the sweep (rather than first-time ingest), the dispatcher worker also runs the `INSERT INTO fingerprint_issue_links ON CONFLICT DO NOTHING` claim BEFORE dispatching, so the create-race remains protected.
