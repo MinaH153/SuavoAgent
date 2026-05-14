@@ -31,6 +31,7 @@ Phase 2 work:
 {
   "ruleset": {
     "ruleset_version": "v1.1",
+    "ruleset_version_int": 11,
     "key_id": "ruleset-v1-key-2026-05-13",
     "signed_at": "2026-06-15T18:24:00Z",
     "expires_at": "2027-06-15T18:24:00Z",
@@ -42,6 +43,13 @@ Phase 2 work:
   "signature": "<base64 ECDSA P-256 sig over canonicalized ruleset JSON>"
 }
 ```
+
+**Round-7 HIGH (Comp 2 chunk 1) — `ruleset_version_int` wire propagation**: the int field is part of the SIGNED bytes (RFC 8785 canonical form includes it). Required propagation:
+1. `RulesetV1.cs` model adds `public int RulesetVersionInt { get; set; }` with `[JsonPropertyName("ruleset_version_int")]`.
+2. Embedded `ruleset-v1.json` MUST be bumped to include the new field (otherwise Phase 1 boot fails parse on the now-required field). The Phase 2 code PR bumps the embedded resource simultaneously with the model change.
+3. `ruleset-v1.schema.json` adds `ruleset_version_int` to `required`.
+4. Cloud Edge Function bundle builder reads + emits `ruleset_version_int` from the source-of-truth ruleset store.
+5. The JSON canonicalizer signs the field in RFC 8785 order.
 
 **Signing**: cloud Edge Function fetches the ruleset signing private key from supabase Vault on each request (low volume, cache TTL 5min), signs the canonicalized JSON, returns bundle. Per spec §5 — Vault for Phase 1+2, KMS for Phase 3 when per-tenant keys arrive.
 
@@ -147,8 +155,11 @@ public sealed class RulesetSignatureVerifier
     ///   `catch (CryptographicException ex)    // ImportFromPem malformed`
     ///   `catch (IOException ex)               // resource stream read fail`
     ///   `catch (UnauthorizedAccessException ex) // file ACL`
+    ///   `catch (JsonException ex)             // round-7 MED: corrupt cache parse → alarm + fallback`
     /// All other exceptions escape and crash the process — supervisor restart
     /// is the right recovery path for process-corruption signals.
+    /// OperationCanceledException / TaskCanceledException intentionally NOT
+    /// caught — caller wants cancel to propagate.
     ///
     /// On throw: emit `ruleset.trust_store_load_failed` mesh signal, set
     /// `_rulesetOtaDisabled = true`, log error, and continue with the embedded
@@ -315,6 +326,8 @@ Chunk C (Signature verification): should `LoadEmbeddedPublicKey` also support a 
 
   This handles coordinated cloud+agent releases where cache might lag.
 
+  **Round-7 MEDIUM (Comp 2 — rollback semantics)**: cache-newer-wins is the steady-state rule, but binary rollback (agent self-updates to an OLDER build with a lower `embedded.ruleset_version_int`) leaves the cached newer ruleset adopted on next boot. Policy: **cache freshness wins; rollback is OS/agent-supervisor responsibility, not ruleset-layer**. If an emergency rollback must also revert ruleset, the rollback procedure must either (a) delete `ruleset-current.json` from disk OR (b) write a `ruleset-rollback-epoch.json` sentinel that the loader honors as `max_allowed_ruleset_version_int` for one boot. Document this in the rollback runbook (`docs/runbooks/mesh-rollback.md`); not enforced in code by this draft.
+
 **Failure-mode integration tests** (table-driven against `ConfigSyncWorker` + fake `IRulesetClient`)
 
 | Scenario | Expected outcome |
@@ -335,8 +348,8 @@ Chunk C (Signature verification): should `LoadEmbeddedPublicKey` also support a 
 - Each `PhiScrubber` and `FingerprintComputer` instance must expose `RulesetVersion` (`internal` visibility for test access). Without this, the test has nothing to compare across generations.
 - Dispatch **≥10,000** `Wire.SwapRuleset(A)` and **≥10,000** `Wire.SwapRuleset(B)` interleaved across N threads; dispatcher reads `_runtime` continuously across ≥4 reader threads → for every read, assert `rt.Ruleset.RulesetVersion == rt.Scrubber.RulesetVersion == rt.Fingerprinter.RulesetVersion` (no mixed generation). Run for a duration target of ≥30s wall-clock to amortize JIT warmup.
 - **CI acceptance criteria** (round-5 MED + round-6 LOW — workflow file is a deliverable + CODEOWNERS-protected):
-   - Nightly: `.github/workflows/mesh-stress-nightly.yml` lands in the Phase 2 code PR (NOT a follow-up; Comp 2 ship is blocked on this file existing). Owner = oncall engineer rotation; CODEOWNERS entry `/.github/workflows/mesh-stress-*.yml @MinaH153 @<oncall-team>`. Runs `dotnet test --filter "Category=Stress"` for the 10k×30s variant. Failure notifications → `#mesh-alerts` Slack + page on 2 consecutive nightly failures.
-   - PR CI smoke: 200 iterations of the same `[Fact]` (NO `[Trait("Category","Stress")]`), with `[Trait("Timing","Fast")]`. Hard wall-clock ceiling: ≤5 seconds; assert via test setup `Stopwatch` measurement. Catches grossly broken changes without flake risk.
+   - Nightly: `.github/workflows/mesh-stress-nightly.yml` lands in the Phase 2 code PR (NOT a follow-up; Comp 2 ship is blocked on this file existing). Owner = `@MinaH153` (no team handle yet — round-7 LOW: replace `@<oncall-team>` placeholder; when a `@SuavoLLC/mesh-oncall` team is created, add it here). CODEOWNERS entry: `/.github/workflows/mesh-stress-*.yml @MinaH153`. Runs `dotnet test --filter "Category=Stress"` for the 10k×30s variant. Failure notifications → `#mesh-alerts` Slack + page on 2 consecutive nightly failures.
+   - PR CI smoke: 200 iterations of the same `[Fact]` (NO `[Trait("Category","Stress")]`), with `[Trait("Timing","Fast")]`. **Wall-clock ceiling calibrated empirically** (round-7 LOW): Phase 2 code PR runs the test 50× on `ubuntu-latest` runners (in a calibration job), captures p50 / p95 / p99 wall-clock, and sets the ceiling to `p99 × 1.5`. Don't guess 5s; measure. The ceiling is recorded in a comment alongside the test and revisited if CI runners change.
 - Single-publisher (only ConfigSyncWorker calls SwapRuleset) is a separate contract test.
 
 **Property test**: PhiScrubber + FingerprintComputer outputs unchanged for Bug 22/23/24 calibration vectors after `Wire.SwapRuleset` to an identical ruleset (verifies snapshot construction doesn't drift state).

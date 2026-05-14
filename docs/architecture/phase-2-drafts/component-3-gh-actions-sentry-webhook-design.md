@@ -173,6 +173,7 @@ The workflow's first step (BEFORE the DB fetch) is HMAC verification against the
               SELECT 1 FROM public.fingerprint_issue_jobs j
                WHERE j.fingerprint_id = o.fingerprint_id
                  AND j.succeeded_at IS NOT NULL
+                 AND j.abandoned_at IS NULL          -- round-7 HIGH #2: skip abandoned
                  AND j.first_occurrence_id IS NOT NULL
                  AND j.last_occurrence_id  IS NOT NULL
                  AND o.id BETWEEN j.first_occurrence_id AND j.last_occurrence_id
@@ -210,7 +211,18 @@ The workflow's first step (BEFORE the DB fetch) is HMAC verification against the
          summary: "Mesh dispatcher producing stale-completion races"
          runbook: "docs/runbooks/mesh-stale-completion.md"
      ```
-   - **Triage runbook** (`docs/runbooks/mesh-stale-completion.md` — to ship alongside the workflow): (1) `SELECT job_id, fingerprint_id, action, attempt_token, dispatch_attempt_count, github_issue_number FROM fingerprint_issue_jobs WHERE id = $alerted_job_id;` (2) Inspect GH issue: was a duplicate created? If so, identify the older issue, edit the newer issue body to reference the older one, close the duplicate. (3) Call `complete_fingerprint_issue_job` with the CURRENT attempt_token from step 1 to mark the row succeeded; do not retry GH work.
+   - **Triage runbook** (`docs/runbooks/mesh-stale-completion.md` — ships in the Phase 2 code PR alongside the workflow). Round-7 HIGH #4: prior inline SQL used non-existent column names (`job_id` doesn't exist; `github_issue_number` lives on links not jobs). Corrected:
+     ```sql
+     -- (1) Inspect the row + linked issue:
+     SELECT j.id AS job_id, j.fingerprint_id, j.action, j.attempt_token,
+            j.dispatch_attempt_count, j.failure_count,
+            l.github_issue_number, l.github_repo, l.state AS link_state
+       FROM public.fingerprint_issue_jobs j
+       LEFT JOIN public.fingerprint_issue_links l USING (fingerprint_id)
+      WHERE j.id = $alerted_job_id;
+     ```
+   - (2) Inspect GH issue: was a duplicate created? **Canonical = lowest issue number** unless `fingerprint_issue_links.github_issue_number` already names one (round-7 MED clarification). Edit every non-canonical duplicate body to reference the canonical, then close them.
+   - (3) Call `complete_fingerprint_issue_job($job_id, $current_attempt_token, $current_last_occurrence_id)` with values from step 1's query — note the `attempt_token` will be the CURRENT row's (rotated by the re-claim that caused this alarm), NOT the workflow's stale token. The function marks the row succeeded + advances registry cursor atomically.
    - DO NOT advance any cursor; the row's CURRENT attempt_token holder may also have done GH work, and the resulting duplicates need human triage.
    - Mitigations to keep this rate near zero: per-action lease TTL ≥ worst-case workflow runtime (round-3 sized — create=30min), token verification at the START of every GH op for long-running actions.
 
@@ -328,6 +340,7 @@ AS $$
 DECLARE
   v_fingerprint_id BIGINT;
   v_last_occ_id    BIGINT;
+  v_action         TEXT;
 BEGIN
   IF p_mode NOT IN ('retry', 'abandon') THEN
     RAISE EXCEPTION 'mode must be ''retry'' or ''abandon''';
@@ -344,17 +357,49 @@ BEGIN
      WHERE id = p_job_id AND succeeded_at IS NULL;
     RETURN FOUND;
   ELSE
-    -- 'abandon': mark this row succeeded (don't retry), enqueue a replacement
-    -- job from the current occurrence cursor so future occurrences are still
-    -- managed.
+    -- 'abandon': mark this row succeeded BUT with abandoned_at sentinel
+    -- so the replay sweep does NOT count its occurrence range as "covered"
+    -- (round-7 HIGH #2: the prior version marked succeeded_at; the sweep's
+    -- NOT EXISTS check then treated the abandoned occurrences as already
+    -- handled, silently dropping them).
+    --
+    -- Schema add: abandoned_at TIMESTAMPTZ column on fingerprint_issue_jobs.
+    -- Replay sweep + digest exclusion add `AND j.abandoned_at IS NULL` to
+    -- their NOT EXISTS clauses. ALSO ROLL BACK the occurrence range
+    -- contribution by clearing first/last_occurrence_id on the abandoned
+    -- row — the replay sweep then re-picks up those occurrences as fresh
+    -- gaps and classifies a new job via the state machine.
     UPDATE public.fingerprint_issue_jobs
-       SET succeeded_at = NOW(),
-           last_error   = 'abandoned: ' || p_audit_reason
+       SET succeeded_at        = NOW(),
+           abandoned_at        = NOW(),
+           last_error          = 'abandoned: ' || p_audit_reason,
+           first_occurrence_id = NULL,
+           last_occurrence_id  = NULL
      WHERE id = p_job_id
-    RETURNING fingerprint_id, last_occurrence_id INTO v_fingerprint_id, v_last_occ_id;
+    RETURNING fingerprint_id, action INTO v_fingerprint_id, v_action;
     IF NOT FOUND THEN RETURN FALSE; END IF;
-    -- Caller (runbook) is responsible for triggering the replay sweep to
-    -- re-pick up subsequent occurrences via the registry cursor.
+
+    -- Round-7 HIGH #3: if the abandoned job was a 'create' attempt,
+    -- bump the fingerprint-level create kill switch. After 3
+    -- consecutive create failures, suppress create classification for
+    -- 24h + page oncall once.
+    IF v_action = 'create' THEN
+      UPDATE public.fingerprint_issue_links
+         SET create_failure_count    = create_failure_count + 1,
+             last_create_failed_at   = NOW(),
+             create_suppressed_until = CASE
+               WHEN create_failure_count + 1 >= 3 THEN NOW() + INTERVAL '24 hours'
+               ELSE create_suppressed_until
+             END
+       WHERE fingerprint_id = v_fingerprint_id;
+      -- Caller observes the threshold crossing via subsequent SELECT
+      -- and emits `mesh.create_suppressed_total{fingerprint_id=...}`
+      -- exactly once per arming window.
+    END IF;
+
+    -- Replay sweep (every 5min) auto-picks up the now-uncovered gap
+    -- (gated by create_suppressed_until for action='create' paths).
+    -- Caller does NOT need to trigger the sweep manually.
     RETURN TRUE;
   END IF;
 END $$;
@@ -389,6 +434,7 @@ WITH gaps AS (
      AND NOT EXISTS (
        SELECT 1 FROM public.fingerprint_issue_jobs j
         WHERE j.fingerprint_id = o.fingerprint_id
+          AND j.abandoned_at IS NULL          -- round-7 HIGH #2: skip abandoned
           AND j.last_occurrence_id >= o.id
      )
    GROUP BY o.fingerprint_id, l.state, l.claim_expires_at, l.last_action_at
@@ -396,6 +442,17 @@ WITH gaps AS (
 classified AS (
   SELECT g.fingerprint_id, g.max_occ_id, g.gap_count,
          CASE
+           -- Round-7 HIGH #3: fingerprint-level create kill switch. If
+           -- create_suppressed_until > NOW(), STOP enqueueing create.
+           -- Records the occurrence but does not loop.
+           -- The dispatcher's create failure path increments
+           -- create_failure_count + last_create_failed_at on every
+           -- recover_fingerprint_issue_job(mode='abandon') call for an
+           -- action='create' row; at >=3 consecutive failures, the
+           -- recovery RPC sets create_suppressed_until = NOW() + 24h +
+           -- pages oncall once via mesh.create_suppressed_total.
+           WHEN g.link_state = 'claimed' AND g.create_suppressed_until IS NOT NULL
+                AND g.create_suppressed_until > NOW()                  THEN NULL
            -- No link row → first-time issue → create
            WHEN g.link_state IS NULL                                   THEN 'create'
            -- claimed + expired → previous create stalled → retry create
@@ -409,21 +466,28 @@ classified AS (
            -- comments on a closed issue and gets ignored.) Throttle via
            -- the dispatcher's coalesce — repeated reopens within a window
            -- get one reopen + one digest.
-           -- Round-5 MEDIUM + Round-6 HIGH (Comp 3 chunk A): two-layer
-           -- reopen control is ENFORCED via the RPC below, not in this
-           -- classification CASE. The classifier sets action='reopen'
-           -- (declarative intent); the dispatcher MUST call
-           -- try_enqueue_reopen_job(fingerprint_id) which atomically
-           -- (under FOR UPDATE on the link row):
-           --   - rejects with action='noop' if do_not_reopen=true OR
-           --     suppressed_until > NOW()
-           --   - rejects with action='noop' if reopen_count_24h >= 3
-           --     (window: reopen_count_window_at < NOW() - INTERVAL '24h'
-           --     resets the window to NOW() before checking)
-           --   - otherwise increments reopen_count_24h, returns 'reopen'
-           -- Schema bits (do_not_reopen bool, suppressed_until ts,
-           -- reopen_count_24h int, reopen_count_window_at ts) land in a
-           -- follow-up migration once Comp 3 spec ships and exercises them.
+           -- Round-5 MEDIUM + Round-6/7 HIGH (Comp 3 chunk A): reopen
+           -- control is ENFORCED in SQL via try_enqueue_reopen_job() defined
+           -- in Comp 1. The classifier sets action='reopen' (declarative
+           -- intent); BEFORE inserting the job, the caller invokes
+           -- `SELECT try_enqueue_reopen_job(fingerprint_id)` which returns:
+           --   - 'reopen'              → enqueue the job
+           --   - 'noop_suppressed'     → operator override active; skip
+           --   - 'noop_budget_exhausted' → 3 reopens already in 24h window;
+           --                              skip + emit one-shot alarm
+           --   - 'noop_no_link'        → first-time fingerprint; should have
+           --                              been classified 'create', not reopen
+           --
+           -- Schema columns (do_not_reopen, suppressed_until, reopen_count_24h,
+           -- reopen_count_window_at, budget_exhausted_notified_at) are in
+           -- Comp 1's fingerprint_issue_links table (added in round-7 patch).
+           --
+           -- Budget-exhausted alarm (round-7 HIGH #5): emit
+           -- `mesh.reopen_budget_exhausted_total{fingerprint_id=...}` ONCE
+           -- per 24h window. Caller emits the metric only when the RPC
+           -- returned 'noop_budget_exhausted' AND `budget_exhausted_notified_at`
+           -- was NULL pre-call (the RPC sets it atomically). Alert rule fires
+           -- on first occurrence per fingerprint per window.
            WHEN g.link_state = 'closed'                                THEN 'reopen'
            ELSE NULL
          END AS action

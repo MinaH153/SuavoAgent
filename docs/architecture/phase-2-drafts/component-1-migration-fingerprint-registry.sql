@@ -325,7 +325,20 @@ CREATE TABLE IF NOT EXISTS public.fingerprint_issue_links (
   -- create-retryable (state stays 'claimed', it just re-attempts the GH
   -- create call). Default 15 minutes matches dispatcher lease.
   claim_expires_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW() + INTERVAL '15 minutes',
-  last_action_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  last_action_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  -- Round-7 HIGH #1 (Comp 3): reopen-budget enforcement state.
+  -- try_enqueue_reopen_job() (defined below) atomically checks + updates
+  -- these under FOR UPDATE on the link row.
+  reopen_count_24h           INT          NOT NULL DEFAULT 0,
+  reopen_count_window_at     TIMESTAMPTZ,        -- start of current 24h window
+  do_not_reopen              BOOLEAN      NOT NULL DEFAULT FALSE,
+  suppressed_until           TIMESTAMPTZ,        -- operator-set
+  budget_exhausted_notified_at TIMESTAMPTZ,      -- round-7 HIGH #5: first-event-only alarm
+  -- Round-7 HIGH #3 (Comp 3): fingerprint-level kill switch for create loops.
+  -- After N consecutive failed creates in claimed state, stop enqueueing.
+  create_failure_count       INT          NOT NULL DEFAULT 0,
+  last_create_failed_at      TIMESTAMPTZ,
+  create_suppressed_until    TIMESTAMPTZ
 );
 
 -- Round-2 MEDIUM (Comp 1): state invariants — 'open'/'closed'/'reopened'
@@ -489,7 +502,12 @@ CREATE TABLE IF NOT EXISTS public.fingerprint_issue_jobs (
   -- get falsely treated as covered. (first_occurrence_id, last_occurrence_id)
   -- specifies the actual occurrence range covered by THIS job; digest excludes
   -- only rows where occurrence_id BETWEEN first AND last.
-  first_occurrence_id   BIGINT       REFERENCES public.fingerprint_occurrences(id)
+  first_occurrence_id   BIGINT       REFERENCES public.fingerprint_occurrences(id),
+  -- Round-7 HIGH #2 (Comp 3): abandoned rows are succeeded_at=NOW() to stop
+  -- re-dispatch but MUST NOT count toward digest / replay-sweep "covered"
+  -- exclusions. The replay sweep and digest cron both add
+  -- `AND j.abandoned_at IS NULL` to their NOT EXISTS predicates.
+  abandoned_at          TIMESTAMPTZ
 );
 
 -- Per-action TTL guidance (set by dispatcher on claim):
@@ -721,6 +739,84 @@ COMMENT ON FUNCTION public.record_fingerprint_issue_job_failure IS
 REVOKE EXECUTE ON FUNCTION public.record_fingerprint_issue_job_failure(BIGINT, UUID, TEXT) FROM PUBLIC, authenticated, anon;
 GRANT  EXECUTE ON FUNCTION public.record_fingerprint_issue_job_failure(BIGINT, UUID, TEXT) TO service_role;
 
+-- Round-7 HIGH #1 (Comp 3): try_enqueue_reopen_job — atomically apply
+-- reopen budget + operator override. Returns 'reopen' if a reopen job
+-- should be enqueued; 'noop' otherwise (budget exhausted / suppressed /
+-- do_not_reopen). Callers (Edge Function ingest + replay sweep) use the
+-- returned action; this function does NOT enqueue the job itself.
+--
+-- Side effect: on 'reopen', atomically increments reopen_count_24h
+-- (resetting the window if older than 24h) and updates last_action_at.
+-- On first transition to budget-exhausted state per window, sets
+-- budget_exhausted_notified_at so the alarm fires exactly once per
+-- 24h window per fingerprint (round-7 HIGH #5).
+CREATE OR REPLACE FUNCTION public.try_enqueue_reopen_job(
+  p_fingerprint_id BIGINT
+) RETURNS TEXT  -- 'reopen' | 'noop_suppressed' | 'noop_budget_exhausted'
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_link  public.fingerprint_issue_links%ROWTYPE;
+  v_now   TIMESTAMPTZ := NOW();
+BEGIN
+  SELECT * INTO v_link FROM public.fingerprint_issue_links
+   WHERE fingerprint_id = p_fingerprint_id
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    -- No link row = first-time fingerprint; sweep should classify as 'create' not 'reopen'.
+    RETURN 'noop_no_link';
+  END IF;
+
+  -- Operator override wins over budget.
+  IF v_link.do_not_reopen
+     OR (v_link.suppressed_until IS NOT NULL AND v_link.suppressed_until > v_now) THEN
+    RETURN 'noop_suppressed';
+  END IF;
+
+  -- Reset 24h window if it's older than 24h or never set.
+  IF v_link.reopen_count_window_at IS NULL
+     OR v_link.reopen_count_window_at < v_now - INTERVAL '24 hours' THEN
+    UPDATE public.fingerprint_issue_links
+       SET reopen_count_24h           = 0,
+           reopen_count_window_at     = v_now,
+           budget_exhausted_notified_at = NULL  -- new window → re-enable alarm
+     WHERE fingerprint_id = p_fingerprint_id;
+    v_link.reopen_count_24h := 0;
+    v_link.reopen_count_window_at := v_now;
+    v_link.budget_exhausted_notified_at := NULL;
+  END IF;
+
+  IF v_link.reopen_count_24h >= 3 THEN
+    -- Budget exhausted. Fire alarm ONCE per window per fingerprint
+    -- (round-7 HIGH #5 — without this, the alarm spams per occurrence).
+    IF v_link.budget_exhausted_notified_at IS NULL THEN
+      UPDATE public.fingerprint_issue_links
+         SET budget_exhausted_notified_at = v_now
+       WHERE fingerprint_id = p_fingerprint_id;
+      -- Caller observes 'noop_budget_exhausted_first' (treated as fire-once
+      -- signal) vs 'noop_budget_exhausted' on subsequent calls. We return
+      -- the latter; the metric increment is the caller's responsibility,
+      -- gated on whether budget_exhausted_notified_at was NULL pre-update.
+    END IF;
+    RETURN 'noop_budget_exhausted';
+  END IF;
+
+  -- Approve reopen. Increment counter + bump last_action_at.
+  UPDATE public.fingerprint_issue_links
+     SET reopen_count_24h = reopen_count_24h + 1,
+         last_action_at   = v_now
+   WHERE fingerprint_id = p_fingerprint_id;
+  RETURN 'reopen';
+END $$;
+
+REVOKE EXECUTE ON FUNCTION public.try_enqueue_reopen_job(BIGINT) FROM PUBLIC, authenticated, anon;
+GRANT  EXECUTE ON FUNCTION public.try_enqueue_reopen_job(BIGINT) TO service_role;
+
+COMMENT ON FUNCTION public.try_enqueue_reopen_job IS
+  'Round-7 HIGH (Comp 3): atomic reopen-budget + operator-override check. Returns reopen/noop_suppressed/noop_budget_exhausted/noop_no_link. Side-effects window reset + count increment + first-time-exhaustion notification stamp.';
+
 -- ── Sweep cursor columns on fingerprint_registry (Comp 3 MEDIUM) ────────────
 -- Persist per-fingerprint cursor so the recovery sweep advances atomically
 -- after each GH lifecycle action succeeds (idempotent replay).
@@ -833,6 +929,6 @@ CREATE TRIGGER fingerprint_registry_cursor_monotonic_trg
 COMMENT ON TABLE public.fingerprint_issue_links IS
   'Mesh Phase 2: 1:1 claim row per fingerprint → GH issue. Edge Function INSERT ON CONFLICT DO NOTHING resolves the create/bump/reopen action decision at the DB layer (not workflow-side). See docs/architecture/phase-2-drafts/component-3-* §F.';
 COMMENT ON TABLE public.fingerprint_issue_jobs IS
-  'Mesh Phase 2: coalesced GH dispatch queue. UPSERT on (fingerprint_id, window_start) collapses alert storms into one pending job; batch worker drains under the 100/hr repository_dispatch cap. See docs/architecture/phase-2-drafts/component-3-* §D.';
+  'Mesh Phase 2: coalesced GH dispatch queue. UPSERT on (fingerprint_id, window_start) collapses alert storms into one pending job; batch worker drains under the 100/hr repository_dispatch cap. See docs/architecture/phase-2-drafts/component-3-* §D. service_role UPDATE is column-restricted (succeeded_at / failure_count via token-checked RPCs only; identity columns write-once at INSERT); future ADD COLUMNs are silently un-GRANTed and require explicit GRANT UPDATE opt-in (round-7 LOW).';
 
 COMMIT;
