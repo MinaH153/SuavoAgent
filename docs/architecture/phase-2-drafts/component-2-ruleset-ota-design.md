@@ -137,12 +137,16 @@ public sealed class RulesetSignatureVerifier
     /// PEM import fails.
     ///
     /// Round-3 MEDIUM: the explicit caller is `ConfigSyncWorker.InitializeAsync`,
-    /// which wraps this call in `try/catch(Exception)` (round-4 MEDIUM
-    /// broadening: ExtractKeyId can throw ArgumentException; CryptographicException
+    /// which wraps this call in
+    /// `try/catch(Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)`
+    /// (round-4 MEDIUM broadening + round-5 MEDIUM fatal-exception exclusion:
+    /// ExtractKeyId can throw ArgumentException; CryptographicException
     /// can surface from ImportFromPem under malformed-but-recoverable PEM
     /// shapes; FileNotFoundException is possible if the embedded resource
-    /// was stripped by a misconfigured trim/AOT build). Catching only
-    /// InvalidOperationException would bypass the fallback for these.
+    /// was stripped by a misconfigured trim/AOT build. But OOM/StackOverflow
+    /// signal process corruption — .NET 6+ recommends letting these escape).
+    /// Catching only InvalidOperationException would bypass the fallback for
+    /// the recoverable cases.
     ///
     /// On throw: emit `ruleset.trust_store_load_failed` mesh signal, set
     /// `_rulesetOtaDisabled = true`, log error, and continue with the embedded
@@ -303,7 +307,7 @@ Chunk C (Signature verification): should `LoadEmbeddedPublicKey` also support a 
 - **Boot with `ruleset-current.json` signed by ROTATED-OUT key_id** (round-3 HIGH): cached bundle's key_id is no longer in trust store. Agent rejects, alarms `ruleset.cached_key_rotated_out`, records the SHA-256 hash of the rejected file (round-4 MEDIUM: prevents re-alarming on every poll), falls back to embedded.
 - Boot with corrupt `ruleset-current.json` (random bytes) → parse fails, alarms, falls back to embedded.
 - Boot with valid cache + corrupt embedded resource → cache loads successfully, no alarm. (Defends against accidental embedded-resource damage during build.)
-- **Boot with valid cache + valid embedded, embedded ruleset_version NEWER than cached** (round-4 MEDIUM): loader prefers embedded (higher monotonic ruleset_version). Cache load happens after embedded baseline; cache is only adopted if its ruleset_version > embedded's. This handles coordinated cloud+agent releases where cache might lag.
+- **Boot with valid cache + valid embedded, embedded ruleset_version NEWER than cached** (round-4 MEDIUM): loader prefers embedded (higher monotonic ruleset_version). Cache load happens after embedded baseline; cache is adopted ONLY on strict greater-than. **Round-5 LOW: equal ruleset_version tie-break — prefer embedded, do NOT swap to cache.** Cache wins exclusively on `cache.ruleset_version > embedded.ruleset_version`. This handles coordinated cloud+agent releases where cache might lag.
 
 **Failure-mode integration tests** (table-driven against `ConfigSyncWorker` + fake `IRulesetClient`)
 
@@ -321,10 +325,12 @@ Chunk C (Signature verification): should `LoadEmbeddedPublicKey` also support a 
 
 **Corruption-after-flush test**: write a valid bundle to `ruleset-current.json`, corrupt 1 byte after `Flush(true)`, restart agent → assert verifier rejects, alarms, falls back to embedded.
 
-**Concurrent-swap stress test** (round-4 MED — generation-tag assertion + CI tagging):
+**Concurrent-swap stress test** (round-4 MED — generation-tag assertion + CI tagging + round-5 MED acceptance criteria):
 - Each `PhiScrubber` and `FingerprintComputer` instance must expose `RulesetVersion` (`internal` visibility for test access). Without this, the test has nothing to compare across generations.
 - Dispatch **≥10,000** `Wire.SwapRuleset(A)` and **≥10,000** `Wire.SwapRuleset(B)` interleaved across N threads; dispatcher reads `_runtime` continuously across ≥4 reader threads → for every read, assert `rt.Ruleset.RulesetVersion == rt.Scrubber.RulesetVersion == rt.Fingerprinter.RulesetVersion` (no mixed generation). Run for a duration target of ≥30s wall-clock to amortize JIT warmup.
-- CI placement: tagged `[Trait("Category","Stress")]` and runs on a nightly job (`mesh-stress-nightly.yml`), NOT main-PR CI (round-4 LOW: stress tests on shared CI are flake-prone). Main PR CI runs a 200-iteration smoke variant of the same test to catch grossly broken changes.
+- **CI acceptance criteria** (round-5 MED — make the workflow ownership concrete, not just a name):
+   - Nightly: create `.github/workflows/mesh-stress-nightly.yml` running `dotnet test --filter "Category=Stress"` for the 10k×30s variant. Owner: oncall engineer. Failure notifications → `#mesh-alerts` Slack + page on 2 consecutive nightly failures.
+   - PR CI smoke: 200 iterations of the same `[Fact]` (NO `[Trait("Category","Stress")]`), with `[Trait("Timing","Fast")]`. Hard wall-clock ceiling: ≤5 seconds; assert via test setup `Stopwatch` measurement. Catches grossly broken changes without flake risk.
 - Single-publisher (only ConfigSyncWorker calls SwapRuleset) is a separate contract test.
 
 **Property test**: PhiScrubber + FingerprintComputer outputs unchanged for Bug 22/23/24 calibration vectors after `Wire.SwapRuleset` to an identical ruleset (verifies snapshot construction doesn't drift state).
