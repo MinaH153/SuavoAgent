@@ -6,6 +6,7 @@
   "type": "object",
   "required": [
     "ruleset_version",
+    "ruleset_version_int",
     "key_id",
     "signed_at",
     "signature_alg",
@@ -19,6 +20,11 @@
     "ruleset_version": {
       "type": "string",
       "pattern": "^v\\d+\\.\\d+"
+    },
+    "ruleset_version_int": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic per-key_id integer. Cloud allocates strictly greater values via the signed_rulesets sequence. Agent OTA freshness gate compares this (not ruleset_version string) to defend against v1.10 < v1.9 string-compare regression."
     },
     "key_id": { "type": "string", "minLength": 1 },
     "signed_at": { "type": "string" },

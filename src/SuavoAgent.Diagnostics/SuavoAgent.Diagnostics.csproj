@@ -49,6 +49,12 @@
     <EmbeddedResource Include="Resources\ruleset-signing-key.pub.pem" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Tests need access to internal helpers (ExtractKeyId,
+         CanonicalizeForSigning) on RulesetSignatureVerifier. -->
+    <InternalsVisibleTo Include="SuavoAgent.Diagnostics.Tests" />
+  </ItemGroup>
+
   <!--
     Build-time git SHA embedding. WriteSourceCodeOnly target emits a
     BuildContext.GitSha constant via partial-class injection. Runs before
