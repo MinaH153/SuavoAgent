@@ -7,8 +7,9 @@ name: Mesh Stress Nightly
 # expose memory-model regressions before they reach prod.
 #
 # PR CI runs the smoke variant (1s wall-clock, no Category trait) via
-# mesh-required-check.yml. This workflow runs ONLY the [Trait(Category=Stress)]
-# variant.
+# mesh-required-check.yml. The Stress variant is gated on the
+# MESH_STRESS_NIGHTLY env var so it self-skips outside this workflow even
+# if a runner happens to invoke the full test suite.
 #
 # CODEOWNERS entry: /.github/workflows/mesh-stress-*.yml @MinaH153
 # (replace with @SuavoLLC/mesh-oncall when the team handle is created —
@@ -35,6 +36,8 @@ jobs:
     name: RulesetRuntime concurrent-swap stress
     runs-on: windows-latest
     timeout-minutes: 15
+    env:
+      MESH_STRESS_NIGHTLY: '1'
 
     steps:
       - uses: actions/checkout@v4
@@ -49,8 +52,8 @@ jobs:
       - name: Build Release
         run: dotnet build tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj --no-restore -c Release
 
-      - name: Run Mesh stress suite (Category=Stress)
-        run: dotnet test tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj --no-build -c Release --filter "Category=Stress" --logger "console;verbosity=detailed" --logger "trx;LogFileName=stress.trx"
+      - name: Run Mesh stress suite
+        run: dotnet test tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj --no-build -c Release --filter "FullyQualifiedName~Stress_Concurrent_swap_storm" --logger "console;verbosity=detailed" --logger "trx;LogFileName=stress.trx"
 
       - name: Upload TRX on failure
         if: failure()

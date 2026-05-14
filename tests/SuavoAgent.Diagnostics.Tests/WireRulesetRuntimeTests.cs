@@ -162,6 +162,15 @@ public class WireRulesetRuntimeTests
     [Trait("Category", "Stress")]
     public async Task Stress_Concurrent_swap_storm_10k_swaps_30s_no_mixed_generation()
     {
+        // Gated by an env var — set ONLY in .github/workflows/mesh-stress-nightly.yml.
+        // PR CI runs the 1s smoke variant above; this 30s × 10k variant is the
+        // nightly acceptance gate (Codex Comp 2 chunk 4 round-5 MED). The Trait
+        // is informational; the env-var check is what actually gates execution.
+        if (Environment.GetEnvironmentVariable("MESH_STRESS_NIGHTLY") != "1")
+        {
+            return;
+        }
+
         EnsureWireInitialised();
 
         var rulesetA = new RulesetV1
