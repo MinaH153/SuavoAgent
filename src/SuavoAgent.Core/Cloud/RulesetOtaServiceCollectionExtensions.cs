@@ -55,7 +55,14 @@ public static class RulesetOtaServiceCollectionExtensions
         var dir = cacheDirectory ?? DefaultCacheDirectory;
 
         // Manual HttpClient — matches the existing AgentConfigClient idiom.
-        var rulesetHttp = new HttpClient
+        // PooledConnectionLifetime caps the DNS pin: without it, this singleton
+        // HttpClient holds the first-resolved IP for process lifetime; if Vercel
+        // rotates the routing IP the agent talks to a dead endpoint until restart.
+        var rulesetHandler = new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        };
+        var rulesetHttp = new HttpClient(rulesetHandler, disposeHandler: true)
         {
             BaseAddress = new Uri(agentOptions.CloudUrl),
             Timeout = TimeSpan.FromSeconds(10),
