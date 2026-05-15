@@ -226,6 +226,39 @@ public sealed class ConfigSyncWorkerRulesetTests : IDisposable
         Assert.Equal(11, swapper.LastSwappedVersionInt);
     }
 
+    // ── Coverage audit H6: save succeeds, swap throws. The bundle lands
+    // on disk (persist-before-swap contract) but the in-memory swap fails
+    // and the worker never advances _currentRulesetETag. Next poll must
+    // see the SAME currentETag the previous poll started with — proving
+    // the worker doesn't silently "succeed" past a swap exception. ──────
+    [Fact]
+    public async Task PollRulesetAsync_when_swapper_throws_after_persist_bundle_saved_but_etag_not_advanced_next_poll_retries()
+    {
+        var (worker, client, store, verifier, swapper) = BuildWorker(initialAgentInt: 10);
+        var bundle = new RulesetBundle(MakeRuleset(11), new byte[] { 1 }, ETag: "\"etag-A\"");
+        client.NextResult = new RulesetFetchResult(bundle, RulesetFetchOutcome.Updated);
+        verifier.NextResult = RulesetVerificationResult.Ok();
+        swapper.ShouldThrowOnNextSwap = true;
+
+        // First poll: swap throws, exception propagates to caller.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => worker.PollRulesetAsync(CancellationToken.None));
+
+        // Save happened BEFORE swap (per worker's persist-before-swap contract),
+        // so the bundle is on disk despite the failed swap.
+        Assert.True(File.Exists(store.CurrentPath));
+        Assert.Equal(0, swapper.SwapCount);  // ShouldThrow consumed the swap, never bumped the count
+
+        // Second poll: ETag must still be null on the wire — the failed swap
+        // never advanced _currentRulesetETag. Without this contract, the
+        // worker would mark itself "caught up" and never retry the failed bundle.
+        client.NextResult = new RulesetFetchResult(null, RulesetFetchOutcome.NotModified);
+        await worker.PollRulesetAsync(CancellationToken.None);
+
+        Assert.Null(client.LastReceivedETag);
+        Assert.Equal(2, client.FetchCount);
+    }
+
     // ── OTA-time freshness gate ─────────────────────────────────────────
 
     [Fact]
@@ -335,8 +368,21 @@ public sealed class ConfigSyncWorkerRulesetTests : IDisposable
             = new(null, RulesetFetchOutcome.Transient);
         public string? LastFailureKindOverride { get; set; }
         public string? LastFailureKind => LastFailureKindOverride;
+
+        /// <summary>
+        /// Captures the ETag value the worker most recently passed to
+        /// <see cref="FetchAsync"/>. Used to assert ETag advancement (or
+        /// non-advancement after a save-then-swap-throw flow).
+        /// </summary>
+        public string? LastReceivedETag { get; private set; }
+        public int FetchCount { get; private set; }
+
         public Task<RulesetFetchResult> FetchAsync(string? currentETag, CancellationToken ct)
-            => Task.FromResult(NextResult);
+        {
+            LastReceivedETag = currentETag;
+            FetchCount++;
+            return Task.FromResult(NextResult);
+        }
     }
 
     private sealed class FakeVerifier : IRulesetVerifier
@@ -356,8 +402,22 @@ public sealed class ConfigSyncWorkerRulesetTests : IDisposable
         public int CurrentVersionInt { get; private set; }
         public int SwapCount { get; private set; }
         public int LastSwappedVersionInt { get; private set; }
+
+        /// <summary>
+        /// Toggle to make the next <see cref="Swap"/> throw — exercises the
+        /// "save succeeded, swap fails" failure mode (audit H6).
+        /// </summary>
+        public bool ShouldThrowOnNextSwap { get; set; }
+
         public void Swap(RulesetV1 ruleset)
         {
+            if (ShouldThrowOnNextSwap)
+            {
+                ShouldThrowOnNextSwap = false;
+                throw new InvalidOperationException(
+                    "test-fake swapper configured to throw (simulating PhiScrubber-ctor-throws " +
+                    "on malformed ruleset, or any other downstream swap-time exception)");
+            }
             SwapCount++;
             LastSwappedVersionInt = ruleset.RulesetVersionInt;
             CurrentVersionInt = ruleset.RulesetVersionInt;
