@@ -27,6 +27,16 @@ internal static class BinaryDownloader
     /// Maximum download size per binary (200 MB). Aborts if Content-Length exceeds this (H-4).
     private const long MaxDownloadBytes = 200 * 1024 * 1024;
 
+    /// Retry schedule for transient HTTP failures (network errors + 5xx).
+    /// GitHub release CDN occasionally throws transient 5xx during high traffic;
+    /// without retry a single TCP reset would force the user to re-run Setup from scratch.
+    private static readonly TimeSpan[] RetryDelays =
+    [
+        TimeSpan.FromSeconds(1),
+        TimeSpan.FromSeconds(3),
+        TimeSpan.FromSeconds(9),
+    ];
+
     /// <summary>
     /// Downloads, verifies, and installs all agent binaries. Returns true on success.
     /// </summary>
@@ -62,7 +72,13 @@ internal static class BinaryDownloader
 
             ConsoleUI.WriteInfo($"Downloading {bin}...");
 
-            if (!await DownloadFileAsync(http, url, destPath, bin))
+            // Retry the whole download on transient failure — the SHA-256 verify
+            // below catches any silent corruption, so retrying a stream that
+            // broke mid-flight is safe.
+            var downloaded = await RetryTransientAsync(
+                () => DownloadFileAsync(http, url, destPath, bin),
+                $"download {bin}");
+            if (!downloaded)
                 return false;
 
             // Verify SHA-256
@@ -97,10 +113,14 @@ internal static class BinaryDownloader
 
         try
         {
-            var checksumBytes = await http.GetByteArrayAsync($"{baseUrl}/checksums.sha256");
+            var checksumBytes = await RetryTransientAsync(
+                () => http.GetByteArrayAsync($"{baseUrl}/checksums.sha256"),
+                "download checksums.sha256");
             await File.WriteAllBytesAsync(checksumPath, checksumBytes);
 
-            var sigText = (await http.GetStringAsync($"{baseUrl}/checksums.sha256.sig")).Trim();
+            var sigText = (await RetryTransientAsync(
+                () => http.GetStringAsync($"{baseUrl}/checksums.sha256.sig"),
+                "download checksums.sha256.sig")).Trim();
             await File.WriteAllTextAsync(sigPath, sigText);
 
             // Verify ECDSA signature
@@ -196,6 +216,51 @@ internal static class BinaryDownloader
         var bytes = File.ReadAllBytes(filePath);
         var hash = SHA256.HashData(bytes);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Retries an HTTP operation on transient failures (network errors + 5xx)
+    /// with exponential backoff (1s / 3s / 9s). Non-transient failures
+    /// (auth, 4xx, file IO) surface immediately on the first attempt.
+    /// </summary>
+    private static async Task<T> RetryTransientAsync<T>(
+        Func<Task<T>> operation, string operationName)
+    {
+        Exception? lastEx = null;
+        for (int attempt = 0; attempt < RetryDelays.Length + 1; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (HttpRequestException ex) when (IsTransientHttpFailure(ex))
+            {
+                lastEx = ex;
+                if (attempt < RetryDelays.Length)
+                {
+                    ConsoleUI.WriteInfo(
+                        $"  {operationName} attempt {attempt + 1} failed ({ex.Message}); " +
+                        $"retrying in {RetryDelays[attempt].TotalSeconds:F0}s");
+                    await Task.Delay(RetryDelays[attempt]);
+                }
+            }
+        }
+
+        throw new HttpRequestException(
+            $"{operationName} failed after {RetryDelays.Length + 1} attempts: {lastEx?.Message}",
+            lastEx);
+    }
+
+    /// <summary>
+    /// True for network-level failures (no status code) and HTTP 5xx responses.
+    /// 4xx (auth / missing artifact) is non-retryable and surfaces immediately.
+    /// </summary>
+    private static bool IsTransientHttpFailure(HttpRequestException ex)
+    {
+        if (ex.StatusCode is null)
+            return true;
+        var status = (int)ex.StatusCode.Value;
+        return status >= 500 && status < 600;
     }
 
     private static void CleanupBinaries(string installDir)
