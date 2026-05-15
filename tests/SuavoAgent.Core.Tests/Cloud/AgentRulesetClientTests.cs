@@ -183,6 +183,27 @@ public sealed class AgentRulesetClientTests
         Assert.Equal("schema_invalid_signature_base64", client.LastFailureKind);
     }
 
+    // ── Coverage audit H1: JSON `null` literal body. JsonSerializer
+    // deserializes "null" to a null object — the null-envelope branch is
+    // present in AgentRulesetClient but was previously unreachable from
+    // tests (only malformed-JSON and missing-fields were covered). ───────
+    [Fact]
+    public async Task FetchAsync_with_200_and_json_null_body_returns_schema_invalid()
+    {
+        var (client, handler) = BuildClient();
+        handler.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("null", Encoding.UTF8, "application/json"),
+        };
+
+        var result = await client.FetchAsync(null, CancellationToken.None);
+
+        Assert.Equal(RulesetFetchOutcome.SchemaInvalid, result.Outcome);
+        Assert.Null(result.Bundle);
+        Assert.NotNull(client.LastFailureKind);
+        Assert.StartsWith("schema_invalid", client.LastFailureKind);
+    }
+
     [Fact]
     public async Task FetchAsync_sends_required_HMAC_headers()
     {

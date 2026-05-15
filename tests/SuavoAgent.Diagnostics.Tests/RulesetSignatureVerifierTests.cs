@@ -249,6 +249,43 @@ public class RulesetSignatureVerifierTests
         Assert.Throws<ArgumentNullException>(() => verifier.Verify(bundle: null!));
     }
 
+    // ── Coverage audit C3: defensive boundary on the only string the
+    // trust-store key-lookup trusts. Empty / whitespace KeyId must fail
+    // closed regardless of trust-store contents — otherwise a future
+    // malformed-resource bug or attacker-controlled bundle could match
+    // an accidental empty-string entry in the dictionary. ──────────────
+    [Fact]
+    public void Verify_with_empty_key_id_returns_failure_regardless_of_trust_store()
+    {
+        var (verifier, signing) = BuildSingleKeyVerifier();
+        // Sign a ruleset whose key_id is the empty string. Even if the
+        // trust store contained an empty-string key, this MUST fail closed
+        // (defense-in-depth against malformed-resource or attacker-supplied
+        // empty key_id matching an accidental dictionary entry).
+        var ruleset = BuildTestRuleset(keyId: "");
+        var bundle = BuildSignedBundle(ruleset, signing);
+
+        var result = verifier.Verify(bundle);
+
+        Assert.False(result.IsValid);
+        Assert.NotNull(result.FailureReason);
+        Assert.Contains("Unknown key_id", result.FailureReason);
+    }
+
+    [Fact]
+    public void Verify_with_whitespace_key_id_returns_failure()
+    {
+        var (verifier, signing) = BuildSingleKeyVerifier();
+        var ruleset = BuildTestRuleset(keyId: "   ");
+        var bundle = BuildSignedBundle(ruleset, signing);
+
+        var result = verifier.Verify(bundle);
+
+        Assert.False(result.IsValid);
+        Assert.NotNull(result.FailureReason);
+        Assert.Contains("Unknown key_id", result.FailureReason);
+    }
+
     [Fact]
     public void Verify_with_far_future_expiry_passes_expiry_check()
     {
