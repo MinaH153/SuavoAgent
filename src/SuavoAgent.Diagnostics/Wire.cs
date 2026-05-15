@@ -101,13 +101,13 @@ public static class Wire
 
             _journal = new LocalJournal(options.LocalJournalPath, options.LocalJournalTimeout);
             _budget = new EmitBudget(options.EmitBudgetPerSecond);
-            // SentrySink captures the INITIAL scrubber + fingerprinter.
-            // Subsequent SwapRuleset calls do NOT propagate to SentrySink;
-            // its scrub layer is defense-in-depth (Wire.DispatchNormal
-            // pre-scrubs the message before handing it off). The bounded
-            // inconsistency window (≤5min OTA poll) is documented; Comp 2.3
-            // will refactor SentrySink to read fresh from Wire.CurrentRuntime
-            // if operational data shows the gap matters.
+            // SentrySink receives the initial scrubber + fingerprinter as
+            // bootstrap fallbacks. On every BeforeSend / ApplyScope, it
+            // reads Wire.CurrentRuntime via CurrentScrubber() /
+            // CurrentFingerprinter() so SwapRuleset takes effect
+            // immediately on the NEXT outgoing event (Comp 2.3 RESOLVED).
+            // The bootstrap refs cover the test-direct-construction path
+            // and the impossible-in-prod nil-runtime case.
             _sentry = new SentrySink(options, initialRuntime.Scrubber, initialRuntime.Fingerprinter);
 
             AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandled;

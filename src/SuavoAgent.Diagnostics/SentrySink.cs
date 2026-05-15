@@ -16,8 +16,20 @@ namespace SuavoAgent.Diagnostics;
 /// <c>MaxQueueItems</c> + <c>ShutdownTimeout</c>/<c>FlushTimeout</c>.
 public sealed class SentrySink : IDisposable
 {
-    private readonly PhiScrubber _scrubber;
-    private readonly FingerprintComputer _fingerprinter;
+    // Bootstrap fallbacks used ONLY when Wire.CurrentRuntime is null
+    // (impossible after AttachUnhandledHooks completes successfully —
+    // Wire publishes the initial RulesetRuntime via Volatile.Write BEFORE
+    // constructing this sink, so production always sees the runtime).
+    // Test fixtures that instantiate SentrySink directly without going
+    // through Wire's init still rely on these.
+    //
+    // Per-call reads via CurrentScrubber()/CurrentFingerprinter() pick up
+    // the latest Wire.CurrentRuntime — Comp 2.3 RESOLVED. Before this
+    // refactor, SentrySink captured these refs at construction time and
+    // ignored every OTA swap, defeating the whole Comp 2 ruleset OTA
+    // pipeline once it goes live.
+    private readonly PhiScrubber _bootstrapScrubber;
+    private readonly FingerprintComputer _bootstrapFingerprinter;
     private readonly WireOptions _options;
     private readonly IDisposable? _sdkDisposable;
     private bool _initialized;
@@ -34,10 +46,29 @@ public sealed class SentrySink : IDisposable
     public SentrySink(WireOptions options, PhiScrubber scrubber, FingerprintComputer fingerprinter)
     {
         _options = options;
-        _scrubber = scrubber;
-        _fingerprinter = fingerprinter;
+        _bootstrapScrubber = scrubber;
+        _bootstrapFingerprinter = fingerprinter;
         _sdkDisposable = TryInit();
     }
+
+    /// <summary>
+    /// Read the active <see cref="PhiScrubber"/> from <see cref="Wire.CurrentRuntime"/>,
+    /// falling back to the bootstrap ref if Wire isn't initialised
+    /// (test contexts). One <see cref="Volatile.Read{T}(ref T)"/> is
+    /// performed inside <see cref="Wire.CurrentRuntime"/>; callers MUST
+    /// invoke this helper exactly once per signal to guarantee
+    /// snapshot coherence with the fingerprinter read.
+    /// </summary>
+    internal PhiScrubber CurrentScrubber()
+        => Wire.CurrentRuntime?.Scrubber ?? _bootstrapScrubber;
+
+    /// <summary>
+    /// Read the active <see cref="FingerprintComputer"/> from
+    /// <see cref="Wire.CurrentRuntime"/>, falling back to the bootstrap ref.
+    /// Same one-read-per-signal contract as <see cref="CurrentScrubber"/>.
+    /// </summary>
+    internal FingerprintComputer CurrentFingerprinter()
+        => Wire.CurrentRuntime?.Fingerprinter ?? _bootstrapFingerprinter;
 
     public bool IsInitialized => _initialized;
     public long BeforeSendFailedTotal => Interlocked.Read(ref _beforeSendFailedTotal);
@@ -135,10 +166,15 @@ public sealed class SentrySink : IDisposable
     {
         try
         {
+            // ONE read per signal — captures the active runtime's scrubber
+            // for the duration of this BeforeSend. A concurrent SwapRuleset
+            // only affects the NEXT event; this one stays coherent.
+            var scrubber = CurrentScrubber();
+
             // Scrub message + exception messages.
             if (!string.IsNullOrEmpty(evt.Message?.Message))
             {
-                evt.Message = new SentryMessage { Message = _scrubber.Sanitize(evt.Message.Message) };
+                evt.Message = new SentryMessage { Message = scrubber.Sanitize(evt.Message.Message) };
             }
             if (evt.SentryExceptions is { } exceptions)
             {
@@ -146,7 +182,7 @@ public sealed class SentrySink : IDisposable
                 {
                     if (!string.IsNullOrEmpty(ex.Value))
                     {
-                        ex.Value = _scrubber.Sanitize(ex.Value);
+                        ex.Value = scrubber.Sanitize(ex.Value);
                     }
                 }
             }
@@ -162,7 +198,7 @@ public sealed class SentrySink : IDisposable
             {
                 if (evt.Extra[key] is string s && !string.IsNullOrEmpty(s))
                 {
-                    evt.SetExtra(key, _scrubber.Sanitize(s));
+                    evt.SetExtra(key, scrubber.Sanitize(s));
                 }
             }
 
@@ -232,12 +268,21 @@ public sealed class SentrySink : IDisposable
         WireComponent component, string? stage,
         IReadOnlyDictionary<string, string>? extraTags)
     {
+        // Single read per signal — pairs with the corresponding CurrentScrubber()
+        // read in SafeBeforeSend (they execute in separate SDK callbacks
+        // so we accept the per-signal pair may straddle a swap; the
+        // operational consequence is one event tagged with the previous
+        // bug-class while scrubbed with the new ruleset, which is
+        // acceptable for an extremely rare race during rollout).
+        var fingerprinter = CurrentFingerprinter();
+
         scope.Fingerprint = new[] { fingerprint };
         scope.SetTag("component", component.ToString());
         scope.SetTag("fp_v1", fingerprint);
         scope.SetTag("git_sha", BuildContext.DefaultGitSha);
+        scope.SetTag("ruleset_version", fingerprinter.RulesetVersion);
         if (stage is not null) scope.SetTag("stage", stage);
-        var bugClass = _fingerprinter.CalibrationBugClass(fingerprint);
+        var bugClass = fingerprinter.CalibrationBugClass(fingerprint);
         if (bugClass is not null) scope.SetTag("bug-class", bugClass);
         if (extraTags is not null)
         {
