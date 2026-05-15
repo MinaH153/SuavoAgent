@@ -105,8 +105,16 @@ public static class NativeProcess
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
 
-            logger.LogInformation("Launched PID {Pid} in session {Session} via CreateProcessAsUser",
-                pi.dwProcessId, sessionId);
+            // Include the impersonation level in the success log so post-deploy
+            // forensics can confirm the fix actually took effect on this host.
+            // Bug 22 (2026-05-11) shipped here with SecurityIdentification (level 1)
+            // and that exact line went on shipping silently for weeks; the only
+            // observable was downstream Helper Win32(5) failures. Emitting the
+            // level inline removes that observation gap.
+            const SECURITY_IMPERSONATION_LEVEL launchedAt = SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation;
+            logger.LogInformation(
+                "Launched PID {Pid} in session {Session} via CreateProcessAsUser (impersonation_level={Level}/{LevelInt})",
+                pi.dwProcessId, sessionId, launchedAt, (int)launchedAt);
             return (int)pi.dwProcessId;
         }
         finally
