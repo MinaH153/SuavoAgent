@@ -220,7 +220,14 @@ try
         // ConfigSyncWorker runs the loop. Manual HttpClient instantiation
         // matches SuavoCloudClient's idiom — the codebase doesn't use
         // IHttpClientFactory so we don't pull in Microsoft.Extensions.Http.
-        var configHttp = new HttpClient
+        // PooledConnectionLifetime caps the DNS pin: the singleton HttpClient
+        // would otherwise hold the first-resolved IP for process lifetime and
+        // miss Vercel IP rotations until agent restart.
+        var configHandler = new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        };
+        var configHttp = new HttpClient(configHandler, disposeHandler: true)
         {
             BaseAddress = new Uri(agentOpts.CloudUrl),
             Timeout = TimeSpan.FromSeconds(10),
