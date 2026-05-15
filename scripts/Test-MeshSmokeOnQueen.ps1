@@ -56,6 +56,52 @@ function Add-Result {
     Write-Host ("  [{0,-5}] {1,-44} {2}" -f $Status, $Name, $Detail) -ForegroundColor $color
 }
 
+function Invoke-WithTimeout {
+    <#
+    .SYNOPSIS
+        Run an external command with a hard timeout. Returns @{TimedOut, ExitCode}.
+    .DESCRIPTION
+        Wraps Start-Process + WaitForExit(ms) so a hung build can't freeze the
+        smoke runner indefinitely (memory rule `feedback-agent-watchdog-stalls-2026-05-04`:
+        ≤30-min hard cap). On timeout, kills the process tree and merges captured
+        stderr into the stdout log so existing tail/grep logic remains untouched.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string[]]$ArgumentList,
+        [Parameter(Mandatory)][string]$LogPath,
+        [int]$TimeoutSeconds = 900,
+        [string]$WorkingDirectory
+    )
+    $errLog = "$LogPath.err"
+    $startArgs = @{
+        FilePath               = $FilePath
+        ArgumentList           = $ArgumentList
+        NoNewWindow            = $true
+        PassThru               = $true
+        RedirectStandardOutput = $LogPath
+        RedirectStandardError  = $errLog
+    }
+    if ($WorkingDirectory) { $startArgs.WorkingDirectory = $WorkingDirectory }
+    $proc = Start-Process @startArgs
+    $exited = $proc.WaitForExit($TimeoutSeconds * 1000)
+    if (-not $exited) {
+        try { $proc.Kill($true) } catch { }
+        if (Test-Path -LiteralPath $errLog) {
+            "`n--- STDERR (TIMEOUT-KILLED after ${TimeoutSeconds}s) ---" | Add-Content -LiteralPath $LogPath
+            Get-Content -LiteralPath $errLog | Add-Content -LiteralPath $LogPath
+        }
+        return [pscustomobject]@{ TimedOut = $true; ExitCode = -1 }
+    }
+    if (Test-Path -LiteralPath $errLog) {
+        $errContent = Get-Content -LiteralPath $errLog -Raw
+        if ($errContent) {
+            "`n--- STDERR ---`n$errContent" | Add-Content -LiteralPath $LogPath
+        }
+    }
+    return [pscustomobject]@{ TimedOut = $false; ExitCode = $proc.ExitCode }
+}
+
 function Test-Section { param([string]$Name) Write-Host "`n=== $Name ===" -ForegroundColor Cyan }
 
 # ── 1. Preflight ───────────────────────────────────────────────────────
@@ -103,10 +149,18 @@ $crashToolCsproj = Join-Path $script:RepoRoot 'tools\SuavoReportCrash\SuavoRepor
 $crashToolOut = Join-Path $env:TEMP "suavo-report-crash-smoke-$(Get-Random)"
 # Capture publish output so we can root-cause on failure (don't swallow with Out-Null)
 $publishLog = Join-Path $env:TEMP "suavo-report-crash-publish-$(Get-Random).log"
-& dotnet publish $crashToolCsproj -c Release -r win-x64 --self-contained -o $crashToolOut *>&1 | Tee-Object -FilePath $publishLog | Out-Null
-$publishExit = $LASTEXITCODE
+$publishRes = Invoke-WithTimeout `
+    -FilePath 'dotnet' `
+    -ArgumentList @('publish', $crashToolCsproj, '-c', 'Release', '-r', 'win-x64', '--self-contained', '-o', $crashToolOut) `
+    -LogPath $publishLog `
+    -TimeoutSeconds 900
+$publishExit = $publishRes.ExitCode
 $crashExe = Join-Path $crashToolOut 'suavo-report-crash.exe'
-if (-not (Test-Path -LiteralPath $crashExe)) {
+if ($publishRes.TimedOut) {
+    Add-Result 'crash-tool-built' 'FAIL' "AOT publish TIMEOUT (>15 min); see $publishLog"
+    Write-Host "  dotnet publish tail (last 20 lines, full log: $publishLog):" -ForegroundColor DarkGray
+    Write-Host ((Get-Content -LiteralPath $publishLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n") -ForegroundColor DarkGray
+} elseif (-not (Test-Path -LiteralPath $crashExe)) {
     $tail = (Get-Content -LiteralPath $publishLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
     Add-Result 'crash-tool-built' 'FAIL' "AOT publish failed (exit $publishExit); exe missing at $crashExe"
     Write-Host "  dotnet publish tail (last 20 lines, full log: $publishLog):" -ForegroundColor DarkGray
@@ -230,18 +284,27 @@ if ($SkipPublish) {
     $publishOutDir = Join-Path $env:TEMP "suavo-publish-smoke-$(Get-Random)"
     $publishLog = Join-Path $env:TEMP "publish-smoke-$(Get-Random).log"
 
-    Push-Location $script:RepoRoot
     try {
         $publishArgs = @('-OutputDir', $publishOutDir)
         if ($CertThumbprint) { $publishArgs += @('-CertThumbprint', $CertThumbprint) }
-        # Stream to file so we can grep for heartbeat ticks
-        & $publishPath @publishArgs *>&1 | Tee-Object -FilePath $publishLog | Out-Host
-        $publishExit = $LASTEXITCODE
-    } finally {
-        Pop-Location
+        # 30-min hard cap — publish.ps1 normally completes in 8-12 min; anything
+        # north of 30 is a hung MSBuild and we want a clean fail not an indefinite hang.
+        $pwshArgs = @('-NoProfile', '-File', $publishPath) + $publishArgs
+        $publishRes = Invoke-WithTimeout `
+            -FilePath 'pwsh.exe' `
+            -ArgumentList $pwshArgs `
+            -LogPath $publishLog `
+            -TimeoutSeconds 1800 `
+            -WorkingDirectory $script:RepoRoot
+        $publishExit = $publishRes.ExitCode
+    } catch {
+        $publishExit = -1
+        $publishRes = [pscustomobject]@{ TimedOut = $false; ExitCode = -1 }
     }
 
-    if ($publishExit -eq 0) {
+    if ($publishRes.TimedOut) {
+        Add-Result 'publish-completes' 'FAIL' "publish.ps1 TIMEOUT (>30 min); see $publishLog"
+    } elseif ($publishExit -eq 0) {
         Add-Result 'publish-completes' 'PASS' "exit 0; output at $publishOutDir"
     } else {
         Add-Result 'publish-completes' 'FAIL' "exit $publishExit"
