@@ -319,18 +319,24 @@ public sealed class BootstrapScriptTests
         Assert.Contains("Agent Merge Gate", ci);
         Assert.Contains("needs: [bootstrap-windows-smoke, build-and-test]", ci);
         Assert.Contains("Require agent checks before merge", ci);
-        Assert.Contains("Verify GitHub sees an online signing runner", release);
-        Assert.Contains("actions/runners", release);
-        Assert.Contains("self-hosted", release);
-        Assert.Contains("windows", release);
-        Assert.Contains("yubikey", release);
-        Assert.Contains("No online self-hosted Windows Yubikey signing runner is registered", release);
+        // Signing is gated by SIGNING_ENABLED + four eSigner cloud secrets;
+        // see docs/signing.md for the activation walkthrough.
+        Assert.Contains("Require eSigner cloud-signing configuration", release);
+        Assert.Contains("SIGNING_ENABLED must be set to true", release);
+        Assert.Contains("Missing eSigner cloud-signing secret(s)", release);
+        Assert.Contains("ES_USERNAME", release);
+        Assert.Contains("ES_PASSWORD", release);
+        Assert.Contains("ES_CREDENTIAL_ID", release);
+        Assert.Contains("ES_TOTP_SECRET", release);
+        Assert.Contains("sslcom/actions-codesigner@develop", release);
         Assert.DoesNotContain("sign_passthrough:", release);
         Assert.DoesNotContain("Upload as final (unsigned)", release);
         Assert.DoesNotContain("MODE=unsigned", release);
-        Assert.Contains("Signing runner", releaseGate);
-        Assert.Contains("self-hosted", releaseGate);
-        Assert.Contains("yubikey", releaseGate);
+        // Self-hosted Yubikey runner is no longer required; cloud HSM signing
+        // runs on ubuntu-latest. Guard against accidental regression.
+        Assert.DoesNotContain("[self-hosted, windows, yubikey]", release);
+        Assert.Contains("Cloud signing key", releaseGate);
+        Assert.Contains("sslcom/actions-codesigner", releaseGate);
         Assert.Contains("windows-release-smoke", release);
         Assert.Contains("Test-SuavoAgentReleaseProbe.ps1", release);
         Assert.Contains("-RequireAuthenticodeSignature", release);
@@ -352,12 +358,18 @@ public sealed class BootstrapScriptTests
         var hotfix = ReadRepoFile(".github/workflows/hotfix.yml");
 
         Assert.Contains("actions: read", hotfix);
-        Assert.Contains("Verify GitHub sees an online signing runner", hotfix);
-        Assert.Contains("actions/runners", hotfix);
-        Assert.Contains("No online self-hosted Windows Yubikey signing runner is registered", hotfix);
+        // Hotfixes use the same eSigner cloud signing gate as releases.
+        Assert.Contains("Require eSigner cloud-signing configuration", hotfix);
+        Assert.Contains("Missing eSigner cloud-signing secret(s)", hotfix);
+        Assert.Contains("ES_USERNAME", hotfix);
+        Assert.Contains("ES_PASSWORD", hotfix);
+        Assert.Contains("ES_CREDENTIAL_ID", hotfix);
+        Assert.Contains("ES_TOTP_SECRET", hotfix);
+        Assert.Contains("sslcom/actions-codesigner@develop", hotfix);
         Assert.DoesNotContain("sign_passthrough:", hotfix);
         Assert.DoesNotContain("Upload as final (unsigned)", hotfix);
         Assert.DoesNotContain("MODE=unsigned", hotfix);
+        Assert.DoesNotContain("[self-hosted, windows, yubikey]", hotfix);
         Assert.Contains("windows-release-smoke", hotfix);
         Assert.Contains("Test-SuavoAgentReleaseProbe.ps1", hotfix);
         Assert.Contains("-RequireAuthenticodeSignature", hotfix);
@@ -369,7 +381,7 @@ public sealed class BootstrapScriptTests
         Assert.Contains("SuavoSetup.exe suavoagent-${{ inputs.version }}-win-x64.zip field-release-receipt.json", hotfix);
         Assert.Contains("release/suavoagent-*-win-x64.zip", hotfix);
         Assert.Contains("release/field-release-receipt.json", hotfix);
-        Assert.Contains("**Authenticode:** Signed (Yubikey EV).", hotfix);
+        Assert.Contains("**Authenticode:** Signed (SSL.com eSigner Cloud EV).", hotfix);
         Assert.DoesNotContain("Unsigned (SmartScreen warning expected)", hotfix);
     }
 
