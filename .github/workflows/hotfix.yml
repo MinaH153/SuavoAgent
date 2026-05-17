@@ -136,7 +136,7 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoAgent.Core.exe
-          override: "true"
+          output_path: ${{ github.workspace }}/release
 
       - name: Sign SuavoAgent.Broker.exe
         uses: sslcom/actions-codesigner@develop
@@ -147,7 +147,7 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoAgent.Broker.exe
-          override: "true"
+          output_path: ${{ github.workspace }}/release
 
       - name: Sign SuavoAgent.Helper.exe
         uses: sslcom/actions-codesigner@develop
@@ -158,7 +158,7 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoAgent.Helper.exe
-          override: "true"
+          output_path: ${{ github.workspace }}/release
 
       - name: Sign SuavoAgent.Watchdog.exe
         uses: sslcom/actions-codesigner@develop
@@ -169,7 +169,7 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoAgent.Watchdog.exe
-          override: "true"
+          output_path: ${{ github.workspace }}/release
 
       - name: Sign SuavoSetup.exe
         uses: sslcom/actions-codesigner@develop
@@ -180,7 +180,7 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoSetup.exe
-          override: "true"
+          output_path: ${{ github.workspace }}/release
 
       - name: Upload signed binaries
         uses: actions/upload-artifact@v4
