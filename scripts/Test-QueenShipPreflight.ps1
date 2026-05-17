@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Queen ship-preflight: 9 environment checks that must pass before publish.ps1
+    Queen ship-preflight: 7 environment checks that must pass before publish.ps1
     will produce a release-ready SuavoAgent build.
 
 .DESCRIPTION
@@ -15,9 +15,16 @@
     Each check fails fast with a single-line actionable error. Output is a
     green/red ASCII summary card by default, or structured JSON with -Json.
 
+    Yubikey + SmartCard service checks were removed when the project switched
+    from on-device Yubikey signing to SSL.com eSigner cloud HSM signing
+    (2026-05-16). The EV cert thumbprint check remains for Windows dev boxes
+    that have eSigner CKA (Cloud Key Adapter) installed and want to sign
+    locally via signtool; on Mac and CKA-less boxes it SKIPs.
+
 .PARAMETER SkipSigning
-    Skip Yubikey / EV cert / SmartCard service checks. Used when running
-    publish.ps1 without -CertThumbprint (unsigned dev builds).
+    Skip the EV cert thumbprint check. Used when running publish.ps1 without
+    -CertThumbprint (unsigned dev builds, or builds intended to be signed
+    later in CI via eSigner CloudSign).
 
 .PARAMETER CertThumbprint
     EV code-signing certificate thumbprint (SHA1). Falls back to
@@ -128,34 +135,6 @@ function Test-DotnetSdk {
         -Fix "Install: winget install Microsoft.DotNet.SDK.8"
 }
 
-function Test-YubikeyPresent {
-    param(
-        [bool]$Skip = $false,
-        [scriptblock]$Resolver = {
-            if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
-                Get-PnpDevice -ErrorAction SilentlyContinue |
-                    Where-Object { $_.FriendlyName -match 'Yubikey|YubiKey' -and $_.Status -eq 'OK' }
-            }
-        }
-    )
-    if ($Skip) {
-        return New-PreflightResult -Name "yubikey" -Status SKIP `
-            -Detail "skipped (-SkipSigning)"
-    }
-    if (-not (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue)) {
-        return New-PreflightResult -Name "yubikey" -Status SKIP `
-            -Detail "Get-PnpDevice unavailable (non-Windows)"
-    }
-    $device = & $Resolver | Select-Object -First 1
-    if ($device) {
-        return New-PreflightResult -Name "yubikey" -Status PASS `
-            -Detail ("present ({0})" -f $device.FriendlyName)
-    }
-    return New-PreflightResult -Name "yubikey" -Status FAIL `
-        -Detail "Yubikey reader not detected" `
-        -Fix "Insert Yubikey, or run with -SkipSigning to publish unsigned."
-}
-
 function Test-EvCertThumbprint {
     param(
         [bool]$Skip = $false,
@@ -190,34 +169,6 @@ function Test-EvCertThumbprint {
     return New-PreflightResult -Name "ev-cert" -Status FAIL `
         -Detail "thumbprint not found in CurrentUser\My store" `
         -Fix 'Verify $env:SUAVO_CERT_THUMBPRINT matches an installed cert, or run with -SkipSigning.'
-}
-
-function Test-SmartCardService {
-    param(
-        [bool]$Skip = $false,
-        [scriptblock]$Resolver = { Get-Service -Name SCardSvr -ErrorAction SilentlyContinue }
-    )
-    if ($Skip) {
-        return New-PreflightResult -Name "smartcard-svc" -Status SKIP `
-            -Detail "skipped (-SkipSigning)"
-    }
-    if (-not (Get-Command Get-Service -ErrorAction SilentlyContinue)) {
-        return New-PreflightResult -Name "smartcard-svc" -Status SKIP `
-            -Detail "Get-Service unavailable (non-Windows)"
-    }
-    $svc = & $Resolver
-    if (-not $svc) {
-        return New-PreflightResult -Name "smartcard-svc" -Status FAIL `
-            -Detail "SCardSvr service not installed" `
-            -Fix "Reinstall Windows Smart Card components, or run with -SkipSigning."
-    }
-    if ($svc.Status -eq 'Running') {
-        return New-PreflightResult -Name "smartcard-svc" -Status PASS `
-            -Detail "running"
-    }
-    return New-PreflightResult -Name "smartcard-svc" -Status FAIL `
-        -Detail ("status={0}" -f $svc.Status) `
-        -Fix "Start-Service SCardSvr; or run with -SkipSigning."
 }
 
 function Test-SentryDsn {
@@ -343,9 +294,7 @@ function Invoke-QueenShipPreflight {
     Add-PreflightResult (Test-PowerShell7Version)
     Add-PreflightResult (Test-PwshOnPath)
     Add-PreflightResult (Test-DotnetSdk)
-    Add-PreflightResult (Test-YubikeyPresent -Skip:$SkipSigning)
     Add-PreflightResult (Test-EvCertThumbprint -Skip:$SkipSigning -Thumbprint $CertThumbprint)
-    Add-PreflightResult (Test-SmartCardService -Skip:$SkipSigning)
     Add-PreflightResult (Test-SentryDsn)
     Add-PreflightResult (Test-GitTreeClean -Allow:$AllowDirtyTree)
     Add-PreflightResult (Test-BuildCacheFresh -MaxAgeDays $CleanCacheMaxAgeDays)

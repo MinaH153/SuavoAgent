@@ -20,32 +20,27 @@ jobs:
   release-signing-preflight:
     runs-on: ubuntu-latest
     steps:
-      - name: Require signed hotfix configuration
+      - name: Require eSigner cloud-signing configuration
         env:
           SIGNING_ENABLED: ${{ vars.SIGNING_ENABLED }}
-          CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
         run: |
           set -euo pipefail
           if [[ "$SIGNING_ENABLED" != "true" ]]; then
             echo "::error::SIGNING_ENABLED must be set to true before cutting a Queen/field hotfix."
             exit 1
           fi
-          if [[ -z "$CERT_THUMBPRINT" ]]; then
-            echo "::error::SIGNING_CERT_THUMBPRINT must be configured before cutting a Queen/field hotfix."
-            exit 1
-          fi
-
-      - name: Verify GitHub sees an online signing runner
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          RUNNER_COUNT="$(
-            gh api "repos/${GITHUB_REPOSITORY}/actions/runners?per_page=100" \
-              --jq '[.runners[] | select(.status == "online" and (([.labels[].name | ascii_downcase] | index("self-hosted")) != null) and (([.labels[].name | ascii_downcase] | index("windows")) != null) and (([.labels[].name | ascii_downcase] | index("yubikey")) != null))] | length'
-          )"
-          if [[ "${RUNNER_COUNT:-0}" -lt 1 ]]; then
-            echo "::error::No online self-hosted Windows Yubikey signing runner is registered. Register the signing PC runner and rerun before cutting a Queen/field hotfix."
+          missing=()
+          for var in ES_USERNAME ES_PASSWORD ES_CREDENTIAL_ID ES_TOTP_SECRET; do
+            if [[ -z "${!var}" ]]; then
+              missing+=("$var")
+            fi
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Missing eSigner cloud-signing secret(s): ${missing[*]}. See docs/signing.md."
             exit 1
           fi
 
@@ -118,11 +113,11 @@ jobs:
           path: release/
           retention-days: 7
 
-  # --- Authenticode sign (gated by SIGNING_ENABLED) -----------------------
+  # --- Authenticode sign via SSL.com eSigner cloud HSM --------------------
   sign_windows:
     if: ${{ vars.SIGNING_ENABLED == 'true' }}
     needs: build
-    runs-on: [self-hosted, windows, yubikey]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -132,51 +127,60 @@ jobs:
           name: suavoagent-hotfix-unsigned-${{ inputs.version }}
           path: release
 
-      - name: Verify signing runner readiness
-        shell: pwsh
-        env:
-          CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
-        run: .\scripts\Test-SigningRunnerReadiness.ps1 -ExpectedThumbprint $env:CERT_THUMBPRINT -Json
+      - name: Sign SuavoAgent.Core.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoAgent.Core.exe
+          override: "true"
 
-      - name: Sign binaries with signtool
-        shell: pwsh
-        env:
-          CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
-          TIMESTAMP_URL: ${{ vars.SIGNING_TIMESTAMP_URL }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (-not $env:CERT_THUMBPRINT) {
-            throw "Secret SIGNING_CERT_THUMBPRINT is not set. See docs/signing.md."
-          }
-          $ts = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { 'http://ts.ssl.com' }
+      - name: Sign SuavoAgent.Broker.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoAgent.Broker.exe
+          override: "true"
 
-          $candidates = @(
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
-            "${env:ProgramFiles}\Windows Kits\10\bin"
-          ) | Where-Object { Test-Path $_ } | ForEach-Object { Get-ChildItem $_ -Directory } | Sort-Object Name -Descending
-          $signtool = $null
-          foreach ($dir in $candidates) {
-            $path = Join-Path $dir 'x64\signtool.exe'
-            if (Test-Path $path) { $signtool = $path; break }
-          }
-          if (-not $signtool) { throw 'signtool.exe not found. Install Windows 10 SDK.' }
-          Write-Host "Using signtool: $signtool"
+      - name: Sign SuavoAgent.Helper.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoAgent.Helper.exe
+          override: "true"
 
-          $targets = @(
-            'release/SuavoAgent.Core.exe',
-            'release/SuavoAgent.Broker.exe',
-            'release/SuavoAgent.Helper.exe',
-            'release/SuavoAgent.Watchdog.exe',
-            'release/SuavoSetup.exe'
-          )
-          foreach ($t in $targets) {
-            if (-not (Test-Path $t)) { throw "Missing binary: $t" }
-            Write-Host "Signing $t"
-            & $signtool sign /fd SHA256 /tr $ts /td SHA256 /sha1 $env:CERT_THUMBPRINT $t
-            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $t (exit $LASTEXITCODE)" }
-            & $signtool verify /pa /v $t
-            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed on $t (exit $LASTEXITCODE)" }
-          }
+      - name: Sign SuavoAgent.Watchdog.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoAgent.Watchdog.exe
+          override: "true"
+
+      - name: Sign SuavoSetup.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoSetup.exe
+          override: "true"
 
       - name: Upload signed binaries
         uses: actions/upload-artifact@v4
@@ -359,7 +363,7 @@ jobs:
             **Windows smoke:** Release zip expanded and passed no-PHI binary/bootstrap probe on windows-latest.
             **Source commit:** ${{ github.sha }}
             **Checksums:** ECDSA P-256 signed.
-            **Authenticode:** Signed (Yubikey EV).
+            **Authenticode:** Signed (SSL.com eSigner Cloud EV).
           files: |
             release/SuavoAgent.Core.exe
             release/SuavoAgent.Broker.exe
