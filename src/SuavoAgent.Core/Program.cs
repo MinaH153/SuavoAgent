@@ -424,7 +424,26 @@ try
     builder.Services.AddSingleton<ExcelPricingReader>();
     builder.Services.AddSingleton<ExcelPricingWriter>();
     builder.Services.AddSingleton<IPricingLookupFactory, PioneerRxSqlPricingLookupFactory>();
-    builder.Services.AddSingleton<IPricingJobExecutor, SqlFirstPricingJobExecutor>();
+
+    // Register both pricing executors as concrete singletons so either can be selected at
+    // resolve time. The IPricingJobExecutor interface is bound below based on
+    // AgentOptions.PricingExecutor — SqlFirst (default) or UiaFirst (Nadim-style UIA-only
+    // pharmacies). Both implementations are fail-closed by design.
+    builder.Services.AddSingleton<SqlFirstPricingJobExecutor>();
+    builder.Services.AddSingleton<UiaFirstPricingJobExecutor>();
+    builder.Services.AddSingleton<IPricingJobExecutor>(sp =>
+    {
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        IPricingJobExecutor executor = opts.PricingExecutor switch
+        {
+            PricingExecutorMode.UiaFirst => sp.GetRequiredService<UiaFirstPricingJobExecutor>(),
+            _ => sp.GetRequiredService<SqlFirstPricingJobExecutor>(),
+        };
+        Log.Information(
+            "Pricing executor selected: {Mode} ({Type}); throttle={ThrottleMs}ms",
+            opts.PricingExecutor, executor.GetType().Name, opts.PricingThrottleMs);
+        return executor;
+    });
 
     // File discovery — Core side. Helper runs the actual locator; this client
     // wraps the find_file IPC call so HeartbeatWorker can dispatch
@@ -470,7 +489,8 @@ try
     // on streak failures (Tier-1 rules) or ambiguous states (Tier-2/3).
     builder.Services.AddSingleton<PricingJobRunner>(sp =>
     {
-        var reasoning = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        var reasoning = opts.Reasoning;
         PricingBrainEvaluator? evaluator = null;
         if (reasoning.PricingBrainEnabled)
         {
@@ -491,7 +511,8 @@ try
             sp.GetRequiredService<ExcelPricingWriter>(),
             sp.GetRequiredService<AgentStateDb>(),
             sp.GetRequiredService<ILogger<PricingJobRunner>>(),
-            evaluator);
+            evaluator,
+            interLookupDelay: TimeSpan.FromMilliseconds(opts.PricingThrottleMs));
     });
 
     // Tier-1 Reasoning — rule engine. The bundled catalog is embedded in this

@@ -20,24 +20,35 @@ public sealed class PricingJobRunner
     private readonly AgentStateDb _db;
     private readonly ILogger<PricingJobRunner> _logger;
     private readonly PricingBrainEvaluator? _brainEvaluator;
+    private readonly TimeSpan _interLookupDelay;
 
     // Timeout per NDC lookup — UIA navigation can be slow
     private static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(30);
-    // Delay between lookups to avoid overwhelming PioneerRx UI
-    private static readonly TimeSpan InterLookupDelay = TimeSpan.FromMilliseconds(500);
+    // Back-compat default if the caller doesn't specify a throttle (UIA wiring picks a slower value).
+    private static readonly TimeSpan DefaultInterLookupDelay = TimeSpan.FromMilliseconds(500);
+    // Hard upper bound — anything above this is almost certainly a misconfiguration that would stall jobs.
+    private static readonly TimeSpan MaxInterLookupDelay = TimeSpan.FromMilliseconds(30000);
 
     public PricingJobRunner(
         ExcelPricingReader reader,
         ExcelPricingWriter writer,
         AgentStateDb db,
         ILogger<PricingJobRunner> logger,
-        PricingBrainEvaluator? brainEvaluator = null)
+        PricingBrainEvaluator? brainEvaluator = null,
+        TimeSpan? interLookupDelay = null)
     {
         _reader = reader;
         _writer = writer;
         _db = db;
         _logger = logger;
         _brainEvaluator = brainEvaluator;
+
+        // Clamp the throttle. Negative inputs collapse to zero; absurd values are capped so a typo
+        // in appsettings can't silently turn a 12-minute job into a multi-hour stall.
+        var requested = interLookupDelay ?? DefaultInterLookupDelay;
+        if (requested < TimeSpan.Zero) requested = TimeSpan.Zero;
+        if (requested > MaxInterLookupDelay) requested = MaxInterLookupDelay;
+        _interLookupDelay = requested;
     }
 
     /// <summary>
@@ -128,7 +139,7 @@ public sealed class PricingJobRunner
                 }
             }
 
-            await Task.Delay(InterLookupDelay, ct);
+            await Task.Delay(_interLookupDelay, ct);
         }
 
         if (haltedByBrain)
