@@ -82,10 +82,10 @@ public sealed class PricingWorkflow
                     return Fail(request, "Could not click Pricing tab");
 
                 // Step 5: Read the supplier grid — find cheapest (lowest cost per unit)
-                var cheapest = ReadCheapestSupplier(editWindow, cf);
+                var cheapest = ReadCheapestSupplier(editWindow, cf, out var gridFailure);
                 if (cheapest == null)
                     return new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
-                        false, null, null, "No supplier rows found in Pricing tab");
+                        false, null, null, gridFailure ?? "No supplier rows found in Pricing tab");
 
                 _logger.Debug("PricingWorkflow: NDC {Ndc} → {Supplier} @ {Cost}/unit",
                     request.Ndc, cheapest.Value.supplier, cheapest.Value.cost);
@@ -153,6 +153,20 @@ public sealed class PricingWorkflow
         return null;
     }
 
+    // SearchByNdc was Codex-flagged as brittle for 500-row batches:
+    // the original sequence was Focus -> Sleep(100) -> Ctrl+A -> Sleep(50) ->
+    // Type(ndc) -> Sleep(100) -> Enter -> Sleep(800) with no verification.
+    // Window focus changes mid-row (toast popups, antivirus dialogs, or just
+    // OS desktop redraws) would silently drop keystrokes or fire Enter against
+    // the wrong control. Now we:
+    //   (1) find the search box,
+    //   (2) attempt the type-and-press sequence up to MaxTypeAttempts times,
+    //       verifying after each that the box actually contains the NDC we
+    //       intended to send before pressing Enter,
+    //   (3) bail with false (caller writes a failure result for the row) if
+    //       all attempts fail rather than firing Enter against an unknown state.
+    private const int MaxTypeAttempts = 2;
+
     private bool SearchByNdc(Window editWindow, ConditionFactory cf, string ndc)
     {
         try
@@ -181,24 +195,64 @@ public sealed class PricingWorkflow
 
             if (searchBox == null) return false;
 
-            searchBox.Focus();
-            Thread.Sleep(100);
+            for (int attempt = 1; attempt <= MaxTypeAttempts; attempt++)
+            {
+                searchBox.Focus();
+                Thread.Sleep(100);
 
-            // Clear existing text then type NDC
-            Keyboard.TypeSimultaneously(FlaUI.Core.WindowsAPI.VirtualKeyShort.CONTROL,
-                FlaUI.Core.WindowsAPI.VirtualKeyShort.KEY_A);
-            Thread.Sleep(50);
-            Keyboard.Type(ndc);
-            Thread.Sleep(100);
-            Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.RETURN);
+                // Clear existing text then type NDC
+                Keyboard.TypeSimultaneously(FlaUI.Core.WindowsAPI.VirtualKeyShort.CONTROL,
+                    FlaUI.Core.WindowsAPI.VirtualKeyShort.KEY_A);
+                Thread.Sleep(50);
+                Keyboard.Type(ndc);
+                Thread.Sleep(150);
 
-            // Wait for item to load
-            Thread.Sleep(800);
-            return true;
+                // Before firing Enter, confirm the search box actually contains
+                // the NDC we just typed. A common failure mode is that the OS
+                // shifted focus between Focus() and Type() — Ctrl+A was a no-op
+                // and Type() landed in some other window. Polling the textbox
+                // value here catches that without nuking the user's foreground.
+                if (SearchBoxContainsNdc(searchBox, ndc))
+                {
+                    Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.RETURN);
+                    Thread.Sleep(800);
+                    return true;
+                }
+
+                _logger.Warning(
+                    "PricingWorkflow: SearchByNdc attempt {Attempt}/{Max} — search box does not contain {Ndc} after type; retrying",
+                    attempt, MaxTypeAttempts, ndc);
+                // Brief backoff before next attempt — gives a transient focus
+                // thief (notification, modal) time to clear.
+                Thread.Sleep(300);
+            }
+
+            _logger.Warning(
+                "PricingWorkflow: SearchByNdc giving up on {Ndc} after {Max} attempts — never confirmed text landed in Quick Search",
+                ndc, MaxTypeAttempts);
+            return false;
         }
         catch (Exception ex)
         {
             _logger.Debug(ex, "PricingWorkflow: SearchByNdc failed for {Ndc}", ndc);
+            return false;
+        }
+    }
+
+    private static bool SearchBoxContainsNdc(AutomationElement searchBox, string ndc)
+    {
+        try
+        {
+            var text = searchBox.AsTextBox()?.Text ?? searchBox.Name ?? "";
+            if (string.IsNullOrEmpty(text)) return false;
+            // Match permissively — PioneerRx may apply input masks (5-4-2) or
+            // strip non-digits. Compare digit-only forms.
+            var typedDigits = new string(ndc.Where(char.IsDigit).ToArray());
+            var observedDigits = new string(text.Where(char.IsDigit).ToArray());
+            return observedDigits.Contains(typedDigits, StringComparison.Ordinal);
+        }
+        catch
+        {
             return false;
         }
     }
@@ -286,11 +340,14 @@ public sealed class PricingWorkflow
     ///
     /// Columns are resolved by header NAME, not ordinal (Codex M-4). If PioneerRx
     /// reorders, hides, or adds columns, the lookup still finds the right fields.
-    /// Falls back to documented ordinals (5=Supplier, 10=Cost Per Unit) only if
-    /// header row is not discoverable — and emits a warning when that happens.
+    /// On schema miss, fails closed with a distinct failure reason — the prior
+    /// fallback-to-hardcoded-ordinals path was Codex-flagged as risking wrong
+    /// supplier/cost data on a UI revision (data integrity is precedence 1).
     /// </summary>
-    private (string supplier, decimal cost)? ReadCheapestSupplier(Window editWindow, ConditionFactory cf)
+    private (string supplier, decimal cost)? ReadCheapestSupplier(
+        Window editWindow, ConditionFactory cf, out string? failureReason)
     {
+        failureReason = null;
         try
         {
             var deadline = DateTime.UtcNow + GridLoadTimeout;
@@ -306,6 +363,7 @@ public sealed class PricingWorkflow
             if (grid == null)
             {
                 _logger.Debug("PricingWorkflow: no DataGrid found on Pricing tab");
+                failureReason = "Pricing tab DataGrid not found";
                 return null;
             }
 
@@ -313,10 +371,21 @@ public sealed class PricingWorkflow
             if (rows.Length == 0)
             {
                 _logger.Debug("PricingWorkflow: Pricing grid has no rows");
+                failureReason = "Pricing grid has no rows";
                 return null;
             }
 
-            var (supplierIdx, costIdx) = ResolvePricingColumns(grid, cf);
+            var cols = ResolvePricingColumns(grid, cf);
+            if (cols is null)
+            {
+                // Fail-fast (Codex review): the schema didn't resolve, so we
+                // cannot safely read cells by ordinal without risking a wrong-
+                // column write back to the operator's Excel. Surface a clear
+                // failure reason so the row's Status cell explains the miss.
+                failureReason = "Pricing grid schema not recognized — Supplier/Cost columns missing or renamed";
+                return null;
+            }
+            var (supplierIdx, costIdx) = cols.Value;
 
             string? bestSupplier = null;
             decimal bestCost = decimal.MaxValue;
@@ -345,40 +414,52 @@ public sealed class PricingWorkflow
                 }
             }
 
-            return bestSupplier != null ? (bestSupplier, bestCost) : null;
+            if (bestSupplier == null)
+            {
+                failureReason = "No supplier rows found in Pricing tab";
+                return null;
+            }
+            return (bestSupplier, bestCost);
         }
         catch (Exception ex)
         {
             _logger.Debug(ex, "PricingWorkflow: ReadCheapestSupplier error");
+            failureReason = "Pricing grid read error";
             return null;
         }
     }
 
     /// <summary>
     /// Resolves the Supplier and Cost Per Unit column indices by header name.
-    /// WPF DataGrid exposes headers as Header/HeaderItem control types. Falls back
-    /// to documented ordinals if no header row is found, with a warning logged.
+    /// WPF DataGrid exposes headers as Header/HeaderItem control types.
+    ///
+    /// Codex review (2026-05-18) flagged the prior fallback-to-hardcoded-ordinals
+    /// behavior: if PioneerRx ships a UI revision that reorders or renames the
+    /// pricing grid columns, hardcoded ordinals (5, 10) would silently write
+    /// the wrong cell values back to the operator's Excel sheet — a correctness
+    /// bug masquerading as success. Pricing data integrity is precedence 1 here.
+    ///
+    /// Now: header miss returns null. Caller treats null as a typed failure
+    /// ("Pricing grid schema not recognized") so the row gets a clear error in
+    /// the Excel output instead of plausible-looking wrong data.
     /// </summary>
-    private (int supplierIdx, int costIdx) ResolvePricingColumns(AutomationElement grid, ConditionFactory cf)
+    private (int supplierIdx, int costIdx)? ResolvePricingColumns(AutomationElement grid, ConditionFactory cf)
     {
-        const int DefaultSupplierIdx = 5;
-        const int DefaultCostIdx = 10;
-
         try
         {
             // Look for a Header descendant (WPF DataGrid exposes column headers as Header control)
             var header = grid.FindFirstDescendant(cf.ByControlType(ControlType.Header));
             if (header == null)
             {
-                _logger.Warning("PricingWorkflow: no Header found in grid — falling back to hardcoded column ordinals");
-                return (DefaultSupplierIdx, DefaultCostIdx);
+                _logger.Warning("PricingWorkflow: no Header found in grid — failing closed (no ordinal fallback)");
+                return null;
             }
 
             var headerCells = header.FindAllDescendants(cf.ByControlType(ControlType.HeaderItem));
             if (headerCells.Length == 0)
             {
-                _logger.Warning("PricingWorkflow: Header has no HeaderItems — falling back to hardcoded column ordinals");
-                return (DefaultSupplierIdx, DefaultCostIdx);
+                _logger.Warning("PricingWorkflow: Header has no HeaderItems — failing closed (no ordinal fallback)");
+                return null;
             }
 
             int supplierIdx = -1, costIdx = -1;
@@ -395,10 +476,11 @@ public sealed class PricingWorkflow
 
             if (supplierIdx == -1 || costIdx == -1)
             {
-                _logger.Warning("PricingWorkflow: could not resolve Supplier/Cost columns by header name " +
-                    "(Supplier={Sup}, Cost={Cost}) — falling back to hardcoded ordinals",
+                _logger.Warning(
+                    "PricingWorkflow: could not resolve Supplier/Cost columns by header name " +
+                    "(Supplier={Sup}, Cost={Cost}) — failing closed (no ordinal fallback)",
                     supplierIdx, costIdx);
-                return (DefaultSupplierIdx, DefaultCostIdx);
+                return null;
             }
 
             _logger.Debug("PricingWorkflow: resolved columns — Supplier=col {Sup}, Cost Per Unit=col {Cost}",
@@ -407,8 +489,8 @@ public sealed class PricingWorkflow
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "PricingWorkflow: column resolution error — falling back to hardcoded ordinals");
-            return (DefaultSupplierIdx, DefaultCostIdx);
+            _logger.Warning(ex, "PricingWorkflow: column resolution error — failing closed (no ordinal fallback)");
+            return null;
         }
     }
 

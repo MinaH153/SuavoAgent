@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using SuavoAgent.Adapters.PioneerRx.Pricing;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Pricing;
@@ -244,5 +245,77 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
         }
 
         public ValueTask DisposeAsync() => _connection.DisposeAsync();
+    }
+}
+
+/// <summary>
+/// UIA-first pricing executor for pharmacies that have not authorized direct SQL access
+/// against the PioneerRx backend (default pilot posture; Nadim's Better Life Pharmacy is
+/// tenant zero). Drives PioneerRx exclusively through the documented operator workflow:
+/// Item -&gt; Rx Item -&gt; Quick Search -&gt; Pricing tab -&gt; read supplier grid.
+///
+/// Like <see cref="SqlFirstPricingJobExecutor"/> this is fail-closed: the executor does not
+/// silently fall back to SQL if the Helper IPC channel is unreachable. The runner's per-NDC
+/// failure handling (no response from Helper -&gt; SupplierPriceResult.Found=false with an
+/// explicit error) plus the brain evaluator's streak-halt rules surface a dead Helper as a
+/// halted job, not a partial success.
+///
+/// Throttle is set at <see cref="PricingJobRunner"/> construction from
+/// <see cref="AgentOptions.PricingThrottleMs"/>; recommended 1500 ms for UIA to stay below
+/// any anti-automation heuristic the vendor may apply.
+/// </summary>
+public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor
+{
+    private readonly PricingJobRunner _runner;
+    private readonly IpcCommandClient _commandClient;
+    private readonly AgentStateDb _db;
+    private readonly ILogger<UiaFirstPricingJobExecutor> _logger;
+
+    public UiaFirstPricingJobExecutor(
+        PricingJobRunner runner,
+        IpcCommandClient commandClient,
+        AgentStateDb db,
+        ILogger<UiaFirstPricingJobExecutor> logger)
+    {
+        _runner = runner;
+        _commandClient = commandClient;
+        _db = db;
+        _logger = logger;
+    }
+
+    public async Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
+    {
+        _logger.LogInformation(
+            "UiaFirstPricingJobExecutor: starting job {JobId} (UIA-via-IPC path; Excel={Path})",
+            spec.JobId, spec.ExcelPath);
+
+        try
+        {
+            var progress = await _runner.RunAsync(spec, _commandClient, ct);
+            var ok = progress.Status == PricingJobStatus.Completed;
+            return new PricingJobExecutionResult(
+                progress,
+                Mode: "uia",
+                Ok: ok,
+                Error: ok ? null : $"pricing job ended with status {progress.Status} - see agent logs");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Catch-all so a malformed Excel or transient IPC error surfaces as a clean
+            // failure result, mirroring SqlFirstPricingJobExecutor's behavior. The runner
+            // itself already swallows per-row exceptions; this catches only the orchestration
+            // boundary (Excel read, DB write).
+            _logger.LogError(ex, "UiaFirstPricingJobExecutor: job {JobId} threw at orchestration boundary", spec.JobId);
+            _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+            return new PricingJobExecutionResult(
+                new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed),
+                Mode: "uia",
+                Ok: false,
+                Error: "pricing job failed - see agent logs");
+        }
     }
 }

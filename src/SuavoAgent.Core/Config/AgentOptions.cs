@@ -110,6 +110,29 @@ public sealed class AgentOptions
     public List<PharmacyConfig> Pharmacies { get; set; } = new();
 
     /// <summary>
+    /// Which IPricingJobExecutor implementation runs <c>run_pricing_job</c> / <c>find_and_run_pricing_job</c>.
+    ///
+    /// <c>SqlFirst</c> (default): SqlFirstPricingJobExecutor reads pricing from the PioneerRx SQL backend
+    /// directly. Fast (~30s for 500 NDCs) and fail-closed — no UIA fallback if SQL is unavailable.
+    ///
+    /// <c>UiaFirst</c>: UiaFirstPricingJobExecutor drives PioneerRx through its UI (Item → Rx Item →
+    /// Quick Search → Pricing tab) for every NDC. Slower (minutes to ~half hour for 500 NDCs depending
+    /// on throttle) but stays inside the documented operator workflow — no direct DB connection,
+    /// no vendor-EULA tamper question. Use for pharmacies that have not (yet) authorized SQL access.
+    /// </summary>
+    public PricingExecutorMode PricingExecutor { get; set; } = PricingExecutorMode.SqlFirst;
+
+    /// <summary>
+    /// Delay between successive NDC lookups within a single pricing job, in milliseconds.
+    /// Throttle exists to (a) avoid hammering PioneerRx during a 500-row batch and (b) stay below
+    /// any anti-automation heuristic the vendor may apply. Default <c>1500</c> ms keeps a 500-NDC
+    /// run at ~12.5 min — comfortably human-paced under UIA mode. SQL-first mode can safely lower
+    /// this since DB lookups don't drive the operator's keyboard.
+    /// Range: clamped to [0, 30000] ms at runner construction.
+    /// </summary>
+    public int PricingThrottleMs { get; set; } = 1500;
+
+    /// <summary>
     /// Returns the effective pharmacy list — either the explicit Pharmacies array
     /// or a single entry synthesized from top-level fields.
     /// </summary>
@@ -129,6 +152,14 @@ public sealed class AgentOptions
             }
         };
     }
+}
+
+public enum PricingExecutorMode
+{
+    /// <summary>SQL-first, fail-closed (default). See <c>AgentOptions.PricingExecutor</c>.</summary>
+    SqlFirst,
+    /// <summary>UIA-first via Helper. No SQL fallback. See <c>AgentOptions.PricingExecutor</c>.</summary>
+    UiaFirst,
 }
 
 public sealed class PharmacyConfig
