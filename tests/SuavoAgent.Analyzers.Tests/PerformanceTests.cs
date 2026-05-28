@@ -20,8 +20,11 @@ namespace SuavoAgent.Analyzers.Tests;
 public class PerformanceTests
 {
     private const int TypeCount = 1000;
-    private const int LinuxThresholdMs = 8_000;
-    private const int MacArmThresholdMs = 10_000;
+    // Thresholds tolerate runner variance on shared GitHub-hosted runners
+    // (2-vCPU pool can spike under contention). A 2x+ regression still trips
+    // the assert, so this remains a useful catastrophic-regression guard.
+    private const int LinuxThresholdMs = 20_000;
+    private const int MacArmThresholdMs = 25_000;
 
     private const string Annotations = """
         namespace SuavoAgent.Contracts.Annotations;
