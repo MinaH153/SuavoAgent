@@ -237,7 +237,6 @@ jobs:
             -ext WixToolset.Util.wixext `
             -out $msiOut `
             installer\windows\SuavoAgent.wxs `
-            installer\windows\Services.wxs `
             installer\windows\DataDirectories.wxs `
             installer\windows\ManagedSettings.wxs `
             installer\windows\UI.wxs

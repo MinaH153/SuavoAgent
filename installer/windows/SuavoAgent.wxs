@@ -102,22 +102,96 @@
       Component groups reference the binaries copied by the build into
       $(var.SOURCE_DIR). The publishing step (dotnet publish) populates that
       directory with the OS-specific binaries.
+
+      Service registration is inlined per-binary using the canonical WiX 4
+      pattern: one Component contains the binary File (as KeyPath) AND its
+      ServiceInstall + ServiceControl elements. Helper is NOT a service
+      (per-user-session Scheduled Task is a v5+ workstream).
     -->
     <ComponentGroup Id="CoreComponents" Directory="INSTALLDIR">
       <Component Id="SuavoAgent.Core.exe" Guid="*">
         <File Source="$(var.SOURCE_DIR)\SuavoAgent.Core.exe" KeyPath="yes" />
+        <ServiceInstall Id="SuavoAgent_Core_Install"
+                        Name="SuavoAgent.Core"
+                        DisplayName="Suavo Agent Core"
+                        Description="HIPAA-compliant reasoning, state database, and cloud sync for SuavoAgent."
+                        Type="ownProcess"
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="normal"
+                        Vital="yes"
+                        Arguments="--service"
+                        Interactive="no">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="60"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+        <ServiceControl Id="SuavoAgent_Core_Control"
+                        Name="SuavoAgent.Core"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
       </Component>
     </ComponentGroup>
 
     <ComponentGroup Id="BrokerComponents" Directory="INSTALLDIR">
       <Component Id="SuavoAgent.Broker.exe" Guid="*">
         <File Source="$(var.SOURCE_DIR)\SuavoAgent.Broker.exe" KeyPath="yes" />
+        <ServiceInstall Id="SuavoAgent_Broker_Install"
+                        Name="SuavoAgent.Broker"
+                        DisplayName="Suavo Agent IPC Broker"
+                        Description="Named-pipe message bus connecting SuavoAgent Core, Helper, and Watchdog."
+                        Type="ownProcess"
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="normal"
+                        Vital="yes"
+                        Arguments="--service"
+                        Interactive="no">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="60"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+        <ServiceControl Id="SuavoAgent_Broker_Control"
+                        Name="SuavoAgent.Broker"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
       </Component>
     </ComponentGroup>
 
     <ComponentGroup Id="WatchdogComponents" Directory="INSTALLDIR">
       <Component Id="SuavoAgent.Watchdog.exe" Guid="*">
         <File Source="$(var.SOURCE_DIR)\SuavoAgent.Watchdog.exe" KeyPath="yes" />
+        <ServiceInstall Id="SuavoAgent_Watchdog_Install"
+                        Name="SuavoAgent.Watchdog"
+                        DisplayName="Suavo Agent Watchdog"
+                        Description="Restarts SuavoAgent Core and Broker on failure; runs self-repair as last resort."
+                        Type="ownProcess"
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="normal"
+                        Vital="yes"
+                        Arguments="--service"
+                        Interactive="no">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="60"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+        <ServiceControl Id="SuavoAgent_Watchdog_Control"
+                        Name="SuavoAgent.Watchdog"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
       </Component>
     </ComponentGroup>
 
@@ -128,10 +202,11 @@
     </ComponentGroup>
 
     <!--
-      DataDirectoriesComponents + ServicesComponents are defined in the
-      sibling .wxs files (DataDirectories.wxs and Services.wxs) — kept
-      separate for readability and easier diff-review when service config
-      changes during the v4 → v5 transition.
+      DataDirectoriesComponents lives in DataDirectories.wxs (kept separate
+      because the ACL config is verbose). Services.wxs was deleted 2026-05-28
+      after Codex review pointed out that splitting service registration from
+      the binary's component is an anti-pattern (Guid='*' incompatible with
+      a Directory-keypath component).
     -->
 
   </Package>
