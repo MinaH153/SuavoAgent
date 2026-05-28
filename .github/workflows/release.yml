@@ -78,6 +78,10 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION_NUMERIC="${TAG#v}"
+          # Strip pre-release suffix (e.g. v3.13.99-esigner-smoke → 3.13.99) so
+          # .NET AssemblyVersion (numeric-only) accepts the value. VERSION
+          # itself keeps the full tag for artifact naming + release receipts.
+          VERSION_NUMERIC="${VERSION_NUMERIC%%-*}"
           echo "VERSION=$TAG" >> "$GITHUB_OUTPUT"
           echo "VERSION_NUMERIC=$VERSION_NUMERIC" >> "$GITHUB_OUTPUT"
 
