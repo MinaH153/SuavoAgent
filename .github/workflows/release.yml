@@ -390,19 +390,23 @@ jobs:
         env:
           VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           PUBLISH_DIR="$GITHUB_WORKSPACE/publish/${{ matrix.arch }}"
           rm -rf "$PUBLISH_DIR"
           mkdir -p "$PUBLISH_DIR"
-          for proj in Core Broker Helper Watchdog Setup; do
-            dotnet publish "src/SuavoAgent.$proj" \
+          # v4 Phase 1 Mac: skip Helper (Windows-only FlaUI dep) — bundle.sh
+          # handles missing Helper binary gracefully. The Mac .app launches a
+          # placeholder screen for now; real Mac vision pipeline (AXUIElement)
+          # is a v5+ workstream per spec §3.
+          for proj in Core Broker Watchdog Setup; do
+            if ! dotnet publish "src/SuavoAgent.$proj" \
               -c Release \
               -r ${{ matrix.arch }} \
               --self-contained \
               -p:Version="$VERSION_NUMERIC" \
-              -o "$PUBLISH_DIR" || {
-                echo "WARN: $proj publish failed for ${{ matrix.arch }} — non-fatal in Phase 1 (Mac runtime port deferred)"
-              }
+              -o "$PUBLISH_DIR"; then
+              echo "WARN: $proj publish failed for ${{ matrix.arch }} — continuing (Phase 1 best-effort Mac)"
+            fi
           done
           echo "Publish output:"
           ls -la "$PUBLISH_DIR"

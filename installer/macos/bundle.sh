@@ -56,11 +56,17 @@ mkdir -p "$(dirname "$DMG_OUTPUT")"
 # --- Copy binaries from dotnet publish ---------------------------------
 
 echo "==> Copying binaries from $PUBLISH_DIR"
-cp "$PUBLISH_DIR/SuavoAgent.Core" "$APP_BUNDLE/Contents/MacOS/"
-cp "$PUBLISH_DIR/SuavoAgent.Broker" "$APP_BUNDLE/Contents/MacOS/"
-cp "$PUBLISH_DIR/SuavoAgent.Helper" "$APP_BUNDLE/Contents/MacOS/"
-cp "$PUBLISH_DIR/SuavoAgent.Watchdog" "$APP_BUNDLE/Contents/MacOS/"
-cp "$PUBLISH_DIR/SuavoSetup" "$APP_BUNDLE/Contents/MacOS/"
+# Helper is intentionally absent on Mac in Phase 1 (FlaUI is Windows-only).
+# All other binaries are best-effort — Phase 1 ships the packaging path;
+# real Mac runtime port is v5+.
+for bin in SuavoAgent.Core SuavoAgent.Broker SuavoAgent.Helper SuavoAgent.Watchdog SuavoSetup; do
+    if [[ -f "$PUBLISH_DIR/$bin" ]]; then
+        cp "$PUBLISH_DIR/$bin" "$APP_BUNDLE/Contents/MacOS/"
+        echo "    copied: $bin"
+    else
+        echo "    skipped: $bin (not present in publish output)"
+    fi
+done
 
 # --- Render Info.plist + plists from templates -------------------------
 
@@ -94,23 +100,40 @@ for nested in \
     "$APP_BUNDLE/Contents/MacOS/SuavoAgent.Watchdog" \
     "$APP_BUNDLE/Contents/MacOS/SuavoSetup"
 do
-    codesign \
-        --sign "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" \
-        --options runtime \
-        --entitlements "$SCRIPT_DIR/entitlements.plist" \
-        --timestamp \
-        --force \
-        "$nested"
+    if [[ -f "$nested" ]]; then
+        codesign \
+            --sign "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" \
+            --options runtime \
+            --entitlements "$SCRIPT_DIR/entitlements.plist" \
+            --timestamp \
+            --force \
+            "$nested"
+    else
+        echo "    skipped (not present): $nested"
+    fi
 done
 
 echo "==> Signing main executable + bundle"
+# If Core didn't publish, use SuavoSetup as the bundle's main executable
+# (the .app needs SOMETHING runnable to satisfy macOS).
+if [[ ! -f "$APP_BUNDLE/Contents/MacOS/SuavoAgent.Core" ]]; then
+    if [[ -f "$APP_BUNDLE/Contents/MacOS/SuavoSetup" ]]; then
+        echo "==> WARN: SuavoAgent.Core missing, using SuavoSetup as bundle main executable"
+        sed -i '' 's|<string>SuavoAgent.Core</string>|<string>SuavoSetup</string>|' "$APP_BUNDLE/Contents/Info.plist"
+    else
+        echo "==> ERROR: neither SuavoAgent.Core nor SuavoSetup present — cannot build bundle"
+        exit 1
+    fi
+fi
+
+MAIN_EXE_NAME=$(plutil -extract CFBundleExecutable raw "$APP_BUNDLE/Contents/Info.plist")
 codesign \
     --sign "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" \
     --options runtime \
     --entitlements "$SCRIPT_DIR/entitlements.plist" \
     --timestamp \
     --force \
-    "$APP_BUNDLE/Contents/MacOS/SuavoAgent.Core"
+    "$APP_BUNDLE/Contents/MacOS/$MAIN_EXE_NAME"
 
 codesign \
     --sign "$APPLE_DEVELOPER_ID_APPLICATION_IDENTITY" \
