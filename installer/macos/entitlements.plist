@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Hardened runtime — required for notarization.
+
+        com.apple.security.cs.allow-jit — needed because LLamaSharp
+        delegates to llama.cpp which uses Metal Performance Shaders +
+        runtime code generation for the GGUF inference paths on
+        Apple Silicon.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!--
+        Allow loading unsigned executable memory. Required for some
+        llama.cpp Metal shader hot-paths. Trade-off documented in
+        installer/macos/README.md.
+    -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!--
+        Disable library validation so we can load llama.cpp dynamic
+        libraries (libllama.dylib, libggml.dylib) that aren't ad-hoc-
+        signed by Apple's framework signing. They ARE Developer-ID-
+        signed by the bundle script's nested codesign step.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!--
+        Network client — for cloud sync (POST /api/agent/heartbeat),
+        manifest download, model download.
+    -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!--
+        Network server — Broker uses a Unix domain socket, not TCP,
+        so no server entitlement needed. Left here as documentation.
+    -->
+    <!-- <key>com.apple.security.network.server</key><false/> -->
+
+    <!--
+        Keychain access — Phase 3 stores the auth key in the System
+        Keychain (per Codex 2026-05-28 §7). Access group bound to the
+        Designated Requirement string at runtime.
+    -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(TeamIdentifierPrefix)com.suavollc.SuavoAgent</string>
+    </array>
+</dict>
+</plist>

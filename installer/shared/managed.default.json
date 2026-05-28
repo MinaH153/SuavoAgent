@@ -1,0 +1,24 @@
+{
+  "$schema": "https://suavollc.com/schemas/agent-managed-v1.json",
+  "$comment": "Per-machine override settings. Edited by pharmacy IT or pushed via MDM (SCCM/Intune managed-app config). Defaults below favor safety: stable channel, manual approval for destructive Tier-2 actions, no model override (agent picks based on hardware profile). Override values take precedence over server-side managed_policy_digest BUT server-side digest mismatch is reported by --doctor for drift visibility.",
+  "schema_version": 1,
+  "update": {
+    "channel": "stable",
+    "minimum_version": null,
+    "auto_apply": true,
+    "rollout_cohort": null
+  },
+  "reasoning": {
+    "tier2_destructive_auto_execute": false,
+    "model_override": null,
+    "cloud_tier3_enabled": true
+  },
+  "telemetry": {
+    "diagnostics_upload_on_doctor": false,
+    "sentry_dsn_override": null
+  },
+  "phi_retention": {
+    "receipts_retention_days": 2555,
+    "state_db_retention_after_revoke": "sealed-by-default"
+  }
+}

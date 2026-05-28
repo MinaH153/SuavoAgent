@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>SuavoAgent</string>
+
+    <key>CFBundleExecutable</key>
+    <string>SuavoAgent.Core</string>
+
+    <key>CFBundleIconFile</key>
+    <string>SuavoAgent.icns</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>com.suavollc.SuavoAgent</string>
+
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <key>CFBundleName</key>
+    <string>SuavoAgent</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.business</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+
+    <!--
+        UIElement YES makes the app menubar-icon-only (no Dock icon,
+        no menu-bar app menu). Per spec §5 Phase 7 the tray icon is
+        the primary UX surface for Mac.
+    -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 MKM TECHNOLOGIES LLC. All rights reserved.</string>
+
+    <!--
+        Hardened runtime entitlements + privacy usage descriptions.
+        Screen recording is required for the Helper's vision pipeline;
+        the user is prompted by the OS the first time the agent tries
+        to capture (we surface a friendly explainer in Avalonia before
+        the OS prompt fires).
+    -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>SuavoAgent reads the pharmacy management system screen to detect new prescriptions and extract delivery information. PHI never leaves your workstation unless you explicitly approve cloud reasoning.</string>
+
+    <key>NSAppleEventsUsageDescription</key>
+    <string>SuavoAgent reads window state via AppleEvents for accessibility-aware UI automation. No keystrokes are sent without your approval.</string>
+
+    <key>NSCameraUsageDescription</key>
+    <string>SuavoAgent does not use the camera.</string>
+
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SuavoAgent does not use the microphone.</string>
+
+    <!--
+        TeamIdentifierPrefix gets substituted by the bundle script from
+        APPLE_TEAM_ID. The DesignatedRequirement string derived from
+        this is what Phase 3's System Keychain entry binds credential
+        access to (Codex 2026-05-28 §7).
+    -->
+    <key>TeamIdentifierPrefix</key>
+    <string>__APPLE_TEAM_ID__</string>
+</dict>
+</plist>

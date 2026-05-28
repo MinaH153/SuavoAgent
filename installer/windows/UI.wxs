@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Wix UI customization.
+
+  Uses WixUI_FeatureTree as the dialog set (Welcome → License →
+  Features → InstallDir → Verify → Install → Finish), with the EULA
+  text and brand artwork pulled from installer/shared/.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Fragment>
+
+    <!--
+      EULA text shown on the License dialog. Sourced from the shared
+      directory so the same RTF is referenced by both Windows and macOS
+      installers when v4.x ships the matching DMG EULA prompt.
+    -->
+    <WixVariable Id="WixUILicenseRtf" Value="..\shared\eula.rtf" />
+
+    <!--
+      Brand artwork. Banner is 500x58 (top of Welcome/Finish), dialog
+      is 500x312 (background of all other dialogs). Both sized per WixUI
+      defaults; replace with Suavo gold-on-dark variants from the brand
+      kit.
+    -->
+    <WixVariable Id="WixUIBannerBmp" Value="..\shared\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="..\shared\dialog.bmp" />
+
+  </Fragment>
+</Wix>

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    SuavoAgent.Helper LaunchAgent — runs per-user-session.
+    Needs the active graphics context for screen capture + UI
+    automation. Per Codex 2026-05-28 §9: Helper stays a LaunchAgent
+    even though Core is a LaunchDaemon.
+
+    Installed by the post-install script to ~/Library/LaunchAgents/
+    com.suavollc.agent.helper.plist on first login of each user.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.suavollc.agent.helper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/SuavoAgent.app/Contents/MacOS/SuavoAgent.Helper</string>
+        <string>--user-session</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/$USER/Library/Logs/SuavoAgent/helper.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/$USER/Library/Logs/SuavoAgent/helper-error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SUAVO_DATA_DIR</key>
+        <string>/Library/Application Support/SuavoAgent</string>
+        <key>SUAVO_USER_LOG_DIR</key>
+        <string>/Users/$USER/Library/Logs/SuavoAgent</string>
+    </dict>
+</dict>
+</plist>

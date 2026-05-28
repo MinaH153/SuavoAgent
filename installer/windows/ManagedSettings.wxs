@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Scaffolds %ProgramData%\SuavoAgent\managed.json with safe defaults.
+
+  This is the per-machine override file that pharmacy IT can edit (or
+  push via SCCM/Intune managed-app config) to pin update channels,
+  override model selection, and toggle Tier-2 destructive-action consent
+  per the Phase 5 channel-pinning design.
+
+  The MSI lays down this file with `OncePerInstall` flag so it's NOT
+  overwritten on upgrade — the pharmacy's customizations survive.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Fragment>
+
+    <ComponentGroup Id="ManagedSettingsComponents" Directory="SuavoProgramData">
+      <Component Id="ManagedSettingsFile" Guid="*" NeverOverwrite="yes" Permanent="yes">
+        <File Id="ManagedJsonDefault"
+              Source="..\shared\managed.default.json"
+              Name="managed.json"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+  </Fragment>
+</Wix>

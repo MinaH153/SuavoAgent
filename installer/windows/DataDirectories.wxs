@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  %ProgramData%\SuavoAgent\ scaffolding with secure ACLs.
+
+  Per Codex 2026-05-28 review §7:
+  - Core service (LocalSystem) needs full read/write
+  - Helper user-session process needs limited read (logs only — not state.db)
+  - Authenticated Users get no access by default (no PHI leakage to other users)
+  - Watchdog (LocalSystem) needs full read/write for self-repair
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Fragment>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="SuavoProgramData" Name="SuavoAgent">
+        <Directory Id="LogsDir" Name="logs" />
+        <Directory Id="ReceiptsDir" Name="receipts" />
+        <Directory Id="NativeDir" Name="native" />
+        <Directory Id="ModelsDir" Name="models" />
+        <Directory Id="DiagnosticsDir" Name="diagnostics" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="DataDirectoriesComponents">
+
+      <!--
+        Root SuavoAgent\ directory: SYSTEM full control, Administrators
+        full control, Authenticated Users NO access. State.db + receipts
+        live under here and contain PHI.
+      -->
+      <Component Id="SuavoProgramDataDir" Directory="SuavoProgramData" Guid="*">
+        <CreateFolder>
+          <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+          <util:PermissionEx User="Administrators" GenericAll="yes" />
+        </CreateFolder>
+        <RegistryValue Root="HKLM"
+                       Key="Software\SuavoAgent"
+                       Name="DataDir"
+                       Type="string"
+                       Value="[SuavoProgramData]"
+                       KeyPath="yes" />
+      </Component>
+
+      <Component Id="LogsDirComponent" Directory="LogsDir" Guid="*">
+        <CreateFolder>
+          <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+          <util:PermissionEx User="Administrators" GenericAll="yes" />
+          <!--
+            Helper user-session process needs to APPEND log entries but
+            should not be able to enumerate/read existing logs (some
+            log entries reference PHI hashes — even non-PHI prefixes
+            are workstation-traceable).
+          -->
+          <util:PermissionEx User="Authenticated Users" GenericWrite="yes" />
+        </CreateFolder>
+        <RegistryValue Root="HKLM"
+                       Key="Software\SuavoAgent"
+                       Name="LogsDir"
+                       Type="string"
+                       Value="[LogsDir]"
+                       KeyPath="yes" />
+      </Component>
+
+      <Component Id="ReceiptsDirComponent" Directory="ReceiptsDir" Guid="*">
+        <CreateFolder>
+          <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+          <util:PermissionEx User="Administrators" GenericAll="yes" />
+        </CreateFolder>
+        <RegistryValue Root="HKLM"
+                       Key="Software\SuavoAgent"
+                       Name="ReceiptsDir"
+                       Type="string"
+                       Value="[ReceiptsDir]"
+                       KeyPath="yes" />
+      </Component>
+
+      <Component Id="NativeDirComponent" Directory="NativeDir" Guid="*">
+        <CreateFolder>
+          <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+          <util:PermissionEx User="Administrators" GenericAll="yes" />
+        </CreateFolder>
+        <RegistryValue Root="HKLM"
+                       Key="Software\SuavoAgent"
+                       Name="NativeDir"
+                       Type="string"
+                       Value="[NativeDir]"
+                       KeyPath="yes" />
+      </Component>
+
+      <Component Id="ModelsDirComponent" Directory="ModelsDir" Guid="*">
+        <CreateFolder>
+          <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+          <util:PermissionEx User="Administrators" GenericAll="yes" />
+        </CreateFolder>
+        <RegistryValue Root="HKLM"
+                       Key="Software\SuavoAgent"
+                       Name="ModelsDir"
+                       Type="string"
+                       Value="[ModelsDir]"
+                       KeyPath="yes" />
+      </Component>
+
+      <Component Id="DiagnosticsDirComponent" Directory="DiagnosticsDir" Guid="*">
+        <CreateFolder>
+          <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+          <util:PermissionEx User="Administrators" GenericAll="yes" />
+        </CreateFolder>
+        <RegistryValue Root="HKLM"
+                       Key="Software\SuavoAgent"
+                       Name="DiagnosticsDir"
+                       Type="string"
+                       Value="[DiagnosticsDir]"
+                       KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+
+  </Fragment>
+</Wix>

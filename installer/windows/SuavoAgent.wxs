@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SuavoAgent v4 MSI (WiX 4)
+
+  Per spec docs/superpowers/specs/2026-05-28-suavoagent-v4-consumer-install.md
+  §5 Phase 1.
+
+  Stable UpgradeCode below MUST NEVER change once the first MSI ships to a
+  pharmacy — that's what tells Windows future MSIs are upgrades, not
+  side-by-side installs. The ProductCode varies per release (auto-generated)
+  so each version is uniquely identifiable.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="SuavoAgent"
+           Language="1033"
+           Version="$(var.VERSION)"
+           Manufacturer="MKM TECHNOLOGIES LLC"
+           UpgradeCode="b1f6e1a4-2b3c-4d5e-9a0b-7f8e6d5c4b3a"
+           InstallerVersion="500"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <SummaryInformation Description="SuavoAgent — HIPAA-compliant pharmacy delivery automation"
+                        Keywords="SuavoAgent,Suavo,Pharmacy,HIPAA,PioneerRx,Delivery"
+                        Manufacturer="MKM TECHNOLOGIES LLC" />
+
+    <!--
+      MajorUpgrade with AllowSameVersionUpgrades=no, downgrade error message
+      set. Schedule afterInstallExecute so the old version is uninstalled
+      after the new one's files are copied (safer for in-place service swap).
+    -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of SuavoAgent is already installed. Uninstall it first if you want to install this older version."
+                  AllowSameVersionUpgrades="no"
+                  Schedule="afterInstallExecute" />
+
+    <!-- WixUI_FeatureTree defined in UI.wxs -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+
+    <!--
+      Icon for Add/Remove Programs. Resource file under installer/shared/ to
+      keep brand artifacts centralized.
+    -->
+    <Icon Id="SuavoAgent.ico" SourceFile="..\shared\SuavoAgent.ico" />
+    <Property Id="ARPPRODUCTICON" Value="SuavoAgent.ico" />
+    <Property Id="ARPHELPLINK" Value="https://suavollc.com/support" />
+    <Property Id="ARPURLINFOABOUT" Value="https://suavollc.com" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <!--
+      Default install location: C:\Program Files\Suavo\Agent\ (matches the
+      bootstrap.ps1 layout pharmacies already see). Per-machine scope means
+      LocalSystem can read everything.
+    -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="SuavoCompanyFolder" Name="Suavo">
+        <Directory Id="INSTALLDIR" Name="Agent" />
+      </Directory>
+    </StandardDirectory>
+
+    <!--
+      Feature tree mirrors the binary roles. Default: all features installed.
+      Power users can deselect Helper (e.g. for headless service-only
+      installs on Windows Server where there's no user session to capture).
+    -->
+    <Feature Id="ProductFeature" Title="SuavoAgent" Level="1" ConfigurableDirectory="INSTALLDIR" Display="expand" AllowAbsent="no">
+
+      <Feature Id="CoreFeature" Title="Core Agent" Description="Reasoning, state database, cloud sync. Required."
+               Level="1" AllowAbsent="no">
+        <ComponentGroupRef Id="CoreComponents" />
+      </Feature>
+
+      <Feature Id="BrokerFeature" Title="IPC Broker" Description="Named-pipe bus between Core, Helper, and Watchdog. Required."
+               Level="1" AllowAbsent="no">
+        <ComponentGroupRef Id="BrokerComponents" />
+      </Feature>
+
+      <Feature Id="WatchdogFeature" Title="Watchdog" Description="Restarts failed services and runs self-repair. Required."
+               Level="1" AllowAbsent="no">
+        <ComponentGroupRef Id="WatchdogComponents" />
+      </Feature>
+
+      <Feature Id="HelperFeature" Title="Vision Helper" Description="Screen capture, OCR, UI automation. Required on pharmacy workstations; skip for headless service-only installs."
+               Level="1" AllowAbsent="yes">
+        <ComponentGroupRef Id="HelperComponents" />
+      </Feature>
+
+      <Feature Id="DataDirectoriesFeature" Title="Data Directories" Description="ProgramData scaffolding with secure ACLs."
+               Level="1" AllowAbsent="no" Display="hidden">
+        <ComponentGroupRef Id="DataDirectoriesComponents" />
+      </Feature>
+
+    </Feature>
+
+    <!--
+      Component groups reference the binaries copied by the build into
+      $(var.SOURCE_DIR). The publishing step (dotnet publish) populates that
+      directory with the OS-specific binaries.
+    -->
+    <ComponentGroup Id="CoreComponents" Directory="INSTALLDIR">
+      <Component Id="SuavoAgent.Core.exe" Guid="*">
+        <File Source="$(var.SOURCE_DIR)\SuavoAgent.Core.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="BrokerComponents" Directory="INSTALLDIR">
+      <Component Id="SuavoAgent.Broker.exe" Guid="*">
+        <File Source="$(var.SOURCE_DIR)\SuavoAgent.Broker.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="WatchdogComponents" Directory="INSTALLDIR">
+      <Component Id="SuavoAgent.Watchdog.exe" Guid="*">
+        <File Source="$(var.SOURCE_DIR)\SuavoAgent.Watchdog.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="HelperComponents" Directory="INSTALLDIR">
+      <Component Id="SuavoAgent.Helper.exe" Guid="*">
+        <File Source="$(var.SOURCE_DIR)\SuavoAgent.Helper.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!--
+      DataDirectoriesComponents + ServicesComponents are defined in the
+      sibling .wxs files (DataDirectories.wxs and Services.wxs) — kept
+      separate for readability and easier diff-review when service config
+      changes during the v4 → v5 transition.
+    -->
+
+  </Package>
+</Wix>

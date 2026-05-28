@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    SuavoAgent.Core LaunchDaemon — runs as root, survives user logout.
+    Per Codex 2026-05-28 §9: Core is machine-scoped infrastructure
+    (heartbeat / revoke / policy / update enforcement); must keep
+    running across pharmacist shift changes.
+
+    Installed by the post-install script to /Library/LaunchDaemons/
+    com.suavollc.agent.core.plist with root:wheel 0644 perms.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.suavollc.agent.core</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/SuavoAgent.app/Contents/MacOS/SuavoAgent.Core</string>
+        <string>--service</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <!--
+            Restart if Core crashes (SuccessfulExit=false) but NOT if
+            it exits cleanly (e.g. graceful shutdown for update apply).
+            Watchdog handles update-flow restarts; LaunchDaemon handles
+            crash recovery.
+        -->
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Library/Application Support/SuavoAgent/logs/core.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Library/Application Support/SuavoAgent/logs/core-error.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Library/Application Support/SuavoAgent</string>
+
+    <!--
+        EnvironmentVariables: pass SUAVO_DATA_DIR so Core knows where
+        to read managed.plist + state.db without hardcoded paths.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SUAVO_DATA_DIR</key>
+        <string>/Library/Application Support/SuavoAgent</string>
+    </dict>
+</dict>
+</plist>
