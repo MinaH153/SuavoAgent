@@ -221,6 +221,16 @@ while (( ATTEMPT < MAX_ATTEMPTS )); do
             break
         fi
     fi
+    # Credential failures (401) are NOT transient — retrying a bad/locked
+    # account just burns auth attempts and triggers Apple's lockout. Bail
+    # immediately so the operator fixes the secret instead of compounding.
+    if grep -qiE "401|Invalid credentials|has been locked" "$NOTARIZE_LOG"; then
+        echo "ERROR: notarytool authentication failed (401). NOT retrying —" >&2
+        echo "       this is a credential problem, not a transient one." >&2
+        echo "       Fix APPLE_ID / APPLE_APP_PASSWORD (must be a 19-char" >&2
+        echo "       app-specific password) and unlock the Apple ID if locked." >&2
+        exit 1
+    fi
     if (( ATTEMPT == MAX_ATTEMPTS )); then
         echo "ERROR: Notarization failed after $MAX_ATTEMPTS attempts" >&2
         exit 1
