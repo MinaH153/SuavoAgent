@@ -77,13 +77,26 @@ public class IpcPipeTests
         using var clientPipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
         await clientPipe.ConnectAsync(5000, cts.Token);
 
-        await Task.Delay(200); // Let server process
+        // Poll for the server to mark itself connected. 200ms was tight on
+        // shared CI runners; the poll bails fast in the happy path while
+        // tolerating up to 3s of scheduler jitter under load.
+        await WaitForAsync(() => server.IsConnected, TimeSpan.FromSeconds(3), cts.Token);
         Assert.True(server.IsConnected);
 
         clientPipe.Close();
-        await Task.Delay(500); // Let server detect disconnect
+        await WaitForAsync(() => !server.IsConnected, TimeSpan.FromSeconds(3), cts.Token);
         Assert.False(server.IsConnected);
 
         server.Dispose();
+    }
+
+    private static async Task WaitForAsync(Func<bool> predicate, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (predicate()) return;
+            await Task.Delay(50, cancellationToken);
+        }
     }
 }

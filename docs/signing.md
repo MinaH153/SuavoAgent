@@ -1,177 +1,151 @@
 # Authenticode signing runbook
 
 SuavoAgent binaries are signed with an **SSL.com EV Code Signing Certificate**
-bound to a **Yubikey FIPS 140-2 hardware token**. The Yubikey must be
-physically plugged into a self-hosted GitHub Actions runner at release time —
-it cannot leave that machine. EV certs cannot be exported as PFX.
+bound to **SSL.com eSigner cloud HSM** (no physical token). The cert lives in
+SSL.com's FIPS 140-2 validated cloud key vault; signing happens via the
+`sslcom/actions-codesigner` GitHub Action in CI. No self-hosted runner is
+required.
 
-The release and hotfix workflows are pre-wired for signing and now **fail
-closed** unless `SIGNING_ENABLED=true` and `SIGNING_CERT_THUMBPRINT` are
-configured. Flip the gate only once the hardware has arrived and the runner is
-configured (see below).
+The release and hotfix workflows **fail closed** unless `SIGNING_ENABLED=true`
+and all four `ES_*` secrets are configured. Flip the gate only once the
+secrets are populated and a smoke tag has signed successfully.
 
-## State when this doc was written (2026-04-22)
+## State when this doc was written (2026-05-16)
 
-- SSL.com order `co-861kueeu2a3` — **pending validation**
+- SSL.com order `co-861kueeu2a3` — **issued + eSigner active** (Apr 21, 2026 →
+  May 15, 2027)
 - Legal entity on cert: `CN=MKM TECHNOLOGIES LLC, O=Suavo (MKM TECHNOLOGIES LLC)`
-- Validation SLA: 3–5 business days → Yubikey FedEx ships 2–3 business days
-  after validation completes
-- Delivery address: 5310 Fountain Grass Avenue, Bakersfield, CA 93313
-- Until the Yubikey arrives, `SIGNING_ENABLED` is unset (or explicitly `false`)
-  and Queen/field releases must not be cut. The release preflight exits before
-  any publishable artifact is produced.
+- Original plan was Yubikey FIPS hardware token; SSL.com enrolled the order in
+  eSigner cloud signing instead, which is strictly better for CI: no USB token,
+  no self-hosted runner, no SmartCard service. The original Yubikey workflow is
+  preserved in git history (`.github/workflows/release.yml` at `ccf0ab1` and
+  earlier) if a future migration back to hardware is ever needed.
 
-## Activation checklist (when Yubikey arrives)
+## Activation checklist
 
-### 1. Install prerequisites on the signing machine
+### 1. Enroll the certificate with eSigner (~10 min, one-shot)
 
-The signing machine must be running Windows 10/11 x64 with:
+Log into <https://secure.ssl.com>. Open order `co-861kueeu2a3`. On the order
+detail page find the **eSigner Cloud Signing Enrollment** section.
 
-- **Windows 10 SDK** — provides `signtool.exe` in
-  `C:\Program Files (x86)\Windows Kits\10\bin\<sdk-version>\x64\`.
-  If multiple SDK versions are installed, the workflow picks the newest.
-- **Yubikey Manager + minidriver** — from <https://www.yubico.com/support/download/>
-  so the Yubikey's certificate appears in Windows' `Cert:\CurrentUser\My` store.
-- **SSL.com eSigner bundle** (shipped with the Yubikey) — installs the
-  SafeNet Authentication Client + drivers that signtool uses under the hood.
-- **.NET 8 SDK** — `winget install Microsoft.DotNet.SDK.8`.
-- **Git for Windows** — needed by `actions/checkout`.
+1. **Second factor authentication** → select **OTP APP** (do NOT pick SMS — the
+   CI needs the raw TOTP secret, which SMS doesn't expose)
+2. **Create a 4-digit PIN** → save to 1Password as "SSL.com eSigner PIN"
+   (separate from the SSL.com account password; cannot be recovered if lost)
+3. Click **create OTP and issue certificate**
+4. A QR code appears **once**. Before navigating away:
+   - Scan with Authy or Google Authenticator on your phone (normal 2FA)
+   - **Also extract the raw secret string**. The QR encodes
+     `otpauth://totp/SSL.com:<user>?secret=BASE32STRING&issuer=SSL.com`.
+     Either click "show key" / "manual entry" if SSL.com offers it, or
+     screenshot the QR and decode it with any QR reader. Save the `secret=`
+     value as "SSL.com eSigner TOTP secret" in 1Password.
 
-After installing prerequisites, keep `SIGNING_ENABLED` unset/false and run the
-local readiness probe from an admin PowerShell:
+If you miss the QR, you can reset it via the "view/reset eSigner QR code"
+flow on SSL.com — but this invalidates the previous OTP setup.
 
-```powershell
-.\scripts\Test-SigningRunnerReadiness.ps1
+### 2. Get the credential ID (~5 min)
+
+Download CodeSignTool for macOS:
+<https://www.ssl.com/download/codesigntool-for-linux-and-macos/>. Unzip, then:
+
+```bash
+./CodeSignTool.sh get_credential_ids \
+  -username="<your-ssl.com-email>" \
+  -password="<your-ssl.com-password>"
 ```
 
-This should fail until the Yubikey cert and GitHub Actions runner service are
-both present. Do not cut a tag from a machine that fails this probe.
+The command prints a GUID. Save as "SSL.com eSigner credential ID" in
+1Password.
 
-### 2. Import the cert and grab its thumbprint
+### 3. Configure GitHub Actions secrets
 
-Plug the Yubikey in, then in an admin PowerShell:
-
-```powershell
-# Lists certs on the token. Copy the thumbprint of the EV cert
-# (Subject should include "MKM TECHNOLOGIES LLC").
-Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -like '*MKM TECHNOLOGIES LLC*' } | Format-List Subject, Thumbprint, NotAfter
-```
-
-Test-sign a throwaway EXE to confirm the Yubikey PIN flow works interactively:
-
-```powershell
-Copy-Item C:\Windows\System32\notepad.exe $env:TEMP\sign-test.exe
-& "C:\Program Files (x86)\Windows Kits\10\bin\<sdk>\x64\signtool.exe" sign /fd SHA256 /tr http://ts.ssl.com /td SHA256 /sha1 <THUMBPRINT> $env:TEMP\sign-test.exe
-& "C:\Program Files (x86)\Windows Kits\10\bin\<sdk>\x64\signtool.exe" verify /pa /v $env:TEMP\sign-test.exe
-```
-
-You should be prompted for the Yubikey PIN on `sign`, and `verify` should
-print `Successfully verified`.
-
-### 3. Register the runner with GitHub
-
-On github.com → **Settings → Actions → Runners → New self-hosted runner** for
-the `MinaH153/SuavoAgent` repo. Pick the Windows x64 installer. When the
-runner's `config.cmd` asks for labels, add:
-
-```
-self-hosted,windows,yubikey
-```
-
-(The workflows target exactly `[self-hosted, windows, yubikey]`.)
-
-Install it as a Windows service so it survives reboots:
-
-```powershell
-.\svc.cmd install  # run from the runner's folder
-.\svc.cmd start
-```
-
-**Runner user account**: must be a local Administrator and must have
-interactive access to the Yubikey cert store. If you installed the Yubikey
-driver under a different account, repeat the install under the runner account
-or move the cert to `Cert:\LocalMachine\My`.
-
-### 4. Configure repo secrets + variables
-
-On github.com → **Settings → Secrets and variables → Actions**:
+On GitHub → **MinaH153/SuavoAgent → Settings → Secrets and variables → Actions**:
 
 | Kind | Name | Value |
 | --- | --- | --- |
-| Secret | `SIGNING_CERT_THUMBPRINT` | Thumbprint from step 2 (no spaces, no colons) |
-| Variable | `SIGNING_TIMESTAMP_URL` | `http://ts.ssl.com` (optional — defaults to this if unset) |
+| Secret | `ES_USERNAME` | SSL.com account email |
+| Secret | `ES_PASSWORD` | SSL.com account password |
+| Secret | `ES_CREDENTIAL_ID` | GUID from step 2 |
+| Secret | `ES_TOTP_SECRET` | Base32 string from step 1 |
 | Variable | `SIGNING_ENABLED` | `true` |
 
 The existing `SIGNING_KEY_PEM` secret stays as-is — it signs `checksums.sha256`
 and the OTA update manifest, not the binaries themselves.
 
-Before flipping `SIGNING_ENABLED=true`, confirm GitHub can see the runner and
-that the local signing cert matches the secret:
+The deprecated `SIGNING_CERT_THUMBPRINT` and `SIGNING_TIMESTAMP_URL`
+variables/secrets are no longer referenced by either workflow; safe to delete.
+
+### 4. Smoke test with a throwaway tag
 
 ```bash
-gh api repos/MinaH153/SuavoAgent/actions/runners \
-  --jq '.runners[] | {name, os, status, labels: [.labels[].name]}'
+git tag v3.13.99-esigner-smoke
+git push origin v3.13.99-esigner-smoke
 ```
 
-```powershell
-.\scripts\Test-SigningRunnerReadiness.ps1 -ExpectedThumbprint "<SIGNING_CERT_THUMBPRINT>"
-```
+Watch the Actions run. Expected sequence:
 
-### 5. Smoke test with a throwaway tag
+- `release-signing-preflight` (ubuntu) — verifies all four `ES_*` secrets are
+  set, fails fast if any are missing
+- `bootstrap-windows-smoke` (windows) — parse-checks `bootstrap.ps1` under PS 5.1
+- `build` (ubuntu) — `dotnet publish` for each of the 5 binaries
+- `sign_windows` (ubuntu) — 5 sequential calls to `sslcom/actions-codesigner@develop`,
+  one per binary; each call talks to SSL.com's cloud HSM over HTTPS and signs
+  the binary in-place
+- `windows-release-smoke` (windows) — expands the zip and asserts every binary
+  passes `Get-AuthenticodeSignature -RequireAuthenticodeSignature`
+- `release` (ubuntu) — generates checksums, signs the manifest, publishes the
+  GitHub Release
+
+Download `SuavoAgent.Core.exe` from the release → Properties → Digital
+Signatures. You should see `MKM Technologies LLC` with a valid timestamp.
+
+If the smoke run is green, delete the tag + release:
 
 ```bash
-git tag v3.13.7-signed-smoke
-git push origin v3.13.7-signed-smoke
+git push origin :refs/tags/v3.13.99-esigner-smoke
+gh release delete v3.13.99-esigner-smoke --yes
 ```
 
-Watch the Actions run. The `build` job finishes on ubuntu, `sign_windows`
-picks up on your runner (pops a Yubikey PIN prompt), `sign_passthrough` is
-skipped, `release` publishes. Download `SuavoAgent.Core.exe` from the release
-and right-click → Properties → Digital Signatures. You should see
-`Suavo (MKM Technologies LLC)` with a valid timestamp.
+### 5. Verify SmartScreen on a fresh Windows machine
 
-The published `field-release-receipt.json` must include a `rollbackArtifact`
-object pointing at the previous non-prerelease release zip and its SHA-256 from
-that release's `checksums.sha256`. The release workflow fails closed if it
-cannot resolve that rollback artifact.
-
-If smoke-test passes, delete the tag + release:
-
-```bash
-git push origin :refs/tags/v3.13.7-signed-smoke
-gh release delete v3.13.7-signed-smoke --yes
-```
-
-### 6. Verify on a fresh Windows machine
-
-Test that the SmartScreen warning is gone by downloading the `.cmd` installer
-from a pharmacy signup page and running it on a Windows machine that has
-never seen the agent. You should see a UAC prompt listing
+Download the `.cmd` installer from a pharmacy signup page and run it on a
+Windows machine that has never seen the agent. The UAC prompt should read
 `Verified publisher: MKM Technologies LLC` instead of `Publisher unknown`.
+
+## Local signing on a Windows dev box (optional)
+
+If you want `publish.ps1 -CertThumbprint <SHA1>` to sign locally on a Windows
+dev machine without going through CI, install
+**[eSigner CKA (Cloud Key Adapter)](https://www.ssl.com/download/#cka)**. CKA
+registers the cloud cert in `Cert:\CurrentUser\My` so the existing
+`signtool /sha1 <thumbprint>` flow in `publish.ps1` keeps working. CKA prompts
+for the OTP / TOTP on each signing operation.
+
+CKA is Windows-only — there is no macOS equivalent. On Mac dev boxes, signing
+only happens in CI.
 
 ## Troubleshooting
 
-**`signtool failed: 0x800B0109`** — The timestamp server rejected the request.
-Swap `SIGNING_TIMESTAMP_URL` to `http://timestamp.digicert.com` or
-`http://timestamp.sectigo.com` and retry.
+**`Error: USER_CRED_INVALID` from CodeSignTool** — `ES_USERNAME` or
+`ES_PASSWORD` is wrong, or the account is locked. Try logging into
+secure.ssl.com manually.
 
-**`signtool failed: 0x80092009`** — signtool cannot find the cert with the
-given thumbprint. Re-check the thumbprint has no spaces/colons and that the
-Yubikey is plugged in + unlocked.
+**`Error: INVALID_TOTP` from CodeSignTool** — `ES_TOTP_SECRET` doesn't match
+the QR enrolled in step 1. Re-enroll (resets the QR) and update the secret.
 
-**`signtool failed: 0x80090016`** — Keyset does not exist. The Yubikey
-minidriver isn't installed under the runner's user account. Reinstall
-Yubikey Manager while logged in as the runner account.
+**`Error: CREDENTIAL_NOT_FOUND`** — `ES_CREDENTIAL_ID` GUID is wrong. Re-run
+`CodeSignTool get_credential_ids` to confirm.
 
-**Runner never picks up the job** — Confirm the runner shows Idle/green at
-github.com → Settings → Actions → Runners. Confirm its labels include
-`self-hosted`, `windows`, and `yubikey` exactly.
+**`HTTP 429 Rate limit exceeded`** — SSL.com's eSigner has a per-account
+signature rate limit (undocumented, anecdotally ~100/hour for standard
+accounts). Spread sign calls across time, or contact SSL.com support to lift
+the cap if shipping high-volume releases.
 
-**`SmartScreen` still warns** after signing — Expected for the first ~30
-days with a brand-new EV cert. Windows Defender builds reputation on signed
-EXEs over downloads. It typically goes away once ~300 unique machines have
-executed the binary. EV cert removes the warning *sooner* than a standard
-OV cert but doesn't eliminate the reputation warmup entirely.
+**SmartScreen still warns after signing** — Expected for the first ~30 days
+with a brand-new EV cert. Windows Defender builds reputation on signed EXEs
+over downloads. EV cert removes the warning sooner than an OV cert but doesn't
+eliminate the reputation warmup entirely.
 
 ## Rollback
 
@@ -181,30 +155,35 @@ To disable signing without reverting the workflows:
 SIGNING_ENABLED = false   # or delete the variable
 ```
 
-Next release/hotfix: the preflight fails closed. Do not validate Queen from an
-unsigned pass-through artifact.
+The next release/hotfix preflight will fail closed. Do not validate Queen
+from an unsigned passthrough artifact.
 
 ## Future: Azure Trusted Signing migration
 
 Azure Trusted Signing is $9.99/month for unlimited signatures but requires a
 **3-year-old verified organization**. MKM Technologies LLC was filed
 2026-03-23, so it's ineligible until approximately **March 2029**. At renewal
-time (April 2027) the choice is:
+time (Apr 2027) the choice is:
 
-1. Renew SSL.com EV cert (~$349) + reuse existing Yubikey — no downtime.
-2. Switch to Certum (Poland) with SimplySign cloud HSM (~$200) — same root
-   store trust; no Yubikey dependency, workflows would need a cloud-signing
-   shim.
-3. Wait until 2029 and migrate to Azure Trusted Signing — cheapest long-term.
+1. **Renew SSL.com EV cert** (~$349/year) — reuse eSigner cloud; zero workflow
+   changes. Default choice unless a clearly better option emerges.
+2. **Wait until Mar 2029 and migrate to Azure Trusted Signing** — cheapest
+   long-term ($120/year vs $349/year), requires re-keying CI workflow.
+
+Note: certs issued on or after Mar 1, 2026 are capped at 458-day validity by
+CA/Browser Forum baseline requirements. The current cert (Apr 21, 2026 → May
+15, 2027) is 389 days. Future renewals will also be ≤458d, so plan on
+auto-renewal in the release pipeline before expiry.
 
 ## Related files
 
 - `.github/workflows/release.yml` — tag-triggered release pipeline
 - `.github/workflows/hotfix.yml` — manual-dispatch hotfix pipeline
-- `scripts/Test-SigningRunnerReadiness.ps1` — local/self-hosted runner
-  signing readiness probe
+- `scripts/Test-QueenShipPreflight.ps1` — local Queen build-readiness probe
+  (signing checks now skipped by default; only the EV cert thumbprint check
+  remains, and only fires on Windows boxes with CKA installed)
 - `Directory.Build.props` — PE metadata (Company, Copyright, Version)
 - `bootstrap.ps1` — client installer; verifies `checksums.sha256` signature
   (separate ECDSA P-256 key, `SIGNING_KEY_PEM`)
-- Memory: `session-2026-04-21-installer-and-cert-order.md`,
-  `session-2026-04-22-ssl-cert-validation-queued.md`
+- Memory: `ssl-com-ev-cert-validation-submitted.md`,
+  `session-end-2026-05-15-mesh-end-to-end-shipped.md`

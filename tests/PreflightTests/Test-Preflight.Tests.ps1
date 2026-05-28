@@ -79,43 +79,6 @@ Describe "Test-DotnetSdk" {
     }
 }
 
-Describe "Test-YubikeyPresent" {
-    It "SKIP when -SkipSigning" {
-        $r = Test-YubikeyPresent -Skip $true
-        $r.status | Should -Be "SKIP"
-        $r.detail | Should -Match "SkipSigning"
-    }
-    It "PASS when Get-PnpDevice returns Yubikey" {
-        if (-not (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue)) {
-            Set-ItResult -Skipped -Because "Get-PnpDevice unavailable on non-Windows host"
-            return
-        }
-        $r = Test-YubikeyPresent -Skip $false -Resolver {
-            [pscustomobject]@{ FriendlyName = "YubiKey FIDO+CCID"; Status = "OK" }
-        }
-        $r.status | Should -Be "PASS"
-        $r.detail | Should -Match "YubiKey"
-    }
-    It "FAIL when no Yubikey detected (Windows)" {
-        if (-not (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue)) {
-            Set-ItResult -Skipped -Because "Get-PnpDevice unavailable on non-Windows host"
-            return
-        }
-        $r = Test-YubikeyPresent -Skip $false -Resolver { @() }
-        $r.status | Should -Be "FAIL"
-        $r.fix | Should -Match "-SkipSigning"
-    }
-    It "SKIP on non-Windows (Get-PnpDevice unavailable)" {
-        if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
-            Set-ItResult -Skipped -Because "Get-PnpDevice available — non-Windows path not exercised"
-            return
-        }
-        $r = Test-YubikeyPresent -Skip $false
-        $r.status | Should -Be "SKIP"
-        $r.detail | Should -Match "non-Windows"
-    }
-}
-
 Describe "Test-EvCertThumbprint" {
     It "SKIP when -SkipSigning" {
         $r = Test-EvCertThumbprint -Skip $true -Thumbprint ""
@@ -158,42 +121,6 @@ Describe "Test-EvCertThumbprint" {
         $r = Test-EvCertThumbprint -Skip $false -Thumbprint "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
         $r.status | Should -Be "SKIP"
         $r.detail | Should -Match "non-Windows"
-    }
-}
-
-Describe "Test-SmartCardService" {
-    It "SKIP when -SkipSigning" {
-        $r = Test-SmartCardService -Skip $true
-        $r.status | Should -Be "SKIP"
-    }
-    It "PASS when SCardSvr running (Windows only)" {
-        if (-not (Get-Command Get-Service -ErrorAction SilentlyContinue)) {
-            Set-ItResult -Skipped -Because "Get-Service unavailable on non-Windows"
-            return
-        }
-        $r = Test-SmartCardService -Skip $false -Resolver {
-            [pscustomobject]@{ Name = "SCardSvr"; Status = "Running" }
-        }
-        $r.status | Should -Be "PASS"
-    }
-    It "FAIL when SCardSvr stopped (Windows only) with actionable fix" {
-        if (-not (Get-Command Get-Service -ErrorAction SilentlyContinue)) {
-            Set-ItResult -Skipped -Because "Get-Service unavailable on non-Windows"
-            return
-        }
-        $r = Test-SmartCardService -Skip $false -Resolver {
-            [pscustomobject]@{ Name = "SCardSvr"; Status = "Stopped" }
-        }
-        $r.status | Should -Be "FAIL"
-        $r.fix | Should -Match "Start-Service SCardSvr"
-    }
-    It "FAIL when SCardSvr missing entirely (Windows only)" {
-        if (-not (Get-Command Get-Service -ErrorAction SilentlyContinue)) {
-            Set-ItResult -Skipped -Because "Get-Service unavailable on non-Windows"
-            return
-        }
-        $r = Test-SmartCardService -Skip $false -Resolver { $null }
-        $r.status | Should -Be "FAIL"
     }
 }
 

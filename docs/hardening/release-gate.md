@@ -12,7 +12,7 @@ This is the evidence checklist for every production SuavoAgent release.
 - OTA manifest: `update-manifest-vX.Y.Z.txt`
 - OTA manifest signature: `update-manifest-vX.Y.Z.sig`
 - Authenticode mode: `signed`; unsigned passthrough is not a Queen/field release
-- Signing runner: GitHub sees at least one online self-hosted runner with `self-hosted`, `windows`, and `yubikey` labels before build/sign/release work starts
+- Cloud signing key: signing is performed by `sslcom/actions-codesigner@develop` against SSL.com's eSigner cloud HSM. The `release-signing-preflight` job fails closed unless `SIGNING_ENABLED=true` and all four `ES_*` secrets (`ES_USERNAME`, `ES_PASSWORD`, `ES_CREDENTIAL_ID`, `ES_TOTP_SECRET`) are populated. See `docs/signing.md` for activation.
 - Windows release smoke: `windows-release-smoke` passed
 - Bootstrap parse: Windows PowerShell 5.1 parse passed
 - Runtime log encoding: Core, Broker, Helper, Watchdog, startup, and crash log files use UTF-8 with BOM so Windows PowerShell 5.1 support commands do not show mojibake.

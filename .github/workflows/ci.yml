@@ -54,19 +54,6 @@ jobs:
           }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $probeDir -BootstrapPath .\bootstrap.ps1 -Json
 
-      - name: Parse signing runner readiness probe
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $source = Get-Content -Raw -LiteralPath .\scripts\Test-SigningRunnerReadiness.ps1
-          $null = [scriptblock]::Create($source)
-          $parseErrors = $null
-          [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
-          if ($parseErrors -and $parseErrors.Count -gt 0) {
-            $parseErrors | Format-List * | Out-String | Write-Host
-            throw "Test-SigningRunnerReadiness.ps1 has Windows PowerShell 5.1 parse errors"
-          }
-
   build-and-test:
     runs-on: ubuntu-latest
     needs: bootstrap-windows-smoke
