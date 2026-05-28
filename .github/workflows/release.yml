@@ -241,7 +241,7 @@ jobs:
             installer\windows\DataDirectories.wxs `
             installer\windows\ManagedSettings.wxs `
             installer\windows\UI.wxs
-          if (-not (Test-Path $msiOut)) { throw "MSI build failed — output not found" }
+          if (-not (Test-Path $msiOut)) { throw "MSI build failed - output not found" }
           Get-Item $msiOut
 
       - name: Sign MSI via sslcom eSigner cloud
