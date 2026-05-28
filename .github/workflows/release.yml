@@ -122,6 +122,9 @@ jobs:
           name: suavoagent-unsigned-${{ needs.build.outputs.version }}
           path: release
 
+      - name: Prepare signed output directory
+        run: mkdir -p "${{ github.workspace }}/release/signed"
+
       - name: Sign SuavoAgent.Core.exe
         uses: sslcom/actions-codesigner@develop
         with:
@@ -131,7 +134,7 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoAgent.Core.exe
-          output_path: ${{ github.workspace }}/release
+          output_path: ${{ github.workspace }}/release/signed
 
       - name: Sign SuavoAgent.Broker.exe
         uses: sslcom/actions-codesigner@develop
@@ -142,7 +145,7 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoAgent.Broker.exe
-          output_path: ${{ github.workspace }}/release
+          output_path: ${{ github.workspace }}/release/signed
 
       - name: Sign SuavoAgent.Helper.exe
         uses: sslcom/actions-codesigner@develop
@@ -153,7 +156,7 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoAgent.Helper.exe
-          output_path: ${{ github.workspace }}/release
+          output_path: ${{ github.workspace }}/release/signed
 
       - name: Sign SuavoAgent.Watchdog.exe
         uses: sslcom/actions-codesigner@develop
@@ -164,7 +167,7 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoAgent.Watchdog.exe
-          output_path: ${{ github.workspace }}/release
+          output_path: ${{ github.workspace }}/release/signed
 
       - name: Sign SuavoSetup.exe
         uses: sslcom/actions-codesigner@develop
@@ -175,13 +178,13 @@ jobs:
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
           file_path: ${{ github.workspace }}/release/SuavoSetup.exe
-          output_path: ${{ github.workspace }}/release
+          output_path: ${{ github.workspace }}/release/signed
 
       - name: Upload signed binaries
         uses: actions/upload-artifact@v4
         with:
           name: suavoagent-final-${{ needs.build.outputs.version }}
-          path: release/
+          path: release/signed/
           retention-days: 7
 
   # --- Windows release artifact smoke -------------------------------------
