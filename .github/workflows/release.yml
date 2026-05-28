@@ -343,8 +343,11 @@ jobs:
           INSTALLER_P12="$RUNNER_TEMP/installer.p12"
           echo -n "$APP_P12_B64" | base64 --decode -o "$APP_P12"
           echo -n "$INSTALLER_P12_B64" | base64 --decode -o "$INSTALLER_P12"
-          security import "$APP_P12" -P "$APP_P12_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security import "$INSTALLER_P12" -P "$INSTALLER_P12_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          # -t agg = aggregate (cert + private key, what P12 carries).
+          # -t cert restricts to cert-only and the password-protected key blob
+          # can't be unlocked, surfacing as "MAC verification failed".
+          security import "$APP_P12" -P "$APP_P12_PWD" -A -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
+          security import "$INSTALLER_P12" -P "$INSTALLER_P12_PWD" -A -t agg -f pkcs12 -k "$KEYCHAIN_PATH"
           # Allow codesign to use the imported keys without further prompts
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
           # List the imported identities for diagnostic logging
