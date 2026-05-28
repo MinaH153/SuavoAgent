@@ -29,6 +29,22 @@ set -euo pipefail
 : "${APPLE_APP_PASSWORD:?APPLE_APP_PASSWORD env var is required}"
 : "${APPLE_DEVELOPER_ID_APPLICATION_IDENTITY:?APPLE_DEVELOPER_ID_APPLICATION_IDENTITY env var is required}"
 
+# Defensively strip ALL whitespace (incl. trailing \n / \r) from the
+# notarization credentials. `gh secret set` / `echo` pipelines silently
+# append a newline, which notarytool rejects as "401 Invalid credentials"
+# (see feedback-vercel-env-add-newline-trap). App-specific passwords,
+# emails, and team IDs never contain whitespace, so this is lossless.
+APPLE_ID="$(printf '%s' "$APPLE_ID" | tr -d '[:space:]')"
+APPLE_APP_PASSWORD="$(printf '%s' "$APPLE_APP_PASSWORD" | tr -d '[:space:]')"
+APPLE_TEAM_ID="$(printf '%s' "$APPLE_TEAM_ID" | tr -d '[:space:]')"
+
+# Length diagnostics — values stay masked (registered as GH secrets), but
+# lengths reveal newline contamination. Expected: TEAM_ID=10,
+# APP_PASSWORD=19 (xxxx-xxxx-xxxx-xxxx). APPLE_ID = email length.
+echo "diag: APPLE_ID length          = ${#APPLE_ID}"
+echo "diag: APPLE_APP_PASSWORD length = ${#APPLE_APP_PASSWORD} (expect 19: xxxx-xxxx-xxxx-xxxx)"
+echo "diag: APPLE_TEAM_ID length      = ${#APPLE_TEAM_ID} (expect 10)"
+
 VERSION_NUMERIC="${VERSION#v}"
 VERSION_NUMERIC="${VERSION_NUMERIC%%-*}"  # strip pre-release suffix
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
