@@ -191,14 +191,11 @@ jobs:
           path: release/signed/
           retention-days: 7
 
-  # --- Windows MSI build (WiX 4 + sslcom EV signing) ----------------------
-  # v4 Phase 1 — packages the 4 signed runtime binaries into a single MSI.
-  # Pharmacies install via `msiexec /i SuavoAgent.msi` or via the polished
-  # one-line installer from Phase 2's download page. EV-signed MSIs from
-  # an established publisher get instant SmartScreen reputation per the
-  # 2026-05-28 install verification, eliminating the "Windows protected
-  # your PC" panel that plain EXEs hit on zero-volume distribution.
-  package_msi_windows:
+  # --- Windows MSI build (WiX 4 on windows-latest) -----------------------
+  # v4 Phase 1 - builds an unsigned MSI on a Windows runner. Signing happens
+  # in the sibling sign_msi job (Linux) because sslcom/actions-codesigner is
+  # a Docker container action.
+  build_msi:
     if: ${{ vars.SIGNING_ENABLED == 'true' }}
     needs: [build, sign_windows]
     runs-on: windows-latest
@@ -243,6 +240,33 @@ jobs:
           if (-not (Test-Path $msiOut)) { throw "MSI build failed - output not found" }
           Get-Item $msiOut
 
+      - name: Upload unsigned MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-msi-unsigned-${{ needs.build.outputs.version }}
+          path: installer/windows/bin/*.msi
+          retention-days: 1
+
+  # --- MSI signing (Linux, sslcom Docker container action) ---------------
+  # Mirrors the existing sign_windows pattern. EV-signed MSIs from an
+  # established publisher get instant SmartScreen reputation per the
+  # 2026-05-28 install verification.
+  sign_msi:
+    if: ${{ vars.SIGNING_ENABLED == 'true' }}
+    needs: [build, build_msi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download unsigned MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-msi-unsigned-${{ needs.build.outputs.version }}
+          path: msi
+
+      - name: Prepare signed output directory
+        run: mkdir -p "${{ github.workspace }}/msi/signed"
+
       - name: Sign MSI via sslcom eSigner cloud
         uses: sslcom/actions-codesigner@develop
         with:
@@ -251,30 +275,15 @@ jobs:
           password: ${{ secrets.ES_PASSWORD }}
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/installer/windows/bin/SuavoAgent-${{ needs.build.outputs.version }}-win-x64.msi
-          output_path: ${{ github.workspace }}/installer/windows/bin/signed
+          file_path: ${{ github.workspace }}/msi/SuavoAgent-${{ needs.build.outputs.version }}-win-x64.msi
+          output_path: ${{ github.workspace }}/msi/signed
           environment_name: PROD
-
-      - name: Verify MSI signature
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $msiName = "SuavoAgent-${{ needs.build.outputs.version }}-win-x64.msi"
-          $signedPath = "installer\windows\bin\signed\$msiName"
-          if (-not (Test-Path $signedPath)) { throw "Signed MSI not found at $signedPath" }
-          # signtool ships with Windows SDK on github-hosted windows-latest
-          $signtool = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' -ErrorAction SilentlyContinue | Select-Object -Last 1).FullName
-          if (-not $signtool) { throw "signtool.exe not found" }
-          & $signtool verify /pa /v $signedPath
-          if ($LASTEXITCODE -ne 0) { throw "MSI signature verification failed" }
-          Write-Host "MSI signature verified: $signedPath"
-          Get-Item $signedPath
 
       - name: Upload signed MSI
         uses: actions/upload-artifact@v4
         with:
           name: suavoagent-msi-${{ needs.build.outputs.version }}
-          path: installer/windows/bin/signed/*.msi
+          path: msi/signed/*.msi
           retention-days: 7
 
   # --- macOS DMG build (gated — requires Apple Developer secrets) --------
@@ -440,13 +449,13 @@ jobs:
 
   # --- Checksums, manifest, GitHub release --------------------------------
   release:
-    needs: [build, sign_windows, windows-release-smoke, package_msi_windows, package_dmg_macos]
+    needs: [build, sign_windows, windows-release-smoke, sign_msi, package_dmg_macos]
     if: |
       always() &&
       needs.build.result == 'success' &&
       needs.sign_windows.result == 'success' &&
       needs.windows-release-smoke.result == 'success' &&
-      needs.package_msi_windows.result == 'success' &&
+      needs.sign_msi.result == 'success' &&
       (needs.package_dmg_macos.result == 'success' || needs.package_dmg_macos.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
