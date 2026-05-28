@@ -9,6 +9,10 @@
     <AssemblyTitle>SuavoAgent.Helper</AssemblyTitle>
     <Description>Suavo pharmacy agent helper — desktop UI automation and vision capture.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- v4 Phase 1: Mac RID support is best-effort. FlaUI is Windows-only,
+         so Mac Helper.app launches a placeholder screen. Real Mac vision
+         pipeline (AXUIElement) is a v5+ workstream. -->
+    <RuntimeIdentifiers>win-x64;osx-arm64;osx-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,18 +20,23 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="FlaUI.UIA2" Version="5.0.0" />
-    <PackageReference Include="Microsoft.Win32.SystemEvents" Version="10.0.6" />
+    <!-- Common managed deps (build everywhere). -->
     <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
-    <!-- System.Drawing.Common: GDI BitBlt screen capture. Windows-only supported
-         surface; guarded at runtime with OperatingSystem.IsWindows(). -->
-    <PackageReference Include="System.Drawing.Common" Version="8.0.10" />
-    <!-- Tesseract OCR managed wrapper only. Native tesseract.dll + leptonica
-         binaries are operator-provided at TesseractOptions.NativeLibraryPath,
-         same stealth pattern as LLamaSharp (Codex C-1 precedent). -->
+    <!-- Tesseract managed wrapper. Native binaries are operator-provided
+         at TesseractOptions.NativeLibraryPath (Codex C-1 precedent). -->
     <PackageReference Include="Tesseract" Version="5.2.0" ExcludeAssets="runtime;native" />
+  </ItemGroup>
+
+  <!-- Windows-only deps. FlaUI P/Invokes uia*.dll; System.Drawing.Common
+       depends on GDI; Microsoft.Win32.SystemEvents wraps user32. All three
+       are guarded at runtime with OperatingSystem.IsWindows() inside the
+       Helper code paths that use them. -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' OR '$(RuntimeIdentifier)' == ''">
+    <PackageReference Include="FlaUI.UIA2" Version="5.0.0" />
+    <PackageReference Include="Microsoft.Win32.SystemEvents" Version="10.0.6" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.10" />
   </ItemGroup>
 
   <ItemGroup>

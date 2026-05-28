@@ -191,6 +191,207 @@ jobs:
           path: release/signed/
           retention-days: 7
 
+  # --- Windows MSI build (WiX 4 + sslcom EV signing) ----------------------
+  # v4 Phase 1 — packages the 4 signed runtime binaries into a single MSI.
+  # Pharmacies install via `msiexec /i SuavoAgent.msi` or via the polished
+  # one-line installer from Phase 2's download page. EV-signed MSIs from
+  # an established publisher get instant SmartScreen reputation per the
+  # 2026-05-28 install verification, eliminating the "Windows protected
+  # your PC" panel that plain EXEs hit on zero-volume distribution.
+  package_msi_windows:
+    if: ${{ vars.SIGNING_ENABLED == 'true' }}
+    needs: [build, sign_windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download signed binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-final-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Install WiX 4 toolset + extensions
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet tool install --global wix --version 4.0.6
+          wix extension add -g WixToolset.UI.wixext/4.0.6
+          wix extension add -g WixToolset.Util.wixext/4.0.6
+          wix --version
+
+      - name: Build MSI
+        shell: powershell
+        env:
+          VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path installer\windows\bin -Force | Out-Null
+          $msiName = "SuavoAgent-${{ needs.build.outputs.version }}-win-x64.msi"
+          $msiOut = "installer\windows\bin\$msiName"
+          wix build `
+            -arch x64 `
+            -define "VERSION=$env:VERSION_NUMERIC" `
+            -define "SOURCE_DIR=$env:GITHUB_WORKSPACE\release" `
+            -ext WixToolset.UI.wixext `
+            -ext WixToolset.Util.wixext `
+            -out $msiOut `
+            installer\windows\SuavoAgent.wxs `
+            installer\windows\Services.wxs `
+            installer\windows\DataDirectories.wxs `
+            installer\windows\ManagedSettings.wxs `
+            installer\windows\UI.wxs
+          if (-not (Test-Path $msiOut)) { throw "MSI build failed — output not found" }
+          Get-Item $msiOut
+
+      - name: Sign MSI via sslcom eSigner cloud
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/installer/windows/bin/SuavoAgent-${{ needs.build.outputs.version }}-win-x64.msi
+          output_path: ${{ github.workspace }}/installer/windows/bin/signed
+          environment_name: PROD
+
+      - name: Verify MSI signature
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msiName = "SuavoAgent-${{ needs.build.outputs.version }}-win-x64.msi"
+          $signedPath = "installer\windows\bin\signed\$msiName"
+          if (-not (Test-Path $signedPath)) { throw "Signed MSI not found at $signedPath" }
+          # signtool ships with Windows SDK on github-hosted windows-latest
+          $signtool = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' -ErrorAction SilentlyContinue | Select-Object -Last 1).FullName
+          if (-not $signtool) { throw "signtool.exe not found" }
+          & $signtool verify /pa /v $signedPath
+          if ($LASTEXITCODE -ne 0) { throw "MSI signature verification failed" }
+          Write-Host "MSI signature verified: $signedPath"
+          Get-Item $signedPath
+
+      - name: Upload signed MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-msi-${{ needs.build.outputs.version }}
+          path: installer/windows/bin/signed/*.msi
+          retention-days: 7
+
+  # --- macOS DMG build (gated — requires Apple Developer secrets) --------
+  # v4 Phase 1 — assembles SuavoAgent.app, signs with Developer ID
+  # Application cert, builds DMG, submits to Apple notarization, staples
+  # the ticket. Skipped cleanly when vars.APPLE_SIGNING_ENABLED != 'true',
+  # so Phase 1 ships the Windows path independently while Joshua
+  # completes the Apple Developer cert setup (installer/macos/README.md).
+  #
+  # Mac binary's runtime usefulness is LIMITED in Phase 1 — Helper's
+  # FlaUI dep is Windows-only and Core's SqlClient/DPAPI/WindowsServices
+  # likewise. The DMG produces a launchable .app that shows a placeholder
+  # "Mac runtime in active development" screen. Real Mac runtime port is
+  # a v5+ workstream once the Windows ecosystem is healthy.
+  package_dmg_macos:
+    if: ${{ vars.APPLE_SIGNING_ENABLED == 'true' }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [osx-arm64, osx-x64]
+        include:
+          - arch: osx-arm64
+            runner: macos-14   # M1 runner
+          - arch: osx-x64
+            runner: macos-13   # Intel runner
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Decode Apple certs into temporary keychain
+        env:
+          APP_P12_B64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APP_P12_PWD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          INSTALLER_P12_B64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          INSTALLER_P12_PWD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/suavo-build.keychain"
+          KEYCHAIN_PWD=$(uuidgen)
+          # Create + unlock temp keychain
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          # Add temp keychain to search list (without removing login keychain)
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          # Decode + import both P12s
+          APP_P12="$RUNNER_TEMP/app.p12"
+          INSTALLER_P12="$RUNNER_TEMP/installer.p12"
+          echo -n "$APP_P12_B64" | base64 --decode -o "$APP_P12"
+          echo -n "$INSTALLER_P12_B64" | base64 --decode -o "$INSTALLER_P12"
+          security import "$APP_P12" -P "$APP_P12_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security import "$INSTALLER_P12" -P "$INSTALLER_P12_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          # Allow codesign to use the imported keys without further prompts
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          # List the imported identities for diagnostic logging
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          # Export the chosen identity name for the bundle script
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          echo "APPLE_DEVELOPER_ID_APPLICATION_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          rm -f "$APP_P12" "$INSTALLER_P12"
+
+      - name: dotnet publish for ${{ matrix.arch }}
+        env:
+          VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
+        run: |
+          set -euo pipefail
+          PUBLISH_DIR="$GITHUB_WORKSPACE/publish/${{ matrix.arch }}"
+          rm -rf "$PUBLISH_DIR"
+          mkdir -p "$PUBLISH_DIR"
+          for proj in Core Broker Helper Watchdog Setup; do
+            dotnet publish "src/SuavoAgent.$proj" \
+              -c Release \
+              -r ${{ matrix.arch }} \
+              --self-contained \
+              -p:Version="$VERSION_NUMERIC" \
+              -o "$PUBLISH_DIR" || {
+                echo "WARN: $proj publish failed for ${{ matrix.arch }} — non-fatal in Phase 1 (Mac runtime port deferred)"
+              }
+          done
+          echo "Publish output:"
+          ls -la "$PUBLISH_DIR"
+
+      - name: Run bundle.sh
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          PUBLISH_DIR: ${{ github.workspace }}/publish/${{ matrix.arch }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          bash installer/macos/bundle.sh
+
+      - name: Upload signed + notarized DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: suavoagent-dmg-${{ needs.build.outputs.version }}-${{ matrix.arch }}
+          path: installer/macos/bin/*.dmg
+          retention-days: 7
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/suavo-build.keychain"
+          [ -f "$KEYCHAIN_PATH" ] && security delete-keychain "$KEYCHAIN_PATH" || true
+
   # --- Windows release artifact smoke -------------------------------------
   windows-release-smoke:
     needs: [build, sign_windows]
@@ -240,12 +441,14 @@ jobs:
 
   # --- Checksums, manifest, GitHub release --------------------------------
   release:
-    needs: [build, sign_windows, windows-release-smoke]
+    needs: [build, sign_windows, windows-release-smoke, package_msi_windows, package_dmg_macos]
     if: |
       always() &&
       needs.build.result == 'success' &&
       needs.sign_windows.result == 'success' &&
-      needs.windows-release-smoke.result == 'success'
+      needs.windows-release-smoke.result == 'success' &&
+      needs.package_msi_windows.result == 'success' &&
+      (needs.package_dmg_macos.result == 'success' || needs.package_dmg_macos.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -254,6 +457,26 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: suavoagent-final-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Download MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-msi-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Download Mac DMG (arm64)
+        uses: actions/download-artifact@v4
+        if: needs.package_dmg_macos.result == 'success'
+        with:
+          name: suavoagent-dmg-${{ needs.build.outputs.version }}-osx-arm64
+          path: release
+
+      - name: Download Mac DMG (x64)
+        uses: actions/download-artifact@v4
+        if: needs.package_dmg_macos.result == 'success'
+        with:
+          name: suavoagent-dmg-${{ needs.build.outputs.version }}-osx-x64
           path: release
 
       - name: Download smoked release zip
@@ -382,6 +605,9 @@ jobs:
             release/SuavoAgent.Helper.exe
             release/SuavoAgent.Watchdog.exe
             release/SuavoSetup.exe
+            release/SuavoAgent-*-win-x64.msi
+            release/SuavoAgent-*-osx-arm64.dmg
+            release/SuavoAgent-*-osx-x64.dmg
             release/suavoagent-*-win-x64.zip
             release/field-release-receipt.json
             release/checksums.sha256

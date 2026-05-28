@@ -19,13 +19,14 @@
     <WixVariable Id="WixUILicenseRtf" Value="..\shared\eula.rtf" />
 
     <!--
-      Brand artwork. Banner is 500x58 (top of Welcome/Finish), dialog
-      is 500x312 (background of all other dialogs). Both sized per WixUI
-      defaults; replace with Suavo gold-on-dark variants from the brand
-      kit.
+      Brand artwork DEFERRED. WixUI extension uses built-in defaults
+      until the Suavo gold-on-dark variants are designed + reviewed.
+      Uncomment once installer/shared/banner.bmp (500x58) and
+      installer/shared/dialog.bmp (500x312) exist.
+
+      <WixVariable Id="WixUIBannerBmp" Value="..\shared\banner.bmp" />
+      <WixVariable Id="WixUIDialogBmp" Value="..\shared\dialog.bmp" />
     -->
-    <WixVariable Id="WixUIBannerBmp" Value="..\shared\banner.bmp" />
-    <WixVariable Id="WixUIDialogBmp" Value="..\shared\dialog.bmp" />
 
   </Fragment>
 </Wix>

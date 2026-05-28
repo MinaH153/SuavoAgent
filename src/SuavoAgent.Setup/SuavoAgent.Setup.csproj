@@ -1,7 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>SuavoSetup</AssemblyName>
@@ -10,23 +9,38 @@
     <RootNamespace>SuavoAgent.Setup</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <SupportedOSPlatformVersion>10.0</SupportedOSPlatformVersion>
     <NoWarn>CA1416</NoWarn>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <!-- v4 Phase 1: support osx-arm64 + osx-x64 RIDs for Mac DMG packaging.
+         Real Mac runtime port is deferred (Helper FlaUI + Core SqlClient/DPAPI
+         + WindowsServices need replacement). For now the Mac SuavoSetup.app
+         shows a "macOS runtime in active development" placeholder. -->
+    <RuntimeIdentifiers>win-x64;osx-arm64;osx-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
-  <!--
-    Publish-only properties. `dotnet publish -r win-x64` activates this group
-    so the release workflow keeps emitting a self-contained, compressed single-
-    file Windows binary. `dotnet build` (no -r) produces a portable assembly,
-    which lets the test project reference SuavoAgent.Setup without activating
-    the single-file + SelfContained constraints.
-  -->
+  <!-- Windows: WinExe (suppresses console window), Win10+ -->
   <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'win-x64'">
+    <OutputType>WinExe</OutputType>
+    <SupportedOSPlatformVersion>10.0</SupportedOSPlatformVersion>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <!-- macOS: Exe (Avalonia handles windowing), macOS 13+. PublishSingleFile
+       NOT enabled on Mac because the .app bundle structure requires loose
+       files at known paths — bundle.sh assembles them into Contents/MacOS/. -->
+  <PropertyGroup Condition="$(RuntimeIdentifier.StartsWith('osx-'))">
+    <OutputType>Exe</OutputType>
+    <SupportedOSPlatformVersion>13.0</SupportedOSPlatformVersion>
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+
+  <!-- Default (no RID): Exe, portable for tests + design-time. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == ''">
+    <OutputType>Exe</OutputType>
   </PropertyGroup>
 
   <ItemGroup>

@@ -42,11 +42,12 @@
     <UIRef Id="WixUI_ErrorProgressText" />
 
     <!--
-      Icon for Add/Remove Programs. Resource file under installer/shared/ to
-      keep brand artifacts centralized.
+      Icon for Add/Remove Programs. DEFERRED — SuavoAgent.ico is a brand
+      artifact pending design. ARP entry uses no custom icon until then.
+
+      <Icon Id="SuavoAgent.ico" SourceFile="..\shared\SuavoAgent.ico" />
+      <Property Id="ARPPRODUCTICON" Value="SuavoAgent.ico" />
     -->
-    <Icon Id="SuavoAgent.ico" SourceFile="..\shared\SuavoAgent.ico" />
-    <Property Id="ARPPRODUCTICON" Value="SuavoAgent.ico" />
     <Property Id="ARPHELPLINK" Value="https://suavollc.com/support" />
     <Property Id="ARPURLINFOABOUT" Value="https://suavollc.com" />
     <Property Id="ARPNOMODIFY" Value="1" />

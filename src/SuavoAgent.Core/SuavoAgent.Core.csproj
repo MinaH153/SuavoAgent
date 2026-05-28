@@ -12,6 +12,11 @@
          LLamaSharp auto-selects the right one at runtime; we just need the publish step to allow the
          parallel files. -->
     <ErrorOnDuplicatePublishOutputFiles>false</ErrorOnDuplicatePublishOutputFiles>
+    <!-- v4 Phase 1: support Mac RIDs for bundle.sh dotnet publish step.
+         Note: SqlClient + WindowsServices + DPAPI usage means the Mac binary
+         won't actually run usefully today; this RID support is for packaging-
+         only until Phase 2+ replaces Windows-coupled deps. -->
+    <RuntimeIdentifiers>win-x64;osx-arm64;osx-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>

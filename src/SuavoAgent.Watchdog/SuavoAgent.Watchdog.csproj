@@ -7,6 +7,8 @@
     <AssemblyTitle>SuavoAgent.Watchdog</AssemblyTitle>
     <Description>Suavo pharmacy agent watchdog — auto-restarts Core/Broker and escalates to bootstrap --repair on persistent failure.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- v4 Phase 1: support Mac RIDs for bundle.sh packaging. -->
+    <RuntimeIdentifiers>win-x64;osx-arm64;osx-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>
