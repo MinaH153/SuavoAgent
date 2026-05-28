@@ -338,11 +338,40 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
           # Add temp keychain to search list (without removing login keychain)
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
-          # Decode + import both P12s
+          # Decode + import both P12s.
+          # Use printf + > redirect (avoids echo -n + -o flag compat issues
+          # between BSD base64 on macOS runners and GNU base64 docs).
           APP_P12="$RUNNER_TEMP/app.p12"
           INSTALLER_P12="$RUNNER_TEMP/installer.p12"
-          echo -n "$APP_P12_B64" | base64 --decode -o "$APP_P12"
-          echo -n "$INSTALLER_P12_B64" | base64 --decode -o "$INSTALLER_P12"
+          printf '%s' "$APP_P12_B64" | base64 -D > "$APP_P12"
+          printf '%s' "$INSTALLER_P12_B64" | base64 -D > "$INSTALLER_P12"
+          # Diagnostic: confirm P12s decoded to non-empty files and that
+          # secrets round-tripped. Sizes + sha256s logged; passwords stay
+          # masked because $APP_P12_PWD is registered as a secret.
+          echo "diag: APP_P12_B64 length     = ${#APP_P12_B64}"
+          echo "diag: INST_P12_B64 length    = ${#INSTALLER_P12_B64}"
+          echo "diag: APP_P12_PWD length     = ${#APP_P12_PWD}"
+          echo "diag: INST_P12_PWD length    = ${#INSTALLER_P12_PWD}"
+          echo "diag: APP_P12 file size      = $(wc -c < "$APP_P12")"
+          echo "diag: INST_P12 file size     = $(wc -c < "$INSTALLER_P12")"
+          echo "diag: APP_P12 sha256         = $(shasum -a 256 "$APP_P12" | awk '{print $1}')"
+          echo "diag: INST_P12 sha256        = $(shasum -a 256 "$INSTALLER_P12" | awk '{print $1}')"
+          # Verify the password works via openssl FIRST (clearer error than
+          # security import's generic "MAC verification failed").
+          if openssl pkcs12 -info -in "$APP_P12" -passin "pass:$APP_P12_PWD" -nokeys >/dev/null 2>&1; then
+            echo "diag: APP_P12 openssl unlock = OK"
+          else
+            echo "diag: APP_P12 openssl unlock = FAIL"
+            openssl pkcs12 -info -in "$APP_P12" -passin "pass:$APP_P12_PWD" -nokeys 2>&1 | head -5
+            exit 1
+          fi
+          if openssl pkcs12 -info -in "$INSTALLER_P12" -passin "pass:$INSTALLER_P12_PWD" -nokeys >/dev/null 2>&1; then
+            echo "diag: INST_P12 openssl unlock = OK"
+          else
+            echo "diag: INST_P12 openssl unlock = FAIL"
+            openssl pkcs12 -info -in "$INSTALLER_P12" -passin "pass:$INSTALLER_P12_PWD" -nokeys 2>&1 | head -5
+            exit 1
+          fi
           # -t agg = aggregate (cert + private key, what P12 carries).
           # -t cert restricts to cert-only and the password-protected key blob
           # can't be unlocked, surfacing as "MAC verification failed".
