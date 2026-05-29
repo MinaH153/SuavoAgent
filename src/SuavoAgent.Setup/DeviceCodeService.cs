@@ -36,6 +36,13 @@ public sealed record DeviceCodePollResult(
         $"DeviceCodePollResult {{ Status = {Status}, AgentId = {AgentId}, PharmacyId = {PharmacyId}, ApiKey = [redacted] }}";
 }
 
+/// <summary>HTTP surface for device-code onboarding (abstracted for testing the pairing orchestrator).</summary>
+public interface IDeviceCodeService
+{
+    Task<DeviceCodeCreateResult> CreateAsync(string fingerprint, string version, CancellationToken ct);
+    Task<DeviceCodePollResult> PollAsync(string deviceCode, CancellationToken ct);
+}
+
 /// <summary>
 /// Client for the v4 device-code onboarding flow. The agent POSTs to create a
 /// code, shows it to the operator (who approves it on the dashboard), then
@@ -45,7 +52,7 @@ public sealed record DeviceCodePollResult(
 /// Mirrors <c>AgentCredentialRecoveryClient</c>'s HTTP conventions (HTTPS-only
 /// CloudUrl, BaseAddress, injectable handler for tests).
 /// </summary>
-public sealed class DeviceCodeService : IDisposable
+public sealed class DeviceCodeService : IDeviceCodeService, IDisposable
 {
     private const string CreateEndpoint = "/api/agent/device-code";
     private const string PollEndpoint = "/api/agent/device-token";
