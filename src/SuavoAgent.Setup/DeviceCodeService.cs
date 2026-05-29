@@ -21,7 +21,15 @@ public sealed record DeviceCodePollResult(
 {
     public bool IsAuthorized => string.Equals(Status, "authorized", StringComparison.Ordinal);
     public bool IsPending => string.Equals(Status, "pending", StringComparison.Ordinal);
-    public bool IsTerminal => !IsPending; // authorized | expired | denied
+
+    // Only the KNOWN terminal states end polling. An unknown/garbage status
+    // (e.g. a transient gateway body) is treated as non-terminal so the poll
+    // loop keeps trying until the code's real expiry — never ending pairing
+    // on a response we don't recognize. (Codex slice C1 review.)
+    public bool IsTerminal =>
+        IsAuthorized
+        || string.Equals(Status, "expired", StringComparison.Ordinal)
+        || string.Equals(Status, "denied", StringComparison.Ordinal);
 
     // Never leak the key in logs/diagnostics.
     public override string ToString() =>

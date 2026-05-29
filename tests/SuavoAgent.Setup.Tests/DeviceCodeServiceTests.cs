@@ -76,6 +76,19 @@ public sealed class DeviceCodeServiceTests
         Assert.DoesNotContain("sagent_topsecret", r.ToString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("pending", false, false)]
+    [InlineData("authorized", true, true)]
+    [InlineData("expired", true, false)]
+    [InlineData("denied", true, false)]
+    [InlineData("weird-gateway-blob", false, false)] // unknown -> keep polling
+    public void PollResult_Terminality(string status, bool expectTerminal, bool expectAuthorized)
+    {
+        var r = new DeviceCodePollResult(status);
+        Assert.Equal(expectTerminal, r.IsTerminal);
+        Assert.Equal(expectAuthorized, r.IsAuthorized);
+    }
+
     private sealed class QueueHandler : HttpMessageHandler
     {
         private readonly Queue<HttpResponseMessage> _responses;

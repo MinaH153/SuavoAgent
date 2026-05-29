@@ -21,6 +21,14 @@ public sealed class DpapiCredentialStore : IEncryptedCredentialStore
     private readonly string _filePath;
     private readonly object _gate = new();
 
+    // App-specific entropy mixed into every Protect/Unprotect. LocalMachine
+    // scope alone lets any local process DPAPI-unprotect; this raises the bar
+    // so a blob can't be decrypted without also knowing SuavoAgent's entropy.
+    // (Defense-in-depth, not a substitute for file ACLs — see PR notes; the
+    // CurrentUser-scope-under-service-identity decision is a follow-up.)
+    private static readonly byte[] Entropy =
+        "SuavoAgent.CredentialStore.v1"u8.ToArray();
+
     /// <summary>Production path: %ProgramData%\SuavoAgent\credentials.dat.</summary>
     public DpapiCredentialStore()
         : this(Path.Combine(
@@ -44,7 +52,7 @@ public sealed class DpapiCredentialStore : IEncryptedCredentialStore
             if (!map.TryGetValue(key, out var blob) || string.IsNullOrEmpty(blob))
                 return null;
             var dec = ProtectedData.Unprotect(
-                Convert.FromBase64String(blob), null, DataProtectionScope.LocalMachine);
+                Convert.FromBase64String(blob), Entropy, DataProtectionScope.LocalMachine);
             return Encoding.UTF8.GetString(dec);
         }
     }
@@ -55,7 +63,7 @@ public sealed class DpapiCredentialStore : IEncryptedCredentialStore
         {
             var map = Read();
             var enc = ProtectedData.Protect(
-                Encoding.UTF8.GetBytes(value), null, DataProtectionScope.LocalMachine);
+                Encoding.UTF8.GetBytes(value), Entropy, DataProtectionScope.LocalMachine);
             map[key] = Convert.ToBase64String(enc);
             Write(map);
         }
@@ -94,6 +102,12 @@ public sealed class DpapiCredentialStore : IEncryptedCredentialStore
         var dir = Path.GetDirectoryName(_filePath);
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
-        File.WriteAllText(_filePath, JsonSerializer.Serialize(map));
+
+        // Atomic replace: write a temp file then move over the target. A
+        // concurrent reader in another process (Core/Broker/Watchdog) never
+        // observes a half-written file. (Codex slice C1 review.)
+        var tmp = _filePath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(map));
+        File.Move(tmp, _filePath, overwrite: true);
     }
 }
