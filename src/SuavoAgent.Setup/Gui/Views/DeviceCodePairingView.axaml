@@ -1,0 +1,101 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="540"
+             x:Class="SuavoAgent.Setup.Gui.Views.DeviceCodePairingView"
+             x:DataType="vm:DeviceCodePairingViewModel">
+
+    <Grid RowDefinitions="*,Auto,Auto,Auto,Auto,*" Margin="80,32">
+
+        <StackPanel Grid.Row="1" HorizontalAlignment="Center" Spacing="10">
+            <TextBlock Text="Connect this workstation"
+                       Foreground="{DynamicResource SuavoTextBrush}"
+                       FontSize="28" FontWeight="Light"
+                       HorizontalAlignment="Center"/>
+            <TextBlock Text="Enter this code in your Suavo pharmacy dashboard to approve this PC."
+                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                       FontSize="14"
+                       TextAlignment="Center" TextWrapping="Wrap"
+                       MaxWidth="560"/>
+        </StackPanel>
+
+        <!-- Code panel (hidden once pairing fails) -->
+        <Border Grid.Row="2" Margin="0,28,0,0"
+                IsVisible="{Binding ShowCode}"
+                HorizontalAlignment="Center"
+                Background="{DynamicResource SuavoCardBrush}"
+                BorderBrush="{DynamicResource SuavoBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="{DynamicResource SuavoRadiusLarge}"
+                Padding="40,28">
+            <StackPanel Spacing="12" HorizontalAlignment="Center">
+                <TextBlock Text="{Binding DeviceCode}"
+                           Foreground="{DynamicResource SuavoTextBrush}"
+                           FontFamily="Consolas,Menlo,monospace"
+                           FontSize="52" FontWeight="Bold"
+                           LetterSpacing="6"
+                           HorizontalAlignment="Center"/>
+                <TextBlock Text="{Binding TimeRemainingText}"
+                           Foreground="{DynamicResource SuavoTextMutedBrush}"
+                           FontSize="13"
+                           HorizontalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Status / error line -->
+        <StackPanel Grid.Row="3" Margin="0,20,0,0" HorizontalAlignment="Center" Spacing="6">
+            <TextBlock Text="{Binding StatusText}"
+                       IsVisible="{Binding ShowCode}"
+                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                       FontSize="13"
+                       TextAlignment="Center" TextWrapping="Wrap"
+                       MaxWidth="560"/>
+            <Border IsVisible="{Binding IsFailed}"
+                    MaxWidth="560"
+                    Background="{DynamicResource SuavoCardBrush}"
+                    BorderBrush="{DynamicResource SuavoDangerBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{DynamicResource SuavoRadiusLarge}"
+                    Padding="22,16">
+                <TextBlock Text="{Binding ErrorText}"
+                           Foreground="{DynamicResource SuavoTextMutedBrush}"
+                           FontSize="13"
+                           TextWrapping="Wrap"/>
+            </Border>
+        </StackPanel>
+
+        <!-- Actions -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal"
+                    HorizontalAlignment="Center" Spacing="12" Margin="0,24,0,0">
+            <Button Content="Open dashboard"
+                    Command="{Binding OpenBrowserCommand}"
+                    IsVisible="{Binding ShowCode}"
+                    Padding="22,12"
+                    Background="{DynamicResource SuavoAccentBrush}"
+                    Foreground="#101010"
+                    BorderThickness="0"
+                    FontWeight="SemiBold"
+                    CornerRadius="10"/>
+            <Button Content="Try a different code"
+                    Command="{Binding RetryCommand}"
+                    IsVisible="{Binding IsFailed}"
+                    Padding="22,12"
+                    Background="{DynamicResource SuavoAccentBrush}"
+                    Foreground="#101010"
+                    BorderThickness="0"
+                    FontWeight="SemiBold"
+                    CornerRadius="10"/>
+            <Button Content="Cancel"
+                    Command="{Binding CancelCommand}"
+                    Padding="22,12"
+                    Background="Transparent"
+                    Foreground="{DynamicResource SuavoTextMutedBrush}"
+                    BorderBrush="{DynamicResource SuavoBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"/>
+        </StackPanel>
+
+    </Grid>
+</UserControl>
