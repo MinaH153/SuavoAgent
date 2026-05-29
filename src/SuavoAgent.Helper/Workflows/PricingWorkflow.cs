@@ -287,6 +287,18 @@ public sealed class PricingWorkflow
                     var raw = el.AsTextBox()?.Text ?? el.Name ?? "";
                     if (string.IsNullOrEmpty(raw)) continue;
 
+                    // Guard: the NDC quick-search dropdown returns a red "(Do Not
+                    // Use)" duplicate next to the green active item. If the loaded
+                    // item screen shows that marker we must NOT price it — fail so
+                    // the row gets a clear status instead of inactive pricing.
+                    if (PricingGridReader.LooksLikeDoNotUse(raw))
+                    {
+                        _logger.Warning(
+                            "PricingWorkflow: loaded item for NDC {Ndc} is marked Do Not Use — refusing to price",
+                            ndc);
+                        return false;
+                    }
+
                     // PioneerRx may display the NDC in any supported shape; normalize before compare
                     // to avoid false negatives on 4-4-2 / 5-3-2 layouts.
                     var observed = NdcNormalizer.TryNormalize(raw.Trim());
@@ -367,7 +379,10 @@ public sealed class PricingWorkflow
                 return null;
             }
 
-            var rows = grid.FindAllChildren(cf.ByControlType(ControlType.DataItem));
+            // Virtualized DevExpress grids load rows lazily — reading once can
+            // catch a partial set and miss the true cheapest. Wait until the row
+            // count stops changing before reading.
+            var rows = WaitForStableRows(grid, cf);
             if (rows.Length == 0)
             {
                 _logger.Debug("PricingWorkflow: Pricing grid has no rows");
@@ -385,41 +400,38 @@ public sealed class PricingWorkflow
                 failureReason = "Pricing grid schema not recognized — Supplier/Cost columns missing or renamed";
                 return null;
             }
-            var (supplierIdx, costIdx) = cols.Value;
+            var (supplierIdx, costIdx, statusIdx) = cols.Value;
 
-            string? bestSupplier = null;
-            decimal bestCost = decimal.MaxValue;
-
+            var parsed = new List<PricingGridReader.SupplierRow>(rows.Length);
             foreach (var row in rows)
             {
                 var cells = row.FindAllChildren(cf.ByControlType(ControlType.Custom))
                     .Concat(row.FindAllChildren(cf.ByControlType(ControlType.DataItem)))
                     .ToArray();
 
-                if (cells.Length <= Math.Max(supplierIdx, costIdx)) continue;
+                var needed = Math.Max(supplierIdx, Math.Max(costIdx, statusIdx));
+                if (cells.Length <= needed) continue;
 
-                var supplierText = cells[supplierIdx].Name?.Trim() ?? "";
-                var costText = cells[costIdx].Name?.Trim() ?? "";
+                // Read FULL cell text (Value / LegacyIAccessible pattern), not the
+                // rendered Name — supplier names truncate in the grid
+                // ("Mckesson Geri…") and a truncated name would be written back.
+                var supplierText = GetCellText(cells[supplierIdx]);
+                var costText = GetCellText(cells[costIdx]);
+                var statusText = statusIdx >= 0 ? GetCellText(cells[statusIdx]) : "";
 
-                if (string.IsNullOrEmpty(supplierText)) continue;
-                if (!decimal.TryParse(costText,
-                    System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out var cost))
-                    continue;
-
-                if (cost > 0 && cost < bestCost)
-                {
-                    bestCost = cost;
-                    bestSupplier = supplierText;
-                }
+                if (!PricingGridReader.TryParseCost(costText, out var cost)) continue;
+                parsed.Add(new PricingGridReader.SupplierRow(supplierText, cost, statusText));
             }
 
-            if (bestSupplier == null)
+            // Cheapest = min Cost across ALL usable rows (sort is user-toggleable;
+            // never trust row 1) — discontinued/unavailable rows excluded.
+            var cheapest = PricingGridReader.SelectCheapest(parsed);
+            if (cheapest == null)
             {
-                failureReason = "No supplier rows found in Pricing tab";
+                failureReason = "No usable supplier rows in Pricing tab";
                 return null;
             }
-            return (bestSupplier, bestCost);
+            return cheapest;
         }
         catch (Exception ex)
         {
@@ -443,7 +455,7 @@ public sealed class PricingWorkflow
     /// ("Pricing grid schema not recognized") so the row gets a clear error in
     /// the Excel output instead of plausible-looking wrong data.
     /// </summary>
-    private (int supplierIdx, int costIdx)? ResolvePricingColumns(AutomationElement grid, ConditionFactory cf)
+    private (int supplierIdx, int costIdx, int statusIdx)? ResolvePricingColumns(AutomationElement grid, ConditionFactory cf)
     {
         try
         {
@@ -462,7 +474,10 @@ public sealed class PricingWorkflow
                 return null;
             }
 
-            int supplierIdx = -1, costIdx = -1;
+            // statusIdx is OPTIONAL — when present we honor "Include Discontinued
+            // = No" defensively by skipping discontinued/unavailable rows even if
+            // the grid's own filter bar wasn't pinned. Absence (-1) is fine.
+            int supplierIdx = -1, costIdx = -1, statusIdx = -1;
             for (int i = 0; i < headerCells.Length; i++)
             {
                 var name = headerCells[i].Name?.Trim() ?? "";
@@ -472,6 +487,8 @@ public sealed class PricingWorkflow
                          (name.Equals("Cost Per Unit", StringComparison.OrdinalIgnoreCase) ||
                           name.Equals("Cost (per unit)", StringComparison.OrdinalIgnoreCase)))
                     costIdx = i;
+                else if (statusIdx == -1 && name.Equals("Status", StringComparison.OrdinalIgnoreCase))
+                    statusIdx = i;
             }
 
             if (supplierIdx == -1 || costIdx == -1)
@@ -483,15 +500,69 @@ public sealed class PricingWorkflow
                 return null;
             }
 
-            _logger.Debug("PricingWorkflow: resolved columns — Supplier=col {Sup}, Cost Per Unit=col {Cost}",
-                supplierIdx, costIdx);
-            return (supplierIdx, costIdx);
+            _logger.Debug("PricingWorkflow: resolved columns — Supplier=col {Sup}, Cost Per Unit=col {Cost}, Status=col {Status}",
+                supplierIdx, costIdx, statusIdx);
+            return (supplierIdx, costIdx, statusIdx);
         }
         catch (Exception ex)
         {
             _logger.Warning(ex, "PricingWorkflow: column resolution error — failing closed (no ordinal fallback)");
             return null;
         }
+    }
+
+    /// <summary>
+    /// Polls the grid's row count until it stabilizes (two consecutive equal,
+    /// non-zero reads) or the load timeout elapses, then returns the rows.
+    /// DevExpress grids virtualize — a single read can catch a partial set and
+    /// miss the true cheapest supplier.
+    /// </summary>
+    private AutomationElement[] WaitForStableRows(AutomationElement grid, ConditionFactory cf)
+    {
+        var deadline = DateTime.UtcNow + GridLoadTimeout;
+        var rows = grid.FindAllChildren(cf.ByControlType(ControlType.DataItem));
+        var stable = 0;
+        while (DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(250);
+            var next = grid.FindAllChildren(cf.ByControlType(ControlType.DataItem));
+            if (next.Length > 0 && next.Length == rows.Length)
+            {
+                if (++stable >= 2) { rows = next; break; }
+            }
+            else
+            {
+                stable = 0;
+            }
+            rows = next;
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Reads a cell's FULL value rather than its rendered Name. Grid cells
+    /// truncate long text in the Name property ("Mckesson Geri…"); the
+    /// ValuePattern / LegacyIAccessible value carries the complete string.
+    /// Falls back to Name (the prior behavior) when no value pattern exists.
+    /// </summary>
+    private static string GetCellText(AutomationElement el)
+    {
+        try
+        {
+            var text = el.AsTextBox()?.Text;
+            if (!string.IsNullOrWhiteSpace(text)) return text.Trim();
+        }
+        catch { /* not a value-bearing element */ }
+
+        try
+        {
+            var legacy = el.Patterns.LegacyIAccessible.PatternOrDefault;
+            var v = legacy?.Value?.ValueOrDefault;
+            if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+        }
+        catch { /* legacy pattern unsupported */ }
+
+        return el.Name?.Trim() ?? "";
     }
 
     private void TryCloseEditWindow(Window editWindow, ConditionFactory cf)
