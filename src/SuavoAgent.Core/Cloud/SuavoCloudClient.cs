@@ -271,10 +271,16 @@ internal static class OutboundPhiGuard
             return;
 
         using var doc = JsonDocument.Parse(body);
-        if (ContainsPhi(doc.RootElement))
+        var offendingField = FindPhiField(doc.RootElement);
+        if (offendingField != null)
         {
+            // PHI-safe diagnostic: name the FIELD that tripped the guard (never the
+            // value). Without this, a blocked heartbeat is undebuggable — which is
+            // exactly how a false-positive on legitimate telemetry can silently take
+            // an agent offline. The field name flows into logs so the offending
+            // payload field can be pinpointed and cleaned up.
             throw new InvalidOperationException(
-                $"PHI-classified payload blocked before outbound cloud POST to {path}.");
+                $"PHI-classified payload blocked before outbound cloud POST to {path} (field: {offendingField}).");
         }
     }
 
@@ -287,7 +293,12 @@ internal static class OutboundPhiGuard
                options.EnableLegacyPhiDeliveryQueueSync;
     }
 
-    private static bool ContainsPhi(JsonElement element, string? propertyName = null)
+    /// <summary>
+    /// Returns the normalized NAME of the first field whose name or value classifies
+    /// as PHI, or null if the payload is clean. Returns the field name only — never
+    /// the value — so it is safe to surface in exceptions and logs.
+    /// </summary>
+    private static string? FindPhiField(JsonElement element, string? propertyName = null)
     {
         switch (element.ValueKind)
         {
@@ -296,24 +307,32 @@ internal static class OutboundPhiGuard
                 {
                     var normalized = NormalizeFieldName(property.Name);
                     if (BlockedFieldNames.Contains(normalized))
-                        return true;
-                    if (ContainsPhi(property.Value, normalized))
-                        return true;
+                        return normalized;
+                    var nested = FindPhiField(property.Value, normalized);
+                    if (nested != null)
+                        return nested;
                 }
 
-                return false;
+                return null;
 
             case JsonValueKind.Array:
-                return element.EnumerateArray().Any(item => ContainsPhi(item, propertyName));
+                foreach (var item in element.EnumerateArray())
+                {
+                    var nested = FindPhiField(item, propertyName);
+                    if (nested != null)
+                        return nested;
+                }
+
+                return null;
 
             case JsonValueKind.String:
                 var value = element.GetString();
                 if (string.IsNullOrWhiteSpace(value) || IsOperationalSafeString(propertyName, value))
-                    return false;
-                return PhiScrubber.ContainsPhi(value);
+                    return null;
+                return PhiScrubber.ContainsPhi(value) ? (propertyName ?? "(root)") : null;
 
             default:
-                return false;
+                return null;
         }
     }
 
