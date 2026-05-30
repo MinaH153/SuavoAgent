@@ -40,6 +40,16 @@ public sealed class HealthSnapshot
         var learningSessionId = _stateDb.GetActiveSessionId(_options.PharmacyId ?? "");
         var visionCapture = (_sp.GetService(typeof(VisionCaptureTelemetry)) as VisionCaptureTelemetry)?.Snapshot();
         var (ipcRejectionCount, lastIpcRejectReason, lastIpcRejectAt) = IpcRejectionStats.Snapshot();
+        var workerHealth = _sp.GetService(typeof(WorkerHealthRegistry)) as WorkerHealthRegistry;
+        var workers = (workerHealth?.Snapshot() ?? Array.Empty<WorkerHealth>())
+            .Select(w => new
+            {
+                name = w.Name,
+                restartCount = w.RestartCount,
+                escalated = w.Escalated,
+                lastFaultUtc = w.LastFaultUtc.ToString("o"),
+            })
+            .ToArray();
 
         var snapshot = new
         {
@@ -63,6 +73,9 @@ public sealed class HealthSnapshot
                 lastIpcRejectReason,
                 lastIpcRejectAt = lastIpcRejectAt?.ToString("o")
             },
+            // Supervised-worker liveness — restart-looping or escalated workers (the cloud's
+            // signal for worker-granular remediation, vs. only detecting a fully-silent agent).
+            workers,
             writeback = new
             {
                 pending = _stateDb.GetPendingWritebacks().Count,

@@ -62,8 +62,9 @@ public sealed class RxDetectionWorker : ResilientHostedService
         ILoggerFactory loggerFactory,
         IOptions<AgentOptions> options,
         AgentStateDb stateDb,
-        IServiceProvider serviceProvider)
-        : base(logger)
+        IServiceProvider serviceProvider,
+        WorkerHealthRegistry? healthRegistry = null)
+        : base(logger, healthRegistry)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;

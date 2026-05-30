@@ -70,8 +70,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
         ILogger<HeartbeatWorker> logger,
         IOptions<AgentOptions> options,
         IServiceProvider serviceProvider,
-        AgentStateDb stateDb)
-        : base(logger)
+        AgentStateDb stateDb,
+        WorkerHealthRegistry? healthRegistry = null)
+        : base(logger, healthRegistry)
     {
         _logger = logger;
         _options = options.Value;

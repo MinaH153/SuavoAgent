@@ -36,8 +36,9 @@ public sealed class WritebackProcessor : ResilientHostedService
         ILogger<WritebackProcessor> logger,
         AgentStateDb stateDb,
         IpcPipeServer pipeServer,
-        IOptions<AgentOptions> options)
-        : base(logger)
+        IOptions<AgentOptions> options,
+        WorkerHealthRegistry? healthRegistry = null)
+        : base(logger, healthRegistry)
     {
         _logger = logger;
         _stateDb = stateDb;
