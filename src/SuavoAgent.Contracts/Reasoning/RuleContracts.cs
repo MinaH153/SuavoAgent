@@ -103,6 +103,13 @@ public sealed record RulePredicate
     /// that tolerance and must survive YAML round-trip.
     /// </summary>
     public int? MinRequiredCount { get; init; }
+
+    /// <summary>
+    /// Visual predicate (W4b): substrings that must ALL appear (case-insensitive) in some
+    /// <see cref="RuleContext.ScreenText"/> region. Empty = no constraint. Lets a rule fire on
+    /// what is literally on screen, app-agnostically — no hardcoded process/element names.
+    /// </summary>
+    public IReadOnlyList<string> TextPresent { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>
