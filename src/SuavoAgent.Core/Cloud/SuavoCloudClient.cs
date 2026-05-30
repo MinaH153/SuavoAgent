@@ -330,10 +330,36 @@ internal static class OutboundPhiGuard
                 var value = element.GetString();
                 if (string.IsNullOrWhiteSpace(value) || IsOperationalSafeString(propertyName, value))
                     return null;
+                // Some telemetry ships pre-validated, pre-serialized JSON as a string
+                // value (intelligenceContext, efficiencyReport, fleetSignals). Scanning
+                // the blob as opaque text trips the date pattern on its embedded ISO
+                // timestamps. Parse and recurse so each leaf gets per-field treatment:
+                // embedded timestamps are exempted; embedded PHI is still caught and
+                // named by its nested field.
+                if (TryParseNestedJson(value, out var parsed))
+                    return FindPhiField(parsed, propertyName);
                 return PhiScrubber.ContainsPhi(value) ? (propertyName ?? "(root)") : null;
 
             default:
                 return null;
+        }
+    }
+
+    private static bool TryParseNestedJson(string value, out JsonElement element)
+    {
+        element = default;
+        var trimmed = value.AsSpan().TrimStart();
+        if (trimmed.Length == 0 || (trimmed[0] != '{' && trimmed[0] != '['))
+            return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(value);
+            element = doc.RootElement.Clone();
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 
