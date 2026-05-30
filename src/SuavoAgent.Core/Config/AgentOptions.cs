@@ -104,6 +104,13 @@ public sealed class AgentOptions
     public VisionOptions Vision { get; set; } = new();
 
     /// <summary>
+    /// Self-healing knobs. WorkerSupervisor restarts a faulted worker in-process instead of
+    /// letting it die silently while the service still shows "Running". Default on; kill-switch
+    /// via config-sync if a worker ever restart-loops.
+    /// </summary>
+    public SelfHealOptions SelfHeal { get; set; } = new();
+
+    /// <summary>
     /// Multi-pharmacy config. When populated, each entry gets its own detection worker.
     /// Backwards-compatible: if empty, falls back to the top-level SqlServer/PharmacyId fields.
     /// </summary>
@@ -160,6 +167,16 @@ public enum PricingExecutorMode
     SqlFirst,
     /// <summary>UIA-first via Helper. No SQL fallback. See <c>AgentOptions.PricingExecutor</c>.</summary>
     UiaFirst,
+}
+
+public sealed class SelfHealOptions
+{
+    /// <summary>
+    /// Restart a faulted <c>ResilientHostedService</c> worker in-process (bounded backoff) instead
+    /// of letting it die silently. Default true. Set false as a kill-switch (faults then propagate
+    /// as before).
+    /// </summary>
+    public bool WorkerSupervisorEnabled { get; set; } = true;
 }
 
 public sealed class PharmacyConfig
