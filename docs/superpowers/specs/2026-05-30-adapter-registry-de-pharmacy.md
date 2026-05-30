@@ -61,17 +61,15 @@ public interface IAdapterRegistry
 public sealed record AdapterConfig
 {
     public required string AdapterType { get; init; }    // normalized lower/trim — join key
-    public required string DisplayName { get; init; }    // "PioneerRx" — the Pms provenance label
+    public required string DisplayName { get; init; }    // "PioneerRx" — the Pms provenance label (SerializeRxBatch Pms field)
     public required ProcessIdentity Process { get; init; }
-    public required StatusVocabulary Status { get; init; }
     public required PhiPolicy Phi { get; init; }
     public required SqlProfile Sql { get; init; }
 }
 
 public sealed record ProcessIdentity(string ProcessName, string DefaultWindowTitle);
-public sealed record StatusVocabulary(IReadOnlyList<string> DeliveryReadyStatusNames, IReadOnlyList<string> AllDeliveryStatusNames)
-{ public bool MatchesDeliveryReady(string d); public bool MatchesAnyDeliveryStatus(string d); }   // logic lifted verbatim
-public sealed record SqlProfile(string DefaultCatalog, string PmsLabel, string SchemaSignature);
+public sealed record SqlProfile(string DefaultCatalog, string SchemaSignature);
+// StatusVocabulary DROPPED — see §9 encapsulation finding (PioneerRx status vocab stays internal to the adapter).
 ```
 
 `AdapterRegistry` ctor: **normalizes** each key (`Trim().ToLowerInvariant()`), **throws on duplicate** keys, **re-checks** every `Phi` is non-empty (invariant #1). `Resolve` normalizes the lookup key identically.
@@ -158,6 +156,7 @@ PioneerRx config == current literals; worker still uses today's engine → regis
 - **R1 (APPROVE-WITH-CHANGES):** Q2 (string key + normalize/dedup), Q3 (nullable catalog — real bug), Q4 (PHI factory enforcement + characterization), Q5 (thread labels, resolve once) → **all ACCEPTED, in this spec.** Q1 (engine seam) → see R2.
 - **R2 (REJECT):** the engine seam was dishonest — `RxMetadata.StatusGuid` + PioneerRx-typed writeback + a no-PMS stub leak/fake PioneerRx semantics; a real neutral contract can't be drawn from one PMS.
 - **DECISION (Joshua delegated; expert call):** **Override Codex's "build neutral contracts now."** R2 proves the abstraction can't be drawn cleanly from N=1 — which is the signal it's *premature*, not that we should push harder. No second PMS exists (zero benefit), the real app-agnostic unlock is W4b vision, and the change would perturb the live Nadim path for no present gain. **Scope reduced to honest config-registry; PMS-neutral detection/writeback contracts deferred to P2** (designed against a real second example or post-W4b). The config registry, PHI invariant, and Q3 fix are all Codex-clean on their own terms — no R3 needed.
+- **Encapsulation finding (post-PhiPolicy, code-grep):** every `PioneerRxConstants` consumer lives **inside the PioneerRx adapter** (`PioneerRxSqlEngine`, `PioneerRxCanarySource`) — status vocab + PHI columns are NOT in Core. The only genuine Core PioneerRx leaks are the `"PioneerPharmacySystem"` catalog literal and the `Pms`/`schemaSignature` labels in `SerializeRxBatch`. **Consequence:** `StatusVocabulary` is **DROPPED** from `AdapterConfig` (PioneerRx status vocab stays adapter-internal; generalizing is N=1 premature). `Pms` label folds into `DisplayName`; `SqlProfile = {DefaultCatalog, SchemaSignature}`. **This supersedes** StatusVocabulary mentions in §4.1/§4.3/§4.6/§7-test4/§8-step3 — drop test 4 + the matcher-migration in step 3. The registry's real value is now: PHI-invariant home + catalog/label leak cleanup + Q3 fix + W3 backbone. (Reinforces that W4b vision-grounding, not config plumbing, is the real app-agnostic unlock.)
 
 ## 10. Done criteria
 
