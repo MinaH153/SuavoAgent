@@ -229,6 +229,11 @@ public sealed class RuleEngine
 
     private static bool SatisfiesTextNearElement(SpatialTextPredicate p, RuleContext ctx)
     {
+        // Fail closed on meaningless predicates: a negative distance budget or an empty text/role
+        // can never be a legitimate spatial constraint (and empty text would otherwise match all).
+        if (p.MaxDistancePx < 0 || string.IsNullOrEmpty(p.Text) || string.IsNullOrEmpty(p.ElementRole))
+            return false;
+
         long maxSq = (long)p.MaxDistancePx * p.MaxDistancePx;
         foreach (var t in ctx.ScreenText)
         {
@@ -248,7 +253,7 @@ public sealed class RuleEngine
         return false;
     }
 
-    private static (long X, long Y) Center(Rect r) => (r.X + r.Width / 2, r.Y + r.Height / 2);
+    private static (long X, long Y) Center(Rect r) => ((long)r.X + r.Width / 2, (long)r.Y + r.Height / 2);
 
     /// <summary>
     /// Basic shell-style glob matching (only '*' and '?'). Case-insensitive.

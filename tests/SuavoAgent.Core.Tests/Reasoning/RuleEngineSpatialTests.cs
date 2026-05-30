@@ -70,4 +70,22 @@ public class RuleEngineSpatialTests
         var p = new RulePredicate { TextNearElement = Array.Empty<SpatialTextPredicate>() };
         Assert.True(RuleEngine.PredicateMatches(p, Ctx(Array.Empty<TextRegion>(), Array.Empty<VisualElement>())));
     }
+
+    [Fact]
+    public void TextNearElement_NegativeDistance_FailsClosed()
+    {
+        // A negative distance budget is meaningless — must never match, even with co-located items.
+        var p = new RulePredicate { TextNearElement = new[] { new SpatialTextPredicate("Price", "button", -1) } };
+        Assert.False(RuleEngine.PredicateMatches(p, Ctx(new[] { T("Price", 0, 0) }, new[] { E("button", 0, 0) })));
+    }
+
+    [Fact]
+    public void TextNearElement_EmptyTextOrRole_FailsClosed()
+    {
+        var emptyText = new RulePredicate { TextNearElement = new[] { new SpatialTextPredicate("", "button", 100) } };
+        var emptyRole = new RulePredicate { TextNearElement = new[] { new SpatialTextPredicate("Price", "", 100) } };
+        var ctx = Ctx(new[] { T("Price", 0, 0) }, new[] { E("button", 0, 0) });
+        Assert.False(RuleEngine.PredicateMatches(emptyText, ctx));
+        Assert.False(RuleEngine.PredicateMatches(emptyRole, ctx));
+    }
 }
