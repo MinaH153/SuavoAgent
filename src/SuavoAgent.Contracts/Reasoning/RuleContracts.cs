@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using SuavoAgent.Contracts.Behavioral;
+using SuavoAgent.Contracts.Vision;
 
 namespace SuavoAgent.Contracts.Reasoning;
 
@@ -206,6 +207,18 @@ public sealed record RuleContext
     /// </summary>
     public IReadOnlyList<ElementSignature> ElementFingerprints { get; init; } =
         Array.Empty<ElementSignature>();
+
+    /// <summary>
+    /// PHI-scrubbed OCR text regions from the current screen (from a captured
+    /// <see cref="ScreenFrame"/> via the vision pipeline). Empty when vision is off.
+    /// </summary>
+    public IReadOnlyList<TextRegion> ScreenText { get; init; } = Array.Empty<TextRegion>();
+
+    /// <summary>
+    /// PHI-scrubbed visual UI elements (role, name, bounds) from the current screen.
+    /// Empty when vision is off.
+    /// </summary>
+    public IReadOnlyList<VisualElement> ScreenElements { get; init; } = Array.Empty<VisualElement>();
 
     /// <summary>Timestamp of context capture. Used for audit trails.</summary>
     public DateTimeOffset CapturedAt { get; init; } = DateTimeOffset.UtcNow;
