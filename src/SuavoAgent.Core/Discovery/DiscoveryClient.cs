@@ -23,13 +23,14 @@ public sealed class DiscoveryClient
     }
 
     /// <summary>
-    /// Sends a discovery request to Helper and waits for the result. Null
-    /// return = Helper unreachable, IPC timeout, or Helper returned an
-    /// error — caller treats as discovery failure (operator must supply
-    /// the path manually).
+    /// Sends a discovery request to Helper and waits for the result. The
+    /// returned <see cref="DiscoveryOutcome"/> is either a success (carrying the
+    /// <see cref="FileDiscoveryResult"/>) or a PHI-safe <see cref="DiscoveryFailure"/>
+    /// classifying WHY discovery failed — so the caller can ack the real reason
+    /// to the cloud instead of an opaque "see agent logs".
     /// </summary>
-    public async Task<FileDiscoveryResult?> FindAsync(
-        IpcCommandClient commandClient,
+    public async Task<DiscoveryOutcome> FindAsync(
+        IIpcCommandClient commandClient,
         string jobId,
         FileDiscoverySpec spec,
         CancellationToken ct)
@@ -49,42 +50,54 @@ public sealed class DiscoveryClient
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "DiscoveryClient: IPC send failed for job {JobId}", jobId);
-            return null;
+            return DiscoveryOutcome.Failed(new DiscoveryFailure(DiscoveryFailureReason.IpcUnavailable));
         }
 
         if (response is null)
         {
             _logger.LogWarning("DiscoveryClient: no response from Helper for job {JobId}", jobId);
-            return null;
+            return DiscoveryOutcome.Failed(new DiscoveryFailure(DiscoveryFailureReason.HelperTimeout));
         }
         if (response.Id != request.Id)
         {
             _logger.LogWarning(
                 "DiscoveryClient: response id mismatch (sent {Sent} got {Got}) — pipe desync guard",
                 request.Id, response.Id);
-            return null;
+            return DiscoveryOutcome.Failed(
+                new DiscoveryFailure(DiscoveryFailureReason.IpcDesync, HelperVersionSuspect: true));
         }
         if (response.Status != IpcStatus.Ok)
         {
             _logger.LogWarning(
                 "DiscoveryClient: Helper returned {Status} {Code}: {Message}",
                 response.Status, response.Error?.Code, response.Error?.Message);
-            return null;
+            return DiscoveryOutcome.Failed(new DiscoveryFailure(
+                DiscoveryFailureReason.HelperError,
+                IpcStatus: response.Status,
+                ErrorCode: response.Error?.Code));
         }
         if (response.Data is null)
         {
             _logger.LogWarning("DiscoveryClient: Helper returned OK with no data for job {JobId}", jobId);
-            return null;
+            return DiscoveryOutcome.Failed(new DiscoveryFailure(DiscoveryFailureReason.NoData));
         }
 
         try
         {
-            return JsonSerializer.Deserialize<FileDiscoveryResult>(response.Data.Value);
+            var result = JsonSerializer.Deserialize<FileDiscoveryResult>(response.Data.Value);
+            if (result is null)
+            {
+                _logger.LogWarning("DiscoveryClient: Helper response deserialized to null for job {JobId}", jobId);
+                return DiscoveryOutcome.Failed(
+                    new DiscoveryFailure(DiscoveryFailureReason.DeserializeError, HelperVersionSuspect: true));
+            }
+            return DiscoveryOutcome.Success(result);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "DiscoveryClient: failed to deserialize FileDiscoveryResult");
-            return null;
+            return DiscoveryOutcome.Failed(
+                new DiscoveryFailure(DiscoveryFailureReason.DeserializeError, HelperVersionSuspect: true));
         }
     }
 }
