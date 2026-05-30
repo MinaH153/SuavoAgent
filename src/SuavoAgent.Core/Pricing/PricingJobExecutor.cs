@@ -1,7 +1,9 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Adapters.PioneerRx;
 using SuavoAgent.Adapters.PioneerRx.Pricing;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Core.Adapters;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
@@ -211,9 +213,7 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
         var csb = new SqlConnectionStringBuilder
         {
             DataSource = pharmacy.SqlServer,
-            InitialCatalog = string.IsNullOrWhiteSpace(pharmacy.SqlDatabase)
-                ? "PioneerPharmacySystem"
-                : pharmacy.SqlDatabase,
+            InitialCatalog = AdapterCatalog.Resolve(pharmacy.SqlDatabase, PioneerRxAdapterConfig.Create()),
             ApplicationName = "SuavoAgent.Pricing",
             ConnectTimeout = 30,
             MaxPoolSize = 1,
