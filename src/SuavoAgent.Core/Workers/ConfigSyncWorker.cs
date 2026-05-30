@@ -72,6 +72,11 @@ public sealed class ConfigSyncWorker : ResilientHostedService
 
     protected override string WorkerName => "config-sync";
 
+    // Config-poll worker: supervise unconditionally. Deliberately NOT gated by
+    // SelfHeal.WorkerSupervisorEnabled (it has no AgentOptions dependency, and the poll loop is
+    // low blast radius) — escalation after MaxRestarts still prevents a runaway restart loop.
+    protected override bool RestartOnFault => true;
+
     protected override Task OnEscalateAsync()
     {
         _logger.LogCritical("ConfigSyncWorker exhausted supervised restarts — config sync halted");
