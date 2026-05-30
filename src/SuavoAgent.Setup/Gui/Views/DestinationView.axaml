@@ -13,7 +13,7 @@
             <TextBlock Text="Install destination"
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="28" FontWeight="Light"/>
-            <TextBlock Text="Confirm where SuavoAgent installs and verify the SQL Server we will connect to."
+            <TextBlock Text="Confirm where SuavoAgent installs. SQL is detected automatically — set it manually only if you already have the values."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"
                        TextWrapping="Wrap"/>
@@ -61,6 +61,25 @@
                     <TextBlock Text="Pre-filled from PioneerRx auto-discovery. Override only if you know the value."
                                Foreground="{DynamicResource SuavoTextSubtleBrush}"
                                FontSize="11"/>
+
+                    <Border IsVisible="{Binding IsSqlDeferred}"
+                            Background="{DynamicResource SuavoSurfaceElevatedBrush}"
+                            BorderBrush="{DynamicResource SuavoDeferredBrush}"
+                            BorderThickness="1" CornerRadius="10" Padding="12,10" Margin="0,4,0,0">
+                        <Grid ColumnDefinitions="Auto,*">
+                            <TextBlock Grid.Column="0" Text="↻" FontSize="16" FontWeight="Bold"
+                                       VerticalAlignment="Top" Margin="0,1,10,0"
+                                       Foreground="{DynamicResource SuavoDeferredBrush}"/>
+                            <StackPanel Grid.Column="1" Spacing="2">
+                                <TextBlock Text="SQL will self-configure"
+                                           Foreground="{DynamicResource SuavoTextBrush}"
+                                           FontSize="12.5" FontWeight="SemiBold"/>
+                                <TextBlock Text="No PioneerRx on this PC yet? Leave this blank. SuavoAgent installs now, comes online, and connects to SQL automatically the moment PioneerRx is detected."
+                                           Foreground="{DynamicResource SuavoTextMutedBrush}"
+                                           FontSize="11.5" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
                 </StackPanel>
 
                 <StackPanel Spacing="6">
