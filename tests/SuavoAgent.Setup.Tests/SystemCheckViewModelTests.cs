@@ -77,6 +77,38 @@ public sealed class SystemCheckViewModelTests
         Assert.True(vm.IsReady);
     }
 
+    [Fact]
+    public void Scan_completes_and_is_ready_even_when_pioneer_probe_throws()
+    {
+        // A misbehaving probe must never strand the scan — it becomes Deferred,
+        // and the OS-only gate still lets the install proceed.
+        var vm = new SystemCheckViewModel(NewContext(), () => { },
+            probeIsWindows10: () => true,
+            probePioneer: () => throw new InvalidOperationException("boom"),
+            probeSql: _ => null);
+
+        vm.Apply(vm.Probe()); // Probe() is pure/background-safe; Apply() is the UI-thread mutation
+
+        Assert.Equal(CheckState.Deferred, vm.PioneerCheck.State);
+        Assert.Equal(CheckState.Deferred, vm.SqlCheck.State);
+        Assert.True(vm.IsReady);
+        Assert.True(vm.ContinueCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void Scan_blocks_when_os_unsupported()
+    {
+        var vm = new SystemCheckViewModel(NewContext(), () => { },
+            probeIsWindows10: () => false,
+            probePioneer: () => null,
+            probeSql: _ => null);
+
+        vm.Apply(vm.Probe());
+
+        Assert.Equal(CheckState.Fail, vm.OsCheck.State);
+        Assert.False(vm.IsReady);
+    }
+
     private static SystemCheckViewModel NewVm() => new(NewContext(), () => { });
 
     private static InstallContext NewContext() => new(new SetupConfig(
