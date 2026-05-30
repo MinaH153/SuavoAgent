@@ -28,6 +28,10 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
     private readonly SemaphoreSlim _lock = new(1, 1);
     private NamedPipeClientStream? _pipe;
 
+    // Bounded reconnect budget for SendAsync's on-demand recovery — kept short so a
+    // genuinely-down Helper fails the call quickly rather than stalling the caller's cycle.
+    private static readonly TimeSpan ReconnectTimeout = TimeSpan.FromSeconds(2);
+
     public bool IsConnected => _pipe?.IsConnected ?? false;
 
     public IpcCommandClient(string pipeName, ILogger<IpcCommandClient> logger)
@@ -38,12 +42,37 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
 
     public async Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct)
     {
+        await _lock.WaitAsync(ct);
         try
         {
-            _pipe = new NamedPipeClientStream(".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            await _pipe.ConnectAsync((int)timeout.TotalMilliseconds, ct);
+            return await ConnectCoreAsync(timeout, ct);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Disposes any stale pipe, then creates and connects a fresh one. Caller MUST hold
+    /// <see cref="_lock"/> (called from <see cref="ConnectAsync"/> and the reconnect path in
+    /// <see cref="SendAsync"/>). Genuine cancellation propagates; connect failures return false.
+    /// </summary>
+    private async Task<bool> ConnectCoreAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        try { _pipe?.Close(); } catch { }
+        _pipe = null;
+        try
+        {
+            var pipe = new NamedPipeClientStream(".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            await pipe.ConnectAsync((int)timeout.TotalMilliseconds, ct);
+            _pipe = pipe;
             _logger.LogInformation("IpcCommandClient connected to Helper on pipe {Name}", _pipeName);
             return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -54,22 +83,30 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
 
     /// <summary>
     /// Sends a command and waits for a response. Thread-safe via semaphore.
-    /// Returns null if the pipe is disconnected or a timeout occurs.
+    /// Reconnects on-demand (bounded) if the pipe is null/broken so a transient Helper drop
+    /// self-recovers instead of failing every cycle until the process restarts. Returns null
+    /// if reconnect fails or a timeout occurs.
     /// </summary>
     public async Task<IpcResponse?> SendAsync(IpcRequest request, TimeSpan timeout, CancellationToken ct)
     {
-        if (_pipe == null || !IsConnected) return null;
-
         await _lock.WaitAsync(ct);
         try
         {
+            if (_pipe == null || !_pipe.IsConnected)
+            {
+                if (!await ConnectCoreAsync(ReconnectTimeout, ct))
+                {
+                    return null;
+                }
+            }
+
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(timeout);
 
             var json = JsonSerializer.Serialize(request);
-            await IpcFraming.WriteFrameAsync(_pipe, json, cts.Token);
+            await IpcFraming.WriteFrameAsync(_pipe!, json, cts.Token);
 
-            var responseJson = await IpcFraming.ReadFrameAsync(_pipe, cts.Token);
+            var responseJson = await IpcFraming.ReadFrameAsync(_pipe!, cts.Token);
             if (responseJson == null)
             {
                 // [C-2] Teardown on partial/missing read so stale data can't poison next request

@@ -41,6 +41,11 @@ public sealed class RxDetectionWorker : ResilientHostedService
     private bool _loggedNoPmsOnce;
     internal bool LoggedNoPmsOnce => _loggedNoPmsOnce; // test hook
 
+    // SQL reconnect backoff: replaces the old fixed 60s retry so a down PMS isn't probed
+    // every minute. Grows 60s→600s cap; reset on a successful connect (TryConnectSqlAsync).
+    private readonly ExponentialBackoff _sqlBackoff =
+        new(TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(600));
+
     public int DetectionIntervalSeconds { get; set; } = 300;
     public int LastDetectedCount { get; private set; }
     public DateTimeOffset? LastDetectionTime { get; private set; }
@@ -121,8 +126,9 @@ public sealed class RxDetectionWorker : ResilientHostedService
             await TryConnectSqlAsync(ct);
             if (!_sqlConnected)
             {
-                _logger.LogDebug("SQL not connected, skipping detection cycle");
-                await Task.Delay(TimeSpan.FromSeconds(60), ct);
+                var backoff = _sqlBackoff.NextDelay();
+                _logger.LogDebug("SQL not connected, skipping detection cycle (retry in {Delay}s)", backoff.TotalSeconds);
+                await Task.Delay(backoff, ct);
                 return;
             }
         }
@@ -411,6 +417,7 @@ public sealed class RxDetectionWorker : ResilientHostedService
 
         if (_sqlConnected)
         {
+            _sqlBackoff.Reset();
             _logger.LogInformation("SQL connected to {Server}/{Db}", server, database);
             await SyncSchemaDiscoveryAsync(ct);
 
