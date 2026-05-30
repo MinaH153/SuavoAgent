@@ -5,9 +5,17 @@
 > A produces. If Phase A is wrong, everything downstream inherits the defect.
 
 **Locked date:** 2026-04-21
-**Status:** v0.1 draft
+**Status:** v0.1 plan — partially shipped (see [Actual status](#actual-status-reconciled-2026-05-30))
 **Depends on:** `invariants.md`, `audit-schema.md`, `key-custody.md`, `action-grammar-v1.md`
 **Blocks:** Phase B (pharmacies 2–5 onboarding) and Phase C (L1 dispatch)
+
+> ⚠️ **READ THIS FIRST (reconciled 2026-05-30).** The ✅ marks in the original
+> "Exit criteria" below were written on the **plan date (2026-04-21)** as
+> *targets*, not as verified completions — they misled a later audit into
+> believing the silent-agent alarm was unbuilt and, separately, that all six
+> deliverables had shipped. Neither was true. The authoritative, verified
+> status is in [Actual status](#actual-status-reconciled-2026-05-30). Do not
+> trust the pre-dated checkmarks; trust the reconciliation section.
 
 ---
 
@@ -553,16 +561,68 @@ before we lose events.
 
 ## Exit criteria for Phase A complete
 
+> ⚠️ The marks below were the **2026-04-21 plan targets**, NOT verified
+> completions. They are preserved verbatim for history. See
+> [Actual status](#actual-status-reconciled-2026-05-30) for what is really shipped.
+
 Phase A is "done" when ALL of:
 
-1. ✅ All 6 deliverables (A1–A6) shipped to prod
-2. ✅ 72 hours of Nadim-in-prod with chain-verify green, zero false alarms,
+1. (target) All 6 deliverables (A1–A6) shipped to prod
+2. (target) 72 hours of Nadim-in-prod with chain-verify green, zero false alarms,
    zero ingest errors
-3. ✅ Chaos test suite passes (kill cloud, kill agent, synthesize tamper)
-4. ✅ External verifier repo published + pharmacy can self-verify their chain
-5. ✅ PHI redaction ruleset reviewed by Joshua + designated Security Officer
-6. ✅ Codex adversarial re-review finds no CRITICAL gaps
-7. ✅ Documentation locked: this doc moves from v0.1 to v1.0
+3. (target) Chaos test suite passes (kill cloud, kill agent, synthesize tamper)
+4. (target) External verifier repo published + pharmacy can self-verify their chain
+5. (target) PHI redaction ruleset reviewed by Joshua + designated Security Officer
+6. (target) Codex adversarial re-review finds no CRITICAL gaps
+7. (target) Documentation locked: this doc moves from v0.1 to v1.0
+
+---
+
+## Actual status (reconciled 2026-05-30)
+
+Verified by reading the live code in **both** repos (agent `MinaH153/SuavoAgent`
++ cloud `SuavoLLC/MKM`) — detection/alerting lives in the **cloud**, which the
+original agent-only audit missed.
+
+| ID | Deliverable | Actual status | Evidence |
+|---|---|---|---|
+| A1 | Silent-agent alarm | ✅ **SHIPPED** | cloud `src/lib/silent-alarm.ts` (4-tier escalation, DB-atomic dedup, maintenance windows), `/api/internal/alerts/silent-agents`, `/api/agent/status-check` (online→offline), pg_cron every 5 min |
+| A2 | Hash-chained audit substrate | ✅ **SHIPPED** | `write_audit_event` RPC with server-side hash chain (migration `20260421235000_audit_chain_server_hash.sql`) |
+| A3 | Crash-log cloud aggregation | ⚠️ **PARTIAL** | heartbeat carries crash-log **metadata** (path/bytes/sha256 prefix, body redacted) via `RuntimeHealthEvidence`; full body upload + aggregation not shipped |
+| A4 | Agent version drift report | ✅ **SHIPPED** | `agent-health-watch` flags `version_drift` (`isAgentVersionBehindTarget`); fleet cockpit health UI |
+| A5 | `bootstrap --probe` health scan | ✅ **SHIPPED** | non-destructive probe published; feeds A1 freshness |
+| A6 | Cryptographic attestation | ❌ **NOT SHIPPED** | eSigner/SSL.com signing infra exists, but the attestation **manifest** + agent-side **startup verifier** are not built |
+
+**Net:** A1/A2/A4/A5 shipped, A3 partial, A6 not shipped. The remaining exit
+criteria (chaos suite, external verifier repo, formal PHI-ruleset sign-off, v1.0
+Codex lock) are **not** met. Phase A is *substantially* but not *fully* complete.
+
+---
+
+## Phase B — Remediation (the agent fixes itself) — IN PROGRESS 2026-05-30
+
+Phase A answers *"did an agent go silent/unhealthy?"* (detection + alert). It
+does **not** make the agent **recover itself**. That gap was the real lesson of
+the Nadim 2026-04-25 "Running but dead for ~12 days" failure: detection would
+have *told us*, but nothing would have *fixed it* in-process. Phase B closes
+that, shipped as small TDD'd + Codex-reviewed chunks:
+
+- **B1 — Worker supervisor** (`ResilientHostedService`, SuavoAgent #113/#114):
+  a faulted worker restarts in-process with bounded backoff instead of dying
+  silently while the Windows service still reports "Running". Kill-switch via
+  `SelfHeal.WorkerSupervisorEnabled`. Escalates after `MaxRestarts`.
+- **B2 — Transient-drop recovery** (SuavoAgent #115): IPC `SendAsync` reconnects
+  on-demand; SQL retry uses exponential backoff (60s→600s) instead of a fixed
+  60s loop.
+- **B3 — Closed-loop worker-granular signal** (SuavoAgent #116/#117 + cloud
+  MKM #1092): per-worker restart/escalation flows to the heartbeat
+  (`WorkerHealthRegistry` → `stats.workers[]`); `agent-health-watch` flags
+  `worker_escalated` (ERROR) / `worker_restart_looping` (WARN) so ops sees a
+  *sick worker*, not just a *silent agent*. Auto-enqueuing a `repair` command is
+  deliberately deferred (avoids unattended pharmacy-agent restarts).
+
+Out of Phase B (separate programs): A6 attestation; Phase C+ LLM diagnosis
+dispatch; Tier-4 PagerDuty; state.db auto-repair.
 
 ---
 
@@ -607,3 +667,10 @@ Day 6–8 (following week):
 - **2026-04-21 v0.1** — Initial draft. Six deliverables, cross-cutting
   concerns, threat model, kickoff tasks. Locks to v1.0 after Nadim pilot
   stabilizes + Codex re-review.
+- **2026-05-30 reconciliation** — The v0.1 "Exit criteria" ✅ marks were plan
+  *targets* dated 2026-04-21, not verified completions; they misled a later
+  audit. Added a [READ THIS FIRST] banner, an [Actual status] table (A1/A2/A4/A5
+  shipped, A3 partial, A6 not shipped — verified across both repos), and a
+  [Phase B — Remediation] section documenting the in-process self-fix work
+  (SuavoAgent #113/#114/#115/#116/#117 + cloud MKM #1092). Exit-criteria items
+  reworded from ✅ to "(target)" to stop the false-completion signal.
