@@ -53,6 +53,9 @@ public static class InferencePromptBuilder
     private const int MaxScreenTextRegions = 16;
     private const int MaxScreenTextLen = 120;
     private const int MaxScreenElements = 24;
+    // Aggregate char budget across screen_text + screen_elements so vision can't blow the
+    // Tier-2 small-token discipline regardless of how many regions/elements are present.
+    private const int MaxScreenCharBudget = 1000;
 
     /// <summary>
     /// The user message — a compact JSON description of the current state.
@@ -93,17 +96,29 @@ public static class InferencePromptBuilder
         }
         else
         {
-            var screenText = ctx.ScreenText
+            // Highest-confidence-first, bounded by both a count cap AND a shared char budget.
+            var budget = MaxScreenCharBudget;
+            var screenText = new List<string>();
+            foreach (var t in ctx.ScreenText
                 .OrderByDescending(t => t.Confidence)
-                .ThenByDescending(t => t.Bounds.Area)
-                .Take(MaxScreenTextRegions)
-                .Select(t => Truncate(t.Text, MaxScreenTextLen))
-                .ToList();
-            var screenElements = ctx.ScreenElements
-                .OrderByDescending(e => e.Confidence)
-                .Take(MaxScreenElements)
-                .Select(e => new { role = Truncate(e.Role, MaxFieldLen), name = Truncate(e.Name, MaxElementNameLen) })
-                .ToList();
+                .ThenByDescending(t => t.Bounds.Area))
+            {
+                if (screenText.Count >= MaxScreenTextRegions || budget <= 0) break;
+                var s = Truncate(t.Text, Math.Min(MaxScreenTextLen, budget));
+                if (s.Length == 0) continue;
+                screenText.Add(s);
+                budget -= s.Length;
+            }
+
+            var screenElements = new List<object>();
+            foreach (var e in ctx.ScreenElements.OrderByDescending(e => e.Confidence))
+            {
+                if (screenElements.Count >= MaxScreenElements || budget <= 0) break;
+                var role = Truncate(e.Role, MaxFieldLen);
+                var name = Truncate(e.Name, Math.Min(MaxElementNameLen, budget));
+                screenElements.Add(new { role, name });
+                budget -= role.Length + name.Length;
+            }
             state = new
             {
                 skill = Truncate(ctx.SkillId, MaxFieldLen),
