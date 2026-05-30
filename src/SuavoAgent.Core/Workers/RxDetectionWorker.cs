@@ -397,6 +397,11 @@ public sealed class RxDetectionWorker : ResilientHostedService
         var database = AdapterCatalog.Resolve(_options.SqlDatabase, _adapterConfig);
 
         _sqlEngine?.Dispose();
+        // The canary source is bound to the engine instance. Disposing+replacing the engine on a
+        // reconnect (now more frequent under the worker supervisor) would otherwise leave the
+        // `_canarySource == null` guard below holding a source bound to the disposed engine — so
+        // clear it here to force a rebuild against the new engine.
+        _canarySource = null;
         _sqlEngine = new PioneerRxSqlEngine(
             server, database,
             _loggerFactory.CreateLogger<PioneerRxSqlEngine>(),
