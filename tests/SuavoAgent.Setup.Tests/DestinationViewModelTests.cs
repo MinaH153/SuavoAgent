@@ -7,11 +7,45 @@ namespace SuavoAgent.Setup.Tests;
 public sealed class DestinationViewModelTests
 {
     [Fact]
-    public void Install_disabled_when_sql_server_empty()
+    public void Install_allowed_when_sql_deferred()
     {
+        // Minimum-viable-control: a box with no PioneerRx leaves SQL blank and
+        // installs anyway — the agent self-configures SQL once it's detected.
         var vm = NewVm();
         vm.SqlServer = "";
+        Assert.True(vm.InstallCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void Install_blocked_when_install_path_empty_even_if_sql_deferred()
+    {
+        var vm = NewVm();
+        vm.InstallPath = "";
+        vm.SqlServer = "";
         Assert.False(vm.InstallCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void Install_blocked_when_sql_server_set_but_database_missing()
+    {
+        // Partial SQL config is still a misconfig — if they start entering SQL,
+        // it must be complete (no silent half-configured connection).
+        var vm = NewVm();
+        vm.SqlServer = "host,49202";
+        vm.SqlDatabase = "";
+        Assert.False(vm.InstallCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void Install_sets_null_credentials_when_sql_deferred()
+    {
+        var ctx = NewContext();
+        var vm = new DestinationViewModel(ctx, () => { });
+        vm.SqlServer = "";
+
+        vm.InstallCommand.Execute(null);
+
+        Assert.Null(ctx.SqlCredentials);
     }
 
     [Fact]

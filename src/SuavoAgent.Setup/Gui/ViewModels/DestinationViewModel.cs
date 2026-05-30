@@ -40,7 +40,14 @@ internal sealed class DestinationViewModel : ViewModelBase
     public string SqlServer
     {
         get => _sqlServer;
-        set { if (SetField(ref _sqlServer, value)) InstallCommand.RaiseCanExecuteChanged(); }
+        set
+        {
+            if (SetField(ref _sqlServer, value))
+            {
+                InstallCommand.RaiseCanExecuteChanged();
+                RaisePropertyChanged(nameof(IsSqlDeferred));
+            }
+        }
     }
 
     public string SqlDatabase
@@ -78,10 +85,15 @@ internal sealed class DestinationViewModel : ViewModelBase
 
     public RelayCommand InstallCommand { get; }
 
+    /// <summary>True when SQL is left blank — the agent self-configures it later.</summary>
+    public bool IsSqlDeferred => string.IsNullOrWhiteSpace(_sqlServer);
+
     private bool CanInstall()
     {
         if (string.IsNullOrWhiteSpace(_installPath)) return false;
-        if (string.IsNullOrWhiteSpace(_sqlServer)) return false;
+        // SQL is optional. Empty server = defer + self-heal once PioneerRx appears.
+        if (string.IsNullOrWhiteSpace(_sqlServer)) return true;
+        // If they're configuring SQL, it must be complete (no half-set connection).
         if (string.IsNullOrWhiteSpace(_sqlDatabase)) return false;
         if (_useSqlAuth && (string.IsNullOrWhiteSpace(_sqlUser) || string.IsNullOrWhiteSpace(_sqlPassword)))
             return false;
@@ -91,11 +103,15 @@ internal sealed class DestinationViewModel : ViewModelBase
     private void Install()
     {
         _ctx.InstallDir = _installPath.Trim();
-        _ctx.SqlCredentials = new SqlCredentialDiscovery.SqlCredentials(
-            Server: _sqlServer.Trim(),
-            Database: _sqlDatabase.Trim(),
-            User: _useSqlAuth ? _sqlUser.Trim() : null,
-            Password: _useSqlAuth ? _sqlPassword : null);
+        // Empty SQL server → deferred: leave credentials null rather than
+        // fabricating them. The agent self-configures SQL after it's online.
+        _ctx.SqlCredentials = string.IsNullOrWhiteSpace(_sqlServer)
+            ? null
+            : new SqlCredentialDiscovery.SqlCredentials(
+                Server: _sqlServer.Trim(),
+                Database: _sqlDatabase.Trim(),
+                User: _useSqlAuth ? _sqlUser.Trim() : null,
+                Password: _useSqlAuth ? _sqlPassword : null);
         _onInstall();
     }
 }

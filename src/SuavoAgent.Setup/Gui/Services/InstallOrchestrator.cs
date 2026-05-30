@@ -30,12 +30,19 @@ internal sealed class InstallOrchestrator
     /// </summary>
     public async Task RunAsync(IProgress<PhaseEvent> progress, CancellationToken ct)
     {
-        if (_ctx.Pioneer == null)
-            throw new InvalidOperationException("Pioneer discovery must complete before install.");
-        if (_ctx.SqlCredentials == null)
-            throw new InvalidOperationException("SQL credentials must be set before install.");
+        // Consent is the one true pre-install gate (HIPAA — no install without
+        // a captured authorization). PioneerRx + SQL are deferred by design:
+        // when they're absent the agent installs in "no-PMS mode", comes online,
+        // heartbeats, and self-heals the SQL connection once PioneerRx appears
+        // (RxDetectionWorker retries every cycle). So their absence is logged,
+        // not fatal — that's the minimum-viable-control path.
         if (_ctx.Consent == null)
             throw new InvalidOperationException("Consent must be captured before install.");
+
+        if (_ctx.Pioneer == null)
+            ConsoleUI.WriteWarn("PioneerRx not detected — installing in no-PMS mode (agent self-heals when it appears).");
+        if (_ctx.SqlCredentials == null)
+            ConsoleUI.WriteWarn("No SQL credentials — deferred. Pricing/detection stays idle until SQL self-configures.");
 
         progress.Report(new PhaseEvent(Phase.Download, "Downloading SuavoAgent binaries"));
         ConsoleUI.WriteStep("Phase 3: Downloading SuavoAgent binaries");
@@ -102,34 +109,35 @@ internal sealed class InstallOrchestrator
         }
     }
 
-    private string BuildAppSettings()
+    internal string BuildAppSettings()
     {
-        var sql = _ctx.SqlCredentials!;
-        var settings = new Dictionary<string, object>
+        var agent = new Dictionary<string, object?>
         {
-            ["Agent"] = new Dictionary<string, object?>
-            {
-                ["CloudUrl"] = _ctx.Config.CloudUrl,
-                ["ApiKey"] = _ctx.Config.ApiKey,
-                ["AgentId"] = _ctx.AgentId,
-                ["PharmacyId"] = _ctx.Config.PharmacyId,
-                ["MachineFingerprint"] = _ctx.MachineFingerprint,
-                ["Version"] = _ctx.Config.ReleaseTag.TrimStart('v'),
-                ["SqlServer"] = sql.Server,
-                ["SqlDatabase"] = sql.Database,
-                ["SqlUser"] = sql.User,
-                ["SqlPassword"] = sql.Password,
-                ["LearningMode"] = _ctx.Config.LearningMode,
-            },
+            ["CloudUrl"] = _ctx.Config.CloudUrl,
+            ["ApiKey"] = _ctx.Config.ApiKey,
+            ["AgentId"] = _ctx.AgentId,
+            ["PharmacyId"] = _ctx.Config.PharmacyId,
+            ["MachineFingerprint"] = _ctx.MachineFingerprint,
+            ["Version"] = _ctx.Config.ReleaseTag.TrimStart('v'),
+            ["LearningMode"] = _ctx.Config.LearningMode,
         };
 
-        if (sql.IsWindowsAuth)
+        // SQL is optional. When deferred (no PioneerRx yet) the keys are omitted
+        // entirely — the agent runs in no-PMS mode and self-heals the SQL
+        // connection once PioneerRx is detected. Windows auth omits user/password.
+        var sql = _ctx.SqlCredentials;
+        if (sql != null)
         {
-            var agentSection = (Dictionary<string, object?>)settings["Agent"];
-            agentSection.Remove("SqlUser");
-            agentSection.Remove("SqlPassword");
+            agent["SqlServer"] = sql.Server;
+            agent["SqlDatabase"] = sql.Database;
+            if (!sql.IsWindowsAuth)
+            {
+                agent["SqlUser"] = sql.User;
+                agent["SqlPassword"] = sql.Password;
+            }
         }
 
+        var settings = new Dictionary<string, object> { ["Agent"] = agent };
         return JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
     }
 

@@ -48,5 +48,37 @@
     <CornerRadius x:Key="SuavoRadiusSmall">4</CornerRadius>
     <CornerRadius x:Key="SuavoRadiusMedium">8</CornerRadius>
     <CornerRadius x:Key="SuavoRadiusLarge">14</CornerRadius>
+    <CornerRadius x:Key="SuavoRadiusPill">999</CornerRadius>
+
+    <!-- Deferred / self-healing state — calm muted gold (distinct from amber warn). -->
+    <Color x:Key="SuavoDeferred">#C9A24C</Color>
+    <SolidColorBrush x:Key="SuavoDeferredBrush" Color="{StaticResource SuavoDeferred}" />
+
+    <!-- Elevated surface for chips / pills sitting on cards. -->
+    <Color x:Key="SuavoSurfaceElevated">#222019</Color>
+    <SolidColorBrush x:Key="SuavoSurfaceElevatedBrush" Color="{StaticResource SuavoSurfaceElevated}" />
+
+    <!-- Depth gradients — premium glass, warm undertone (design DNA). -->
+    <LinearGradientBrush x:Key="SuavoBackgroundGradientBrush" StartPoint="0%,0%" EndPoint="50%,100%">
+        <GradientStop Color="#100F0D" Offset="0" />
+        <GradientStop Color="#08080A" Offset="1" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="SuavoCardGradientBrush" StartPoint="0%,0%" EndPoint="0%,100%">
+        <GradientStop Color="#1D1B18" Offset="0" />
+        <GradientStop Color="#161412" Offset="1" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="SuavoAccentGradientBrush" StartPoint="0%,0%" EndPoint="100%,100%">
+        <GradientStop Color="#ECBE69" Offset="0" />
+        <GradientStop Color="#D4A24C" Offset="0.55" />
+        <GradientStop Color="#BC8C3C" Offset="1" />
+    </LinearGradientBrush>
+
+    <!-- Hairline gold accent for hero rules. -->
+    <LinearGradientBrush x:Key="SuavoAccentRuleBrush" StartPoint="0%,0%" EndPoint="100%,0%">
+        <GradientStop Color="#D4A24C" Offset="0" />
+        <GradientStop Color="#D4A24C00" Offset="1" />
+    </LinearGradientBrush>
 
 </ResourceDictionary>
