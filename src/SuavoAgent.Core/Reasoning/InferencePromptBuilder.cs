@@ -50,6 +50,9 @@ public static class InferencePromptBuilder
     private const int MaxElementNameLen = 100;
     private const int MaxElements = 24;
     private const int MaxFlags = 16;
+    private const int MaxScreenTextRegions = 16;
+    private const int MaxScreenTextLen = 120;
+    private const int MaxScreenElements = 24;
 
     /// <summary>
     /// The user message — a compact JSON description of the current state.
@@ -72,15 +75,47 @@ public static class InferencePromptBuilder
                 kv => Truncate(kv.Key, MaxFieldLen),
                 kv => Truncate(kv.Value, MaxFieldLen));
 
-        var state = new
+        // Vision grounding: when a ScreenFrame has been merged into the context (vision on),
+        // surface the on-screen text + elements so the LLM reasons over what's literally shown.
+        // When vision is off (both empty) we emit the EXACT legacy object — byte-identical output.
+        object state;
+        if (ctx.ScreenText.Count == 0 && ctx.ScreenElements.Count == 0)
         {
-            skill = Truncate(ctx.SkillId, MaxFieldLen),
-            process = Truncate(ctx.ProcessName, MaxFieldLen),
-            window = Truncate(ctx.WindowTitle, MaxFieldLen),
-            visible_elements = elements,
-            operator_idle_ms = ctx.OperatorIdleMs,
-            flags = cappedFlags,
-        };
+            state = new
+            {
+                skill = Truncate(ctx.SkillId, MaxFieldLen),
+                process = Truncate(ctx.ProcessName, MaxFieldLen),
+                window = Truncate(ctx.WindowTitle, MaxFieldLen),
+                visible_elements = elements,
+                operator_idle_ms = ctx.OperatorIdleMs,
+                flags = cappedFlags,
+            };
+        }
+        else
+        {
+            var screenText = ctx.ScreenText
+                .OrderByDescending(t => t.Confidence)
+                .ThenByDescending(t => t.Bounds.Area)
+                .Take(MaxScreenTextRegions)
+                .Select(t => Truncate(t.Text, MaxScreenTextLen))
+                .ToList();
+            var screenElements = ctx.ScreenElements
+                .OrderByDescending(e => e.Confidence)
+                .Take(MaxScreenElements)
+                .Select(e => new { role = Truncate(e.Role, MaxFieldLen), name = Truncate(e.Name, MaxElementNameLen) })
+                .ToList();
+            state = new
+            {
+                skill = Truncate(ctx.SkillId, MaxFieldLen),
+                process = Truncate(ctx.ProcessName, MaxFieldLen),
+                window = Truncate(ctx.WindowTitle, MaxFieldLen),
+                visible_elements = elements,
+                operator_idle_ms = ctx.OperatorIdleMs,
+                flags = cappedFlags,
+                screen_text = screenText,
+                screen_elements = screenElements,
+            };
+        }
         var allowed = request.AllowedActions
             .OrderBy(a => a.ToString(), StringComparer.Ordinal)
             .Select(a => a.ToString())
