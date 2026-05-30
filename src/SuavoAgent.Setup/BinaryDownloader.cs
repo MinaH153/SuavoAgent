@@ -118,17 +118,14 @@ internal static class BinaryDownloader
                 "download checksums.sha256");
             await File.WriteAllBytesAsync(checksumPath, checksumBytes);
 
-            var sigText = (await RetryTransientAsync(
-                () => http.GetStringAsync($"{baseUrl}/checksums.sha256.sig"),
-                "download checksums.sha256.sig")).Trim();
-            await File.WriteAllTextAsync(sigPath, sigText);
+            // The release signs checksums.sha256 with `openssl dgst -sha256 -sign`,
+            // which emits a BINARY, DER (ASN.1)-encoded ECDSA signature — not hex.
+            var sigBytes = await RetryTransientAsync(
+                () => http.GetByteArrayAsync($"{baseUrl}/checksums.sha256.sig"),
+                "download checksums.sha256.sig");
+            await File.WriteAllBytesAsync(sigPath, sigBytes);
 
-            // Verify ECDSA signature
-            using var ecdsa = ECDsa.Create();
-            ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(PublicKeyBase64), out _);
-
-            var sigBytes = Convert.FromHexString(sigText);
-            var valid = ecdsa.VerifyData(checksumBytes, sigBytes, HashAlgorithmName.SHA256);
+            var valid = VerifyChecksumSignature(checksumBytes, sigBytes);
 
             if (!valid)
             {
@@ -157,6 +154,20 @@ internal static class BinaryDownloader
             Cleanup(checksumPath, sigPath);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Verifies the ECDSA P-256 / SHA-256 signature over the raw checksums.sha256
+    /// bytes. The release signs with `openssl dgst -sign`, so the signature is a
+    /// BINARY DER (ASN.1) sequence — not hex, and not the IEEE-P1363 format that
+    /// <see cref="ECDsa.VerifyData(byte[], byte[], HashAlgorithmName)"/> assumes.
+    /// </summary>
+    internal static bool VerifyChecksumSignature(byte[] checksumBytes, byte[] derSignature)
+    {
+        using var ecdsa = ECDsa.Create();
+        ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(PublicKeyBase64), out _);
+        return ecdsa.VerifyData(
+            checksumBytes, derSignature, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
     }
 
     /// <summary>
