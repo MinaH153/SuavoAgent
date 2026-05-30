@@ -14,7 +14,7 @@
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="28" FontWeight="Light"
                        HorizontalAlignment="Center"/>
-            <TextBlock Text="Enter this code in your Suavo pharmacy dashboard to approve this PC."
+            <TextBlock Text="Enter this code in your Suavo dashboard to approve this PC."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"
                        TextAlignment="Center" TextWrapping="Wrap"

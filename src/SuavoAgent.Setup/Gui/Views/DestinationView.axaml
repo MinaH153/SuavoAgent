@@ -29,7 +29,7 @@
 
                 <StackPanel Spacing="6">
                     <TextBlock Text="Install path"
-                               Foreground="{DynamicResource SuavoAccentBrush}"
+                               Foreground="{DynamicResource SuavoAccentTextBrush}"
                                FontWeight="SemiBold" FontSize="12"/>
                     <TextBox Text="{Binding InstallPath, Mode=TwoWay}"
                              Background="{DynamicResource SuavoSurfaceBrush}"
@@ -42,7 +42,7 @@
 
                 <StackPanel Spacing="6">
                     <TextBlock Text="SQL Server"
-                               Foreground="{DynamicResource SuavoAccentBrush}"
+                               Foreground="{DynamicResource SuavoAccentTextBrush}"
                                FontWeight="SemiBold" FontSize="12"/>
                     <Grid ColumnDefinitions="*,*" Margin="0,0,0,0">
                         <TextBox Grid.Column="0" Margin="0,0,12,0"
@@ -58,7 +58,7 @@
                                  Foreground="{DynamicResource SuavoTextBrush}"
                                  BorderBrush="{DynamicResource SuavoBorderBrush}"/>
                     </Grid>
-                    <TextBlock Text="Pre-filled from PioneerRx auto-discovery. Override only if you know the value."
+                    <TextBlock Text="Pre-filled from auto-discovery. Override only if you know the value."
                                Foreground="{DynamicResource SuavoTextSubtleBrush}"
                                FontSize="11"/>
 
@@ -74,7 +74,7 @@
                                 <TextBlock Text="SQL will self-configure"
                                            Foreground="{DynamicResource SuavoTextBrush}"
                                            FontSize="12.5" FontWeight="SemiBold"/>
-                                <TextBlock Text="No PioneerRx on this PC yet? Leave this blank. SuavoAgent installs now, comes online, and connects to SQL automatically the moment PioneerRx is detected."
+                                <TextBlock Text="No supported system on this PC yet? Leave this blank. SuavoAgent installs now, comes online, and connects automatically the moment one is detected."
                                            Foreground="{DynamicResource SuavoTextMutedBrush}"
                                            FontSize="11.5" TextWrapping="Wrap"/>
                             </StackPanel>

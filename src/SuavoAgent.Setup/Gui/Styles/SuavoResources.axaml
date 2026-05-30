@@ -2,30 +2,33 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!--
-        Suavo palette — per ~/.claude/rules/design-principles.md.
-        Foundation: deep charcoal (not blue-navy).
-        Accent: warm gold / amber.
-        Text: warm cream / ivory.
+        Suavo palette — Light Mercury.
+        Mirrors the web Light-Mercury tokens (Suavo/src/lib/tokens.ts):
+        warm cream canvas, white elevated surfaces, dark ink text, gold accent.
+        Status colors are tuned darker than the dark theme so they read on light.
+        Accent has two roles: SuavoAccent (#D4A574) for fills/buttons, and
+        SuavoAccentText (#8A4A00) for gold text/eyebrows that must stay legible on cream.
         Animations: spring-based (added at view layer).
     -->
 
-    <Color x:Key="SuavoBackground">#0A0A0A</Color>
-    <Color x:Key="SuavoSurface">#141414</Color>
-    <Color x:Key="SuavoCard">#1A1A1A</Color>
-    <Color x:Key="SuavoBorder">#2A2A2A</Color>
+    <Color x:Key="SuavoBackground">#F7F4EC</Color>
+    <Color x:Key="SuavoSurface">#FFFFFF</Color>
+    <Color x:Key="SuavoCard">#FFFFFF</Color>
+    <Color x:Key="SuavoBorder">#E7E2D5</Color>
 
-    <Color x:Key="SuavoAccent">#D4A24C</Color>
-    <Color x:Key="SuavoAccentHover">#E8B65C</Color>
+    <Color x:Key="SuavoAccent">#D4A574</Color>
+    <Color x:Key="SuavoAccentHover">#E0B685</Color>
     <Color x:Key="SuavoAccentPressed">#B88A3A</Color>
-    <Color x:Key="SuavoAccentMuted">#6A501E</Color>
+    <Color x:Key="SuavoAccentMuted">#EFE3CC</Color>
+    <Color x:Key="SuavoAccentText">#8A4A00</Color>
 
-    <Color x:Key="SuavoText">#F5EEDC</Color>
-    <Color x:Key="SuavoTextMuted">#A8A196</Color>
-    <Color x:Key="SuavoTextSubtle">#6E6A62</Color>
+    <Color x:Key="SuavoText">#141619</Color>
+    <Color x:Key="SuavoTextMuted">#4F4F49</Color>
+    <Color x:Key="SuavoTextSubtle">#8A867C</Color>
 
-    <Color x:Key="SuavoSuccess">#7A9B6E</Color>
-    <Color x:Key="SuavoWarning">#D4A24C</Color>
-    <Color x:Key="SuavoDanger">#8B2B2B</Color>
+    <Color x:Key="SuavoSuccess">#5E8A63</Color>
+    <Color x:Key="SuavoWarning">#B5791F</Color>
+    <Color x:Key="SuavoDanger">#A33A3A</Color>
 
     <SolidColorBrush x:Key="SuavoBackgroundBrush" Color="{StaticResource SuavoBackground}" />
     <SolidColorBrush x:Key="SuavoSurfaceBrush" Color="{StaticResource SuavoSurface}" />
@@ -36,6 +39,7 @@
     <SolidColorBrush x:Key="SuavoAccentHoverBrush" Color="{StaticResource SuavoAccentHover}" />
     <SolidColorBrush x:Key="SuavoAccentPressedBrush" Color="{StaticResource SuavoAccentPressed}" />
     <SolidColorBrush x:Key="SuavoAccentMutedBrush" Color="{StaticResource SuavoAccentMuted}" />
+    <SolidColorBrush x:Key="SuavoAccentTextBrush" Color="{StaticResource SuavoAccentText}" />
 
     <SolidColorBrush x:Key="SuavoTextBrush" Color="{StaticResource SuavoText}" />
     <SolidColorBrush x:Key="SuavoTextMutedBrush" Color="{StaticResource SuavoTextMuted}" />
@@ -50,35 +54,35 @@
     <CornerRadius x:Key="SuavoRadiusLarge">14</CornerRadius>
     <CornerRadius x:Key="SuavoRadiusPill">999</CornerRadius>
 
-    <!-- Deferred / self-healing state — calm muted gold (distinct from amber warn). -->
-    <Color x:Key="SuavoDeferred">#C9A24C</Color>
+    <!-- Deferred / self-healing state — calm dark gold (distinct from amber warn), legible on light. -->
+    <Color x:Key="SuavoDeferred">#8A6A1E</Color>
     <SolidColorBrush x:Key="SuavoDeferredBrush" Color="{StaticResource SuavoDeferred}" />
 
-    <!-- Elevated surface for chips / pills sitting on cards. -->
-    <Color x:Key="SuavoSurfaceElevated">#222019</Color>
+    <!-- Elevated surface for chips / pills sitting on cards — warm cream tint. -->
+    <Color x:Key="SuavoSurfaceElevated">#F4F0E6</Color>
     <SolidColorBrush x:Key="SuavoSurfaceElevatedBrush" Color="{StaticResource SuavoSurfaceElevated}" />
 
-    <!-- Depth gradients — premium glass, warm undertone (design DNA). -->
+    <!-- Depth gradients — premium, warm undertone (design DNA). -->
     <LinearGradientBrush x:Key="SuavoBackgroundGradientBrush" StartPoint="0%,0%" EndPoint="50%,100%">
-        <GradientStop Color="#100F0D" Offset="0" />
-        <GradientStop Color="#08080A" Offset="1" />
+        <GradientStop Color="#FBF9F2" Offset="0" />
+        <GradientStop Color="#F2EEE3" Offset="1" />
     </LinearGradientBrush>
 
     <LinearGradientBrush x:Key="SuavoCardGradientBrush" StartPoint="0%,0%" EndPoint="0%,100%">
-        <GradientStop Color="#1D1B18" Offset="0" />
-        <GradientStop Color="#161412" Offset="1" />
+        <GradientStop Color="#FFFFFF" Offset="0" />
+        <GradientStop Color="#FBF9F3" Offset="1" />
     </LinearGradientBrush>
 
     <LinearGradientBrush x:Key="SuavoAccentGradientBrush" StartPoint="0%,0%" EndPoint="100%,100%">
-        <GradientStop Color="#ECBE69" Offset="0" />
-        <GradientStop Color="#D4A24C" Offset="0.55" />
-        <GradientStop Color="#BC8C3C" Offset="1" />
+        <GradientStop Color="#E6C485" Offset="0" />
+        <GradientStop Color="#D4A574" Offset="0.55" />
+        <GradientStop Color="#C2933F" Offset="1" />
     </LinearGradientBrush>
 
     <!-- Hairline gold accent for hero rules. -->
     <LinearGradientBrush x:Key="SuavoAccentRuleBrush" StartPoint="0%,0%" EndPoint="100%,0%">
-        <GradientStop Color="#D4A24C" Offset="0" />
-        <GradientStop Color="#D4A24C00" Offset="1" />
+        <GradientStop Color="#D4A574" Offset="0" />
+        <GradientStop Color="#D4A57400" Offset="1" />
     </LinearGradientBrush>
 
 </ResourceDictionary>
