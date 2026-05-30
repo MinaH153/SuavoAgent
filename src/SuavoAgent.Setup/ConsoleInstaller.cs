@@ -72,6 +72,8 @@ internal static class ConsoleInstaller
             Console.ResetColor();
 
             ConsoleUI.WriteStep("Phase 3: Downloading SuavoAgent binaries");
+            ConsoleUI.WriteInfo("Stopping any running SuavoAgent services before download...");
+            ServiceInstaller.StopServices();
             var downloadSuccess = await BinaryDownloader.DownloadAndVerifyAsync(
                 config.ReleaseTag, InstallDir);
             if (!downloadSuccess)

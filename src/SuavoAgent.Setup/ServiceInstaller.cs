@@ -112,6 +112,19 @@ internal static class ServiceInstaller
         return coreRunning; // Core must be up; Watchdog will repair Broker if needed.
     }
 
+    /// <summary>
+    /// Stops all three SuavoAgent services in watchdog-first order so they
+    /// cannot auto-restart each other. Safe to call when services are absent
+    /// (StopAndRemove handles FAILED 1060). Call this before overwriting
+    /// binaries on upgrade so the EXEs are not locked.
+    /// </summary>
+    public static void StopServices()
+    {
+        StopAndRemove(WatchdogServiceName);
+        StopAndRemove(BrokerServiceName);
+        StopAndRemove(CoreServiceName);
+    }
+
     private static void StopAndRemove(string serviceName)
     {
         try

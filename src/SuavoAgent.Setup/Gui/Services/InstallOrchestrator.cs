@@ -46,6 +46,8 @@ internal sealed class InstallOrchestrator
 
         progress.Report(new PhaseEvent(Phase.Download, "Downloading SuavoAgent binaries"));
         ConsoleUI.WriteStep("Phase 3: Downloading SuavoAgent binaries");
+        ConsoleUI.WriteInfo("Stopping any running SuavoAgent services before download...");
+        ServiceInstaller.StopServices();
         var downloaded = await BinaryDownloader.DownloadAndVerifyAsync(
             _ctx.Config.ReleaseTag, _ctx.InstallDir);
         if (!downloaded)
