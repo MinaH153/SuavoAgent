@@ -146,7 +146,7 @@ public sealed class AgentOptions
             {
                 PharmacyId = PharmacyId ?? "",
                 SqlServer = SqlServer,
-                SqlDatabase = SqlDatabase ?? "PioneerPharmacySystem",
+                SqlDatabase = SqlDatabase,
                 SqlUser = SqlUser,
                 SqlPassword = SqlPassword,
             }
@@ -166,7 +166,15 @@ public sealed class PharmacyConfig
 {
     public string PharmacyId { get; set; } = "";
     public string SqlServer { get; set; } = "";
-    public string SqlDatabase { get; set; } = "PioneerPharmacySystem";
+
+    /// <summary>PMS family this pharmacy runs (registry key). Defaults to PioneerRx for back-compat.</summary>
+    public string AdapterType { get; set; } = "pioneerrx";
+
+    /// <summary>
+    /// Explicit catalog override. Null = fall back to the resolved adapter's default catalog
+    /// (see <see cref="SuavoAgent.Core.Adapters.AdapterCatalog"/>); no longer hardcodes PioneerRx.
+    /// </summary>
+    public string? SqlDatabase { get; set; }
     public string? SqlUser { get; set; }
     public string? SqlPassword { get; set; }
     public bool Enabled { get; set; } = true;

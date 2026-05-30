@@ -12,6 +12,8 @@ using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Contracts.Models;
+using SuavoAgent.Contracts.Adapters;
+using SuavoAgent.Core.Adapters;
 
 namespace SuavoAgent.Core.Workers;
 
@@ -29,6 +31,7 @@ public sealed class RxDetectionWorker : BackgroundService
     private readonly AgentStateDb _stateDb;
     private readonly bool _canaryEnabled;
     private readonly IServiceProvider _serviceProvider;
+    private readonly AdapterConfig _adapterConfig;
     private PioneerRxSqlEngine? _sqlEngine;
     private PioneerRxCanarySource? _canarySource;
     private PioneerRxWritebackEngine? _writebackEngine;
@@ -62,6 +65,7 @@ public sealed class RxDetectionWorker : BackgroundService
         _stateDb = stateDb;
         _serviceProvider = serviceProvider;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
+        _adapterConfig = serviceProvider.GetService<IAdapterRegistry>()?.Default ?? PioneerRxAdapterConfig.Create();
         _canaryEnabled = !_options.LearningMode;
     }
 
@@ -376,7 +380,7 @@ public sealed class RxDetectionWorker : BackgroundService
         }
 
         var server = _options.SqlServer ?? "localhost";
-        var database = _options.SqlDatabase ?? "PioneerPharmacySystem";
+        var database = AdapterCatalog.Resolve(_options.SqlDatabase, _adapterConfig);
 
         _sqlEngine?.Dispose();
         _sqlEngine = new PioneerRxSqlEngine(

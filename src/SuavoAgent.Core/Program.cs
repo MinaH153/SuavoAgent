@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Serilog;
 using SuavoAgent.Core;
+using SuavoAgent.Core.Adapters;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
@@ -263,6 +264,9 @@ try
         Log.Warning("No ApiKey configured — cloud sync disabled. Set Agent:ApiKey in appsettings.json");
     }
     builder.Services.AddSingleton(sp => new SeedApplicator(sp.GetRequiredService<AgentStateDb>()));
+
+    // Adapter registry — single source of per-PMS Core config + the enforced PHI-policy invariant.
+    builder.Services.AddAdapterRegistry();
 
     builder.Services.AddHostedService<HeartbeatWorker>();
 
