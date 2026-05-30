@@ -14,6 +14,7 @@ using SuavoAgent.Core.ActionGrammarV1.Workflows;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Diagnostics;
 using SuavoAgent.Core.Health;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
@@ -737,6 +738,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "collect_health_probe":
                     await HandleCollectHealthProbeAsync(scEl, cmd, ct);
                     break;
+                case "fetch_diagnostics":
+                    await HandleFetchDiagnosticsAsync(scEl, cmd, ct);
+                    break;
                 case "export_pioneerrx_shadow_fixture":
                     await PioneerRxShadowFixtureCommand.HandleAsync(
                         scEl, cmd, _options, _serviceProvider, _stateDb, _cloudClient, _logger, ct);
@@ -1140,6 +1144,73 @@ public sealed class HeartbeatWorker : ResilientHostedService
             CaptureReason: "non_phi_health_probe"));
 
         await AckAsync(true, BuildHealthProbeResult(reason), null);
+    }
+
+    /// <summary>
+    /// <c>fetch_diagnostics</c> — gathers a PHI-safe snapshot of the box's config,
+    /// SQL connectivity, helper/IPC health, and error-mesh counters and acks it to
+    /// the cloud. Read-only: never drives the PMS, never mutates the box. This is
+    /// how Claude debugs an agent remotely without touching the PHI workstation.
+    /// Secrets (ApiKey/SqlPassword/HmacSalt/CloudCertPin) are never gathered;
+    /// <see cref="DiagnosticsSnapshotBuilder"/> enforces the safe field set and the
+    /// ack POST runs the snapshot through OutboundPhiGuard.
+    /// </summary>
+    private async Task HandleFetchDiagnosticsAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+        var requesterId = dataEl.TryGetProperty("requesterId", out var rid) ? rid.GetString() : "operator";
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        var rxWorker = _serviceProvider.GetService<RxDetectionWorker>();
+        var pharmacies = _options.GetEffectivePharmacies();
+        var firstPharmacy = pharmacies.Count > 0 ? pharmacies[0] : null;
+        var sql = new DiagnosticsSnapshotBuilder.SqlDiagnostics(
+            Configured: pharmacies.Count > 0,
+            Connected: rxWorker?.IsSqlConnected ?? false,
+            Server: firstPharmacy?.SqlServer ?? _options.SqlServer,
+            Database: firstPharmacy?.SqlDatabase ?? _options.SqlDatabase,
+            User: firstPharmacy?.SqlUser ?? _options.SqlUser);
+
+        var wire = new DiagnosticsSnapshotBuilder.WireDiagnostics(
+            SentryInitialized: global::SuavoAgent.Diagnostics.Wire.SentryInitialized,
+            EventsEmittedTotal: global::SuavoAgent.Diagnostics.Wire.EventsEmittedTotal,
+            WireHandlerFailedTotal: global::SuavoAgent.Diagnostics.Wire.WireHandlerFailedTotal,
+            SentryEnqueuedTotal: global::SuavoAgent.Diagnostics.Wire.SentryEnqueuedTotal,
+            SentryEnqueueFailedTotal: global::SuavoAgent.Diagnostics.Wire.SentryEnqueueFailedTotal,
+            SentryBeforeSendFailedTotal: global::SuavoAgent.Diagnostics.Wire.SentryBeforeSendFailedTotal,
+            RulesetVersion: global::SuavoAgent.Diagnostics.Wire.RulesetVersion);
+
+        var snapshot = DiagnosticsSnapshotBuilder.Build(
+            _options,
+            sql,
+            wire,
+            helper: BuildHelperPayload(_serviceProvider.GetService<IpcPipeServer>()),
+            watchdog: BuildWatchdogPayload(),
+            runtimeHealth: RuntimeHealthEvidence.Collect(),
+            commandPipeConnected: _ipcCommandClient?.IsConnected ?? false,
+            uptimeSeconds: (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
+            processId: Environment.ProcessId,
+            collectedAtUtc: DateTimeOffset.UtcNow);
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: commandId ?? cmd.Nonce,
+            EventType: "fetch_diagnostics_command",
+            FromState: "requested",
+            ToState: "collected",
+            Trigger: "signed_command",
+            CommandId: cmd.Nonce,
+            RequesterId: requesterId,
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: "non_phi_diagnostics"));
+
+        await AckAsync(true, snapshot, null);
     }
 
     private object BuildHealthProbeResult(string reason)
@@ -2345,13 +2416,17 @@ public sealed class HeartbeatWorker : ResilientHostedService
 
         // Run discovery.
         var discoveryJobId = Guid.NewGuid().ToString("N");
-        var discoveryResult = await _discoveryClient.FindAsync(_ipcCommandClient, discoveryJobId, spec, ct);
-        if (discoveryResult is null)
+        var discovery = await _discoveryClient.FindAsync(_ipcCommandClient, discoveryJobId, spec, ct);
+        if (!discovery.Succeeded)
         {
-            _logger.LogError("find_and_run_pricing_job: discovery returned null");
-            await AckAsync(false, null, "discovery failed — see agent logs");
+            var failure = discovery.Failure!;
+            _logger.LogError(
+                "find_and_run_pricing_job: discovery failed reason={Reason} ipcStatus={Status} code={Code}",
+                failure.ReasonCode, failure.IpcStatus, failure.ErrorCode);
+            await AckAsync(false, failure.ToAckResult(), failure.HumanMessage);
             return;
         }
+        var discoveryResult = discovery.Result!;
 
         _logger.LogInformation(
             "find_and_run_pricing_job: discovery resolution={Resolution} best={File} confidence={Conf}",
