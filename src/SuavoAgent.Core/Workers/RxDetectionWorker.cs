@@ -17,7 +17,7 @@ using SuavoAgent.Core.Adapters;
 
 namespace SuavoAgent.Core.Workers;
 
-public sealed class RxDetectionWorker : BackgroundService
+public sealed class RxDetectionWorker : ResilientHostedService
 {
     private static readonly JsonSerializerOptions SyncPayloadJsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -58,6 +58,7 @@ public sealed class RxDetectionWorker : BackgroundService
         IOptions<AgentOptions> options,
         AgentStateDb stateDb,
         IServiceProvider serviceProvider)
+        : base(logger)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
@@ -69,7 +70,20 @@ public sealed class RxDetectionWorker : BackgroundService
         _canaryEnabled = !_options.LearningMode;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override string WorkerName => "rx-detection";
+    protected override bool RestartOnFault => _options.SelfHeal.WorkerSupervisorEnabled;
+
+    protected override Task OnEscalateAsync()
+    {
+        // Exhausted in-process restarts: mark disconnected so the heartbeat reports degraded and
+        // log CRITICAL — the cloud silent-agent / health-watch surfaces it for repair.
+        _sqlConnected = false;
+        _logger.LogCritical(
+            "RxDetectionWorker exhausted supervised restarts — detection halted, awaiting repair");
+        return Task.CompletedTask;
+    }
+
+    protected override async Task RunAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Rx detection worker started (canary={Canary})", _canaryEnabled);
 
@@ -383,6 +397,11 @@ public sealed class RxDetectionWorker : BackgroundService
         var database = AdapterCatalog.Resolve(_options.SqlDatabase, _adapterConfig);
 
         _sqlEngine?.Dispose();
+        // The canary source is bound to the engine instance. Disposing+replacing the engine on a
+        // reconnect (now more frequent under the worker supervisor) would otherwise leave the
+        // `_canarySource == null` guard below holding a source bound to the disposed engine — so
+        // clear it here to force a rebuild against the new engine.
+        _canarySource = null;
         _sqlEngine = new PioneerRxSqlEngine(
             server, database,
             _loggerFactory.CreateLogger<PioneerRxSqlEngine>(),
