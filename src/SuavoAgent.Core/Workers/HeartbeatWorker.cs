@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -419,6 +420,8 @@ public sealed class HeartbeatWorker : ResilientHostedService
                         lastRxCount = _lastRxCount
                     },
                     helper = helperPayload,
+                    // Supervised-worker liveness (self-heal Chunk 3b) — see BuildWorkersPayload.
+                    workers = BuildWorkersPayload(_serviceProvider.GetService<WorkerHealthRegistry>()),
                     writeback = new
                     {
                         pending = pendingWbCount,
@@ -619,6 +622,23 @@ public sealed class HeartbeatWorker : ResilientHostedService
             lastIpcRejectAt = lastAt?.ToString("o"),
         };
     }
+
+    /// <summary>
+    /// Supervised-worker liveness for the heartbeat wire — restart-looping/escalated workers so
+    /// the cloud's agent-health-watch can remediate at worker granularity (closed loop) rather
+    /// than only detecting a fully-silent agent. Empty array when no registry / no faults (safe to
+    /// emit either way). Names are static ("rx-detection", …); no PHI.
+    /// </summary>
+    internal static object[] BuildWorkersPayload(WorkerHealthRegistry? registry)
+        => (registry?.Snapshot() ?? Array.Empty<WorkerHealth>())
+            .Select(w => (object)new
+            {
+                name = w.Name,
+                restartCount = w.RestartCount,
+                escalated = w.Escalated,
+                lastFaultUtc = w.LastFaultUtc.ToString("o"),
+            })
+            .ToArray();
 
     private object BuildWatchdogPayload()
     {
