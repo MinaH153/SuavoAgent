@@ -76,4 +76,32 @@ public sealed class OutboundPhiGuardTests
 
         Assert.Null(ex);
     }
+
+    [Fact]
+    public void Allows_utc_iso_timestamps_with_a_positive_offset()
+    {
+        // The exact field that was blocking every heartbeat: canary.lastVerifiedAt is
+        // DateTimeOffset.UtcNow.ToString("o") -> a "+00:00" offset. The "+" escapes the
+        // operational charset (which allows "-" but not "+") and the embedded date trips
+        // the PHI date pattern. Also covers the "Z" form and a non-whitelisted field name.
+        var body = @"{
+            ""canary"": { ""status"":""clean"", ""lastVerifiedAt"":""2026-05-30T10:00:59.6567122+00:00"" },
+            ""watchdog"": { ""present"":true, ""generatedAtUtc"":""2026-05-30T10:00:59+00:00"" },
+            ""lastVerifiedAt"":""2026-05-30T10:00:59.6567122Z""
+        }";
+
+        Assert.Null(Record.Exception(
+            () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options)));
+    }
+
+    [Theory]
+    [InlineData("patient dob 1990-01-15")] // bare ISO date — no T/time
+    [InlineData("dob 01/15/1990")]          // US layout
+    public void Still_blocks_a_date_of_birth_so_the_fix_does_not_weaken_phi(string dob)
+    {
+        var body = $@"{{ ""freeNote"":""{dob}"" }}";
+
+        Assert.Throws<InvalidOperationException>(
+            () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options));
+    }
 }

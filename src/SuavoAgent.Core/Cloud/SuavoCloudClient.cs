@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Learning;
 
@@ -336,6 +337,13 @@ internal static class OutboundPhiGuard
         }
     }
 
+    // ISO-8601 datetimes (incl. UTC "+00:00"/"Z" offsets) are operational metadata,
+    // not PHI. Requires the "T" + time, so a bare date like a "1990-01-15" DOB is NOT
+    // matched and stays subject to the PHI scan.
+    private static readonly Regex IsoTimestamp = new(
+        @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     private static bool IsOperationalSafeString(string? propertyName, string value)
     {
         if (propertyName is not null &&
@@ -351,6 +359,13 @@ internal static class OutboundPhiGuard
         {
             return true;
         }
+
+        // The charset below allows the "-" of a negative UTC offset but not the "+" of a
+        // positive one, so a UTC timestamp ("...T..:..:..+00:00" — every watchdog write
+        // and every canary lastVerifiedAt) would escape this exemption and trip the date
+        // pattern, silently blocking the heartbeat from any non-negative-offset timezone.
+        if (IsoTimestamp.IsMatch(value))
+            return true;
 
         return value.Length <= 96 &&
                value.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '-' or '.' or ':');
