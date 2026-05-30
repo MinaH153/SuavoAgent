@@ -173,8 +173,9 @@ public sealed class SelfHealOptions
 {
     /// <summary>
     /// Restart a faulted <c>ResilientHostedService</c> worker in-process (bounded backoff) instead
-    /// of letting it die silently. Default true. Set false as a kill-switch (faults then propagate
-    /// as before).
+    /// of letting it die silently. Default true; set false as a kill-switch (faults then propagate
+    /// as before). Gates the workers that read AgentOptions (RxDetection, Writeback, Heartbeat);
+    /// ConfigSync is a low-risk config-poll loop and supervises unconditionally.
     /// </summary>
     public bool WorkerSupervisorEnabled { get; set; } = true;
 }
