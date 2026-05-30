@@ -26,7 +26,7 @@
                        FontWeight="Light"
                        FontSize="44"
                        HorizontalAlignment="Center"/>
-            <TextBlock Text="Pharmacy intelligence agent for PioneerRx."
+            <TextBlock Text="The on-desktop agent for regulated workstations."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="16"
                        HorizontalAlignment="Center"/>

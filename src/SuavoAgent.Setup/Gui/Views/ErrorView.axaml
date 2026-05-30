@@ -15,7 +15,7 @@
                     Background="{DynamicResource SuavoDangerBrush}"
                     CornerRadius="32">
                 <TextBlock Text="!"
-                           Foreground="#F5EEDC"
+                           Foreground="#FFFFFF"
                            FontSize="36" FontWeight="Bold"
                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>

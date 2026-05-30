@@ -23,7 +23,7 @@
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="34" FontWeight="Light"
                        HorizontalAlignment="Center"/>
-            <TextBlock Text="The agent will query for delivery-ready prescriptions every 5 minutes."
+            <TextBlock Text="The agent now runs quietly in the background, observing and automating your workflows."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"
                        HorizontalAlignment="Center"/>

@@ -25,7 +25,7 @@
                         <TextBlock Grid.Column="0"
                                    Text="{Binding Icon}"
                                    FontSize="16" FontWeight="Bold"
-                                   Foreground="{DynamicResource SuavoAccentBrush}"
+                                   Foreground="{DynamicResource SuavoAccentTextBrush}"
                                    VerticalAlignment="Center"/>
                         <TextBlock Grid.Column="1"
                                    Text="{Binding Title}"
@@ -38,7 +38,7 @@
                                      Minimum="0" Maximum="100"
                                      Value="{Binding Percent}"
                                      IsVisible="{Binding IsActive}"
-                                     Foreground="{DynamicResource SuavoAccentBrush}"
+                                     Foreground="{DynamicResource SuavoAccentTextBrush}"
                                      Background="{DynamicResource SuavoBorderBrush}"/>
                     </Grid>
                 </DataTemplate>
@@ -46,7 +46,7 @@
         </ItemsControl>
 
         <Border Grid.Row="2"
-                Background="#080808"
+                Background="#16140F"
                 BorderBrush="{DynamicResource SuavoBorderBrush}"
                 BorderThickness="1"
                 CornerRadius="{DynamicResource SuavoRadiusMedium}">

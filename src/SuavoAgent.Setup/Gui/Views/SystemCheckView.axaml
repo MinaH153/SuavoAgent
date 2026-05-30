@@ -56,7 +56,7 @@
         <!-- ── Hero ──────────────────────────────────────────────────────── -->
         <StackPanel Grid.Row="0" Spacing="10">
             <TextBlock Text="WORKSTATION READINESS"
-                       Foreground="{DynamicResource SuavoAccentBrush}"
+                       Foreground="{DynamicResource SuavoAccentTextBrush}"
                        FontSize="11" FontWeight="SemiBold" />
             <TextBlock Text="System check"
                        Foreground="{DynamicResource SuavoTextBrush}"
