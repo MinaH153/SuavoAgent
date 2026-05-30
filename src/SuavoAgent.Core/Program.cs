@@ -275,6 +275,7 @@ try
     // Both gates default OFF so this is a no-op until a pilot opts in.
     builder.Services.Configure<VisionOptions>(builder.Configuration.GetSection("Vision"));
     builder.Services.AddSingleton<SuavoAgent.Core.Workers.VisionCaptureTelemetry>();
+    builder.Services.AddSingleton<IVisionShadowReasoner, VisionGroundedShadowReasoner>();
     builder.Services.AddHostedService<SuavoAgent.Core.Workers.VisionCaptureWorker>();
 
     builder.Services.AddSingleton<AgentStateDb>(sp =>

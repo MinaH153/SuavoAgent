@@ -193,6 +193,26 @@ public sealed class RuleEngine
             }
         }
 
+        // W4b visual predicate: every required substring must appear (case-insensitive)
+        // in some on-screen text region. Empty = no constraint (legacy behaviour).
+        if (p.TextPresent.Count > 0)
+        {
+            foreach (var required in p.TextPresent)
+            {
+                var found = false;
+                foreach (var region in ctx.ScreenText)
+                {
+                    if (region.Text.Contains(required, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    return false;
+            }
+        }
+
         return true;
     }
 
