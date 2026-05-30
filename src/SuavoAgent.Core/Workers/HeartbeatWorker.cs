@@ -23,7 +23,7 @@ using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
 
-public sealed class HeartbeatWorker : BackgroundService
+public sealed class HeartbeatWorker : ResilientHostedService
 {
     private readonly ILogger<HeartbeatWorker> _logger;
     private readonly AgentOptions _options;
@@ -71,6 +71,7 @@ public sealed class HeartbeatWorker : BackgroundService
         IOptions<AgentOptions> options,
         IServiceProvider serviceProvider,
         AgentStateDb stateDb)
+        : base(logger)
     {
         _logger = logger;
         _options = options.Value;
@@ -100,7 +101,17 @@ public sealed class HeartbeatWorker : BackgroundService
         }
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override string WorkerName => "heartbeat";
+    protected override bool RestartOnFault => _options.SelfHeal.WorkerSupervisorEnabled;
+
+    protected override Task OnEscalateAsync()
+    {
+        // The cloud silent-agent alarm already catches a dead heartbeat; log loudly and stop.
+        _logger.LogCritical("HeartbeatWorker exhausted supervised restarts — heartbeat halted");
+        return Task.CompletedTask;
+    }
+
+    protected override async Task RunAsync(CancellationToken stoppingToken)
     {
         if (_cloudClient == null)
         {

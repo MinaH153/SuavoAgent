@@ -25,7 +25,7 @@ namespace SuavoAgent.Core.Workers;
 /// transient network blip (or broken cloud response) doesn't kill the
 /// worker and leave the agent without future updates.
 /// </summary>
-public sealed class ConfigSyncWorker : BackgroundService
+public sealed class ConfigSyncWorker : ResilientHostedService
 {
     private readonly IAgentConfigClient _client;
     private readonly ConfigOverrideStore _store;
@@ -51,6 +51,7 @@ public sealed class ConfigSyncWorker : BackgroundService
         RulesetSyncStore? rulesetStore = null,
         IRulesetVerifier? rulesetVerifier = null,
         IRulesetSwapper? rulesetSwapper = null)
+        : base(logger)
     {
         _client = client;
         _store = store;
@@ -69,7 +70,15 @@ public sealed class ConfigSyncWorker : BackgroundService
            && _rulesetVerifier is not null
            && _rulesetSwapper is not null;
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override string WorkerName => "config-sync";
+
+    protected override Task OnEscalateAsync()
+    {
+        _logger.LogCritical("ConfigSyncWorker exhausted supervised restarts — config sync halted");
+        return Task.CompletedTask;
+    }
+
+    protected override async Task RunAsync(CancellationToken stoppingToken)
     {
         await InitializeRulesetCacheAsync(stoppingToken).ConfigureAwait(false);
         while (!stoppingToken.IsCancellationRequested)
