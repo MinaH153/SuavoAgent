@@ -22,6 +22,11 @@ public sealed class SessionWatcher : BackgroundService
     {
         _logger.LogInformation("Session watcher started — monitoring for interactive sessions");
 
+        // One-shot at startup: the Broker is LocalSystem, so it's the one always-on component that
+        // can re-register a missing Watchdog service (Core is LocalService; the repair command needs
+        // the very Watchdog that's gone). No-op on a healthy install. Best-effort, never fatal.
+        EnsureWatchdogService();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -36,6 +41,34 @@ public sealed class SessionWatcher : BackgroundService
             }
 
             await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        }
+    }
+
+    private void EnsureWatchdogService()
+    {
+        try
+        {
+            var flag = Environment.GetEnvironmentVariable("SUAVO_WATCHDOG_SELF_HEAL");
+            var enabled = !string.Equals(flag, "0", StringComparison.OrdinalIgnoreCase)
+                          && !string.Equals(flag, "false", StringComparison.OrdinalIgnoreCase);
+
+            var installDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
+            var watchdogBinary = Path.Combine(installDir, "SuavoAgent.Watchdog.exe");
+            // Fixed canonical path only — deliberately NOT honoring a SUAVO_BOOTSTRAP_PS1 override:
+            // the Broker is LocalSystem and runs this script with -ExecutionPolicy Bypass, so an
+            // env-pointed path would be a privileged-exec surface. The installer always persists
+            // bootstrap.ps1 here (ProgramData\SuavoAgent), so the fixed path is correct.
+            var bootstrap = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent", "bootstrap.ps1");
+
+            new WatchdogServiceGuard(
+                new ScWatchdogServiceProbe(), _logger, enabled, watchdogBinary, bootstrap)
+                .EnsureWatchdogRegistered();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "WatchdogServiceGuard failed (non-fatal)");
         }
     }
 
