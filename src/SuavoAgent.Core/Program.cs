@@ -268,6 +268,11 @@ try
     // Adapter registry — single source of per-PMS Core config + the enforced PHI-policy invariant.
     builder.Services.AddAdapterRegistry();
 
+    // Supervised-worker health: ResilientHostedService workers record faults here; the
+    // heartbeat (HealthSnapshot.workers[]) surfaces restart-looping/escalated workers to the
+    // cloud for closed-loop remediation. Singleton so every worker + the snapshot share it.
+    builder.Services.AddSingleton<SuavoAgent.Core.Workers.WorkerHealthRegistry>();
+
     builder.Services.AddHostedService<HeartbeatWorker>();
 
     // VisionCaptureWorker — fires periodic capture_screen IPC commands when

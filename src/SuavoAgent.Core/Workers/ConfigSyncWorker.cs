@@ -50,8 +50,9 @@ public sealed class ConfigSyncWorker : ResilientHostedService
         IRulesetClient? rulesetClient = null,
         RulesetSyncStore? rulesetStore = null,
         IRulesetVerifier? rulesetVerifier = null,
-        IRulesetSwapper? rulesetSwapper = null)
-        : base(logger)
+        IRulesetSwapper? rulesetSwapper = null,
+        WorkerHealthRegistry? healthRegistry = null)
+        : base(logger, healthRegistry)
     {
         _client = client;
         _store = store;

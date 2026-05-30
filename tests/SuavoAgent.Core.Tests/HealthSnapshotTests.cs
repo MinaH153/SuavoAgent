@@ -1,9 +1,11 @@
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using SuavoAgent.Core;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Health;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
+using SuavoAgent.Core.Workers;
 using Xunit;
 
 namespace SuavoAgent.Core.Tests;
@@ -255,6 +257,51 @@ public sealed class HealthSnapshotTests : IDisposable
         {
             try { Directory.Delete(root, recursive: true); } catch { }
         }
+    }
+
+    [Fact]
+    public void Take_Includes_SupervisedWorkerHealth_FromRegistry()
+    {
+        var registry = new WorkerHealthRegistry();
+        registry.RecordFault("rx-detection", restartCount: 6, escalated: true, faultedAtUtc: DateTimeOffset.UtcNow);
+
+        using var services = new ServiceCollection()
+            .AddSingleton(registry)
+            .BuildServiceProvider();
+        var options = new AgentOptions
+        {
+            AgentId = "agent-health-test",
+            Version = "test",
+            PharmacyId = "pharmacy-health-test",
+        };
+
+        var snapshot = new HealthSnapshot(
+            options, _db, services, DateTimeOffset.UtcNow.AddSeconds(-5)).Take();
+
+        var workers = snapshot.GetProperty("workers");
+        Assert.Equal(JsonValueKind.Array, workers.ValueKind);
+        var w = Assert.Single(workers.EnumerateArray().ToArray());
+        Assert.Equal("rx-detection", w.GetProperty("name").GetString());
+        Assert.Equal(6, w.GetProperty("restartCount").GetInt32());
+        Assert.True(w.GetProperty("escalated").GetBoolean());
+        Assert.True(DateTimeOffset.TryParse(w.GetProperty("lastFaultUtc").GetString(), out _));
+    }
+
+    [Fact]
+    public void Take_Workers_EmptyWhenRegistryUnavailable()
+    {
+        using var services = new ServiceCollection().BuildServiceProvider();
+        var options = new AgentOptions
+        {
+            AgentId = "agent-health-test",
+            Version = "test",
+            PharmacyId = "pharmacy-health-test",
+        };
+
+        var snapshot = new HealthSnapshot(
+            options, _db, services, DateTimeOffset.UtcNow.AddSeconds(-5)).Take();
+
+        Assert.Empty(snapshot.GetProperty("workers").EnumerateArray().ToArray());
     }
 
     public void Dispose()

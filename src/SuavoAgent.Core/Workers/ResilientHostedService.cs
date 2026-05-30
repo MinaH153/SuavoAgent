@@ -17,8 +17,13 @@ namespace SuavoAgent.Core.Workers;
 public abstract class ResilientHostedService : BackgroundService
 {
     private readonly ILogger _log;
+    private readonly WorkerHealthRegistry? _healthRegistry;
 
-    protected ResilientHostedService(ILogger log) => _log = log;
+    protected ResilientHostedService(ILogger log, WorkerHealthRegistry? healthRegistry = null)
+    {
+        _log = log;
+        _healthRegistry = healthRegistry;
+    }
 
     /// <summary>Short name for logs/telemetry.</summary>
     protected abstract string WorkerName { get; }
@@ -72,11 +77,13 @@ public abstract class ResilientHostedService : BackgroundService
                     throw;
 
                 RestartCount++;
+                var willEscalate = RestartCount > MaxRestarts;
                 _log.LogCritical(ex,
                     "Worker {Worker} faulted (restart {Count}/{Max}) — supervising",
                     WorkerName, RestartCount, MaxRestarts);
+                _healthRegistry?.RecordFault(WorkerName, RestartCount, willEscalate, DateTimeOffset.UtcNow);
 
-                if (RestartCount > MaxRestarts)
+                if (willEscalate)
                 {
                     Escalated = true;
                     _log.LogCritical(

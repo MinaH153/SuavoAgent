@@ -24,8 +24,9 @@ public class ResilientHostedServiceTests
 
         public int Runs => _runs;
 
-        public FaultyWorker(int throwTimes, int maxRestarts, bool blockWhenHealthy)
-            : base(NullLogger.Instance)
+        public FaultyWorker(int throwTimes, int maxRestarts, bool blockWhenHealthy,
+            WorkerHealthRegistry? registry = null)
+            : base(NullLogger.Instance, registry)
         {
             _throwTimes = throwTimes;
             _max = maxRestarts;
@@ -90,6 +91,20 @@ public class ResilientHostedServiceTests
 
         Assert.Equal(0, w.RestartCount);
         Assert.False(w.Escalated);
+    }
+
+    [Fact]
+    public async Task Faults_AreRecorded_InHealthRegistry()
+    {
+        var registry = new WorkerHealthRegistry();
+        var w = new FaultyWorker(throwTimes: 1000, maxRestarts: 2, blockWhenHealthy: false, registry: registry);
+
+        await w.RunSupervisedAsync(CancellationToken.None);
+
+        var health = Assert.Single(registry.Snapshot());
+        Assert.Equal("faulty", health.Name);
+        Assert.Equal(3, health.RestartCount);   // restart 3 > max(2) → escalated
+        Assert.True(health.Escalated);
     }
 
     [Fact]
