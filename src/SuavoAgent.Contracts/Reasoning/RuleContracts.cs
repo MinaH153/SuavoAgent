@@ -110,7 +110,21 @@ public sealed record RulePredicate
     /// what is literally on screen, app-agnostically — no hardcoded process/element names.
     /// </summary>
     public IReadOnlyList<string> TextPresent { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Spatial visual predicate: each entry requires on-screen text to sit NEAR a control of a
+    /// given role. Empty = no constraint. Grounds rules on screen layout, app-agnostically.
+    /// </summary>
+    public IReadOnlyList<SpatialTextPredicate> TextNearElement { get; init; } = Array.Empty<SpatialTextPredicate>();
 }
+
+/// <summary>
+/// One "text near a control" spatial constraint: <paramref name="Text"/> must appear
+/// (case-insensitive) in some <see cref="RuleContext.ScreenText"/> region whose bounding-box
+/// center is within <paramref name="MaxDistancePx"/> pixels of some <see cref="RuleContext.ScreenElements"/>
+/// element of role <paramref name="ElementRole"/> (case-insensitive).
+/// </summary>
+public sealed record SpatialTextPredicate(string Text, string ElementRole, int MaxDistancePx = 100);
 
 /// <summary>
 /// A single action the rule emits when matched. Parameters are string-keyed so

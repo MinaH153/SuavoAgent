@@ -2,6 +2,7 @@ using System.Collections.Frozen;
 using System.Collections.Immutable;
 using System.Text.RegularExpressions;
 using SuavoAgent.Contracts.Reasoning;
+using SuavoAgent.Contracts.Vision;
 
 namespace SuavoAgent.Core.Reasoning;
 
@@ -213,8 +214,41 @@ public sealed class RuleEngine
             }
         }
 
+        // W4b+ spatial predicate: each entry requires on-screen text near a control of a role.
+        if (p.TextNearElement.Count > 0)
+        {
+            foreach (var near in p.TextNearElement)
+            {
+                if (!SatisfiesTextNearElement(near, ctx))
+                    return false;
+            }
+        }
+
         return true;
     }
+
+    private static bool SatisfiesTextNearElement(SpatialTextPredicate p, RuleContext ctx)
+    {
+        long maxSq = (long)p.MaxDistancePx * p.MaxDistancePx;
+        foreach (var t in ctx.ScreenText)
+        {
+            if (!t.Text.Contains(p.Text, StringComparison.OrdinalIgnoreCase))
+                continue;
+            var (tx, ty) = Center(t.Bounds);
+            foreach (var e in ctx.ScreenElements)
+            {
+                if (!string.Equals(e.Role, p.ElementRole, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var (ex, ey) = Center(e.Bounds);
+                long dx = tx - ex, dy = ty - ey;
+                if (dx * dx + dy * dy <= maxSq)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static (long X, long Y) Center(Rect r) => (r.X + r.Width / 2, r.Y + r.Height / 2);
 
     /// <summary>
     /// Basic shell-style glob matching (only '*' and '?'). Case-insensitive.
