@@ -58,6 +58,26 @@ public sealed class VisionOptions
     /// 2026-04-26).
     /// </summary>
     public VisionPeriodicCaptureOptions PeriodicCapture { get; set; } = new();
+
+    /// <summary>
+    /// W4b observe-only vision-grounded reasoning over captured frames. Requires
+    /// <see cref="Enabled"/>. Default off.
+    /// </summary>
+    public VisionShadowReasoningOptions ShadowReasoning { get; set; } = new();
+}
+
+/// <summary>
+/// Observe-only vision-grounded reasoning toggle (W4b). When on, the capture worker feeds each
+/// captured (scrubbed) <c>ScreenFrame</c> to the reasoner, which logs the would-be decision and
+/// executes nothing. No screen content reaches the cloud (the reasoner runs a cloud-disabled brain).
+/// </summary>
+public sealed class VisionShadowReasoningOptions
+{
+    /// <summary>Master toggle for shadow reasoning. Default false. Requires Vision.Enabled too.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Skill id used to match shadow-observation rules. Default "vision-observe".</summary>
+    public string SkillId { get; set; } = "vision-observe";
 }
 
 /// <summary>

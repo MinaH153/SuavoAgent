@@ -1,9 +1,12 @@
+using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Vision;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
+using SuavoAgent.Core.Reasoning;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
@@ -38,6 +41,7 @@ public sealed class VisionCaptureWorker : BackgroundService
     private readonly IIpcCommandClient _ipc;
     private readonly TimeProvider _clock;
     private readonly VisionCaptureTelemetry _telemetry;
+    private readonly IVisionShadowReasoner? _reasoner;
 
     public VisionCaptureWorker(
         ILogger<VisionCaptureWorker> logger,
@@ -46,7 +50,8 @@ public sealed class VisionCaptureWorker : BackgroundService
         AgentStateDb stateDb,
         IIpcCommandClient ipc,
         TimeProvider? clock = null,
-        VisionCaptureTelemetry? telemetry = null)
+        VisionCaptureTelemetry? telemetry = null,
+        IVisionShadowReasoner? reasoner = null)
     {
         _logger = logger;
         _agentOptions = agentOptions.Value;
@@ -55,6 +60,7 @@ public sealed class VisionCaptureWorker : BackgroundService
         _ipc = ipc;
         _clock = clock ?? TimeProvider.System;
         _telemetry = telemetry ?? new VisionCaptureTelemetry();
+        _reasoner = reasoner;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -208,6 +214,12 @@ public sealed class VisionCaptureWorker : BackgroundService
         AppendCaptureOutcome(commandId, "complete", "captured", storageId);
         _telemetry.RecordCaptured(storageId, commandId);
 
+        // W4b: observe-only vision-grounded reasoning. The Helper already returned the scrubbed
+        // ScreenFrame in this response; when enabled, ground the brain on it and log the would-be
+        // decision. Best-effort — a reasoning error must never fail the capture/audit path.
+        if (_reasoner != null && options.ShadowReasoning.Enabled)
+            await TryObserveAsync(response, options, ct);
+
         _logger.LogInformation(
             "VisionCaptureWorker: capture committed — storageId={StorageId}", storageId);
         return TickResult.Captured(storageId, commandId);
@@ -225,6 +237,31 @@ public sealed class VisionCaptureWorker : BackgroundService
             new(false, null, null, reason);
         public static TickResult Failed(string reason) =>
             new(false, null, null, reason);
+    }
+
+    private static readonly JsonSerializerOptions ShadowFrameJsonOptions = new(JsonSerializerDefaults.Web);
+
+    /// <summary>
+    /// Best-effort observe-only step: deserialize the scrubbed ScreenFrame the Helper returned in
+    /// the capture response and hand it to the reasoner. Never throws into the capture/audit path.
+    /// </summary>
+    private async Task TryObserveAsync(IpcResponse response, VisionOptions options, CancellationToken ct)
+    {
+        try
+        {
+            if (response.Data is { } data &&
+                data.TryGetProperty("frame", out var frameEl) &&
+                frameEl.ValueKind == JsonValueKind.Object)
+            {
+                var frame = frameEl.Deserialize<ScreenFrame>(ShadowFrameJsonOptions);
+                if (frame != null)
+                    await _reasoner!.ObserveAsync(frame, options.ShadowReasoning.SkillId, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "VisionCaptureWorker: shadow reasoning skipped (non-fatal)");
+        }
     }
 
     private void AppendCaptureOutcome(

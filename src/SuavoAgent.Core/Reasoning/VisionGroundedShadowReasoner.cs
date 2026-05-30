@@ -16,7 +16,7 @@ namespace SuavoAgent.Core.Reasoning;
 /// screen-derived context never reaches Tier-3 (HIPAA invariant). "Observe-only" is enforced
 /// structurally — this class has no executor and never acts on <see cref="BrainDecision.Actions"/>.
 /// </summary>
-public sealed class VisionGroundedShadowReasoner
+public sealed class VisionGroundedShadowReasoner : IVisionShadowReasoner
 {
     private readonly TieredBrain _shadowBrain;
     private readonly ILogger<VisionGroundedShadowReasoner> _logger;
