@@ -104,4 +104,30 @@ public sealed class OutboundPhiGuardTests
         Assert.Throws<InvalidOperationException>(
             () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options));
     }
+
+    [Fact]
+    public void Allows_a_pre_serialized_json_blob_field_with_embedded_timestamps()
+    {
+        // intelligenceContext / efficiencyReport / fleetSignals ship source-validated
+        // JSON as a STRING value. Its embedded UTC timestamps must not trip the date
+        // pattern when the blob is scanned as opaque text.
+        var blob = @"{""channel"":""fleet-east"",""computedAt"":""2026-05-30T10:00:59.65+00:00"",""score"":42}";
+        var body = $@"{{ ""fleetSignals"": {System.Text.Json.JsonSerializer.Serialize(blob)} }}";
+
+        Assert.Null(Record.Exception(
+            () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options)));
+    }
+
+    [Fact]
+    public void Still_finds_phi_inside_a_json_blob_field_and_names_the_nested_field()
+    {
+        // Recursing into the blob keeps PHI detection: a patient phone hidden inside
+        // intelligenceContext is still caught, named by its nested field.
+        var blob = @"{""note"":""patient Jane Rivera 555-123-4567""}";
+        var body = $@"{{ ""intelligenceContext"": {System.Text.Json.JsonSerializer.Serialize(blob)} }}";
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options));
+        Assert.Contains("field: note", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }
