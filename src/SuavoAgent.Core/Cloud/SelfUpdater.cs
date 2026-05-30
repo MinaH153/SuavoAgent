@@ -205,12 +205,15 @@ public static class SelfUpdater
             return false;
 
         // Validate all URLs
-        var downloads = new[]
+        var downloads = new List<(string Url, string Sha256, string Binary)>
         {
-            (Url: manifest.CoreUrl, Sha256: manifest.CoreSha256, Binary: "SuavoAgent.Core.exe"),
-            (Url: manifest.BrokerUrl, Sha256: manifest.BrokerSha256, Binary: "SuavoAgent.Broker.exe"),
-            (Url: manifest.HelperUrl, Sha256: manifest.HelperSha256, Binary: "SuavoAgent.Helper.exe"),
+            (manifest.CoreUrl, manifest.CoreSha256, "SuavoAgent.Core.exe"),
+            (manifest.BrokerUrl, manifest.BrokerSha256, "SuavoAgent.Broker.exe"),
+            (manifest.HelperUrl, manifest.HelperSha256, "SuavoAgent.Helper.exe"),
         };
+        // Self-heal Chunk B: the Watchdog binary ships only when the manifest carries it (back-compat).
+        if (manifest.HasWatchdog)
+            downloads.Add((manifest.WatchdogUrl!, manifest.WatchdogSha256!, "SuavoAgent.Watchdog.exe"));
 
         foreach (var d in downloads)
         {
@@ -390,6 +393,36 @@ public static class SelfUpdater
         }
     }
 
+    /// <summary>
+    /// Best-effort swap of the staged Watchdog binary. Unlike <see cref="SwapBinaries"/> this never
+    /// fails the overall update: if the Watchdog service holds a lock on its .exe (running) the swap
+    /// is skipped and the .new is left for a later restart. Returns true iff a swap occurred.
+    /// </summary>
+    internal static bool SwapWatchdogBestEffort(string installDir, ILogger logger)
+    {
+        const string bin = "SuavoAgent.Watchdog.exe";
+        var current = Path.Combine(installDir, bin);
+        var newFile = current + ".new";
+        var oldFile = current + ".old";
+
+        if (!File.Exists(newFile)) return false;
+        try
+        {
+            if (File.Exists(oldFile)) File.Delete(oldFile);
+            if (File.Exists(current)) File.Move(current, oldFile);
+            File.Move(newFile, current);
+            logger.LogInformation("Swapped {Binary} (best-effort)", bin);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Locked (service running) or other IO — roll back this one binary, keep .new for later.
+            logger.LogWarning(ex, "Watchdog swap skipped (best-effort) — likely locked; leaving staged binary");
+            try { if (!File.Exists(current) && File.Exists(oldFile)) File.Move(oldFile, current); } catch { }
+            return false;
+        }
+    }
+
     public static bool CheckPendingUpdate(ILogger logger)
     {
         var installDir = Path.GetDirectoryName(Environment.ProcessPath);
@@ -448,6 +481,11 @@ public static class SelfUpdater
 
             if (SwapBinaries(installDir, logger))
             {
+                // Self-heal Chunk B: swap the Watchdog separately + best-effort. If the Watchdog
+                // service is running its .exe is locked — skip without failing the (already-applied)
+                // Core/Broker/Helper swap; the .new stays for a later attempt. For a box MISSING the
+                // Watchdog there's no lock, so this drops the binary in for the Broker to register.
+                SwapWatchdogBestEffort(installDir, logger);
                 File.Delete(sentinel);
                 logger.LogInformation("Bootstrap update applied — v{Version}", manifest.Version);
                 return true;
@@ -473,6 +511,9 @@ public static class SelfUpdater
             ["SuavoAgent.Broker.exe"] = manifest.BrokerSha256,
             ["SuavoAgent.Helper.exe"] = manifest.HelperSha256,
         };
+        // Self-heal Chunk B: a staged Watchdog binary must match the (signed) manifest hash too.
+        if (manifest.HasWatchdog)
+            expected["SuavoAgent.Watchdog.exe"] = manifest.WatchdogSha256!;
 
         foreach (var (binary, expectedHash) in expected)
         {
