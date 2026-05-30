@@ -270,8 +270,18 @@ internal static class OutboundPhiGuard
         if (IsExplicitPhiPath(path, options))
             return;
 
+        // Control-plane telemetry (the heartbeat) is built by the agent from a
+        // fixed, PHI-free schema — patient rx data flows on /api/agent/sync, which
+        // is still fully scanned. The fuzzy value regex false-positives on the
+        // heartbeat's ISO timestamps, install paths, and the operator consent name,
+        // which would otherwise block every heartbeat (and with it command delivery
+        // + online status). So for control-plane paths we keep the *structural*
+        // blocked-field-NAME check (catches an accidental patient field) but skip
+        // the fuzzy value scan. Data-sync paths keep both.
+        var scanValues = !IsControlPlanePath(path);
+
         using var doc = JsonDocument.Parse(body);
-        if (ContainsPhi(doc.RootElement))
+        if (ContainsPhi(doc.RootElement, scanValues))
         {
             throw new InvalidOperationException(
                 $"PHI-classified payload blocked before outbound cloud POST to {path}.");
@@ -287,7 +297,14 @@ internal static class OutboundPhiGuard
                options.EnableLegacyPhiDeliveryQueueSync;
     }
 
-    private static bool ContainsPhi(JsonElement element, string? propertyName = null)
+    /// <summary>
+    /// Agent-built control-plane telemetry that never carries patient rx data by
+    /// construction. Exempt from the fuzzy value-PHI scan (not the field-name scan).
+    /// </summary>
+    private static bool IsControlPlanePath(string path) =>
+        string.Equals(path, "/api/agent/heartbeat", StringComparison.Ordinal);
+
+    private static bool ContainsPhi(JsonElement element, bool scanValues, string? propertyName = null)
     {
         switch (element.ValueKind)
         {
@@ -297,16 +314,20 @@ internal static class OutboundPhiGuard
                     var normalized = NormalizeFieldName(property.Name);
                     if (BlockedFieldNames.Contains(normalized))
                         return true;
-                    if (ContainsPhi(property.Value, normalized))
+                    if (ContainsPhi(property.Value, scanValues, normalized))
                         return true;
                 }
 
                 return false;
 
             case JsonValueKind.Array:
-                return element.EnumerateArray().Any(item => ContainsPhi(item, propertyName));
+                return element.EnumerateArray().Any(item => ContainsPhi(item, scanValues, propertyName));
 
             case JsonValueKind.String:
+                // Control-plane paths keep the structural field-name guard above but
+                // skip the fuzzy value heuristic (the false-positive source).
+                if (!scanValues)
+                    return false;
                 var value = element.GetString();
                 if (string.IsNullOrWhiteSpace(value) || IsOperationalSafeString(propertyName, value))
                     return false;
