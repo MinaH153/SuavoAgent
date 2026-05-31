@@ -10,6 +10,10 @@ public sealed class SeedApplicator
 
     public SeedApplicator(AgentStateDb db) => _db = db;
 
+    // Confidence for a fleet-seeded rxQueue candidate. Moderate (matches the
+    // correlation seed clamp) so the agent's own observation can confirm/override.
+    private const double SeedRxQueueConfidence = 0.6;
+
     public record ApplyResult(int ItemsApplied, bool AlreadyApplied);
     public record ModelApplyResult(int CorrelationsApplied, int CorrelationsSkipped, bool AlreadyApplied);
 
@@ -64,7 +68,8 @@ public sealed class SeedApplicator
         return new(applied, AlreadyApplied: false);
     }
 
-    public ModelApplyResult ApplyModelSeeds(string sessionId, SeedResponse response)
+    public ModelApplyResult ApplyModelSeeds(string sessionId, SeedResponse response,
+        bool applyFleetRxQueueShape = false)
     {
         if (_db.GetAppliedSeed(response.SeedDigest) is not null)
             return new(0, 0, AlreadyApplied: true);
@@ -81,6 +86,22 @@ public sealed class SeedApplicator
             _db.InsertSeedItem(response.SeedDigest, "query_shape", qs.QueryShapeHash, now);
         foreach (var sm in response.StatusMappings)
             _db.InsertSeedItem(response.SeedDigest, "status_mapping", sm.StatusGuid, now);
+
+        // Fleet rxQueue queue-shape warm-start — default-OFF via FleetLearning.Enabled
+        // (passed as applyFleetRxQueueShape). Seeds a discovery candidate so a fresh
+        // pharmacy starts from the fleet consensus; moderate confidence lets the
+        // agent's own observation win. No PHI — schema identifiers only. Runs BEFORE
+        // the correlations check so a shape-only seed still applies + commits.
+        if (applyFleetRxQueueShape && response.RxQueueShape is { } shape
+            && !string.IsNullOrWhiteSpace(shape.PrimaryTable)
+            && !string.IsNullOrWhiteSpace(shape.RxNumberColumn)
+            && !string.IsNullOrWhiteSpace(shape.StatusColumn))
+        {
+            _db.InsertSeedItem(response.SeedDigest, "rx_queue_shape", shape.PrimaryTable, now);
+            _db.InsertRxQueueCandidate(sessionId, shape.PrimaryTable, shape.RxNumberColumn,
+                shape.StatusColumn, shape.DateColumn, shape.PatientFkColumn,
+                SeedRxQueueConfidence, "{\"source\":\"fleet_seed\"}");
+        }
 
         if (response.Correlations is not { } correlations)
         {

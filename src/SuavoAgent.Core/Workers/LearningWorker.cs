@@ -612,7 +612,8 @@ public sealed class LearningWorker : BackgroundService
             }
             else // model
             {
-                var result = _applicator.ApplyModelSeeds(_sessionId!, seedResp);
+                var result = _applicator.ApplyModelSeeds(
+                    _sessionId!, seedResp, _options.FleetLearning.Enabled);
                 if (!result.AlreadyApplied)
                 {
                     _activeSeedDigest = seedResp.SeedDigest;

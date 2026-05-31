@@ -98,6 +98,12 @@ public sealed class AgentOptions
     public FleetFeaturesOptions FleetFeatures { get; set; } = new();
 
     /// <summary>
+    /// Fleet-learning rollout. Default OFF: the agent pulls fleet seeds but does
+    /// NOT apply the consensus rx_queue_shape warm-start until a pilot opts in.
+    /// </summary>
+    public FleetLearningOptions FleetLearning { get; set; } = new();
+
+    /// <summary>
     /// Vision pipeline configuration (screenshot capture + extraction). Off by
     /// default — enabling adds a new HIPAA surface (encrypted screens on disk).
     /// </summary>

@@ -21,7 +21,21 @@ public sealed record SeedResponse(
     [property: JsonPropertyName("query_shapes")] IReadOnlyList<SeedQueryShape> QueryShapes,
     [property: JsonPropertyName("status_mappings")] IReadOnlyList<SeedStatusMapping> StatusMappings,
     [property: JsonPropertyName("workflow_hints")] IReadOnlyList<SeedWorkflowHint>? WorkflowHints,
-    [property: JsonPropertyName("workflow_templates")] IReadOnlyList<SeedWorkflowTemplate>? WorkflowTemplates = null);
+    [property: JsonPropertyName("workflow_templates")] IReadOnlyList<SeedWorkflowTemplate>? WorkflowTemplates = null,
+    [property: JsonPropertyName("rx_queue_shape")] SeedRxQueueShape? RxQueueShape = null);
+
+/// <summary>
+/// Fleet-learned consensus rxQueue queue-shape — warm-starts a new pharmacy's
+/// queue detection during discovery (read-side hint, never an action). Schema
+/// identifiers only; no PHI. Served (snake_case) by /api/agent/seed/pull and
+/// applied behind the default-OFF FleetLearning.Enabled flag.
+/// </summary>
+public sealed record SeedRxQueueShape(
+    [property: JsonPropertyName("primary_table")] string PrimaryTable,
+    [property: JsonPropertyName("rx_number_column")] string RxNumberColumn,
+    [property: JsonPropertyName("status_column")] string StatusColumn,
+    [property: JsonPropertyName("date_column")] string? DateColumn,
+    [property: JsonPropertyName("patient_fk_column")] string? PatientFkColumn);
 
 // v3.12 — workflow template transfer currency (spec §6). Steps ride on the
 // existing ECDSA-verified SeedResponse envelope (SeedClient uses
