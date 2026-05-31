@@ -27,3 +27,14 @@ public sealed class FleetFeaturesOptions
 {
     public bool SchemaAdaptation { get; set; } = false;
 }
+
+/// <summary>
+/// Fleet-learning rollout flag. When false (default), the agent still PULLS
+/// fleet seeds but does NOT apply the consensus rx_queue_shape — observe-first.
+/// Flip per-pilot once the shared-brain warm-start is trusted in the field.
+/// Bound from <c>FleetLearning:*</c>.
+/// </summary>
+public sealed class FleetLearningOptions
+{
+    public bool Enabled { get; set; } = false;
+}
