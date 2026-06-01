@@ -740,6 +740,16 @@ try
 
     builder.Services.AddSingleton<RxDetectionWorker>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<RxDetectionWorker>());
+
+    // Wave 1B Track 1.4 — register the agent.health_composite emission stack so the
+    // HeartbeatWorker (HeartbeatWorker.cs:92-93) actually resolves IHealthSignals +
+    // HealthCompositeCalculator and emits the composite (helper/IPC/schema-canary/
+    // extraction) every tick. Without this they resolved as null and the box emitted
+    // ZERO composites, leaving the cloud agent-health-watch alarm blind to a silently
+    // degraded box. Must come AFTER IpcPipeServer (631), RxDetectionWorker (above), and
+    // AgentStateDb (286). See roadmap H2 #13.
+    SuavoAgent.Core.Health.HealthCompositeServiceCollectionExtensions.AddHealthComposite(builder.Services);
+
     builder.Services.AddHostedService<WritebackProcessor>();
 
     // Learning Agent — only active when LearningMode is enabled
