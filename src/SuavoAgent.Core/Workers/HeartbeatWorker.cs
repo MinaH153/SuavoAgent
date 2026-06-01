@@ -1167,50 +1167,66 @@ public sealed class HeartbeatWorker : ResilientHostedService
             await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
         }
 
-        var rxWorker = _serviceProvider.GetService<RxDetectionWorker>();
-        var pharmacies = _options.GetEffectivePharmacies();
-        var firstPharmacy = pharmacies.Count > 0 ? pharmacies[0] : null;
-        var sql = new DiagnosticsSnapshotBuilder.SqlDiagnostics(
-            Configured: pharmacies.Count > 0,
-            Connected: rxWorker?.IsSqlConnected ?? false,
-            Server: firstPharmacy?.SqlServer ?? _options.SqlServer,
-            Database: firstPharmacy?.SqlDatabase ?? _options.SqlDatabase,
-            User: firstPharmacy?.SqlUser ?? _options.SqlUser);
+        // Build + audit + ack inside a try so a throw NEVER leaves the command stuck
+        // at 'sent'. AckCommandAsync is best-effort cloud-side, but the cloud can only
+        // resolve a command it hears about — if snapshot build (RuntimeHealthEvidence
+        // .Collect / BuildWatchdogPayload / DiagnosticsSnapshotBuilder.Build) or the
+        // audit append throws, no ack would be sent and the operator's cockpit would
+        // spin forever. On failure, ack 'failed' with a SAFE, exception-TYPE-only reason
+        // (never the message — it could carry a path or other infra detail).
+        try
+        {
+            var rxWorker = _serviceProvider.GetService<RxDetectionWorker>();
+            var pharmacies = _options.GetEffectivePharmacies();
+            var firstPharmacy = pharmacies.Count > 0 ? pharmacies[0] : null;
+            var sql = new DiagnosticsSnapshotBuilder.SqlDiagnostics(
+                Configured: pharmacies.Count > 0,
+                Connected: rxWorker?.IsSqlConnected ?? false,
+                Server: firstPharmacy?.SqlServer ?? _options.SqlServer,
+                Database: firstPharmacy?.SqlDatabase ?? _options.SqlDatabase,
+                User: firstPharmacy?.SqlUser ?? _options.SqlUser);
 
-        var wire = new DiagnosticsSnapshotBuilder.WireDiagnostics(
-            SentryInitialized: global::SuavoAgent.Diagnostics.Wire.SentryInitialized,
-            EventsEmittedTotal: global::SuavoAgent.Diagnostics.Wire.EventsEmittedTotal,
-            WireHandlerFailedTotal: global::SuavoAgent.Diagnostics.Wire.WireHandlerFailedTotal,
-            SentryEnqueuedTotal: global::SuavoAgent.Diagnostics.Wire.SentryEnqueuedTotal,
-            SentryEnqueueFailedTotal: global::SuavoAgent.Diagnostics.Wire.SentryEnqueueFailedTotal,
-            SentryBeforeSendFailedTotal: global::SuavoAgent.Diagnostics.Wire.SentryBeforeSendFailedTotal,
-            RulesetVersion: global::SuavoAgent.Diagnostics.Wire.RulesetVersion);
+            var wire = new DiagnosticsSnapshotBuilder.WireDiagnostics(
+                SentryInitialized: global::SuavoAgent.Diagnostics.Wire.SentryInitialized,
+                EventsEmittedTotal: global::SuavoAgent.Diagnostics.Wire.EventsEmittedTotal,
+                WireHandlerFailedTotal: global::SuavoAgent.Diagnostics.Wire.WireHandlerFailedTotal,
+                SentryEnqueuedTotal: global::SuavoAgent.Diagnostics.Wire.SentryEnqueuedTotal,
+                SentryEnqueueFailedTotal: global::SuavoAgent.Diagnostics.Wire.SentryEnqueueFailedTotal,
+                SentryBeforeSendFailedTotal: global::SuavoAgent.Diagnostics.Wire.SentryBeforeSendFailedTotal,
+                RulesetVersion: global::SuavoAgent.Diagnostics.Wire.RulesetVersion);
 
-        var snapshot = DiagnosticsSnapshotBuilder.Build(
-            _options,
-            sql,
-            wire,
-            helper: BuildHelperPayload(_serviceProvider.GetService<IpcPipeServer>()),
-            watchdog: BuildWatchdogPayload(),
-            runtimeHealth: RuntimeHealthEvidence.Collect(),
-            commandPipeConnected: _ipcCommandClient?.IsConnected ?? false,
-            uptimeSeconds: (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
-            processId: Environment.ProcessId,
-            collectedAtUtc: DateTimeOffset.UtcNow);
+            var snapshot = DiagnosticsSnapshotBuilder.Build(
+                _options,
+                sql,
+                wire,
+                helper: BuildHelperPayload(_serviceProvider.GetService<IpcPipeServer>()),
+                watchdog: BuildWatchdogPayload(),
+                runtimeHealth: RuntimeHealthEvidence.Collect(),
+                commandPipeConnected: _ipcCommandClient?.IsConnected ?? false,
+                uptimeSeconds: (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
+                processId: Environment.ProcessId,
+                collectedAtUtc: DateTimeOffset.UtcNow);
 
-        _stateDb.AppendChainedAuditEntry(new AuditEntry(
-            TaskId: commandId ?? cmd.Nonce,
-            EventType: "fetch_diagnostics_command",
-            FromState: "requested",
-            ToState: "collected",
-            Trigger: "signed_command",
-            CommandId: cmd.Nonce,
-            RequesterId: requesterId,
-            Actor: "operator",
-            SourceComponent: "heartbeat_worker",
-            CaptureReason: "non_phi_diagnostics"));
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: commandId ?? cmd.Nonce,
+                EventType: "fetch_diagnostics_command",
+                FromState: "requested",
+                ToState: "collected",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: requesterId,
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: "non_phi_diagnostics"));
 
-        await AckAsync(true, snapshot, null);
+            await AckAsync(true, snapshot, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "fetch_diagnostics snapshot build failed");
+            // Exception TYPE only — safe to surface; the message may contain infra detail.
+            await AckAsync(false, null, $"diagnostics_collection_failed:{ex.GetType().Name}");
+        }
     }
 
     private object BuildHealthProbeResult(string reason)
