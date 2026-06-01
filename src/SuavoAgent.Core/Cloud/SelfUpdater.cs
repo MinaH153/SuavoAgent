@@ -486,6 +486,16 @@ public static class SelfUpdater
                 // Core/Broker/Helper swap; the .new stays for a later attempt. For a box MISSING the
                 // Watchdog there's no lock, so this drops the binary in for the Broker to register.
                 SwapWatchdogBestEffort(installDir, logger);
+
+                // CRITICAL: regenerate binaries.manifest from the just-swapped binaries. The
+                // Broker's H-8 guard (SessionWatcher.VerifyHelperIntegrity) refuses to launch the
+                // Helper if its on-disk hash != the manifest. Before this, an OTA/bootstrap swap
+                // updated the .exes but left the OLD manifest, so the new Helper was rejected and the
+                // agent went BLIND (vision/UIA offline) with no crash and no app-log error — exactly
+                // the field failure on Mina's box after the v3.17.0 swap. Regenerate AFTER the swap so
+                // the manifest reflects what's actually on disk.
+                RegenerateBinariesManifest(installDir, logger);
+
                 File.Delete(sentinel);
                 logger.LogInformation("Bootstrap update applied — v{Version}", manifest.Version);
                 return true;
@@ -537,5 +547,66 @@ public static class SelfUpdater
         await using var stream = File.OpenRead(filePath);
         var hash = await SHA256.HashDataAsync(stream, ct);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Rewrites %ProgramData%\SuavoAgent\binaries.manifest from the binaries CURRENTLY on disk in
+    /// <paramref name="installDir"/>, so the Broker's H-8 integrity guard
+    /// (SessionWatcher.VerifyHelperIntegrity) validates the post-swap Helper instead of refusing to
+    /// launch it against a stale hash. Format + path mirror install.ps1: a JSON object of
+    /// { "SuavoAgent.&lt;X&gt;.exe": "&lt;lowercase-hex-sha256&gt;" } at CommonApplicationData\SuavoAgent.
+    /// Best-effort: a swap already succeeded, so never throw — a stale manifest only costs a Helper
+    /// relaunch, and a missing manifest makes the guard fail-OPEN (skips the check). Written
+    /// atomically (temp + replace) so the Broker can never read a half-written manifest mid-poll.
+    /// The manifestPathOverride param exists only so tests can target a temp dir.
+    /// </summary>
+    internal static void RegenerateBinariesManifest(
+        string installDir, ILogger logger, string? manifestPathOverride = null)
+    {
+        try
+        {
+            var binaries = new[]
+            {
+                "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe",
+                "SuavoAgent.Helper.exe", "SuavoAgent.Watchdog.exe",
+            };
+
+            var entries = new List<string>();
+            foreach (var bin in binaries)
+            {
+                var path = Path.Combine(installDir, bin);
+                if (!File.Exists(path)) continue; // e.g. a box without the Watchdog binary
+                using var stream = File.OpenRead(path);
+                var hash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+                // Manual JSON to match install.ps1's ConvertTo-Json shape with no extra deps.
+                entries.Add($"  \"{bin}\": \"{hash}\"");
+            }
+
+            if (entries.Count == 0)
+            {
+                logger.LogWarning("RegenerateBinariesManifest: no binaries found in {Dir} — leaving manifest untouched", installDir);
+                return;
+            }
+
+            var json = "{\n" + string.Join(",\n", entries) + "\n}\n";
+
+            var manifestPath = manifestPathOverride ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent", "binaries.manifest");
+            Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
+            var tempPath = manifestPath + ".tmp";
+
+            File.WriteAllText(tempPath, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            if (File.Exists(manifestPath))
+                File.Replace(tempPath, manifestPath, null);
+            else
+                File.Move(tempPath, manifestPath);
+
+            logger.LogInformation("Regenerated binaries.manifest ({Count} binaries) after swap", entries.Count);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "RegenerateBinariesManifest failed — Helper may be refused until manifest is refreshed");
+        }
     }
 }
