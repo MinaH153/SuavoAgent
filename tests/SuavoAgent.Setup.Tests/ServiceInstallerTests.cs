@@ -57,6 +57,22 @@ public class ServiceInstallerTests
         // on-disk bytes are "NT AUTHORITY\\LocalService" (two backslashes).
         // In the test source, that's "\\\\LocalService" (four).
         Assert.Contains("NT AUTHORITY\\\\LocalService", source);    // Core account
-        Assert.Contains("NT AUTHORITY\\\\NetworkService", source);  // Broker account
+
+        // Broker MUST register as LocalSystem. WTSQueryUserToken +
+        // CreateProcessAsUser require SeTcbPrivilege, which is held ONLY by
+        // LocalSystem. Under NetworkService the privileged launch fails 1314
+        // and the Broker silently falls back to launching the Helper in its
+        // OWN session (Session 0) — an invisible desktop where the intent
+        // cursor, vision capture, and UIA never render. The C# installer
+        // regressed to NetworkService (with a false "NetworkService has
+        // SeTcbPrivilege" comment) and shipped a Helper that never painted on
+        // the pilot box (2026-06-01). install.ps1 + bootstrap.ps1 already
+        // register LocalSystem; this keeps all three install paths in sync and
+        // guards the regression forever.
+        Assert.Matches(@"create \{BrokerServiceName\}.*LocalSystem", source);  // Broker account
+        // No service may be REGISTERED as NetworkService (the word may still
+        // appear in explanatory comments). Targets the `obj= ...NetworkService`
+        // clause specifically — the exact regression we are guarding against.
+        Assert.DoesNotMatch(@"obj=[^\n]*NetworkService", source);
     }
 }

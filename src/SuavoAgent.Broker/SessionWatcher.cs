@@ -214,6 +214,13 @@ public sealed class SessionWatcher : BackgroundService
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
+    // Whether the Process.Start fallback may run when the privileged session
+    // launch produced no PID. Extracted + internal so the fail-closed decision is
+    // unit-testable (mirrors VerifyHelperIntegrityAt). On Windows the fallback
+    // would run a BLIND Session-0 Helper, so refuse; on non-Windows there is no
+    // session isolation and Process.Start is the legitimate dev/test path.
+    internal static bool MayUseProcessStartFallback(bool isWindows) => !isWindows;
+
     private void LaunchHelper(uint sessionId)
     {
         var helperPath = Path.Combine(AppContext.BaseDirectory, "SuavoAgent.Helper.exe");
@@ -244,7 +251,25 @@ public sealed class SessionWatcher : BackgroundService
                 pid = NativeProcess.LaunchInSession(sessionId, helperPath, args, _logger);
             }
 
-            // Fallback: launch in current session (works for dev/testing)
+            // Privileged launch produced no PID. The Process.Start fallback runs
+            // the Helper in the BROKER's OWN session — on Windows that is Session
+            // 0, an invisible desktop where the intent cursor, screen capture and
+            // UIA all run blind while the process looks alive. Refuse it on
+            // Windows (fail-closed): leave the Helper down so the cloud's
+            // helper-down watch reports degraded — never ship a blind Helper.
+            if (pid == null && !MayUseProcessStartFallback(OperatingSystem.IsWindows()))
+            {
+                _logger.LogCritical(
+                    "Helper launch into interactive session {Session} FAILED: CreateProcessAsUser returned null " +
+                    "(Broker almost certainly lacks SeTcbPrivilege — it must run as LocalSystem, not NetworkService/LocalService). " +
+                    "Refusing the Session-0 fallback because a Helper there is BLIND (no visible cursor, screen capture, or UIA) " +
+                    "yet looks alive. Leaving Helper DOWN so the cloud reports degraded. FIX: register SuavoAgent.Broker as LocalSystem.",
+                    sessionId);
+                return;
+            }
+
+            // Fallback: launch in current session (dev/test, non-Windows only —
+            // no interactive-session isolation there).
             if (pid == null)
             {
                 var psi = new ProcessStartInfo
@@ -257,7 +282,7 @@ public sealed class SessionWatcher : BackgroundService
                 var proc = Process.Start(psi);
                 pid = proc?.Id;
                 if (pid != null)
-                    _logger.LogInformation("Launched Helper PID {Pid} for session {Session} (fallback)",
+                    _logger.LogInformation("Launched Helper PID {Pid} for session {Session} (dev fallback, non-Windows)",
                         pid, sessionId);
             }
 
