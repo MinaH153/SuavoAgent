@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
+using SuavoAgent.Core.Health;
 
 namespace SuavoAgent.Core.Cloud;
 
@@ -351,6 +352,26 @@ public static class SelfUpdater
     public static bool SwapBinaries(string installDir, ILogger logger)
     {
         var binaries = new[] { "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe" };
+
+        // #10: require the FULL staged set. The OTA staging path always downloads Core+Broker+Helper
+        // together (versioned + signed as a unit), so a partial set at swap time means a corrupted or
+        // partial stage. Swapping only the present subset would leave version skew — a new Core running
+        // against an old Broker/Helper — the silent-corruption class this guard exists to prevent.
+        // Refuse and swap nothing; the caller discards the staged .new files and the box stays on the
+        // last-good set.
+        var missing = new List<string>();
+        foreach (var bin in binaries)
+            if (!File.Exists(Path.Combine(installDir, bin + ".new"))) missing.Add(bin);
+        if (missing.Count > 0)
+        {
+            // Distinguish "nothing staged" (normal — no pending swap) from a genuine partial set.
+            if (missing.Count < binaries.Length)
+                logger.LogWarning(
+                    "Refusing partial binary swap — missing staged {Missing}; keeping last-good set to avoid version skew",
+                    string.Join(", ", missing));
+            return false;
+        }
+
         var swapped = new List<string>();
 
         try
@@ -361,8 +382,7 @@ public static class SelfUpdater
                 var newFile = current + ".new";
                 var oldFile = current + ".old";
 
-                if (!File.Exists(newFile)) continue;
-
+                // All .new files were verified present above — swap unconditionally.
                 if (File.Exists(oldFile)) File.Delete(oldFile);
                 if (File.Exists(current)) File.Move(current, oldFile);
                 File.Move(newFile, current);
@@ -486,8 +506,47 @@ public static class SelfUpdater
                 // Core/Broker/Helper swap; the .new stays for a later attempt. For a box MISSING the
                 // Watchdog there's no lock, so this drops the binary in for the Broker to register.
                 SwapWatchdogBestEffort(installDir, logger);
+
+                // CRITICAL: regenerate binaries.manifest from the just-swapped binaries. The
+                // Broker's H-8 guard (SessionWatcher.VerifyHelperIntegrity) refuses to launch the
+                // Helper if its on-disk hash != the manifest. Before this, an OTA/bootstrap swap
+                // updated the .exes but left the OLD manifest, so the new Helper was rejected and the
+                // agent went BLIND (vision/UIA offline) with no crash and no app-log error — exactly
+                // the field failure on Mina's box after the v3.17.0 swap. Regenerate AFTER the swap so
+                // the manifest reflects what's actually on disk.
+                var manifestOk = RegenerateBinariesManifest(installDir, logger);
+                if (!manifestOk)
+                {
+                    // The swap already applied, so we can't un-apply — but a stale/failed
+                    // manifest means the Broker's H-8 guard will REFUSE to launch the Helper
+                    // (the silent-blind failure this whole fix exists to prevent). Make it
+                    // LOUD instead of reporting clean success: record update health 'degraded'
+                    // so the cloud agent-health-watch can alarm, and log an error. Best-effort
+                    // on the health write itself — never throw out of the bootstrap path.
+                    try
+                    {
+                        RuntimeHealthEvidence.WriteUpdateHealth(
+                            RuntimeHealthEvidence.UpdateHealthPath(),
+                            status: "degraded",
+                            targetVersion: manifest.Version,
+                            lastAttemptAt: DateTimeOffset.UtcNow,
+                            lastSuccessAt: null,
+                            consecutiveFailures: 1,
+                            lastErrorKind: "manifest_regen_failed",
+                            channel: null);
+                    }
+                    catch (Exception hx)
+                    {
+                        logger.LogError(hx, "Failed to record degraded update health after manifest regen failure");
+                    }
+                    logger.LogError(
+                        "Bootstrap update v{Version} applied but binaries.manifest regen FAILED — Helper will be refused until the manifest is refreshed (update marked degraded)",
+                        manifest.Version);
+                }
+
                 File.Delete(sentinel);
-                logger.LogInformation("Bootstrap update applied — v{Version}", manifest.Version);
+                logger.LogInformation("Bootstrap update applied — v{Version}{Suffix}",
+                    manifest.Version, manifestOk ? "" : " (DEGRADED: manifest regen failed)");
                 return true;
             }
 
@@ -503,7 +562,7 @@ public static class SelfUpdater
         }
     }
 
-    private static bool VerifyStagedBinaries(string installDir, UpdateManifest manifest, ILogger logger)
+    internal static bool VerifyStagedBinaries(string installDir, UpdateManifest manifest, ILogger logger)
     {
         var expected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -518,7 +577,14 @@ public static class SelfUpdater
         foreach (var (binary, expectedHash) in expected)
         {
             var newPath = Path.Combine(installDir, binary + ".new");
-            if (!File.Exists(newPath)) continue;
+            if (!File.Exists(newPath))
+            {
+                // #10: a declared binary with no staged .new is a partial/corrupted stage. Abort the
+                // whole update (the caller discards the staged files) rather than letting SwapBinaries
+                // apply a subset and leave version skew.
+                logger.LogWarning("Staged binary missing for {Binary} — partial update, aborting swap", binary);
+                return false;
+            }
 
             using var stream = File.OpenRead(newPath);
             var actual = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
@@ -537,5 +603,71 @@ public static class SelfUpdater
         await using var stream = File.OpenRead(filePath);
         var hash = await SHA256.HashDataAsync(stream, ct);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Rewrites %ProgramData%\SuavoAgent\binaries.manifest from the binaries CURRENTLY on disk in
+    /// <paramref name="installDir"/>, so the Broker's H-8 integrity guard
+    /// (SessionWatcher.VerifyHelperIntegrity) validates the post-swap Helper instead of refusing to
+    /// launch it against a stale hash. Format + path mirror install.ps1: a JSON object of
+    /// { "SuavoAgent.&lt;X&gt;.exe": "&lt;lowercase-hex-sha256&gt;" } at CommonApplicationData\SuavoAgent.
+    /// Best-effort: a swap already succeeded, so never throw — a stale manifest only costs a Helper
+    /// relaunch, and a missing manifest makes the guard fail-OPEN (skips the check). Written
+    /// atomically (temp + replace) so the Broker can never read a half-written manifest mid-poll.
+    /// The manifestPathOverride param exists only so tests can target a temp dir.
+    /// </summary>
+    /// <returns>true if the manifest was rewritten to match on-disk binaries; false on
+    /// any failure (no binaries found, or an IO/exception during write) — the caller MUST
+    /// treat false as a degraded update, never as clean success.</returns>
+    internal static bool RegenerateBinariesManifest(
+        string installDir, ILogger logger, string? manifestPathOverride = null)
+    {
+        try
+        {
+            var binaries = new[]
+            {
+                "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe",
+                "SuavoAgent.Helper.exe", "SuavoAgent.Watchdog.exe",
+            };
+
+            var entries = new List<string>();
+            foreach (var bin in binaries)
+            {
+                var path = Path.Combine(installDir, bin);
+                if (!File.Exists(path)) continue; // e.g. a box without the Watchdog binary
+                using var stream = File.OpenRead(path);
+                var hash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+                // Manual JSON to match install.ps1's ConvertTo-Json shape with no extra deps.
+                entries.Add($"  \"{bin}\": \"{hash}\"");
+            }
+
+            if (entries.Count == 0)
+            {
+                logger.LogError("RegenerateBinariesManifest: no binaries found in {Dir} — manifest NOT refreshed (degraded)", installDir);
+                return false;
+            }
+
+            var json = "{\n" + string.Join(",\n", entries) + "\n}\n";
+
+            var manifestPath = manifestPathOverride ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent", "binaries.manifest");
+            Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
+            var tempPath = manifestPath + ".tmp";
+
+            File.WriteAllText(tempPath, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            if (File.Exists(manifestPath))
+                File.Replace(tempPath, manifestPath, null);
+            else
+                File.Move(tempPath, manifestPath);
+
+            logger.LogInformation("Regenerated binaries.manifest ({Count} binaries) after swap", entries.Count);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "RegenerateBinariesManifest failed — Helper may be refused until manifest is refreshed");
+            return false;
+        }
     }
 }

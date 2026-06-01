@@ -161,20 +161,22 @@ public class CriticalPathTests : IDisposable
     }
 
     [Fact]
-    public void SwapBinaries_RollsBackOnPartialFailure()
+    public void SwapBinaries_PartialStagedSet_RefusesWithoutSwapping()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "suavo-crit-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(tempDir);
         try
         {
-            // Stage Core.new but make Broker.new → Broker swap fail by creating a read-only old file
+            // Only Core.exe.new is staged — Broker/Helper .new are absent. A partial set must be
+            // refused: swapping just Core leaves a new Core against an old Broker/Helper (version
+            // skew). #10 makes SwapBinaries all-or-nothing — it returns false and swaps nothing.
             File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe"), "old-core");
             File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe.new"), "new-core");
 
-            // If only Core has a .new file, it should swap that one and return true
             var result = SelfUpdater.SwapBinaries(tempDir, _logger);
-            Assert.True(result);
-            Assert.Equal("new-core", File.ReadAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe")));
+
+            Assert.False(result);
+            Assert.Equal("old-core", File.ReadAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe")));
         }
         finally
         {

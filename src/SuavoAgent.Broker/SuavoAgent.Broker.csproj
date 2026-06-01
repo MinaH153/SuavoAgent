@@ -23,4 +23,8 @@
     <ProjectReference Include="..\SuavoAgent.Diagnostics\SuavoAgent.Diagnostics.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="SuavoAgent.Broker.Tests" />
+  </ItemGroup>
+
 </Project>

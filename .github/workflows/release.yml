@@ -389,4 +389,9 @@ jobs:
             release/update-manifest-v*.txt
             release/update-manifest-v*.sig
           draft: false
-          prerelease: false
+          # A tag with a pre-release suffix (e.g. v3.17.1-rc1) must publish as a GitHub
+          # prerelease, NOT as a full release. Otherwise GitHub marks it "Latest" and
+          # bootstrap.ps1 (which resolves an empty -ReleaseTag via releases/latest) would
+          # serve unmerged rc code to every FRESH install. Pre-release tags are also then
+          # excluded from the rollback-receipt's "previous non-prerelease release" search.
+          prerelease: ${{ contains(needs.build.outputs.version, '-') }}
