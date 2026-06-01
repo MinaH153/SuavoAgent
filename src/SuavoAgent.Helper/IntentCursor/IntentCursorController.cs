@@ -13,7 +13,11 @@ public sealed record IntentCursorRenderRequest(
     int DurationMs,
     int DiameterPx,
     double Opacity,
-    string Tone);
+    string Tone,
+    // Glide target. Null => static halo at (X,Y); set => animate (X,Y)->(ToX,ToY).
+    int? ToX = null,
+    int? ToY = null,
+    string Easing = IntentCursorEasings.Default);
 
 public sealed record IntentCursorResult(
     bool Accepted,
@@ -157,6 +161,66 @@ public static class IntentCursorPolicy
             return false;
         }
 
+        // Optional glide target. Mirrors the start-point resolution (anchor XOR
+        // raw coords) with distinct error codes so a bad target is diagnosable.
+        // Absent => static halo (back-compat).
+        int? toX = null;
+        int? toY = null;
+        var hasToAnchor = !string.IsNullOrWhiteSpace(request.ToAnchor);
+        var hasToCoords = request.ToX.HasValue || request.ToY.HasValue;
+
+        if (hasToAnchor && hasToCoords)
+        {
+            errorCode = "ambiguous_target_coordinates";
+            return false;
+        }
+
+        if (hasToAnchor || hasToCoords)
+        {
+            double tx;
+            double ty;
+
+            if (hasToAnchor)
+            {
+                if (!string.Equals(request.ToAnchor, IntentCursorAnchors.PrimaryCenter, StringComparison.Ordinal))
+                {
+                    errorCode = "invalid_target_anchor";
+                    return false;
+                }
+
+                if (anchorResolver is null || !anchorResolver(request.ToAnchor!, out tx, out ty))
+                {
+                    errorCode = "target_anchor_unavailable";
+                    return false;
+                }
+            }
+            else
+            {
+                if (!request.ToX.HasValue || !request.ToY.HasValue)
+                {
+                    errorCode = "invalid_target_coordinates";
+                    return false;
+                }
+
+                tx = request.ToX.Value;
+                ty = request.ToY.Value;
+            }
+
+            if (!double.IsFinite(tx) ||
+                !double.IsFinite(ty) ||
+                tx < MinCoordinate ||
+                tx > MaxCoordinate ||
+                ty < MinCoordinate ||
+                ty > MaxCoordinate)
+            {
+                errorCode = "invalid_target_coordinates";
+                return false;
+            }
+
+            toX = RoundCoordinate(tx);
+            toY = RoundCoordinate(ty);
+        }
+
         var duration = request.DurationMs <= 0
             ? DefaultDurationMs
             : Math.Clamp(request.DurationMs, MinDurationMs, MaxDurationMs);
@@ -173,9 +237,42 @@ public static class IntentCursorPolicy
             DurationMs: duration,
             DiameterPx: diameter,
             Opacity: opacity,
-            Tone: NormalizeTone(request.Tone));
+            Tone: NormalizeTone(request.Tone),
+            ToX: toX,
+            ToY: toY,
+            Easing: NormalizeEasing(request.Easing));
         return true;
     }
+
+    /// <summary>
+    /// Eases normalized progress (0..1) for the glide path. ease-in-out-cubic is
+    /// the default S-curve (slow start, fast middle, soft landing); linear is
+    /// available for mechanical motion. Unknown names fall back to the default
+    /// so a bad payload never throws mid-render.
+    /// </summary>
+    public static double Ease(string easing, double progress)
+    {
+        var t = Math.Clamp(progress, 0.0, 1.0);
+        return easing switch
+        {
+            IntentCursorEasings.Linear => t,
+            _ => t < 0.5
+                ? 4.0 * t * t * t
+                : 1.0 - Math.Pow(-2.0 * t + 2.0, 3) / 2.0,
+        };
+    }
+
+    /// <summary>Pixel-rounded linear interpolation between two integer coordinates.</summary>
+    public static int Lerp(int from, int to, double t) =>
+        (int)Math.Round(from + (to - from) * t, MidpointRounding.AwayFromZero);
+
+    private static string NormalizeEasing(string? easing) =>
+        easing switch
+        {
+            IntentCursorEasings.Linear => IntentCursorEasings.Linear,
+            IntentCursorEasings.EaseInOutCubic => IntentCursorEasings.EaseInOutCubic,
+            _ => IntentCursorEasings.Default,
+        };
 
     public static double OpacityAt(double requestedOpacity, int elapsedMs, int durationMs)
     {
