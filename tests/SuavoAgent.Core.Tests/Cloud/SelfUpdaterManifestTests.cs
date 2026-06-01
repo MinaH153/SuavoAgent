@@ -10,7 +10,8 @@ namespace SuavoAgent.Core.Tests.Cloud;
 // .exes but left binaries.manifest stale, so the Broker's H-8 guard
 // (SessionWatcher.VerifyHelperIntegrity) refused to launch the new Helper and the
 // agent went blind. After a swap, RegenerateBinariesManifest must rewrite the
-// manifest to match the binaries now on disk.
+// manifest to match the binaries now on disk — AND return false (not silently
+// succeed) when it cannot, so the caller can mark the update degraded.
 public class SelfUpdaterManifestTests
 {
     private static string MakeTempDir()
@@ -27,24 +28,23 @@ public class SelfUpdaterManifestTests
     }
 
     [Fact]
-    public void RegenerateBinariesManifest_WritesHashesMatchingOnDiskBinaries()
+    public void RegenerateBinariesManifest_WritesHashesMatchingOnDiskBinaries_AndReturnsTrue()
     {
         var installDir = MakeTempDir();
         var manifestPath = Path.Combine(MakeTempDir(), "binaries.manifest");
         try
         {
-            // Simulate post-swap on-disk binaries with distinct content.
             File.WriteAllText(Path.Combine(installDir, "SuavoAgent.Core.exe"), "core-v2-bytes");
             File.WriteAllText(Path.Combine(installDir, "SuavoAgent.Broker.exe"), "broker-v2-bytes");
             File.WriteAllText(Path.Combine(installDir, "SuavoAgent.Helper.exe"), "helper-v2-bytes");
             File.WriteAllText(Path.Combine(installDir, "SuavoAgent.Watchdog.exe"), "watchdog-v2-bytes");
 
-            SelfUpdater.RegenerateBinariesManifest(installDir, NullLogger.Instance, manifestPath);
+            var ok = SelfUpdater.RegenerateBinariesManifest(installDir, NullLogger.Instance, manifestPath);
+            Assert.True(ok);
 
             Assert.True(File.Exists(manifestPath));
             using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
             var root = doc.RootElement;
-
             foreach (var bin in new[]
             {
                 "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe",
@@ -69,12 +69,12 @@ public class SelfUpdaterManifestTests
         var manifestPath = Path.Combine(MakeTempDir(), "binaries.manifest");
         try
         {
-            // A box without the Watchdog binary — manifest should list only what's present.
             File.WriteAllText(Path.Combine(installDir, "SuavoAgent.Core.exe"), "core");
             File.WriteAllText(Path.Combine(installDir, "SuavoAgent.Broker.exe"), "broker");
             File.WriteAllText(Path.Combine(installDir, "SuavoAgent.Helper.exe"), "helper");
 
-            SelfUpdater.RegenerateBinariesManifest(installDir, NullLogger.Instance, manifestPath);
+            var ok = SelfUpdater.RegenerateBinariesManifest(installDir, NullLogger.Instance, manifestPath);
+            Assert.True(ok);
 
             using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
             var root = doc.RootElement;
@@ -98,7 +98,8 @@ public class SelfUpdaterManifestTests
             File.WriteAllText(manifestPath, "{ \"SuavoAgent.Helper.exe\": \"deadbeefstalehash\" }");
             File.WriteAllText(Path.Combine(installDir, "SuavoAgent.Helper.exe"), "fresh-helper-bytes");
 
-            SelfUpdater.RegenerateBinariesManifest(installDir, NullLogger.Instance, manifestPath);
+            var ok = SelfUpdater.RegenerateBinariesManifest(installDir, NullLogger.Instance, manifestPath);
+            Assert.True(ok);
 
             using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
             var actual = doc.RootElement.GetProperty("SuavoAgent.Helper.exe").GetString();
@@ -109,6 +110,51 @@ public class SelfUpdaterManifestTests
         {
             Directory.Delete(installDir, recursive: true);
             Directory.Delete(Path.GetDirectoryName(manifestPath)!, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RegenerateBinariesManifest_ReturnsFalse_WhenNoBinariesPresent()
+    {
+        // fix1 contract: an empty/missing install dir must NOT silently succeed — it
+        // returns false so the caller marks the update degraded instead of reporting
+        // clean success (the silent-blind archetype this whole fix prevents).
+        var installDir = MakeTempDir(); // exists but contains no agent binaries
+        var manifestPath = Path.Combine(MakeTempDir(), "binaries.manifest");
+        try
+        {
+            var ok = SelfUpdater.RegenerateBinariesManifest(installDir, NullLogger.Instance, manifestPath);
+            Assert.False(ok);
+            // And it must not leave a bogus/empty manifest behind.
+            Assert.False(File.Exists(manifestPath));
+        }
+        finally
+        {
+            Directory.Delete(installDir, recursive: true);
+            Directory.Delete(Path.GetDirectoryName(manifestPath)!, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RegenerateBinariesManifest_ReturnsFalse_OnWriteFailure()
+    {
+        // Force an IO failure by pointing the manifest at a path whose parent is a
+        // FILE, not a directory — Directory.CreateDirectory(parent) throws, the method
+        // catches and must return false (degraded), never throw and never claim success.
+        var installDir = MakeTempDir();
+        File.WriteAllText(Path.Combine(installDir, "SuavoAgent.Helper.exe"), "helper");
+        var parentFile = Path.Combine(MakeTempDir(), "not-a-dir");
+        File.WriteAllText(parentFile, "i am a file");
+        var manifestPath = Path.Combine(parentFile, "binaries.manifest"); // parent is a file
+        try
+        {
+            var ok = SelfUpdater.RegenerateBinariesManifest(installDir, NullLogger.Instance, manifestPath);
+            Assert.False(ok);
+        }
+        finally
+        {
+            Directory.Delete(installDir, recursive: true);
+            Directory.Delete(Path.GetDirectoryName(parentFile)!, recursive: true);
         }
     }
 }

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
+using SuavoAgent.Core.Health;
 
 namespace SuavoAgent.Core.Cloud;
 
@@ -494,10 +495,39 @@ public static class SelfUpdater
                 // agent went BLIND (vision/UIA offline) with no crash and no app-log error — exactly
                 // the field failure on Mina's box after the v3.17.0 swap. Regenerate AFTER the swap so
                 // the manifest reflects what's actually on disk.
-                RegenerateBinariesManifest(installDir, logger);
+                var manifestOk = RegenerateBinariesManifest(installDir, logger);
+                if (!manifestOk)
+                {
+                    // The swap already applied, so we can't un-apply — but a stale/failed
+                    // manifest means the Broker's H-8 guard will REFUSE to launch the Helper
+                    // (the silent-blind failure this whole fix exists to prevent). Make it
+                    // LOUD instead of reporting clean success: record update health 'degraded'
+                    // so the cloud agent-health-watch can alarm, and log an error. Best-effort
+                    // on the health write itself — never throw out of the bootstrap path.
+                    try
+                    {
+                        RuntimeHealthEvidence.WriteUpdateHealth(
+                            RuntimeHealthEvidence.UpdateHealthPath(),
+                            status: "degraded",
+                            targetVersion: manifest.Version,
+                            lastAttemptAt: DateTimeOffset.UtcNow,
+                            lastSuccessAt: null,
+                            consecutiveFailures: 1,
+                            lastErrorKind: "manifest_regen_failed",
+                            channel: null);
+                    }
+                    catch (Exception hx)
+                    {
+                        logger.LogError(hx, "Failed to record degraded update health after manifest regen failure");
+                    }
+                    logger.LogError(
+                        "Bootstrap update v{Version} applied but binaries.manifest regen FAILED — Helper will be refused until the manifest is refreshed (update marked degraded)",
+                        manifest.Version);
+                }
 
                 File.Delete(sentinel);
-                logger.LogInformation("Bootstrap update applied — v{Version}", manifest.Version);
+                logger.LogInformation("Bootstrap update applied — v{Version}{Suffix}",
+                    manifest.Version, manifestOk ? "" : " (DEGRADED: manifest regen failed)");
                 return true;
             }
 
@@ -560,7 +590,10 @@ public static class SelfUpdater
     /// atomically (temp + replace) so the Broker can never read a half-written manifest mid-poll.
     /// The manifestPathOverride param exists only so tests can target a temp dir.
     /// </summary>
-    internal static void RegenerateBinariesManifest(
+    /// <returns>true if the manifest was rewritten to match on-disk binaries; false on
+    /// any failure (no binaries found, or an IO/exception during write) — the caller MUST
+    /// treat false as a degraded update, never as clean success.</returns>
+    internal static bool RegenerateBinariesManifest(
         string installDir, ILogger logger, string? manifestPathOverride = null)
     {
         try
@@ -584,8 +617,8 @@ public static class SelfUpdater
 
             if (entries.Count == 0)
             {
-                logger.LogWarning("RegenerateBinariesManifest: no binaries found in {Dir} — leaving manifest untouched", installDir);
-                return;
+                logger.LogError("RegenerateBinariesManifest: no binaries found in {Dir} — manifest NOT refreshed (degraded)", installDir);
+                return false;
             }
 
             var json = "{\n" + string.Join(",\n", entries) + "\n}\n";
@@ -603,10 +636,12 @@ public static class SelfUpdater
                 File.Move(tempPath, manifestPath);
 
             logger.LogInformation("Regenerated binaries.manifest ({Count} binaries) after swap", entries.Count);
+            return true;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "RegenerateBinariesManifest failed — Helper may be refused until manifest is refreshed");
+            return false;
         }
     }
 }
