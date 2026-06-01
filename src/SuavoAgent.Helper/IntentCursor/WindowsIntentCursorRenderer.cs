@@ -78,6 +78,10 @@ internal sealed class WindowsIntentCursorRenderer : IIntentCursorRenderer
             PaintLayeredWindow(hwnd, request with { Opacity = 0 }, windowSize);
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
+            // When a glide target is set, the halo travels (X,Y)->(ToX,ToY) over
+            // DurationMs; the layered window is repositioned every frame via
+            // UpdateLayeredWindow's dst. Without a target it stays put (static).
+            var hasPath = request.ToX.HasValue && request.ToY.HasValue;
             var startedAt = Environment.TickCount64;
             while (true)
             {
@@ -88,7 +92,22 @@ internal sealed class WindowsIntentCursorRenderer : IIntentCursorRenderer
                 }
 
                 var opacity = IntentCursorPolicy.OpacityAt(request.Opacity, elapsedMs, request.DurationMs);
-                PaintLayeredWindow(hwnd, request with { Opacity = opacity }, windowSize);
+                var frame = request with { Opacity = opacity };
+
+                if (hasPath)
+                {
+                    var progress = request.DurationMs <= 0
+                        ? 1.0
+                        : elapsedMs / (double)request.DurationMs;
+                    var eased = IntentCursorPolicy.Ease(request.Easing, progress);
+                    frame = frame with
+                    {
+                        X = IntentCursorPolicy.Lerp(request.X, request.ToX!.Value, eased),
+                        Y = IntentCursorPolicy.Lerp(request.Y, request.ToY!.Value, eased),
+                    };
+                }
+
+                PaintLayeredWindow(hwnd, frame, windowSize);
 
                 while (NativeMessagePump.PeekMessage(out var msg, IntPtr.Zero, 0, 0, PM_REMOVE))
                 {
