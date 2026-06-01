@@ -28,6 +28,26 @@ jobs:
             throw "bootstrap.ps1 has Windows PowerShell 5.1 parse errors"
           }
 
+      - name: Parse operator update scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          # upgrade.ps1 + install.ps1 both write the H-8 binaries.manifest; a parse
+          # error there silently ships a broken deploy/update path (no app builds it).
+          foreach ($script in @('.\upgrade.ps1', '.\install.ps1')) {
+            $source = Get-Content -Raw -LiteralPath $script
+            $null = [scriptblock]::Create($source)
+            $parseErrors = $null
+            [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
+            if ($parseErrors -and $parseErrors.Count -gt 0) {
+              $parseErrors | Format-List * | Out-String | Write-Host
+              throw "$script has Windows PowerShell 5.1 parse errors"
+            }
+          }
+
       - name: Parse and run no-PHI release probe
         shell: powershell
         run: |
