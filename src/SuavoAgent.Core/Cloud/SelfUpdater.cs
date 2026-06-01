@@ -352,6 +352,26 @@ public static class SelfUpdater
     public static bool SwapBinaries(string installDir, ILogger logger)
     {
         var binaries = new[] { "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe" };
+
+        // #10: require the FULL staged set. The OTA staging path always downloads Core+Broker+Helper
+        // together (versioned + signed as a unit), so a partial set at swap time means a corrupted or
+        // partial stage. Swapping only the present subset would leave version skew — a new Core running
+        // against an old Broker/Helper — the silent-corruption class this guard exists to prevent.
+        // Refuse and swap nothing; the caller discards the staged .new files and the box stays on the
+        // last-good set.
+        var missing = new List<string>();
+        foreach (var bin in binaries)
+            if (!File.Exists(Path.Combine(installDir, bin + ".new"))) missing.Add(bin);
+        if (missing.Count > 0)
+        {
+            // Distinguish "nothing staged" (normal — no pending swap) from a genuine partial set.
+            if (missing.Count < binaries.Length)
+                logger.LogWarning(
+                    "Refusing partial binary swap — missing staged {Missing}; keeping last-good set to avoid version skew",
+                    string.Join(", ", missing));
+            return false;
+        }
+
         var swapped = new List<string>();
 
         try
@@ -362,8 +382,7 @@ public static class SelfUpdater
                 var newFile = current + ".new";
                 var oldFile = current + ".old";
 
-                if (!File.Exists(newFile)) continue;
-
+                // All .new files were verified present above — swap unconditionally.
                 if (File.Exists(oldFile)) File.Delete(oldFile);
                 if (File.Exists(current)) File.Move(current, oldFile);
                 File.Move(newFile, current);
@@ -543,7 +562,7 @@ public static class SelfUpdater
         }
     }
 
-    private static bool VerifyStagedBinaries(string installDir, UpdateManifest manifest, ILogger logger)
+    internal static bool VerifyStagedBinaries(string installDir, UpdateManifest manifest, ILogger logger)
     {
         var expected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -558,7 +577,14 @@ public static class SelfUpdater
         foreach (var (binary, expectedHash) in expected)
         {
             var newPath = Path.Combine(installDir, binary + ".new");
-            if (!File.Exists(newPath)) continue;
+            if (!File.Exists(newPath))
+            {
+                // #10: a declared binary with no staged .new is a partial/corrupted stage. Abort the
+                // whole update (the caller discards the staged files) rather than letting SwapBinaries
+                // apply a subset and leave version skew.
+                logger.LogWarning("Staged binary missing for {Binary} — partial update, aborting swap", binary);
+                return false;
+            }
 
             using var stream = File.OpenRead(newPath);
             var actual = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
