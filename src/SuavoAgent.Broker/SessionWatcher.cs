@@ -101,14 +101,38 @@ public sealed class SessionWatcher : BackgroundService
         LaunchHelper(activeSessionId);
     }
 
-    private bool VerifyHelperIntegrity(string helperPath)
+    private bool VerifyHelperIntegrity(string helperPath) =>
+        VerifyHelperIntegrityAt(
+            helperPath,
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent"),
+            _logger);
+
+    // H-8 tamper guard, extracted + path-injectable so the decision is unit-testable (the live
+    // caller passes the real %ProgramData%\SuavoAgent dir). The on-disk Helper hash must equal the
+    // binaries.manifest entry or the Broker refuses to launch the Helper.
+    internal static bool VerifyHelperIntegrityAt(string helperPath, string programDataDir, ILogger logger)
     {
-        var manifestPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "SuavoAgent", "binaries.manifest");
+        var manifestPath = Path.Combine(programDataDir, "binaries.manifest");
         if (!File.Exists(manifestPath))
         {
-            _logger.LogWarning("binaries.manifest not found — skipping Helper integrity check");
+            // #11: a missing manifest is the integrity ROOT being absent. Failing open here both
+            // defeats the tamper guard (delete the manifest → the Helper launches unverified) and
+            // hides it (the box looks green). On a MANAGED install the installer always persists
+            // bootstrap.ps1 in this same dir, so a missing manifest is anomalous → fail-CLOSED
+            // (refuse; the resulting helper-down state is the degraded signal the cloud reads).
+            // Only a genuine pre-install/dev box (no bootstrap.ps1) keeps the fail-open so a first
+            // boot isn't bricked before install.ps1 has written the manifest.
+            var managed = File.Exists(Path.Combine(programDataDir, "bootstrap.ps1"));
+            if (managed)
+            {
+                logger.LogError(
+                    "binaries.manifest missing on a managed install (bootstrap.ps1 present) — refusing to launch Helper (fail-closed; integrity unverifiable)");
+                return false;
+            }
+            logger.LogWarning(
+                "binaries.manifest not found and no managed-install marker — skipping Helper integrity check (first-boot/dev)");
             return true;
         }
         try
@@ -116,7 +140,7 @@ public sealed class SessionWatcher : BackgroundService
             using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(manifestPath));
             if (!doc.RootElement.TryGetProperty("SuavoAgent.Helper.exe", out var hashEl))
             {
-                _logger.LogError("Helper hash not in manifest — refusing to launch (fail-closed)");
+                logger.LogError("Helper hash not in manifest — refusing to launch (fail-closed)");
                 return false;
             }
             var expected = hashEl.GetString() ?? "";
@@ -125,16 +149,16 @@ public sealed class SessionWatcher : BackgroundService
                 System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();
             if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogError("Helper binary hash mismatch — refusing to launch. Expected={Expected} Actual={Actual}",
+                logger.LogError("Helper binary hash mismatch — refusing to launch. Expected={Expected} Actual={Actual}",
                     expected, actual);
                 return false;
             }
-            _logger.LogDebug("Helper binary integrity verified");
+            logger.LogDebug("Helper binary integrity verified");
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Helper integrity check error — refusing to launch (fail-closed)");
+            logger.LogError(ex, "Helper integrity check error — refusing to launch (fail-closed)");
             return false;
         }
     }
