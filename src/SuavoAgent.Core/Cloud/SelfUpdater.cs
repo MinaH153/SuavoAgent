@@ -545,6 +545,13 @@ public static class SelfUpdater
                 }
 
                 File.Delete(sentinel);
+
+                // Signal the LocalSystem Watchdog to cycle the Broker onto the new binary. SCM only
+                // restarts Core on our Exit below; without this the Broker keeps running the OLD
+                // binary, #130 never re-runs, the orphan Helper holds the IPC pipe, and the box
+                // strands at ipc_unreachable until a manual restart (the field failure this fixes).
+                WatchdogRestartRequestWriter.Queue(installDir, manifest.Version, logger);
+
                 logger.LogInformation("Bootstrap update applied — v{Version}{Suffix}",
                     manifest.Version, manifestOk ? "" : " (DEGRADED: manifest regen failed)");
                 return true;

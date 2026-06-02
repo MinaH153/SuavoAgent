@@ -84,7 +84,13 @@ try
         var bootstrap = Environment.GetEnvironmentVariable("SUAVO_BOOTSTRAP_PS1")
                         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                                         "SuavoAgent", "bootstrap.ps1");
-        return new WatchdogOptions { BootstrapPath = bootstrap };
+        // Restart-request lives in the install dir (alongside the OTA sentinel), whose ACL
+        // denies interactive-user writes — Core writes it post-swap, the Watchdog consumes it.
+        return new WatchdogOptions
+        {
+            BootstrapPath = bootstrap,
+            RestartRequestPath = Path.Combine(exeDir, "watchdog-restart-request.json"),
+        };
     });
     builder.Services.AddHostedService<WatchdogWorker>();
 

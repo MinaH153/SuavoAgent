@@ -13,6 +13,11 @@ public sealed class WatchdogOptions
     public string? BootstrapPath { get; init; }
     public string? TelemetryPath { get; init; }
     public string? RepairRequestPath { get; init; }
+
+    /// Path to the post-OTA restart-request file (default: &lt;installDir&gt;\watchdog-restart-request.json,
+    /// written by Core's SelfUpdater after a binary swap). The install dir ACL denies interactive-user
+    /// writes (Users = ReadAndExecute), so the signal can't be spoofed by a logged-in pharmacy user.
+    public string? RestartRequestPath { get; init; }
 }
 
 public sealed class WatchdogWorker : BackgroundService
@@ -23,6 +28,16 @@ public sealed class WatchdogWorker : BackgroundService
     private readonly WatchdogDecisionEngine _engine = new();
     private readonly Dictionary<string, ServiceLedger> _ledgers = new(StringComparer.OrdinalIgnoreCase);
     private WatchdogRemoteRepairTelemetry? _lastRemoteRepair;
+    private WatchdogUpdateRestartTelemetry? _lastUpdateRestart;
+
+    // Only the Broker may be cycled by a post-OTA restart request. Core restarts itself via
+    // SCM (Environment.Exit after the swap); the Helper is reconciled by the new Broker's #130.
+    private static readonly HashSet<string> AllowedRestartServices =
+        new(StringComparer.OrdinalIgnoreCase) { "SuavoAgent.Broker" };
+
+    // Reject (and stop retrying) a restart request older than this. Bounds retries when a
+    // dependency never comes up; the normal per-service loop then recovers any stopped service.
+    private static readonly TimeSpan UpdateRestartTtl = TimeSpan.FromMinutes(10);
 
     public WatchdogWorker(ILogger<WatchdogWorker> logger, IServiceCommand command, WatchdogOptions options)
     {
@@ -72,6 +87,11 @@ public sealed class WatchdogWorker : BackgroundService
 
     internal void TickOnce(DateTimeOffset now)
     {
+        // Post-OTA restart first: cycle the Broker onto the just-swapped binary so its #130
+        // orphan-Helper reconcile runs and frees the IPC pipe. Time-critical — do it before
+        // per-service decisions so the loop observes START_PENDING and doesn't double-act.
+        ProcessQueuedUpdateRestartRequest(now);
+
         ProcessQueuedRemoteRepairRequest(now);
 
         var serviceSnapshots = new List<WatchdogServiceTelemetry>();
@@ -165,7 +185,8 @@ public sealed class WatchdogWorker : BackgroundService
                 Present: true,
                 Timestamp: now.ToString("o"),
                 Services: services,
-                RemoteRepair: _lastRemoteRepair);
+                RemoteRepair: _lastRemoteRepair,
+                UpdateRestart: _lastUpdateRestart);
             var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
             {
                 PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -189,6 +210,165 @@ public sealed class WatchdogWorker : BackgroundService
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "SuavoAgent",
         "watchdog-health.json");
+
+    /// Post-OTA restart handler. Core's SelfUpdater swaps the binaries on disk and regenerates
+    /// the manifest, but only Core is restarted by SCM (it Environment.Exit()s); the Broker keeps
+    /// running its OLD in-memory binary and looks healthy, so #130 never re-runs and the orphan
+    /// Helper keeps the IPC pipe → ipc_unreachable. This cycles the Broker (LocalSystem-only) so it
+    /// reloads the new binary. The request file is KEPT until the restart succeeds (Codex Q3): if
+    /// the Broker start is rejected because Core is still START_PENDING, we retry next tick.
+    private void ProcessQueuedUpdateRestartRequest(DateTimeOffset now)
+    {
+        var requestPath = _options.RestartRequestPath ?? DefaultRestartRequestPath();
+        if (string.IsNullOrEmpty(requestPath) || !File.Exists(requestPath))
+            return;
+
+        UpdateRestartRequest request;
+        try
+        {
+            request = ParseUpdateRestartRequest(File.ReadAllText(requestPath));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Unreadable update-restart request — discarding");
+            RecordUpdateRestart(requestPath, now, "unknown", null, "rejected_unreadable", Array.Empty<string>(), delete: true);
+            return;
+        }
+
+        // Defense-in-depth validation (the install-dir ACL already blocks interactive-user writes):
+        // schema, exact service allowlist, and TTL freshness so a stale/forged file can't loop.
+        if (request.SchemaVersion != 1)
+        {
+            _logger.LogWarning("update-restart schemaVersion {V} unsupported — discarding", request.SchemaVersion);
+            RecordUpdateRestart(requestPath, now, request.Version, request.RequestedAt, "rejected_schema", Array.Empty<string>(), delete: true);
+            return;
+        }
+
+        if (request.Services.Count == 0 || request.Services.Any(s => !AllowedRestartServices.Contains(s)))
+        {
+            _logger.LogWarning("update-restart names non-allowlisted service(s) — discarding");
+            RecordUpdateRestart(requestPath, now, request.Version, request.RequestedAt, "rejected_service", Array.Empty<string>(), delete: true);
+            return;
+        }
+
+        if (!DateTimeOffset.TryParse(request.RequestedAt,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var requestedAt))
+        {
+            _logger.LogWarning("update-restart has unparseable requestedAt — discarding");
+            RecordUpdateRestart(requestPath, now, request.Version, request.RequestedAt, "rejected_timestamp", Array.Empty<string>(), delete: true);
+            return;
+        }
+
+        if (now - requestedAt > UpdateRestartTtl)
+        {
+            _logger.LogWarning(
+                "update-restart expired (age {Age:F1}m > {Ttl}m) — discarding; normal loop recovers any stopped service",
+                (now - requestedAt).TotalMinutes, UpdateRestartTtl.TotalMinutes);
+            RecordUpdateRestart(requestPath, now, request.Version, request.RequestedAt, "expired", Array.Empty<string>(), delete: true);
+            return;
+        }
+
+        // Cycle each target service so the new on-disk binary loads.
+        var restarted = new List<string>();
+        var allOk = true;
+        foreach (var svc in request.Services.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                if (_command.Query(svc) == ServiceState.Running && !_command.Stop(svc, _options.StartTimeout))
+                {
+                    _logger.LogWarning("update-restart: failed to stop {Service} — retrying next tick", svc);
+                    allOk = false;
+                    continue;
+                }
+
+                if (_command.Start(svc, _options.StartTimeout))
+                {
+                    restarted.Add(svc);
+                    _logger.LogInformation("update-restart: cycled {Service} onto new binary v{Version} (post-OTA)", svc, request.Version);
+                }
+                else
+                {
+                    _logger.LogWarning("update-restart: start of {Service} not accepted yet (dependency may be starting) — retrying next tick", svc);
+                    allOk = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "update-restart: error cycling {Service} — retrying next tick", svc);
+                allOk = false;
+            }
+        }
+
+        if (allOk)
+        {
+            _logger.LogInformation("update-restart complete for v{Version}: {Services}", request.Version, string.Join(",", restarted));
+            RecordUpdateRestart(requestPath, now, request.Version, request.RequestedAt, "restarted", restarted, delete: true);
+        }
+        else
+        {
+            // Keep the file; retry next tick (bounded by TTL above).
+            RecordUpdateRestart(requestPath, now, request.Version, request.RequestedAt, "pending_retry", restarted, delete: false);
+        }
+    }
+
+    private void RecordUpdateRestart(
+        string requestPath, DateTimeOffset now, string version, string? requestedAt,
+        string outcome, IReadOnlyList<string> restarted, bool delete)
+    {
+        _lastUpdateRestart = new WatchdogUpdateRestartTelemetry(
+            Present: true,
+            Version: version,
+            RequestedAt: requestedAt,
+            CompletedAt: now.ToString("o"),
+            Outcome: outcome,
+            ServicesRestarted: restarted);
+
+        if (delete)
+        {
+            try { File.Delete(requestPath); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to delete update-restart request"); }
+        }
+    }
+
+    private static string? DefaultRestartRequestPath()
+    {
+        var installDir = Path.GetDirectoryName(Environment.ProcessPath);
+        return string.IsNullOrEmpty(installDir)
+            ? null
+            : Path.Combine(installDir, "watchdog-restart-request.json");
+    }
+
+    private static UpdateRestartRequest ParseUpdateRestartRequest(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var schema = root.TryGetProperty("schemaVersion", out var sv) && sv.ValueKind == JsonValueKind.Number
+            ? sv.GetInt32() : 0;
+        var version = root.TryGetProperty("version", out var v) && v.ValueKind == JsonValueKind.String
+            ? SanitizeVersion(v.GetString()) : "unknown";
+        var requestedAt = root.TryGetProperty("requestedAt", out var r) && r.ValueKind == JsonValueKind.String
+            ? r.GetString() ?? "" : "";
+
+        var services = new List<string>();
+        if (root.TryGetProperty("services", out var svcs) && svcs.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var el in svcs.EnumerateArray())
+                if (el.ValueKind == JsonValueKind.String && el.GetString() is { Length: > 0 } s)
+                    services.Add(s);
+        }
+
+        return new UpdateRestartRequest(schema, version, requestedAt, services);
+    }
+
+    private static string SanitizeVersion(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "unknown";
+        var chars = value.Where(ch => char.IsLetterOrDigit(ch) || ch is '.' or '-' or '_').Take(40).ToArray();
+        return chars.Length == 0 ? "unknown" : new string(chars);
+    }
 
     private void ProcessQueuedRemoteRepairRequest(DateTimeOffset now)
     {
@@ -303,7 +483,22 @@ internal sealed record WatchdogTelemetry(
     bool Present,
     string Timestamp,
     IReadOnlyList<WatchdogServiceTelemetry> Services,
-    WatchdogRemoteRepairTelemetry? RemoteRepair);
+    WatchdogRemoteRepairTelemetry? RemoteRepair,
+    WatchdogUpdateRestartTelemetry? UpdateRestart);
+
+internal sealed record WatchdogUpdateRestartTelemetry(
+    bool Present,
+    string Version,
+    string? RequestedAt,
+    string CompletedAt,
+    string Outcome,
+    IReadOnlyList<string> ServicesRestarted);
+
+internal sealed record UpdateRestartRequest(
+    int SchemaVersion,
+    string Version,
+    string RequestedAt,
+    IReadOnlyList<string> Services);
 
 internal sealed record WatchdogRemoteRepairTelemetry(
     bool Present,
