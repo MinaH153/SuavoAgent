@@ -772,6 +772,56 @@ public class HeartbeatWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task ShowIntentCursor_GlidePayload_RelaysToHelperWithTarget()
+    {
+        // The agentic glide: x,y start + toX,toY target + easing. The PHI safety
+        // guard must ALLOW these (toX/toY are numbers; easing is a constrained
+        // enum) so the cursor can travel, not just appear. Regression guard for
+        // the v3.18.0 miss where the glide shipped but the guard rejected every
+        // toX/toY/easing payload before it reached the Helper.
+        var response = BuildResponseJson("show_cursor", new
+        {
+            x = 300.0,
+            y = 250.0,
+            toX = 1100.0,
+            toY = 680.0,
+            durationMs = 4500,
+            easing = "ease_in_out_cubic",
+            tone = "attention",
+            commandId = "cmd-glide-1",
+            requesterId = "operator-1"
+        });
+
+        await InvokeProcessAsync(response);
+
+        var sent = Assert.Single(_intentCursorClient.Requests);
+        Assert.Equal(300.0, sent.X.GetValueOrDefault());
+        Assert.Equal(1100.0, sent.ToX.GetValueOrDefault());
+        Assert.Equal(680.0, sent.ToY.GetValueOrDefault());
+        Assert.Equal("ease_in_out_cubic", sent.Easing);
+    }
+
+    [Fact]
+    public async Task ShowIntentCursor_FreeFormEasing_RejectsBeforeHelper()
+    {
+        // easing is a new string field — it must stay a closed enum so it cannot
+        // become a PHI side-channel. A free-form value is rejected before the Helper.
+        var response = BuildResponseJson("show_cursor", new
+        {
+            x = 300.0,
+            y = 250.0,
+            toX = 1100.0,
+            toY = 680.0,
+            easing = "Rx 12345 patient",
+            commandId = "cmd-glide-bad"
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Empty(_intentCursorClient.Requests);
+    }
+
+    [Fact]
     public async Task ShowIntentCursor_UnknownStringPayload_RejectsBeforeHelper()
     {
         var response = BuildResponseJson("show_intent_cursor", new

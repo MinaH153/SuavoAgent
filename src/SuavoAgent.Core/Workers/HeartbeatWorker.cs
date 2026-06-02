@@ -1477,6 +1477,13 @@ public sealed class HeartbeatWorker : ResilientHostedService
             "opacity" or
             "tone" or
             "anchor" or
+            // Glide target + easing (v3.18.x). toX/toY are numbers; toAnchor and
+            // easing are closed enums (see HasUnsafeIntentCursorValue) so none can
+            // smuggle PHI through a free-form string.
+            "tox" or
+            "toy" or
+            "toanchor" or
+            "easing" or
             "commandid" or
             "requesterid";
     }
@@ -1495,9 +1502,13 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     IntentCursorTones.Attention or
                     IntentCursorTones.Success or
                     IntentCursorTones.Warning),
-            "anchor" => value.ValueKind != JsonValueKind.String ||
+            "anchor" or "toanchor" => value.ValueKind != JsonValueKind.String ||
                 !string.Equals(value.GetString(), IntentCursorAnchors.PrimaryCenter, StringComparison.Ordinal),
-            "x" or "y" or "durationms" or "diameterpx" or "opacity" =>
+            "easing" => value.ValueKind != JsonValueKind.String ||
+                value.GetString() is not (
+                    IntentCursorEasings.Linear or
+                    IntentCursorEasings.EaseInOutCubic),
+            "x" or "y" or "tox" or "toy" or "durationms" or "diameterpx" or "opacity" =>
                 value.ValueKind != JsonValueKind.Number,
             "commandid" or "requesterid" =>
                 value.ValueKind != JsonValueKind.String || value.GetString()?.Length > 128,
