@@ -27,6 +27,14 @@ public sealed class SessionWatcher : BackgroundService
         // the very Watchdog that's gone). No-op on a healthy install. Best-effort, never fatal.
         EnsureWatchdogService();
 
+        // One-shot at startup: kill any orphan Helper left by a PRIOR Broker instance before we
+        // launch ours. After an OTA self-update (or a crash / Watchdog cycle) the old Helper survives
+        // — it's a CreateProcessAsUser child, not terminated when its launching Broker exits — and it
+        // keeps the Core<->Helper IPC pipe bound, so the fresh Helper we launch can't take the pipe
+        // and Core sees `ipc_unreachable` (agent looks updated but can't render/act; the post-OTA
+        // stranding on the pilot box 2026-06-01, which only a full stop+restart recovered).
+        ReconcileOrphanHelpers();
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -70,6 +78,59 @@ public sealed class SessionWatcher : BackgroundService
         {
             _logger.LogWarning(ex, "WatchdogServiceGuard failed (non-fatal)");
         }
+    }
+
+    // Kill Helper processes left over from a prior Broker instance so the fresh Helper we launch
+    // gets a clean IPC pipe. Best-effort, never fatal; the Broker is LocalSystem so it can terminate
+    // a Helper running in the user's interactive session. Waits briefly for each to exit so the pipe
+    // is released before LaunchHelper runs.
+    private void ReconcileOrphanHelpers()
+    {
+        try
+        {
+            var running = Process.GetProcessesByName("SuavoAgent.Helper");
+            try
+            {
+                var orphanPids = OrphanHelperPids(
+                    running.Select(p => p.Id),
+                    _helpers.Values.Select(h => h.ProcessId));
+
+                foreach (var proc in running)
+                {
+                    if (!orphanPids.Contains(proc.Id)) continue;
+                    try
+                    {
+                        proc.Kill();
+                        proc.WaitForExit(3000); // let it release the IPC pipe before we launch a fresh Helper
+                        _logger.LogWarning(
+                            "Killed orphan Helper PID {Pid} at Broker startup (prior-instance leftover holding the IPC pipe)",
+                            proc.Id);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to kill orphan Helper PID {Pid}", proc.Id);
+                    }
+                }
+            }
+            finally
+            {
+                foreach (var proc in running) proc.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Orphan Helper reconciliation failed (non-fatal)");
+        }
+    }
+
+    // The running Helper PIDs that are orphans to kill: every running Helper NOT already tracked as
+    // launched by THIS Broker. At startup the tracked set is empty, so every running Helper is a
+    // prior-instance orphan. Pure + testable.
+    internal static HashSet<int> OrphanHelperPids(
+        IEnumerable<int> runningHelperPids, IEnumerable<int> trackedHelperPids)
+    {
+        var tracked = new HashSet<int>(trackedHelperPids);
+        return runningHelperPids.Where(pid => !tracked.Contains(pid)).ToHashSet();
     }
 
     private void CheckActiveSessions()
