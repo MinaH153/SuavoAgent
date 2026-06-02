@@ -590,28 +590,23 @@ public sealed class RxDetectionWorker : ResilientHostedService
 
         if (includeLegacyDeliveryQueue)
         {
-            data["rxDeliveryQueue"] = rxs.Select(rx =>
+            // Track 3 invariant (Codex CRITICAL #15, closed 2026-05-12):
+            // the legacy rxDeliveryQueue ships ONLY operational metadata.
+            // PHI fields (patient name/phone/address) are intentionally
+            // absent — they were silently dropped cloud-side by
+            // sanitizeSnapshotData anyway, and HIPAA minimum-necessary
+            // forbids putting them on the wire in the first place.
+            // Patient delivery details flow exclusively through the typed,
+            // signed-command path SuavoCloudClient.SendPatientDetailsAsync.
+            data["rxDeliveryQueue"] = rxs.Select(rx => new
             {
-                var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
-                var rxHash = HashRxNumber(rx.RxNumber, hmacSalt);
-                return new
-                {
-                    rxNumber = rxHash,
-                    drugName = rx.DrugName,
-                    ndc = rx.Ndc,
-                    dateFilled = rx.DateFilled?.ToString("o"),
-                    quantity = rx.Quantity,
-                    statusGuid = rx.StatusGuid.ToString(),
-                    detectedAt = rx.DetectedAt.ToString("o"),
-                    patientFirstName = pd?.FirstName,
-                    patientLastInitial = pd?.LastInitial,
-                    patientPhone = pd?.Phone,
-                    deliveryAddress1 = pd?.Address1,
-                    deliveryAddress2 = pd?.Address2,
-                    deliveryCity = pd?.City,
-                    deliveryState = pd?.State,
-                    deliveryZip = pd?.Zip
-                };
+                rxNumber = HashRxNumber(rx.RxNumber, hmacSalt),
+                drugName = rx.DrugName,
+                ndc = rx.Ndc,
+                dateFilled = rx.DateFilled?.ToString("o"),
+                quantity = rx.Quantity,
+                statusGuid = rx.StatusGuid.ToString(),
+                detectedAt = rx.DetectedAt.ToString("o"),
             }).ToArray();
         }
 

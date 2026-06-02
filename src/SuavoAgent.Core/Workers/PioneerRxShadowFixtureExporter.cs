@@ -40,16 +40,37 @@ internal static class PioneerRxShadowFixtureExporter
                 .ToArray()
             : Array.Empty<FixturePatient>();
 
-        var forbiddenInCandidate = new List<string>();
-        forbiddenInCandidate.AddRange(rows.Select(row => row.DrugName).Where(value => !string.IsNullOrWhiteSpace(value))!);
-        forbiddenInCandidate.AddRange(patients.SelectMany(patient => new[]
-        {
-            patient.FirstName,
-            patient.Phone,
-            patient.Address1,
-        }).Where(value => !string.IsNullOrWhiteSpace(value))!);
+        // Drug name appears cleartext in the legacy rxDeliveryQueue but is
+        // hashed (nameHash) in the canonical rxOrderCandidates. It is
+        // forbidden in candidate, required (as operational metadata) in
+        // queue.
+        var drugNames = rows
+            .Select(row => row.DrugName)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
+            .ToList();
 
-        var minimumNecessaryInQueue = new List<string>(forbiddenInCandidate);
+        // Directly-identifying patient PHI (name, phone, street address)
+        // is forbidden EVERYWHERE on the agent→cloud sync wire as of
+        // 2026-05-12 (Codex CRITICAL #15 / Track 3 invariant). The legacy
+        // queue no longer carries these fields; patient delivery details
+        // flow exclusively through SendPatientDetailsAsync.
+        var patientPhi = patients
+            .SelectMany(patient => new[]
+            {
+                patient.FirstName,
+                patient.Phone,
+                patient.Address1,
+            })
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
+            .ToList();
+
+        var forbiddenInCandidate = new List<string>(drugNames);
+        forbiddenInCandidate.AddRange(patientPhi);
+
+        var forbiddenEverywhere = new List<string>(rows.Select(row => row.RxNumber));
+        forbiddenEverywhere.AddRange(patientPhi);
 
         var fixture = new FixtureRoot(
             SerializedAtUtc: options.SerializedAtUtc,
@@ -61,8 +82,8 @@ internal static class PioneerRxShadowFixtureExporter
             Rxs: rows,
             Patients: patients,
             ForbiddenInCandidate: forbiddenInCandidate,
-            ForbiddenEverywhere: rows.Select(row => row.RxNumber).ToArray(),
-            MinimumNecessaryInQueue: minimumNecessaryInQueue);
+            ForbiddenEverywhere: forbiddenEverywhere,
+            MinimumNecessaryInQueue: drugNames);
 
         var json = JsonSerializer.Serialize(fixture, FixtureJsonOptions);
         EnsureSourceTokensAbsent(json, sourceRxs);
