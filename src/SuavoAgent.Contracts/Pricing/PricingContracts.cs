@@ -4,11 +4,14 @@ namespace SuavoAgent.Contracts.Pricing;
 
 /// <summary>
 /// Sent by Core to Helper: look up pricing for one NDC in PioneerRx.
+/// <c>Patches</c> carries the job's active learned selector corrections (M2b); the Helper's
+/// resolver tries them before the hardcoded builtin. Null/empty = builtin-only (today's behavior).
 /// </summary>
 public record NdcPricingRequest(
     string JobId,
     int RowIndex,
-    string Ndc);
+    string Ndc,
+    IReadOnlyList<SelectorPatch>? Patches = null);
 
 /// <summary>
 /// Returned by Helper to Core after reading the Pricing tab for one NDC.
