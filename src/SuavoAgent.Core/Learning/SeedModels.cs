@@ -22,7 +22,8 @@ public sealed record SeedResponse(
     [property: JsonPropertyName("status_mappings")] IReadOnlyList<SeedStatusMapping> StatusMappings,
     [property: JsonPropertyName("workflow_hints")] IReadOnlyList<SeedWorkflowHint>? WorkflowHints,
     [property: JsonPropertyName("workflow_templates")] IReadOnlyList<SeedWorkflowTemplate>? WorkflowTemplates = null,
-    [property: JsonPropertyName("rx_queue_shape")] SeedRxQueueShape? RxQueueShape = null);
+    [property: JsonPropertyName("rx_queue_shape")] SeedRxQueueShape? RxQueueShape = null,
+    [property: JsonPropertyName("selector_patches")] IReadOnlyList<SeedSelectorPatch>? SelectorPatches = null);
 
 /// <summary>
 /// Fleet-learned consensus rxQueue queue-shape — warm-starts a new pharmacy's
@@ -54,6 +55,26 @@ public sealed record SeedWorkflowTemplate(
     [property: JsonPropertyName("fleet_match_count")] int FleetMatchCount,
     [property: JsonPropertyName("fleet_mismatch_count")] int FleetMismatchCount,
     [property: JsonPropertyName("has_writeback")] bool HasWriteback);
+
+// M2c — fleet selector-patch transfer currency. Rides the same ECDSA-verified SeedResponse
+// envelope (SeedClient.PostSignedVerifiedAsync), so integrity is protected end-to-end. Snake-case
+// wire DTOs mapped to the domain SelectorPatch / ElementSignature in SeedApplicator. PHI-negative:
+// only GREEN-tier structural atoms (control_type / automation_id / class_name) + enums + numbers.
+public sealed record SeedElementSignature(
+    [property: JsonPropertyName("control_type")] string ControlType,
+    [property: JsonPropertyName("automation_id")] string AutomationId,
+    [property: JsonPropertyName("class_name")] string? ClassName);
+
+public sealed record SeedSelectorPatch(
+    [property: JsonPropertyName("patch_id")] string PatchId,
+    [property: JsonPropertyName("skill_id")] string SkillId,
+    [property: JsonPropertyName("step_id")] string StepId,
+    [property: JsonPropertyName("pms_fingerprint")] string? PmsFingerprint,
+    [property: JsonPropertyName("screen_signature")] string? ScreenSignature,
+    [property: JsonPropertyName("target")] SeedElementSignature Target,
+    [property: JsonPropertyName("fallbacks")] IReadOnlyList<SeedElementSignature> Fallbacks,
+    [property: JsonPropertyName("confidence")] double Confidence,
+    [property: JsonPropertyName("version")] int Version);
 
 public sealed record UiOverlap(
     [property: JsonPropertyName("matched")] int Matched,

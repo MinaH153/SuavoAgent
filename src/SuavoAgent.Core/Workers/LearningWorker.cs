@@ -640,6 +640,19 @@ public sealed class LearningWorker : BackgroundService
                         tplResult.TemplatesApplied, tplResult.TemplatesSkipped, seedResp.SeedDigest);
                 }
             }
+
+            // M2c — learned selector corrections close the learn-from-mistake loop. Same verified
+            // envelope; own seed_items idempotency; malformed/non-identifiable patches are skipped.
+            if (seedResp.SelectorPatches is { Count: > 0 })
+            {
+                var patchResult = _applicator.ApplySelectorPatches(seedResp);
+                if (patchResult.PatchesApplied > 0 || patchResult.PatchesSkipped > 0)
+                {
+                    _logger.LogInformation(
+                        "Applied {Applied} selector patch(es), skipped {Skipped} from digest {Digest}",
+                        patchResult.PatchesApplied, patchResult.PatchesSkipped, seedResp.SeedDigest);
+                }
+            }
         }
         catch (Exception ex)
         {
