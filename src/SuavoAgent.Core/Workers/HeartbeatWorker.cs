@@ -798,6 +798,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "abort_workflow":
                     await HandleAbortWorkflowAsync(scEl, cmd, ct);
                     break;
+                case "update_selector":
+                    await HandleUpdateSelectorCommandAsync(scEl, cmd, ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -806,6 +809,74 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Signed command processing failed");
+        }
+    }
+
+    // M2d — operator DIRECT selector correction (the fast path that bypasses the slow fleet
+    // aggregate→approve cycle). The signed `update_selector` command carries a single SelectorPatch,
+    // already ECDSA-verified by the signed-command pipeline. It maps through the SAME fail-closed
+    // validator as fleet seeds and upserts with operator provenance — single-step, signed,
+    // schema-validated, audited. A malformed/non-identifiable patch is rejected, never stored.
+    private async Task HandleUpdateSelectorCommandAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        if (!dataEl.TryGetProperty("patch", out var patchEl) || patchEl.ValueKind != JsonValueKind.Object)
+        {
+            _logger.LogWarning("update_selector: missing patch payload");
+            await AckAsync(false, null, "missing patch payload");
+            return;
+        }
+
+        SeedSelectorPatch? wire;
+        try
+        {
+            wire = JsonSerializer.Deserialize<SeedSelectorPatch>(patchEl.GetRawText());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "update_selector: patch deserialize failed");
+            await AckAsync(false, null, "malformed patch");
+            return;
+        }
+
+        var mapped = wire is null ? null : SelectorPatchMapper.TryMap(wire, $"operator:{cmd.Nonce}");
+        if (mapped is null)
+        {
+            _logger.LogWarning("update_selector: patch rejected by fail-closed validator");
+            await AckAsync(false, null, "patch rejected — malformed or non-identifiable");
+            return;
+        }
+
+        try
+        {
+            _stateDb.UpsertSelectorPatch(mapped, DateTimeOffset.UtcNow.ToString("o"));
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: mapped.PatchId,
+                EventType: "selector_patch_applied",
+                FromState: "proposed",
+                ToState: "active",
+                Trigger: "update_selector",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: $"step={mapped.StepId} skill={mapped.SkillId} via=operator"));
+            _logger.LogInformation(
+                "update_selector: applied operator patch {PatchId} for step {Step}", mapped.PatchId, mapped.StepId);
+            await AckAsync(true, new { patchId = mapped.PatchId, step = mapped.StepId.ToString() }, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "update_selector: apply failed");
+            await AckAsync(false, null, "apply failed — see agent logs");
         }
     }
 
