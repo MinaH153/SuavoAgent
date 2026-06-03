@@ -862,20 +862,26 @@ public sealed class HeartbeatWorker : ResilientHostedService
             // failure rolls back the upsert (the transaction disposes uncommitted), so we never leave
             // an applied-but-unaudited patch — and the ACK below truthfully reports the outcome.
             var now = DateTimeOffset.UtcNow.ToString("o");
-            using var txn = _stateDb.BeginTransaction();
-            _stateDb.UpsertSelectorPatch(mapped, now);
-            _stateDb.AppendChainedAuditEntry(new AuditEntry(
-                TaskId: mapped.PatchId,
-                EventType: "selector_patch_applied",
-                FromState: "proposed",
-                ToState: "active",
-                Trigger: "update_selector",
-                CommandId: cmd.Nonce,
-                RequesterId: "operator",
-                Actor: "operator",
-                SourceComponent: "heartbeat_worker",
-                CaptureReason: $"step={mapped.StepId} skill={mapped.SkillId} via=operator"));
-            _stateDb.CommitTransaction(txn);
+            // Atomic: applying the patch (it drives the live PMS) and recording the chained audit entry
+            // must commit together or not at all. AgentStateDb does both inside ONE transaction — the
+            // handler must NOT open its own outer transaction around AppendChainedAuditEntry (which owns
+            // a Serializable transaction for chain integrity); Microsoft.Data.Sqlite forbids nesting, and
+            // the old outer-transaction wrapper threw `does not support nested transactions` on every
+            // real apply (field-confirmed on Mina's box, 2026-06-03).
+            _stateDb.UpsertSelectorPatchWithAudit(
+                mapped,
+                new AuditEntry(
+                    TaskId: mapped.PatchId,
+                    EventType: "selector_patch_applied",
+                    FromState: "proposed",
+                    ToState: "active",
+                    Trigger: "update_selector",
+                    CommandId: cmd.Nonce,
+                    RequesterId: "operator",
+                    Actor: "operator",
+                    SourceComponent: "heartbeat_worker",
+                    CaptureReason: $"step={mapped.StepId} skill={mapped.SkillId} via=operator"),
+                now);
             _logger.LogInformation(
                 "update_selector: applied operator patch {PatchId} for step {Step}", mapped.PatchId, mapped.StepId);
             await AckAsync(true, new { patchId = mapped.PatchId, step = mapped.StepId.ToString() }, null);
