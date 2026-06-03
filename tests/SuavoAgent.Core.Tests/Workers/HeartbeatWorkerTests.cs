@@ -341,6 +341,28 @@ public class HeartbeatWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task ForceLearningPhase_ApprovedPhase_NotForceable()
+    {
+        // The hook must never reach the approval-gated phases — that would bypass approve_pom.
+        var sessionId = $"sess-{Guid.NewGuid():N}";
+        _db.CreateLearningSession(sessionId, TestPharmacyId);
+        _db.UpdateLearningPhase(sessionId, "pattern");
+        _db.UpdateLearningPhase(sessionId, "model"); // legitimately at 'model'
+
+        var response = BuildResponseJson("force_learning_phase", new
+        {
+            commandId = "cmd-flp-approved",
+            targetPhase = "approved",
+            sessionId,
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Equal("model", _db.GetLearningSession(sessionId)!.Value.Phase); // unchanged — refused
+        Assert.Null(_db.GetLearningSession(sessionId)!.Value.ApprovedModelDigest);
+    }
+
+    [Fact]
     public async Task ForceLearningPhase_NoActiveSession_NoThrow()
     {
         var response = BuildResponseJson("force_learning_phase", new

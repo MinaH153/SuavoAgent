@@ -928,6 +928,17 @@ public sealed class HeartbeatWorker : ResilientHostedService
             return;
         }
 
+        // Only the gate-exercising learning phases may be forced. 'approved'/'active' are
+        // NEVER forceable: reaching them must go through the approve_pom digest-verified flow,
+        // and forcing them here would bypass the POM approval gate (and trigger adapter
+        // activation on an unapproved model). 'discovery' is the start state, not a forward target.
+        if (targetPhase is not ("pattern" or "model"))
+        {
+            _logger.LogWarning("force_learning_phase: phase '{Phase}' is not forceable (only pattern/model)", targetPhase);
+            await AckAsync(false, null, "phase_not_forceable");
+            return;
+        }
+
         var explicitSession = dataEl.TryGetProperty("sessionId", out var sid) ? sid.GetString() : null;
         var sessionId = !string.IsNullOrWhiteSpace(explicitSession)
             ? explicitSession
