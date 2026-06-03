@@ -857,7 +857,13 @@ public sealed class HeartbeatWorker : ResilientHostedService
 
         try
         {
-            _stateDb.UpsertSelectorPatch(mapped, DateTimeOffset.UtcNow.ToString("o"));
+            // Atomic: the patch drives the live PMS, so applying it and recording the audit must
+            // commit together or not at all. Wrapping both in one transaction means an audit-append
+            // failure rolls back the upsert (the transaction disposes uncommitted), so we never leave
+            // an applied-but-unaudited patch — and the ACK below truthfully reports the outcome.
+            var now = DateTimeOffset.UtcNow.ToString("o");
+            using var txn = _stateDb.BeginTransaction();
+            _stateDb.UpsertSelectorPatch(mapped, now);
             _stateDb.AppendChainedAuditEntry(new AuditEntry(
                 TaskId: mapped.PatchId,
                 EventType: "selector_patch_applied",
@@ -869,13 +875,15 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 Actor: "operator",
                 SourceComponent: "heartbeat_worker",
                 CaptureReason: $"step={mapped.StepId} skill={mapped.SkillId} via=operator"));
+            _stateDb.CommitTransaction(txn);
             _logger.LogInformation(
                 "update_selector: applied operator patch {PatchId} for step {Step}", mapped.PatchId, mapped.StepId);
             await AckAsync(true, new { patchId = mapped.PatchId, step = mapped.StepId.ToString() }, null);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "update_selector: apply failed");
+            // Transaction rolled back on dispose — neither the patch nor the audit committed.
+            _logger.LogWarning(ex, "update_selector: apply failed (rolled back)");
             await AckAsync(false, null, "apply failed — see agent logs");
         }
     }
