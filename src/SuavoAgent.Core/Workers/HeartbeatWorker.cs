@@ -2392,6 +2392,23 @@ public sealed class HeartbeatWorker : ResilientHostedService
             return;
         }
 
+        // Pre-flight: a UIA job drives the LIVE PMS screen. Fail fast (don't touch the
+        // screen) unless the Helper is reachable, answering, and in the interactive
+        // session. SqlFirst reads SQL and never actuates, so it needs no live Helper.
+        if (_options.PricingExecutor == PricingExecutorMode.UiaFirst)
+        {
+            var preflight = await HelperInteractivePreflight.CheckAsync(
+                _ipcCommandClient, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(5), ct);
+            if (!preflight.Ok)
+            {
+                _logger.LogError("run_pricing_job: Helper pre-flight failed — {Error}", preflight.Error);
+                await AckAsync(false, null, preflight.Error);
+                return;
+            }
+            _logger.LogInformation(
+                "run_pricing_job: Helper interactive pre-flight OK (session {Session})", preflight.HelperSessionId);
+        }
+
         if (!string.IsNullOrEmpty(pricingCandidateToken))
         {
             excelPath = _stateDb.TryResolvePricingDiscoveryCandidate(pricingCandidateToken);
@@ -2500,6 +2517,20 @@ public sealed class HeartbeatWorker : ResilientHostedService
             if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
             await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
         }
+
+        // Pre-flight: discovery runs FileLocatorService in the Helper's user session and the
+        // pricing run drives the live PMS screen — both need the Helper alive, answering, and
+        // in the interactive session. Fail fast before touching anything if it isn't.
+        var preflight = await HelperInteractivePreflight.CheckAsync(
+            _ipcCommandClient, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(5), ct);
+        if (!preflight.Ok)
+        {
+            _logger.LogError("find_and_run_pricing_job: Helper pre-flight failed — {Error}", preflight.Error);
+            await AckAsync(false, null, preflight.Error);
+            return;
+        }
+        _logger.LogInformation(
+            "find_and_run_pricing_job: Helper interactive pre-flight OK (session {Session})", preflight.HelperSessionId);
 
         // Pack selection. v3.13 has only pharmacy_rx; future verticals plug in here.
         var spec = pack switch
