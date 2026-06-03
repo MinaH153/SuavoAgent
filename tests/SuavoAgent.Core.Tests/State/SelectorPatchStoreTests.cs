@@ -96,4 +96,34 @@ public class SelectorPatchStoreTests : IDisposable
         Assert.Equal(2, active.Count);
         Assert.Equal("b", active[0].PatchId); // ORDER BY version DESC
     }
+
+    [Fact]
+    public void UpgradedBox_WithMigration1Already_Applied_StillCreatesSelectorPatchesTable()
+    {
+        // Field bug (2026-06-03, Mina's box): selector_patches was originally added to the BODY of
+        // already-applied migration #1, so a box that applied #1 in the v3.12 era NEVER created the table —
+        // UpsertSelectorPatch threw `no such table: selector_patches`, making both the operator
+        // update_selector correction and the fleet seed-apply dead on every upgraded box. The fresh-DB
+        // store tests above passed only because a fresh DB runs migration #1. This simulates the UPGRADED
+        // box (migrations 1+2 recorded as applied, no selector_patches present) and proves the new
+        // versioned migration #3 creates the table on next startup.
+        var upgradeDbPath = Path.Combine(_tempDir, "upgraded.db");
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={upgradeDbPath}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, description TEXT NOT NULL);
+                INSERT INTO schema_migrations (version, applied_at, description) VALUES (1, '2026-04-01T00:00:00Z', 'v3.12 (pre-M2b: applied WITHOUT selector_patches)');
+                INSERT INTO schema_migrations (version, applied_at, description) VALUES (2, '2026-04-01T00:00:00Z', 'v3.12 applied schema adaptations');
+                """;
+            cmd.ExecuteNonQuery();
+        }
+
+        // Opening AgentStateDb runs ApplyMigrationIfNeeded(3) → creates selector_patches on the upgraded DB.
+        // Without the fix (table only in already-applied migration #1) this Upsert throws `no such table`.
+        using var upgraded = new AgentStateDb(upgradeDbPath);
+        upgraded.UpsertSelectorPatch(Patch(id: "upg"), "2026-06-03T00:00:00Z");
+        Assert.Equal("upg", Assert.Single(upgraded.GetActiveSelectorPatches()).PatchId);
+    }
 }
