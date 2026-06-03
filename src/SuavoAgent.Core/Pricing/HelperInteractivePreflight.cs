@@ -58,9 +58,13 @@ public static class HelperInteractivePreflight
             return HelperPreflightResult.Fail(
                 "Helper ping is missing session diagnostics — the agent is out of date; update it before running");
 
-        if (!info.IsInteractive)
+        // Re-derive the verdict from the raw session ids — do not trust the Helper's
+        // self-reported IsInteractive bool. The safety decision lives in Core, not in the
+        // process being checked, so a buggy/partial/spoofed self-report can't false-pass.
+        if (!info.IsConsoleInteractive)
             return HelperPreflightResult.Fail(
-                $"Helper is in non-interactive Session 0 (session {info.HelperSessionId}) and is blind to the screen. " +
+                $"Helper is not in the active interactive console session (helper session {info.HelperSessionId}, " +
+                $"active console {info.ActiveConsoleSessionId}) and is blind to the screen. " +
                 "Restart the Broker so it relaunches the Helper into the interactive console session.",
                 info.HelperSessionId);
 

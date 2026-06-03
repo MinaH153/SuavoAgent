@@ -97,8 +97,40 @@ public class HelperInteractivePreflightTests
 
         Assert.False(result.Ok);
         Assert.False(result.IsInteractive);
-        Assert.Contains("Session 0", result.Error);
         Assert.Contains("Broker", result.Error); // tells the operator how to recover
+    }
+
+    [Fact]
+    public async Task ForgedInteractiveTrue_WithSession0_FailsClosed()
+    {
+        // Defense in depth: the gate must re-derive interactivity from the session ids,
+        // NOT trust a self-reported IsInteractive=true that contradicts them. A Helper
+        // bug, partial payload, or spoof that claims interactive while sitting in Session 0
+        // must still fail closed.
+        var ipc = new PreflightFakeIpc
+        {
+            NextResponse = _ => PingOk(PingPayload(helperSession: 0, activeConsole: 1, isInteractive: true)),
+        };
+
+        var result = await HelperInteractivePreflight.CheckAsync(ipc, Connect, Ping, default);
+
+        Assert.False(result.Ok);
+        Assert.False(result.IsInteractive);
+    }
+
+    [Fact]
+    public async Task ForgedInteractiveTrue_WithSessionMismatch_FailsClosed()
+    {
+        // Non-zero but not the active console session (e.g. another user switched in):
+        // still can't drive THE physical console, so fail closed despite IsInteractive=true.
+        var ipc = new PreflightFakeIpc
+        {
+            NextResponse = _ => PingOk(PingPayload(helperSession: 3, activeConsole: 1, isInteractive: true)),
+        };
+
+        var result = await HelperInteractivePreflight.CheckAsync(ipc, Connect, Ping, default);
+
+        Assert.False(result.Ok);
     }
 
     [Fact]

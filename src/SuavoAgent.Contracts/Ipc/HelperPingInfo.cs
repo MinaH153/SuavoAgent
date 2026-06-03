@@ -19,6 +19,15 @@ public sealed record HelperPingInfo(
     uint ActiveConsoleSessionId,
     bool IsInteractive)
 {
+    /// <summary>
+    /// The authoritative interactivity verdict, recomputed from the raw session ids rather
+    /// than trusting the serialized <see cref="IsInteractive"/> self-report. The safety gate
+    /// uses THIS so a buggy, partial, or spoofed ping (e.g. <c>IsInteractive=true</c> with no
+    /// or mismatched session ids) cannot false-pass: a Helper can only drive the screen when it
+    /// shares the active physical console session and that session isn't the services Session 0.
+    /// </summary>
+    public bool IsConsoleInteractive => HelperSessionId != 0 && HelperSessionId == ActiveConsoleSessionId;
+
     private static readonly JsonSerializerOptions ParseOptions =
         new() { PropertyNameCaseInsensitive = true };
 
