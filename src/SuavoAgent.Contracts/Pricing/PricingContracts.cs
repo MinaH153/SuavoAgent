@@ -1,3 +1,5 @@
+using SuavoAgent.Contracts.Learning;
+
 namespace SuavoAgent.Contracts.Pricing;
 
 /// <summary>
@@ -10,6 +12,8 @@ public record NdcPricingRequest(
 
 /// <summary>
 /// Returned by Helper to Core after reading the Pricing tab for one NDC.
+/// <c>Observations</c> carries the GREEN-tier selector-resolution telemetry for the run's
+/// steps (M2a capture); null/empty for the SQL path, which drives no selectors.
 /// </summary>
 public record SupplierPriceResult(
     string JobId,
@@ -18,7 +22,8 @@ public record SupplierPriceResult(
     bool Found,
     string? SupplierName,
     decimal? CostPerUnit,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    IReadOnlyList<SelectorObservation>? Observations = null);
 
 /// <summary>
 /// Persisted in AgentStateDb; describes a full pricing job run.

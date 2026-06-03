@@ -631,11 +631,14 @@ public sealed class AgentStateDb : IDisposable
                 supplier_name TEXT,
                 cost_per_unit REAL,
                 error_message TEXT,
+                observations_json TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (job_id) REFERENCES pricing_jobs(job_id)
             )
         """);
         Execute("CREATE INDEX IF NOT EXISTS idx_pricing_results_job ON pricing_results(job_id)");
+        // M2a: GREEN-tier selector-resolution telemetry for existing DBs created before the column.
+        TryAlter("ALTER TABLE pricing_results ADD COLUMN observations_json TEXT");
 
         Execute("""
             CREATE TABLE IF NOT EXISTS pricing_discovery_candidates (
@@ -3881,9 +3884,12 @@ public sealed class AgentStateDb : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             INSERT OR REPLACE INTO pricing_results
-                (job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message)
-            VALUES (@job, @row, @ndc, @found, @supplier, @cost, @error)
+                (job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message, observations_json)
+            VALUES (@job, @row, @ndc, @found, @supplier, @cost, @error, @observations)
             """;
+        var observationsJson = result.Observations is { Count: > 0 }
+            ? System.Text.Json.JsonSerializer.Serialize(result.Observations)
+            : null;
         cmd.Parameters.AddWithValue("@job", result.JobId);
         cmd.Parameters.AddWithValue("@row", result.RowIndex);
         cmd.Parameters.AddWithValue("@ndc", result.Ndc);
@@ -3891,13 +3897,14 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@supplier", (object?)result.SupplierName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@cost", (object?)result.CostPerUnit ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@error", (object?)result.ErrorMessage ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@observations", (object?)observationsJson ?? DBNull.Value);
         cmd.ExecuteNonQuery();
     }
 
     public List<SupplierPriceResult> GetPricingResults(string jobId)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message FROM pricing_results WHERE job_id = @job ORDER BY row_index";
+        cmd.CommandText = "SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message, observations_json FROM pricing_results WHERE job_id = @job ORDER BY row_index";
         cmd.Parameters.AddWithValue("@job", jobId);
         using var reader = cmd.ExecuteReader();
         var results = new List<SupplierPriceResult>();
@@ -3910,7 +3917,10 @@ public sealed class AgentStateDb : IDisposable
                 Found: reader.GetInt32(3) == 1,
                 SupplierName: reader.IsDBNull(4) ? null : reader.GetString(4),
                 CostPerUnit: reader.IsDBNull(5) ? null : (decimal)reader.GetDouble(5),
-                ErrorMessage: reader.IsDBNull(6) ? null : reader.GetString(6)));
+                ErrorMessage: reader.IsDBNull(6) ? null : reader.GetString(6),
+                Observations: reader.IsDBNull(7)
+                    ? null
+                    : System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Learning.SelectorObservation>>(reader.GetString(7))));
         }
         return results;
     }

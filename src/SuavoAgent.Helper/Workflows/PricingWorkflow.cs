@@ -4,6 +4,7 @@ using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
 using FlaUI.UIA2;
 using Serilog;
+using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Pricing;
 
@@ -47,9 +48,20 @@ public sealed class PricingWorkflow
     /// </summary>
     public SupplierPriceResult Lookup(NdcPricingRequest request)
     {
+        // M2a capture: GREEN-tier selector-resolution telemetry per step. Builtin source only
+        // (no learned patches yet). Candidate scans run ONLY on the rare failure path, so the
+        // happy path is unchanged. Never records element Name/Value/Text — PHI-negative by type.
+        var observations = new List<SelectorObservation>();
+        void Observe(SelectorStepId step, SelectorOutcome outcome, SelectorFailureKind kind,
+                     IReadOnlyList<ObservedElement>? candidates = null) =>
+            observations.Add(new SelectorObservation(
+                step, SelectorResolvedVia.Builtin, outcome, kind, null,
+                candidates ?? Array.Empty<ObservedElement>()));
+        SupplierPriceResult Done(SupplierPriceResult r) => r with { Observations = observations };
+
         var mainWindow = _engine.MainWindow;
         if (mainWindow == null)
-            return Fail(request, "PioneerRx main window not available");
+            return Done(Fail(request, "PioneerRx main window not available"));
 
         try
         {
@@ -58,40 +70,69 @@ public sealed class PricingWorkflow
 
             // Step 1: Open Item → Rx Item from the menu bar
             if (!OpenRxItemDialog(mainWindow, cf))
-                return Fail(request, "Could not open Item → Rx Item menu");
+            {
+                Observe(SelectorStepId.OpenRxItem, SelectorOutcome.Failed, SelectorFailureKind.ElementNotFound,
+                    ScanCandidates(mainWindow, cf, ControlType.MenuItem));
+                return Done(Fail(request, "Could not open Item → Rx Item menu"));
+            }
+            Observe(SelectorStepId.OpenRxItem, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
             // Step 2: Find the Edit Rx Item window
             var editWindow = WaitForWindow(automation, EditRxItemWindowTitle);
             if (editWindow == null)
-                return Fail(request, "Edit Rx Item window did not appear");
+            {
+                Observe(SelectorStepId.QuickSearchField, SelectorOutcome.Failed, SelectorFailureKind.Timeout);
+                return Done(Fail(request, "Edit Rx Item window did not appear"));
+            }
 
             try
             {
                 // Step 3: Type NDC into Quick Search and press Enter
                 if (!SearchByNdc(editWindow, cf, request.Ndc))
-                    return Fail(request, $"Could not enter NDC {request.Ndc} in Quick Search");
+                {
+                    Observe(SelectorStepId.QuickSearchField, SelectorOutcome.Failed, SelectorFailureKind.ElementNotFound,
+                        ScanCandidates(editWindow, cf, ControlType.Edit));
+                    return Done(Fail(request, $"Could not enter NDC {request.Ndc} in Quick Search"));
+                }
+                Observe(SelectorStepId.QuickSearchField, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 // [C-3] Verify the loaded item's NDC matches the requested NDC before reading pricing.
                 // Prevents returning pricing data for the previously-selected item when Quick Search
-                // is slow or finds no match.
+                // is slow or finds no match. (Selector resolved; the mismatch is semantic, so no
+                // candidate scan — and we must not read element values here.)
                 if (!VerifyLoadedNdc(editWindow, cf, request.Ndc))
-                    return Fail(request, $"Loaded item NDC does not match {request.Ndc} — item may not exist or search timed out");
+                {
+                    Observe(SelectorStepId.VerifyNdc, SelectorOutcome.Failed, SelectorFailureKind.VerifyMismatch);
+                    return Done(Fail(request, $"Loaded item NDC does not match {request.Ndc} — item may not exist or search timed out"));
+                }
+                Observe(SelectorStepId.VerifyNdc, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 // Step 4: Navigate to Pricing tab
                 if (!ClickPricingTab(editWindow, cf))
-                    return Fail(request, "Could not click Pricing tab");
+                {
+                    Observe(SelectorStepId.PricingTab, SelectorOutcome.Failed, SelectorFailureKind.ElementNotFound,
+                        ScanCandidates(editWindow, cf, ControlType.TabItem));
+                    return Done(Fail(request, "Could not click Pricing tab"));
+                }
+                Observe(SelectorStepId.PricingTab, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 // Step 5: Read the supplier grid — find cheapest (lowest cost per unit)
                 var cheapest = ReadCheapestSupplier(editWindow, cf, out var gridFailure);
                 if (cheapest == null)
-                    return new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
-                        false, null, null, gridFailure ?? "No supplier rows found in Pricing tab");
+                {
+                    Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Failed, SelectorFailureKind.GridEmpty,
+                        ScanCandidates(editWindow, cf, ControlType.Table)
+                            .Concat(ScanCandidates(editWindow, cf, ControlType.DataGrid)).Take(5).ToList());
+                    return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
+                        false, null, null, gridFailure ?? "No supplier rows found in Pricing tab"));
+                }
+                Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 _logger.Debug("PricingWorkflow: NDC {Ndc} → {Supplier} @ {Cost}/unit",
                     request.Ndc, cheapest.Value.supplier, cheapest.Value.cost);
 
-                return new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
-                    true, cheapest.Value.supplier, cheapest.Value.cost, null);
+                return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
+                    true, cheapest.Value.supplier, cheapest.Value.cost, null));
             }
             finally
             {
@@ -102,9 +143,44 @@ public sealed class PricingWorkflow
         catch (Exception ex)
         {
             _logger.Error(ex, "PricingWorkflow: unhandled error for NDC {Ndc}", request.Ndc);
-            return Fail(request, ex.Message);
+            // Compliance: never upload a raw exception message (uncontrolled free text — possible
+            // leak vector). The real exception is in the local log above; the corpus/cloud get a
+            // generic reason + the structured observations only.
+            return Done(Fail(request, "Pricing lookup failed (unhandled error)"));
         }
     }
+
+    // GREEN-tier candidate scan for the failure path: records ControlType / AutomationId /
+    // ClassName of up to 5 elements of the given type so the fleet corpus can learn what was
+    // actually on screen when a builtin selector missed. NEVER reads Name/Value/Text (PHI tier).
+    private static IReadOnlyList<ObservedElement> ScanCandidates(
+        AutomationElement root, ConditionFactory cf, ControlType type)
+    {
+        try
+        {
+            return root.FindAllDescendants(cf.ByControlType(type))
+                .Take(5)
+                .Select(ToObserved)
+                .ToList();
+        }
+        catch
+        {
+            return Array.Empty<ObservedElement>();
+        }
+    }
+
+    private static ObservedElement ToObserved(AutomationElement el)
+    {
+        string controlType;
+        try { controlType = el.ControlType.ToString(); } catch { controlType = "Unknown"; }
+        string? automationId;
+        try { automationId = NullIfEmpty(el.AutomationId); } catch { automationId = null; }
+        string? className;
+        try { className = NullIfEmpty(el.ClassName); } catch { className = null; }
+        return new ObservedElement(controlType, automationId, className);
+    }
+
+    private static string? NullIfEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
 
     private bool OpenRxItemDialog(Window mainWindow, ConditionFactory cf)
     {
