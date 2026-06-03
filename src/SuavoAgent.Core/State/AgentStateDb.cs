@@ -2,7 +2,9 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
+using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Canary;
+using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Learning;
@@ -631,11 +633,14 @@ public sealed class AgentStateDb : IDisposable
                 supplier_name TEXT,
                 cost_per_unit REAL,
                 error_message TEXT,
+                observations_json TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (job_id) REFERENCES pricing_jobs(job_id)
             )
         """);
         Execute("CREATE INDEX IF NOT EXISTS idx_pricing_results_job ON pricing_results(job_id)");
+        // M2a: GREEN-tier selector-resolution telemetry for existing DBs created before the column.
+        TryAlter("ALTER TABLE pricing_results ADD COLUMN observations_json TEXT");
 
         Execute("""
             CREATE TABLE IF NOT EXISTS pricing_discovery_candidates (
@@ -719,6 +724,34 @@ public sealed class AgentStateDb : IDisposable
                 rollback_reason TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_asa_from ON applied_schema_adaptations(from_schema_hash);
+            """);
+        // Migration 3 (fix 2026-06-03): the M2b selector-patch store was originally added to the BODY
+        // of already-applied migration #1, so every box that applied #1 in the v3.12 era never created
+        // the table — UpsertSelectorPatch then threw `no such table: selector_patches`, making BOTH the
+        // operator update_selector correction AND the fleet seed-apply dead-on-arrival on every upgraded
+        // box (field-confirmed on Mina's box, 2026-06-03). Moved into its own versioned migration so
+        // existing DBs create it on next startup. Fresh DBs get it here too (#1 no longer defines it).
+        ApplyMigrationIfNeeded(3,
+            "M2b learned selector-patch correction store (fix: was wrongly bolted onto migration 1)",
+            """
+            CREATE TABLE IF NOT EXISTS selector_patches (
+                patch_id TEXT PRIMARY KEY,
+                skill_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                pms_fingerprint TEXT,
+                screen_signature TEXT,
+                target_json TEXT NOT NULL,
+                fallbacks_json TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                seed_digest TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                applied_at TEXT NOT NULL,
+                retired_at TEXT,
+                retirement_reason TEXT,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_sp_skill_step
+                ON selector_patches(skill_id, step_id) WHERE retired_at IS NULL;
             """);
     }
 
@@ -990,51 +1023,61 @@ public sealed class AgentStateDb : IDisposable
             // the race even when multiple writers share the DB across
             // process boundaries (PRAGMA busy_timeout=5000 covers contention).
             using var tx = _conn.BeginTransaction(System.Data.IsolationLevel.Serializable);
-            var prevHash = GetLastAuditHashLocked() ?? _auditChainSeed;
-            var newHash = ComputeAuditHash(prevHash, entry.TaskId, entry.EventType,
-                entry.FromState, entry.ToState, entry.Trigger, timestamp);
-
-            using var cmd = _conn.CreateCommand();
-            cmd.Transaction = tx;
-            // Codex 2026-04-26: forensic metadata columns (actor / source_component /
-            // capture_reason / window_title_hash / element_count / scrubber_version /
-            // storage_id) are written alongside the chained columns but do NOT
-            // contribute to the prev_hash chain — that keeps existing rows
-            // verifiable while still recording capture intent for audit dossier
-            // reconstruction.
-            cmd.CommandText = """
-                INSERT INTO audit_entries (task_id, from_state, to_state, trigger, timestamp, prev_hash,
-                                           event_type, command_id, requester_id, rx_number,
-                                           actor, source_component, capture_reason,
-                                           window_title_hash, element_count, scrubber_version, storage_id)
-                VALUES (@taskId, @from, @to, @trigger, @timestamp, @prevHash,
-                        @eventType, @commandId, @requesterId, @rxNumber,
-                        @actor, @sourceComponent, @captureReason,
-                        @windowTitleHash, @elementCount, @scrubberVersion, @storageId)
-                """;
-            cmd.Parameters.AddWithValue("@taskId", entry.TaskId);
-            cmd.Parameters.AddWithValue("@from", entry.FromState);
-            cmd.Parameters.AddWithValue("@to", entry.ToState);
-            cmd.Parameters.AddWithValue("@trigger", entry.Trigger);
-            cmd.Parameters.AddWithValue("@timestamp", timestamp);
-            cmd.Parameters.AddWithValue("@prevHash", prevHash);
-            cmd.Parameters.AddWithValue("@eventType", entry.EventType);
-            cmd.Parameters.AddWithValue("@commandId", (object?)entry.CommandId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@requesterId", (object?)entry.RequesterId ?? DBNull.Value);
-            // Store HMAC hash of rx_number — never store raw PHI in audit log
-            var rxHash = entry.RxNumber != null ? HmacRxNumber(entry.RxNumber) : null;
-            cmd.Parameters.AddWithValue("@rxNumber", (object?)rxHash ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@actor", (object?)entry.Actor ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@sourceComponent", (object?)entry.SourceComponent ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@captureReason", (object?)entry.CaptureReason ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@windowTitleHash", (object?)entry.WindowTitleHash ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@elementCount", (object?)entry.ElementCount ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@scrubberVersion", (object?)entry.ScrubberVersion ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@storageId", (object?)entry.StorageId ?? DBNull.Value);
-            cmd.ExecuteNonQuery();
+            var newHash = AppendAuditEntryLocked(entry, timestamp, tx);
             tx.Commit();
             return newHash;
         }
+    }
+
+    /// <summary>
+    /// Inserts one chained audit row on an ALREADY-OPEN transaction, assuming the caller holds
+    /// <c>_auditWriteLock</c>. Does NOT open or commit the transaction — so it can be composed with
+    /// another write into a SINGLE atomic commit (e.g. <see cref="UpsertSelectorPatchWithAudit"/>)
+    /// without nesting transactions, which Microsoft.Data.Sqlite forbids. Returns the new chain hash.
+    /// </summary>
+    private string AppendAuditEntryLocked(AuditEntry entry, string timestamp, Microsoft.Data.Sqlite.SqliteTransaction tx)
+    {
+        var prevHash = GetLastAuditHashLocked() ?? _auditChainSeed;
+        var newHash = ComputeAuditHash(prevHash, entry.TaskId, entry.EventType,
+            entry.FromState, entry.ToState, entry.Trigger, timestamp);
+
+        using var cmd = _conn.CreateCommand();
+        cmd.Transaction = tx;
+        // Codex 2026-04-26: forensic metadata columns (actor / source_component / capture_reason /
+        // window_title_hash / element_count / scrubber_version / storage_id) are written alongside the
+        // chained columns but do NOT contribute to the prev_hash chain — that keeps existing rows
+        // verifiable while still recording capture intent for audit dossier reconstruction.
+        cmd.CommandText = """
+            INSERT INTO audit_entries (task_id, from_state, to_state, trigger, timestamp, prev_hash,
+                                       event_type, command_id, requester_id, rx_number,
+                                       actor, source_component, capture_reason,
+                                       window_title_hash, element_count, scrubber_version, storage_id)
+            VALUES (@taskId, @from, @to, @trigger, @timestamp, @prevHash,
+                    @eventType, @commandId, @requesterId, @rxNumber,
+                    @actor, @sourceComponent, @captureReason,
+                    @windowTitleHash, @elementCount, @scrubberVersion, @storageId)
+            """;
+        cmd.Parameters.AddWithValue("@taskId", entry.TaskId);
+        cmd.Parameters.AddWithValue("@from", entry.FromState);
+        cmd.Parameters.AddWithValue("@to", entry.ToState);
+        cmd.Parameters.AddWithValue("@trigger", entry.Trigger);
+        cmd.Parameters.AddWithValue("@timestamp", timestamp);
+        cmd.Parameters.AddWithValue("@prevHash", prevHash);
+        cmd.Parameters.AddWithValue("@eventType", entry.EventType);
+        cmd.Parameters.AddWithValue("@commandId", (object?)entry.CommandId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@requesterId", (object?)entry.RequesterId ?? DBNull.Value);
+        // Store HMAC hash of rx_number — never store raw PHI in audit log
+        var rxHash = entry.RxNumber != null ? HmacRxNumber(entry.RxNumber) : null;
+        cmd.Parameters.AddWithValue("@rxNumber", (object?)rxHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@actor", (object?)entry.Actor ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@sourceComponent", (object?)entry.SourceComponent ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@captureReason", (object?)entry.CaptureReason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@windowTitleHash", (object?)entry.WindowTitleHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@elementCount", (object?)entry.ElementCount ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@scrubberVersion", (object?)entry.ScrubberVersion ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@storageId", (object?)entry.StorageId ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+        return newHash;
     }
 
     // Same query as GetLastAuditHash but assumes the caller already holds
@@ -2627,6 +2670,121 @@ public sealed class AgentStateDb : IDisposable
         cmd.ExecuteNonQuery();
     }
 
+    // --- M2b: learned selector patches (applied by the seed pipeline; read by the resolver) ---
+
+    public void UpsertSelectorPatch(SelectorPatch patch, string appliedAt) =>
+        UpsertSelectorPatchCore(patch, appliedAt, tx: null);
+
+    /// <summary>
+    /// Upserts the patch AND appends its chained audit entry in ONE atomic transaction. The operator
+    /// direct-correction (update_selector) needs both to commit together — but AppendChainedAuditEntry
+    /// owns its own Serializable transaction, so a caller cannot wrap the two in an OUTER transaction
+    /// (Microsoft.Data.Sqlite forbids nested transactions — the field bug on Mina's box, 2026-06-03,
+    /// where the handler's BeginTransaction + AppendChainedAuditEntry threw). Doing both writes here
+    /// under the single _auditWriteLock + one transaction is the atomic path. Returns the new chain hash.
+    /// </summary>
+    public string UpsertSelectorPatchWithAudit(SelectorPatch patch, AuditEntry auditEntry, string appliedAt)
+    {
+        lock (_auditWriteLock)
+        {
+            using var tx = _conn.BeginTransaction(System.Data.IsolationLevel.Serializable);
+            UpsertSelectorPatchCore(patch, appliedAt, tx);
+            var newHash = AppendAuditEntryLocked(auditEntry, appliedAt, tx);
+            tx.Commit();
+            return newHash;
+        }
+    }
+
+    private void UpsertSelectorPatchCore(SelectorPatch patch, string appliedAt, Microsoft.Data.Sqlite.SqliteTransaction? tx)
+    {
+        using var cmd = _conn.CreateCommand();
+        if (tx is not null) cmd.Transaction = tx;
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO selector_patches
+                (patch_id, skill_id, step_id, pms_fingerprint, screen_signature,
+                 target_json, fallbacks_json, confidence, seed_digest, version, applied_at)
+            VALUES (@id, @skill, @step, @pms, @screen, @target, @fallbacks, @conf, @digest, @ver, @at)
+            """;
+        cmd.Parameters.AddWithValue("@id", patch.PatchId);
+        cmd.Parameters.AddWithValue("@skill", patch.SkillId);
+        cmd.Parameters.AddWithValue("@step", patch.StepId.ToString());
+        cmd.Parameters.AddWithValue("@pms", (object?)patch.PmsFingerprint ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@screen", (object?)patch.ScreenSignatureV1 ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@target", System.Text.Json.JsonSerializer.Serialize(patch.Target));
+        cmd.Parameters.AddWithValue("@fallbacks", System.Text.Json.JsonSerializer.Serialize(patch.Fallbacks));
+        cmd.Parameters.AddWithValue("@conf", patch.Confidence);
+        cmd.Parameters.AddWithValue("@digest", patch.SeedDigest);
+        cmd.Parameters.AddWithValue("@ver", patch.Version);
+        cmd.Parameters.AddWithValue("@at", appliedAt);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Active (non-retired) selector patches, newest version first.</summary>
+    public IReadOnlyList<SelectorPatch> GetActiveSelectorPatches()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT patch_id, skill_id, step_id, pms_fingerprint, screen_signature,
+                   target_json, fallbacks_json, confidence, seed_digest, version
+            FROM selector_patches WHERE retired_at IS NULL
+            ORDER BY version DESC
+            """;
+        var rows = new List<SelectorPatch>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var patch = TryReadSelectorPatch(reader);
+            if (patch is not null) rows.Add(patch);
+        }
+        return rows;
+    }
+
+    public void RetireSelectorPatch(string patchId, string retiredAt, string reason)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE selector_patches
+               SET retired_at = @at, retirement_reason = @reason
+             WHERE patch_id = @id
+            """;
+        cmd.Parameters.AddWithValue("@id", patchId);
+        cmd.Parameters.AddWithValue("@at", retiredAt);
+        cmd.Parameters.AddWithValue("@reason", reason);
+        cmd.ExecuteNonQuery();
+    }
+
+    // Tolerant read: a malformed row (e.g. a target with no AutomationId, which
+    // ElementSignature rejects) is skipped rather than throwing — a corrupt patch
+    // must never break the whole load + leave the resolver blind to the good ones.
+    private static SelectorPatch? TryReadSelectorPatch(SqliteDataReader reader)
+    {
+        try
+        {
+            // A corrupt step_id must be skipped, NOT defaulted to step 0 (which would silently
+            // re-target the patch to the wrong step).
+            if (!Enum.TryParse<SelectorStepId>(reader.GetString(2), out var step)) return null;
+            var target = System.Text.Json.JsonSerializer.Deserialize<ElementSignature>(reader.GetString(5));
+            if (target is null) return null;
+            var fallbacks = System.Text.Json.JsonSerializer
+                .Deserialize<List<ElementSignature>>(reader.GetString(6)) ?? new List<ElementSignature>();
+            return new SelectorPatch(
+                PatchId: reader.GetString(0),
+                SkillId: reader.GetString(1),
+                StepId: step,
+                PmsFingerprint: reader.IsDBNull(3) ? null : reader.GetString(3),
+                ScreenSignatureV1: reader.IsDBNull(4) ? null : reader.GetString(4),
+                Target: target,
+                Fallbacks: fallbacks,
+                Confidence: reader.GetDouble(7),
+                SeedDigest: reader.GetString(8),
+                Version: reader.GetInt32(9));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// Increments the low-confidence counter for a template. Returns the new value.
     /// Extractor uses this to drive auto-retirement at a configured threshold.
@@ -3881,9 +4039,12 @@ public sealed class AgentStateDb : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             INSERT OR REPLACE INTO pricing_results
-                (job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message)
-            VALUES (@job, @row, @ndc, @found, @supplier, @cost, @error)
+                (job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message, observations_json)
+            VALUES (@job, @row, @ndc, @found, @supplier, @cost, @error, @observations)
             """;
+        var observationsJson = result.Observations is { Count: > 0 }
+            ? System.Text.Json.JsonSerializer.Serialize(result.Observations)
+            : null;
         cmd.Parameters.AddWithValue("@job", result.JobId);
         cmd.Parameters.AddWithValue("@row", result.RowIndex);
         cmd.Parameters.AddWithValue("@ndc", result.Ndc);
@@ -3891,13 +4052,14 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@supplier", (object?)result.SupplierName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@cost", (object?)result.CostPerUnit ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@error", (object?)result.ErrorMessage ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@observations", (object?)observationsJson ?? DBNull.Value);
         cmd.ExecuteNonQuery();
     }
 
     public List<SupplierPriceResult> GetPricingResults(string jobId)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message FROM pricing_results WHERE job_id = @job ORDER BY row_index";
+        cmd.CommandText = "SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message, observations_json FROM pricing_results WHERE job_id = @job ORDER BY row_index";
         cmd.Parameters.AddWithValue("@job", jobId);
         using var reader = cmd.ExecuteReader();
         var results = new List<SupplierPriceResult>();
@@ -3910,7 +4072,10 @@ public sealed class AgentStateDb : IDisposable
                 Found: reader.GetInt32(3) == 1,
                 SupplierName: reader.IsDBNull(4) ? null : reader.GetString(4),
                 CostPerUnit: reader.IsDBNull(5) ? null : (decimal)reader.GetDouble(5),
-                ErrorMessage: reader.IsDBNull(6) ? null : reader.GetString(6)));
+                ErrorMessage: reader.IsDBNull(6) ? null : reader.GetString(6),
+                Observations: reader.IsDBNull(7)
+                    ? null
+                    : System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Learning.SelectorObservation>>(reader.GetString(7))));
         }
         return results;
     }

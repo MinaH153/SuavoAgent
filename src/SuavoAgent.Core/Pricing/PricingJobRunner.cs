@@ -1,5 +1,6 @@
 using System.Text.Json;
 using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
@@ -80,6 +81,13 @@ public sealed class PricingJobRunner
         _logger.LogInformation("PricingJobRunner: {Total} NDCs ({Invalid} unparseable skipped), {Pending} pending, job {JobId}",
             totalItems, readResult.Invalid.Count, pending.Count, spec.JobId);
 
+        // M2b: load the job's active learned selector patches once and hand them to the Helper
+        // with each lookup. Empty (the case until M2c distributes one) = builtin-only behavior.
+        var activePatches = _db.GetActiveSelectorPatches();
+        if (activePatches.Count > 0)
+            _logger.LogInformation("PricingJobRunner: {Count} active selector patch(es) in effect for job {JobId}",
+                activePatches.Count, spec.JobId);
+
         int consecutiveFailures = 0;
         bool haltedByBrain = false;
         string? haltReason = null;
@@ -99,7 +107,7 @@ public sealed class PricingJobRunner
         {
             ct.ThrowIfCancellationRequested();
 
-            var result = await LookupNdcAsync(spec.JobId, row, commandClient, ct);
+            var result = await LookupNdcAsync(spec.JobId, row, commandClient, activePatches, ct);
             _db.SavePricingResult(result);
 
             if (result.Found)
@@ -170,7 +178,8 @@ public sealed class PricingJobRunner
     }
 
     private async Task<SupplierPriceResult> LookupNdcAsync(
-        string jobId, NdcRow row, IpcCommandClient commandClient, CancellationToken ct)
+        string jobId, NdcRow row, IpcCommandClient commandClient,
+        IReadOnlyList<SelectorPatch> patches, CancellationToken ct)
     {
         try
         {
@@ -178,7 +187,8 @@ public sealed class PricingJobRunner
                 Id: Guid.NewGuid().ToString("N"),
                 Command: IpcCommands.PricingLookup,
                 Version: 1,
-                Data: JsonSerializer.SerializeToElement(new NdcPricingRequest(jobId, row.RowIndex, row.NdcNormalized)));
+                Data: JsonSerializer.SerializeToElement(
+                    new NdcPricingRequest(jobId, row.RowIndex, row.NdcNormalized, patches)));
 
             var response = await commandClient.SendAsync(request, LookupTimeout, ct);
 

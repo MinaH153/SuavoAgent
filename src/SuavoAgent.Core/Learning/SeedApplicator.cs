@@ -1,4 +1,5 @@
 using System.Text.Json;
+using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Core.State;
 
@@ -245,6 +246,56 @@ public sealed class SeedApplicator
                 extractedAt: now,
                 extractedBy: $"seed:{response.SeedDigest}");
             _db.InsertSeedItem(response.SeedDigest, "template", tmpl.TemplateId, now);
+            applied++;
+        }
+        _db.CommitTransaction(txn);
+
+        return new(applied, skipped);
+    }
+
+    public record SelectorPatchApplyResult(int PatchesApplied, int PatchesSkipped);
+
+    /// <summary>
+    /// Applies <see cref="SeedResponse.SelectorPatches"/> — the learned selector corrections that
+    /// close the M2 loop. The seed envelope is already ECDSA-verified at the transport layer
+    /// (<c>SeedClient.PostSignedVerifiedAsync</c>), so integrity holds end-to-end before we get here.
+    ///
+    /// Idempotent (seed_items "selector_patch"). Each patch is mapped to the strict domain
+    /// <see cref="SelectorPatch"/> / <see cref="ElementSignature"/> — whose constructor rejects an
+    /// empty ControlType/AutomationId — so a non-identifiable or malformed patch is skipped, never
+    /// applied. The patch carries only GREEN-tier structural atoms: no PHI can ride this path.
+    /// Stamps each patch's provenance with the seed digest before persisting.
+    /// </summary>
+    public SelectorPatchApplyResult ApplySelectorPatches(SeedResponse response)
+    {
+        if (response.SelectorPatches is null || response.SelectorPatches.Count == 0)
+            return new(0, 0);
+
+        var existing = _db.GetSeedItems(response.SeedDigest)
+            .Where(i => i.ItemType == "selector_patch")
+            .Select(i => i.ItemKey)
+            .ToHashSet();
+        if (existing.Count > 0 && response.SelectorPatches.All(p => existing.Contains(p.PatchId)))
+            return new(0, 0);
+
+        int applied = 0, skipped = 0;
+        var now = DateTimeOffset.UtcNow.ToString("o");
+
+        using var txn = _db.BeginTransaction();
+        foreach (var seedPatch in response.SelectorPatches)
+        {
+            if (existing.Contains(seedPatch.PatchId)) continue;
+
+            var patch = SelectorPatchMapper.TryMap(seedPatch, response.SeedDigest);
+            if (patch is null)
+            {
+                _db.RejectSeedItem(response.SeedDigest, "selector_patch", seedPatch.PatchId, now);
+                skipped++;
+                continue;
+            }
+
+            _db.UpsertSelectorPatch(patch, now);
+            _db.InsertSeedItem(response.SeedDigest, "selector_patch", patch.PatchId, now);
             applied++;
         }
         _db.CommitTransaction(txn);

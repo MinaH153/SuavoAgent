@@ -4,6 +4,7 @@ using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
 using FlaUI.UIA2;
 using Serilog;
+using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Pricing;
 
@@ -47,9 +48,25 @@ public sealed class PricingWorkflow
     /// </summary>
     public SupplierPriceResult Lookup(NdcPricingRequest request)
     {
+        // M2a capture: GREEN-tier selector-resolution telemetry per step. Builtin source only
+        // (no learned patches yet). Candidate scans run ONLY on the rare failure path, so the
+        // happy path is unchanged. Never records element Name/Value/Text — PHI-negative by type.
+        var observations = new List<SelectorObservation>();
+        void Observe(SelectorStepId step, SelectorOutcome outcome, SelectorFailureKind kind,
+                     IReadOnlyList<ObservedElement>? candidates = null) =>
+            observations.Add(new SelectorObservation(
+                step, SelectorResolvedVia.Builtin, outcome, kind, null,
+                candidates ?? Array.Empty<ObservedElement>()));
+        SupplierPriceResult Done(SupplierPriceResult r) => r with { Observations = observations };
+
+        // M2b: the resolver tries any active learned selector patch before the hardcoded builtin.
+        // With no patches (the case until M2c distributes one) it IS the builtin find — today's
+        // behavior unchanged. The builtin always backstops a missed learned selector per element.
+        var resolver = new SelectorResolver(request.Patches);
+
         var mainWindow = _engine.MainWindow;
         if (mainWindow == null)
-            return Fail(request, "PioneerRx main window not available");
+            return Done(Fail(request, "PioneerRx main window not available"));
 
         try
         {
@@ -57,41 +74,70 @@ public sealed class PricingWorkflow
             var cf = automation.ConditionFactory;
 
             // Step 1: Open Item → Rx Item from the menu bar
-            if (!OpenRxItemDialog(mainWindow, cf))
-                return Fail(request, "Could not open Item → Rx Item menu");
+            if (!OpenRxItemDialog(mainWindow, cf, resolver))
+            {
+                Observe(SelectorStepId.OpenRxItem, SelectorOutcome.Failed, SelectorFailureKind.ElementNotFound,
+                    ScanCandidates(mainWindow, cf, ControlType.MenuItem));
+                return Done(Fail(request, "Could not open Item → Rx Item menu"));
+            }
+            Observe(SelectorStepId.OpenRxItem, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
             // Step 2: Find the Edit Rx Item window
             var editWindow = WaitForWindow(automation, EditRxItemWindowTitle);
             if (editWindow == null)
-                return Fail(request, "Edit Rx Item window did not appear");
+            {
+                Observe(SelectorStepId.QuickSearchField, SelectorOutcome.Failed, SelectorFailureKind.Timeout);
+                return Done(Fail(request, "Edit Rx Item window did not appear"));
+            }
 
             try
             {
                 // Step 3: Type NDC into Quick Search and press Enter
-                if (!SearchByNdc(editWindow, cf, request.Ndc))
-                    return Fail(request, $"Could not enter NDC {request.Ndc} in Quick Search");
+                if (!SearchByNdc(editWindow, cf, request.Ndc, resolver))
+                {
+                    Observe(SelectorStepId.QuickSearchField, SelectorOutcome.Failed, SelectorFailureKind.ElementNotFound,
+                        ScanCandidates(editWindow, cf, ControlType.Edit));
+                    return Done(Fail(request, $"Could not enter NDC {request.Ndc} in Quick Search"));
+                }
+                Observe(SelectorStepId.QuickSearchField, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 // [C-3] Verify the loaded item's NDC matches the requested NDC before reading pricing.
                 // Prevents returning pricing data for the previously-selected item when Quick Search
-                // is slow or finds no match.
+                // is slow or finds no match. (Selector resolved; the mismatch is semantic, so no
+                // candidate scan — and we must not read element values here.)
                 if (!VerifyLoadedNdc(editWindow, cf, request.Ndc))
-                    return Fail(request, $"Loaded item NDC does not match {request.Ndc} — item may not exist or search timed out");
+                {
+                    Observe(SelectorStepId.VerifyNdc, SelectorOutcome.Failed, SelectorFailureKind.VerifyMismatch);
+                    return Done(Fail(request, $"Loaded item NDC does not match {request.Ndc} — item may not exist or search timed out"));
+                }
+                Observe(SelectorStepId.VerifyNdc, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 // Step 4: Navigate to Pricing tab
-                if (!ClickPricingTab(editWindow, cf))
-                    return Fail(request, "Could not click Pricing tab");
+                if (!ClickPricingTab(editWindow, cf, resolver))
+                {
+                    Observe(SelectorStepId.PricingTab, SelectorOutcome.Failed, SelectorFailureKind.ElementNotFound,
+                        ScanCandidates(editWindow, cf, ControlType.TabItem));
+                    return Done(Fail(request, "Could not click Pricing tab"));
+                }
+                Observe(SelectorStepId.PricingTab, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 // Step 5: Read the supplier grid — find cheapest (lowest cost per unit)
                 var cheapest = ReadCheapestSupplier(editWindow, cf, out var gridFailure);
                 if (cheapest == null)
-                    return new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
-                        false, null, null, gridFailure ?? "No supplier rows found in Pricing tab");
+                {
+                    Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Failed, SelectorFailureKind.GridEmpty,
+                        ScanCandidates(editWindow, cf, ControlType.Table)
+                            .Concat(ScanCandidates(editWindow, cf, ControlType.DataGrid)).Take(5).ToList());
+                    return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
+                        false, null, null, gridFailure ?? "No supplier rows found in Pricing tab"));
+                }
+                Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 _logger.Debug("PricingWorkflow: NDC {Ndc} → {Supplier} @ {Cost}/unit",
                     request.Ndc, cheapest.Value.supplier, cheapest.Value.cost);
 
-                return new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
-                    true, cheapest.Value.supplier, cheapest.Value.cost, null);
+                return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
+                    true, cheapest.Value.supplier, cheapest.Value.cost, null));
             }
             finally
             {
@@ -102,11 +148,56 @@ public sealed class PricingWorkflow
         catch (Exception ex)
         {
             _logger.Error(ex, "PricingWorkflow: unhandled error for NDC {Ndc}", request.Ndc);
-            return Fail(request, ex.Message);
+            // Compliance: never upload a raw exception message (uncontrolled free text — possible
+            // leak vector). The real exception is in the local log above; the corpus/cloud get a
+            // generic reason + the structured observations only.
+            return Done(Fail(request, "Pricing lookup failed (unhandled error)"));
         }
     }
 
-    private bool OpenRxItemDialog(Window mainWindow, ConditionFactory cf)
+    // GREEN-tier candidate scan for the failure path: records ControlType / AutomationId /
+    // ClassName of up to 5 elements of the given type so the fleet corpus can learn what was
+    // actually on screen when a builtin selector missed. NEVER reads Name/Value/Text (PHI tier).
+    private static IReadOnlyList<ObservedElement> ScanCandidates(
+        AutomationElement root, ConditionFactory cf, ControlType type)
+    {
+        try
+        {
+            return root.FindAllDescendants(cf.ByControlType(type))
+                .Take(5)
+                .Select(ToObserved)
+                .ToList();
+        }
+        catch
+        {
+            return Array.Empty<ObservedElement>();
+        }
+    }
+
+    private static ObservedElement ToObserved(AutomationElement el)
+    {
+        string controlType;
+        try { controlType = el.ControlType.ToString(); } catch { controlType = "Unknown"; }
+        string? automationId;
+        try { automationId = NullIfEmpty(el.AutomationId); } catch { automationId = null; }
+        string? className;
+        try { className = NullIfEmpty(el.ClassName); } catch { className = null; }
+        return new ObservedElement(controlType, automationId, className);
+    }
+
+    private static string? NullIfEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
+
+    // Visibility into learned-patch usage during a run. The FallbackUsed line is the early
+    // signal that a learned selector has drifted (input to later auto-retirement / M2c-M2d).
+    private void LogIfLearned(SelectorStepId step, SelectorResolver.Resolution res)
+    {
+        if (res.ResolvedVia == SelectorResolvedVia.Learned)
+            _logger.Information("PricingWorkflow: step {Step} resolved via learned patch {PatchId}", step, res.PatchId);
+        else if (res.Outcome == SelectorOutcome.FallbackUsed)
+            _logger.Warning("PricingWorkflow: step {Step} learned patch {PatchId} missed — used builtin fallback", step, res.PatchId);
+    }
+
+    private bool OpenRxItemDialog(Window mainWindow, ConditionFactory cf, SelectorResolver resolver)
     {
         try
         {
@@ -114,15 +205,17 @@ public sealed class PricingWorkflow
             var menuBar = mainWindow.FindFirstDescendant(cf.ByControlType(ControlType.MenuBar));
             if (menuBar == null) return false;
 
-            var itemMenu = menuBar.FindFirstDescendant(cf.ByName(ItemMenuName));
+            var (itemMenu, itemRes) = resolver.FindFirst(menuBar, cf, SelectorStepId.OpenItemMenu, cf.ByName(ItemMenuName));
             if (itemMenu == null) return false;
+            LogIfLearned(SelectorStepId.OpenItemMenu, itemRes);
 
             itemMenu.AsMenuItem()?.Click();
             Thread.Sleep(300);
 
             // Click "Rx Item" in the dropdown
-            var rxItemEntry = mainWindow.FindFirstDescendant(cf.ByName(RxItemMenuName));
+            var (rxItemEntry, rxRes) = resolver.FindFirst(mainWindow, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
             if (rxItemEntry == null) return false;
+            LogIfLearned(SelectorStepId.OpenRxItem, rxRes);
 
             rxItemEntry.AsMenuItem()?.Click();
             Thread.Sleep(300);
@@ -167,7 +260,7 @@ public sealed class PricingWorkflow
     //       all attempts fail rather than firing Enter against an unknown state.
     private const int MaxTypeAttempts = 2;
 
-    private bool SearchByNdc(Window editWindow, ConditionFactory cf, string ndc)
+    private bool SearchByNdc(Window editWindow, ConditionFactory cf, string ndc, SelectorResolver resolver)
     {
         try
         {
@@ -176,11 +269,13 @@ public sealed class PricingWorkflow
             AutomationElement? searchBox = null;
             while (DateTime.UtcNow < deadline)
             {
-                // Try by name hint and by control type + position
-                searchBox = editWindow.FindFirstDescendant(
-                    new FlaUI.Core.Conditions.AndCondition(
-                        cf.ByControlType(ControlType.Edit),
-                        cf.ByHelpText(QuickSearchHint)));
+                // Learned patch first, then the builtin (ControlType=Edit + HelpText "Quick Search").
+                var builtin = new FlaUI.Core.Conditions.AndCondition(
+                    cf.ByControlType(ControlType.Edit),
+                    cf.ByHelpText(QuickSearchHint));
+                var (box, res) = resolver.FindFirst(editWindow, cf, SelectorStepId.QuickSearchField, builtin);
+                searchBox = box;
+                if (searchBox != null) LogIfLearned(SelectorStepId.QuickSearchField, res);
 
                 if (searchBox == null)
                 {
@@ -321,16 +416,17 @@ public sealed class PricingWorkflow
         return false;
     }
 
-    private bool ClickPricingTab(Window editWindow, ConditionFactory cf)
+    private bool ClickPricingTab(Window editWindow, ConditionFactory cf, SelectorResolver resolver)
     {
         try
         {
             var deadline = DateTime.UtcNow + ElementTimeout;
             while (DateTime.UtcNow < deadline)
             {
-                var pricingTab = editWindow.FindFirstDescendant(cf.ByName(PricingTabName));
+                var (pricingTab, res) = resolver.FindFirst(editWindow, cf, SelectorStepId.PricingTab, cf.ByName(PricingTabName));
                 if (pricingTab != null)
                 {
+                    LogIfLearned(SelectorStepId.PricingTab, res);
                     pricingTab.AsTabItem()?.Select();
                     Thread.Sleep(500);
                     return true;

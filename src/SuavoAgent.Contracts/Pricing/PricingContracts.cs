@@ -1,15 +1,22 @@
+using SuavoAgent.Contracts.Learning;
+
 namespace SuavoAgent.Contracts.Pricing;
 
 /// <summary>
 /// Sent by Core to Helper: look up pricing for one NDC in PioneerRx.
+/// <c>Patches</c> carries the job's active learned selector corrections (M2b); the Helper's
+/// resolver tries them before the hardcoded builtin. Null/empty = builtin-only (today's behavior).
 /// </summary>
 public record NdcPricingRequest(
     string JobId,
     int RowIndex,
-    string Ndc);
+    string Ndc,
+    IReadOnlyList<SelectorPatch>? Patches = null);
 
 /// <summary>
 /// Returned by Helper to Core after reading the Pricing tab for one NDC.
+/// <c>Observations</c> carries the GREEN-tier selector-resolution telemetry for the run's
+/// steps (M2a capture); null/empty for the SQL path, which drives no selectors.
 /// </summary>
 public record SupplierPriceResult(
     string JobId,
@@ -18,7 +25,8 @@ public record SupplierPriceResult(
     bool Found,
     string? SupplierName,
     decimal? CostPerUnit,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    IReadOnlyList<SelectorObservation>? Observations = null);
 
 /// <summary>
 /// Persisted in AgentStateDb; describes a full pricing job run.
