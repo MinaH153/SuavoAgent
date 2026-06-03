@@ -191,7 +191,8 @@ public sealed class IpcCommandServer : IDisposable
             IpcCommands.CaptureScreen => HandleCaptureScreenAsync(request, ct),
             IpcCommands.FindFile => HandleFindFileAsync(request, ct),
             IpcCommands.IntentCursor => HandleIntentCursorAsync(request, ct),
-            IpcCommands.Ping => Task.FromResult(Ok(request.Id, request.Command, null)),
+            IpcCommands.Ping => Task.FromResult(Ok(request.Id, request.Command,
+                JsonSerializer.SerializeToElement(HelperSessionProbe.Current()))),
             ActuationIpcCommands.GetState
                 or ActuationIpcCommands.ClickByLabel
                 or ActuationIpcCommands.TypeText
