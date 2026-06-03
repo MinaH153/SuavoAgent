@@ -65,6 +65,7 @@ public sealed class PricingJobCloudUploader
                     confidence = r.Found ? 0.95m : 0.35m,
                     source,
                     localEvidenceId = $"pricing:{spec.JobId}:{r.RowIndex}",
+                    selectorObservations = MapObservations(r.Observations),
                 }).ToArray(),
             };
 
@@ -82,6 +83,27 @@ public sealed class PricingJobCloudUploader
             _logger.LogWarning(ex, "Pricing job cloud upload failed for {JobId}", spec.JobId);
         }
     }
+
+    // M2a: GREEN-tier selector telemetry. Each field is ControlType / AutomationId / ClassName
+    // or an enum name — PHI-negative by type (SelectorObservation/ObservedElement cannot carry
+    // Name / Value / Text / a free-text string), so no scrub is needed or possible here.
+    private static object[]? MapObservations(
+        IReadOnlyList<SuavoAgent.Contracts.Learning.SelectorObservation>? observations)
+    {
+        if (observations is not { Count: > 0 }) return null;
+        return observations.Select(o => (object)new
+        {
+            stepId = o.StepId.ToString(),
+            resolvedVia = o.ResolvedVia.ToString(),
+            outcome = o.Outcome.ToString(),
+            failureKind = o.FailureKind.ToString(),
+            attempted = MapElement(o.Attempted),
+            observedCandidates = o.ObservedCandidates.Select(MapElement).ToArray(),
+        }).ToArray();
+    }
+
+    private static object? MapElement(SuavoAgent.Contracts.Learning.ObservedElement? e) =>
+        e is null ? null : new { controlType = e.ControlType, automationId = e.AutomationId, className = e.ClassName };
 
     private static string? SafeWarning(string? value)
     {
