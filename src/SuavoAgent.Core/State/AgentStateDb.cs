@@ -2,7 +2,9 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
+using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Canary;
+using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Learning;
@@ -689,6 +691,27 @@ public sealed class AgentStateDb : IDisposable
             -- rows are exempt so version bumps with same screen_signature can coexist.
             CREATE UNIQUE INDEX IF NOT EXISTS uniq_wt_active_skill_screen
                 ON workflow_templates(skill_id, screen_signature) WHERE retired_at IS NULL;
+
+            -- M2b: learned, signed selector corrections (one active per skill+step+screen).
+            -- The resolver tries an active patch's target before the hardcoded builtin.
+            CREATE TABLE IF NOT EXISTS selector_patches (
+                patch_id TEXT PRIMARY KEY,
+                skill_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                pms_fingerprint TEXT,
+                screen_signature TEXT,
+                target_json TEXT NOT NULL,
+                fallbacks_json TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                seed_digest TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                applied_at TEXT NOT NULL,
+                retired_at TEXT,
+                retirement_reason TEXT,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_sp_skill_step
+                ON selector_patches(skill_id, step_id) WHERE retired_at IS NULL;
 
             CREATE TABLE IF NOT EXISTS auto_rule_approvals (
                 rule_id TEXT PRIMARY KEY,
@@ -2628,6 +2651,95 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@at", retiredAt);
         cmd.Parameters.AddWithValue("@reason", reason);
         cmd.ExecuteNonQuery();
+    }
+
+    // --- M2b: learned selector patches (applied by the seed pipeline; read by the resolver) ---
+
+    public void UpsertSelectorPatch(SelectorPatch patch, string appliedAt)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO selector_patches
+                (patch_id, skill_id, step_id, pms_fingerprint, screen_signature,
+                 target_json, fallbacks_json, confidence, seed_digest, version, applied_at)
+            VALUES (@id, @skill, @step, @pms, @screen, @target, @fallbacks, @conf, @digest, @ver, @at)
+            """;
+        cmd.Parameters.AddWithValue("@id", patch.PatchId);
+        cmd.Parameters.AddWithValue("@skill", patch.SkillId);
+        cmd.Parameters.AddWithValue("@step", patch.StepId.ToString());
+        cmd.Parameters.AddWithValue("@pms", (object?)patch.PmsFingerprint ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@screen", (object?)patch.ScreenSignatureV1 ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@target", System.Text.Json.JsonSerializer.Serialize(patch.Target));
+        cmd.Parameters.AddWithValue("@fallbacks", System.Text.Json.JsonSerializer.Serialize(patch.Fallbacks));
+        cmd.Parameters.AddWithValue("@conf", patch.Confidence);
+        cmd.Parameters.AddWithValue("@digest", patch.SeedDigest);
+        cmd.Parameters.AddWithValue("@ver", patch.Version);
+        cmd.Parameters.AddWithValue("@at", appliedAt);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Active (non-retired) selector patches, newest version first.</summary>
+    public IReadOnlyList<SelectorPatch> GetActiveSelectorPatches()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT patch_id, skill_id, step_id, pms_fingerprint, screen_signature,
+                   target_json, fallbacks_json, confidence, seed_digest, version
+            FROM selector_patches WHERE retired_at IS NULL
+            ORDER BY version DESC
+            """;
+        var rows = new List<SelectorPatch>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var patch = TryReadSelectorPatch(reader);
+            if (patch is not null) rows.Add(patch);
+        }
+        return rows;
+    }
+
+    public void RetireSelectorPatch(string patchId, string retiredAt, string reason)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE selector_patches
+               SET retired_at = @at, retirement_reason = @reason
+             WHERE patch_id = @id
+            """;
+        cmd.Parameters.AddWithValue("@id", patchId);
+        cmd.Parameters.AddWithValue("@at", retiredAt);
+        cmd.Parameters.AddWithValue("@reason", reason);
+        cmd.ExecuteNonQuery();
+    }
+
+    // Tolerant read: a malformed row (e.g. a target with no AutomationId, which
+    // ElementSignature rejects) is skipped rather than throwing — a corrupt patch
+    // must never break the whole load + leave the resolver blind to the good ones.
+    private static SelectorPatch? TryReadSelectorPatch(SqliteDataReader reader)
+    {
+        try
+        {
+            Enum.TryParse<SelectorStepId>(reader.GetString(2), out var step);
+            var target = System.Text.Json.JsonSerializer.Deserialize<ElementSignature>(reader.GetString(5));
+            if (target is null) return null;
+            var fallbacks = System.Text.Json.JsonSerializer
+                .Deserialize<List<ElementSignature>>(reader.GetString(6)) ?? new List<ElementSignature>();
+            return new SelectorPatch(
+                PatchId: reader.GetString(0),
+                SkillId: reader.GetString(1),
+                StepId: step,
+                PmsFingerprint: reader.IsDBNull(3) ? null : reader.GetString(3),
+                ScreenSignatureV1: reader.IsDBNull(4) ? null : reader.GetString(4),
+                Target: target,
+                Fallbacks: fallbacks,
+                Confidence: reader.GetDouble(7),
+                SeedDigest: reader.GetString(8),
+                Version: reader.GetInt32(9));
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>
