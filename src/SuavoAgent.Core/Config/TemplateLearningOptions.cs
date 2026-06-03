@@ -38,3 +38,15 @@ public sealed class FleetLearningOptions
 {
     public bool Enabled { get; set; } = false;
 }
+
+/// <summary>
+/// Test-only hook toggles. Bound from <c>Agent:TestHooks:*</c>. Default OFF — must stay false
+/// in the field. When enabled via signed config-override, unlocks deterministic test seams
+/// (e.g. the <c>force_learning_phase</c> signed command) that drive single-step learning-phase
+/// transitions so the M1 PhaseGate can be exercised end-to-end on a real box. These seams never
+/// bypass a safety gate; they only move the phase, which the gate then evaluates normally.
+/// </summary>
+public sealed class TestHooksOptions
+{
+    public bool Enabled { get; set; } = false;
+}

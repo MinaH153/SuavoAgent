@@ -197,6 +197,13 @@ public sealed class LearningWorker : BackgroundService
                     _phaseStartedAt, canaryClean, unseededCount);
                 var eval = gate.Evaluate();
 
+                // Every eval is logged (not just advance) so a HOLD is directly observable — which
+                // gate failed and why. Previously the gate was silent unless ready/abort.
+                _logger.LogInformation(
+                    "PhaseGate eval: phase={Phase} ready={Ready} gates=[{Gates}]",
+                    session.Phase, eval.Ready,
+                    string.Join(", ", eval.Gates.Select(g => $"{g.Name}:{(g.Passed ? "pass" : "FAIL")} ({g.Detail})")));
+
                 if (eval.AbortAcceleration)
                 {
                     _logger.LogWarning("Seed acceleration aborted — reverting to time-based phase duration");

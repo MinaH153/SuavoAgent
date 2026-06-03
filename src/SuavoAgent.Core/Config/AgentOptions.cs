@@ -126,6 +126,15 @@ public sealed class AgentOptions
     public SelfHealOptions SelfHeal { get; set; } = new();
 
     /// <summary>
+    /// Test-only hooks. Default OFF. When enabled (signed config-override
+    /// <c>Agent.TestHooks.Enabled=true</c>), unlocks deterministic test seams such as the
+    /// <c>force_learning_phase</c> signed command used to exercise the M1 PhaseGate on a real
+    /// box. These seams never bypass a safety gate — they only drive single-step phase
+    /// transitions that the gate then evaluates as normal. Must stay false in the field.
+    /// </summary>
+    public TestHooksOptions TestHooks { get; set; } = new();
+
+    /// <summary>
     /// Multi-pharmacy config. When populated, each entry gets its own detection worker.
     /// Backwards-compatible: if empty, falls back to the top-level SqlServer/PharmacyId fields.
     /// </summary>
