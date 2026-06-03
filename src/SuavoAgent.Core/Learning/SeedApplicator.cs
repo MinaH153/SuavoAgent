@@ -286,7 +286,7 @@ public sealed class SeedApplicator
         {
             if (existing.Contains(seedPatch.PatchId)) continue;
 
-            var patch = TryMapSelectorPatch(seedPatch, response.SeedDigest);
+            var patch = SelectorPatchMapper.TryMap(seedPatch, response.SeedDigest);
             if (patch is null)
             {
                 _db.RejectSeedItem(response.SeedDigest, "selector_patch", seedPatch.PatchId, now);
@@ -301,33 +301,6 @@ public sealed class SeedApplicator
         _db.CommitTransaction(txn);
 
         return new(applied, skipped);
-    }
-
-    // Wire DTO → strict domain patch. Returns null (caller skips) on any malformed/unsafe input:
-    // unknown step_id, empty ids, out-of-range confidence, or an ElementSignature the domain ctor
-    // rejects (empty ControlType/AutomationId = not cross-install identifiable). Fail-closed.
-    private static SelectorPatch? TryMapSelectorPatch(SeedSelectorPatch p, string seedDigest)
-    {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(p.PatchId) || string.IsNullOrWhiteSpace(p.SkillId)) return null;
-            if (p.Confidence < 0 || p.Confidence > 1) return null;
-            if (!Enum.TryParse<SelectorStepId>(p.StepId, ignoreCase: false, out var step)) return null;
-            if (p.Target is null) return null;
-
-            var target = new ElementSignature(p.Target.ControlType, p.Target.AutomationId, p.Target.ClassName);
-            var fallbacks = (p.Fallbacks ?? Array.Empty<SeedElementSignature>())
-                .Select(f => new ElementSignature(f.ControlType, f.AutomationId, f.ClassName))
-                .ToList();
-
-            return new SelectorPatch(
-                p.PatchId, p.SkillId, step, p.PmsFingerprint, p.ScreenSignature,
-                target, fallbacks, p.Confidence, seedDigest, p.Version);
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     private static bool PmsVersionIncluded(
