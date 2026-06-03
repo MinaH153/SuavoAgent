@@ -692,27 +692,6 @@ public sealed class AgentStateDb : IDisposable
             CREATE UNIQUE INDEX IF NOT EXISTS uniq_wt_active_skill_screen
                 ON workflow_templates(skill_id, screen_signature) WHERE retired_at IS NULL;
 
-            -- M2b: learned, signed selector corrections (one active per skill+step+screen).
-            -- The resolver tries an active patch's target before the hardcoded builtin.
-            CREATE TABLE IF NOT EXISTS selector_patches (
-                patch_id TEXT PRIMARY KEY,
-                skill_id TEXT NOT NULL,
-                step_id TEXT NOT NULL,
-                pms_fingerprint TEXT,
-                screen_signature TEXT,
-                target_json TEXT NOT NULL,
-                fallbacks_json TEXT NOT NULL,
-                confidence REAL NOT NULL,
-                seed_digest TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                applied_at TEXT NOT NULL,
-                retired_at TEXT,
-                retirement_reason TEXT,
-                consecutive_failures INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_sp_skill_step
-                ON selector_patches(skill_id, step_id) WHERE retired_at IS NULL;
-
             CREATE TABLE IF NOT EXISTS auto_rule_approvals (
                 rule_id TEXT PRIMARY KEY,
                 template_id TEXT NOT NULL,
@@ -745,6 +724,34 @@ public sealed class AgentStateDb : IDisposable
                 rollback_reason TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_asa_from ON applied_schema_adaptations(from_schema_hash);
+            """);
+        // Migration 3 (fix 2026-06-03): the M2b selector-patch store was originally added to the BODY
+        // of already-applied migration #1, so every box that applied #1 in the v3.12 era never created
+        // the table — UpsertSelectorPatch then threw `no such table: selector_patches`, making BOTH the
+        // operator update_selector correction AND the fleet seed-apply dead-on-arrival on every upgraded
+        // box (field-confirmed on Mina's box, 2026-06-03). Moved into its own versioned migration so
+        // existing DBs create it on next startup. Fresh DBs get it here too (#1 no longer defines it).
+        ApplyMigrationIfNeeded(3,
+            "M2b learned selector-patch correction store (fix: was wrongly bolted onto migration 1)",
+            """
+            CREATE TABLE IF NOT EXISTS selector_patches (
+                patch_id TEXT PRIMARY KEY,
+                skill_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                pms_fingerprint TEXT,
+                screen_signature TEXT,
+                target_json TEXT NOT NULL,
+                fallbacks_json TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                seed_digest TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                applied_at TEXT NOT NULL,
+                retired_at TEXT,
+                retirement_reason TEXT,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_sp_skill_step
+                ON selector_patches(skill_id, step_id) WHERE retired_at IS NULL;
             """);
     }
 

@@ -150,14 +150,21 @@ try
     builder.Configuration.AddJsonFile(configOverridesPath, optional: true, reloadOnChange: true);
     var appSettingsPath = Path.Combine(exeDir, "appsettings.json");
 
-    var startupVersion = builder.Configuration.GetSection("Agent").Get<AgentOptions>()?.Version ?? "unknown";
+    // Version comes from the STAMPED ASSEMBLY, not appsettings.json — the OTA swaps the binaries but
+    // never rewrites Agent.Version, so config-sourced version drifts stale after every update. See AgentVersion.
+    var startupVersion = AgentVersion.Resolve(builder.Configuration.GetSection("Agent").Get<AgentOptions>()?.Version);
     Log.Information("SuavoAgent.Core starting v{Version}", startupVersion);
     builder.Services.AddWindowsService(options => options.ServiceName = "SuavoAgent.Core");
     builder.Services.AddSerilog();
 
     builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
+    // Override the config-bound Version with the stamped assembly version for every IOptions<AgentOptions>
+    // consumer (heartbeat → cloud agent_version, etc.) so the reported version is OTA-correct.
+    builder.Services.PostConfigure<AgentOptions>(o => o.Version = AgentVersion.Resolve(o.Version));
 
     var agentOpts = builder.Configuration.GetSection("Agent").Get<AgentOptions>() ?? new AgentOptions();
+    // The local copy feeds SuavoCloudClient directly (heartbeat), so apply the same assembly-version override.
+    agentOpts.Version = AgentVersion.Resolve(agentOpts.Version);
 
     // Mission Loop Phase 1 — registered behind a config gate so the pilot
     // flip can open it via ConfigSyncWorker without a service restart.
