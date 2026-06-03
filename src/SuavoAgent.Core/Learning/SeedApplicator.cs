@@ -1,4 +1,5 @@
 using System.Text.Json;
+using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Core.State;
 
@@ -250,6 +251,83 @@ public sealed class SeedApplicator
         _db.CommitTransaction(txn);
 
         return new(applied, skipped);
+    }
+
+    public record SelectorPatchApplyResult(int PatchesApplied, int PatchesSkipped);
+
+    /// <summary>
+    /// Applies <see cref="SeedResponse.SelectorPatches"/> — the learned selector corrections that
+    /// close the M2 loop. The seed envelope is already ECDSA-verified at the transport layer
+    /// (<c>SeedClient.PostSignedVerifiedAsync</c>), so integrity holds end-to-end before we get here.
+    ///
+    /// Idempotent (seed_items "selector_patch"). Each patch is mapped to the strict domain
+    /// <see cref="SelectorPatch"/> / <see cref="ElementSignature"/> — whose constructor rejects an
+    /// empty ControlType/AutomationId — so a non-identifiable or malformed patch is skipped, never
+    /// applied. The patch carries only GREEN-tier structural atoms: no PHI can ride this path.
+    /// Stamps each patch's provenance with the seed digest before persisting.
+    /// </summary>
+    public SelectorPatchApplyResult ApplySelectorPatches(SeedResponse response)
+    {
+        if (response.SelectorPatches is null || response.SelectorPatches.Count == 0)
+            return new(0, 0);
+
+        var existing = _db.GetSeedItems(response.SeedDigest)
+            .Where(i => i.ItemType == "selector_patch")
+            .Select(i => i.ItemKey)
+            .ToHashSet();
+        if (existing.Count > 0 && response.SelectorPatches.All(p => existing.Contains(p.PatchId)))
+            return new(0, 0);
+
+        int applied = 0, skipped = 0;
+        var now = DateTimeOffset.UtcNow.ToString("o");
+
+        using var txn = _db.BeginTransaction();
+        foreach (var seedPatch in response.SelectorPatches)
+        {
+            if (existing.Contains(seedPatch.PatchId)) continue;
+
+            var patch = TryMapSelectorPatch(seedPatch, response.SeedDigest);
+            if (patch is null)
+            {
+                _db.RejectSeedItem(response.SeedDigest, "selector_patch", seedPatch.PatchId, now);
+                skipped++;
+                continue;
+            }
+
+            _db.UpsertSelectorPatch(patch, now);
+            _db.InsertSeedItem(response.SeedDigest, "selector_patch", patch.PatchId, now);
+            applied++;
+        }
+        _db.CommitTransaction(txn);
+
+        return new(applied, skipped);
+    }
+
+    // Wire DTO → strict domain patch. Returns null (caller skips) on any malformed/unsafe input:
+    // unknown step_id, empty ids, out-of-range confidence, or an ElementSignature the domain ctor
+    // rejects (empty ControlType/AutomationId = not cross-install identifiable). Fail-closed.
+    private static SelectorPatch? TryMapSelectorPatch(SeedSelectorPatch p, string seedDigest)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(p.PatchId) || string.IsNullOrWhiteSpace(p.SkillId)) return null;
+            if (p.Confidence < 0 || p.Confidence > 1) return null;
+            if (!Enum.TryParse<SelectorStepId>(p.StepId, ignoreCase: false, out var step)) return null;
+            if (p.Target is null) return null;
+
+            var target = new ElementSignature(p.Target.ControlType, p.Target.AutomationId, p.Target.ClassName);
+            var fallbacks = (p.Fallbacks ?? Array.Empty<SeedElementSignature>())
+                .Select(f => new ElementSignature(f.ControlType, f.AutomationId, f.ClassName))
+                .ToList();
+
+            return new SelectorPatch(
+                p.PatchId, p.SkillId, step, p.PmsFingerprint, p.ScreenSignature,
+                target, fallbacks, p.Confidence, seedDigest, p.Version);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static bool PmsVersionIncluded(
