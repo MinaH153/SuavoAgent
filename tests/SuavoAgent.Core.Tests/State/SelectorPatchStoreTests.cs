@@ -126,4 +126,25 @@ public class SelectorPatchStoreTests : IDisposable
         upgraded.UpsertSelectorPatch(Patch(id: "upg"), "2026-06-03T00:00:00Z");
         Assert.Equal("upg", Assert.Single(upgraded.GetActiveSelectorPatches()).PatchId);
     }
+
+    [Fact]
+    public void UpsertSelectorPatchWithAudit_CommitsBothAtomically_NoNestedTransaction()
+    {
+        // Bug C regression (Mina's box, 2026-06-03): the operator update_selector handler wrapped
+        // UpsertSelectorPatch + AppendChainedAuditEntry in an OUTER BeginTransaction, but
+        // AppendChainedAuditEntry opens its OWN Serializable transaction — Microsoft.Data.Sqlite threw
+        // `does not support nested transactions` on every real apply, so the patch never persisted.
+        // The atomic combined method commits both writes in ONE transaction with no nesting.
+        var hash = _db.UpsertSelectorPatchWithAudit(
+            Patch(id: "op1"),
+            new AuditEntry(
+                TaskId: "op1", EventType: "selector_patch_applied", FromState: "proposed", ToState: "active",
+                Trigger: "update_selector", CommandId: "cmd-1", RequesterId: "operator",
+                Actor: "operator", SourceComponent: "test", CaptureReason: "step=QuickSearchField via=operator"),
+            "2026-06-03T12:00:00Z");
+
+        Assert.False(string.IsNullOrEmpty(hash));                                   // chain hash returned
+        Assert.Equal("op1", Assert.Single(_db.GetActiveSelectorPatches()).PatchId); // patch persisted
+        Assert.Equal(hash, _db.GetLastAuditHash());                                 // audit row appended + chained
+    }
 }

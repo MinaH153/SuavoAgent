@@ -1023,51 +1023,61 @@ public sealed class AgentStateDb : IDisposable
             // the race even when multiple writers share the DB across
             // process boundaries (PRAGMA busy_timeout=5000 covers contention).
             using var tx = _conn.BeginTransaction(System.Data.IsolationLevel.Serializable);
-            var prevHash = GetLastAuditHashLocked() ?? _auditChainSeed;
-            var newHash = ComputeAuditHash(prevHash, entry.TaskId, entry.EventType,
-                entry.FromState, entry.ToState, entry.Trigger, timestamp);
-
-            using var cmd = _conn.CreateCommand();
-            cmd.Transaction = tx;
-            // Codex 2026-04-26: forensic metadata columns (actor / source_component /
-            // capture_reason / window_title_hash / element_count / scrubber_version /
-            // storage_id) are written alongside the chained columns but do NOT
-            // contribute to the prev_hash chain — that keeps existing rows
-            // verifiable while still recording capture intent for audit dossier
-            // reconstruction.
-            cmd.CommandText = """
-                INSERT INTO audit_entries (task_id, from_state, to_state, trigger, timestamp, prev_hash,
-                                           event_type, command_id, requester_id, rx_number,
-                                           actor, source_component, capture_reason,
-                                           window_title_hash, element_count, scrubber_version, storage_id)
-                VALUES (@taskId, @from, @to, @trigger, @timestamp, @prevHash,
-                        @eventType, @commandId, @requesterId, @rxNumber,
-                        @actor, @sourceComponent, @captureReason,
-                        @windowTitleHash, @elementCount, @scrubberVersion, @storageId)
-                """;
-            cmd.Parameters.AddWithValue("@taskId", entry.TaskId);
-            cmd.Parameters.AddWithValue("@from", entry.FromState);
-            cmd.Parameters.AddWithValue("@to", entry.ToState);
-            cmd.Parameters.AddWithValue("@trigger", entry.Trigger);
-            cmd.Parameters.AddWithValue("@timestamp", timestamp);
-            cmd.Parameters.AddWithValue("@prevHash", prevHash);
-            cmd.Parameters.AddWithValue("@eventType", entry.EventType);
-            cmd.Parameters.AddWithValue("@commandId", (object?)entry.CommandId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@requesterId", (object?)entry.RequesterId ?? DBNull.Value);
-            // Store HMAC hash of rx_number — never store raw PHI in audit log
-            var rxHash = entry.RxNumber != null ? HmacRxNumber(entry.RxNumber) : null;
-            cmd.Parameters.AddWithValue("@rxNumber", (object?)rxHash ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@actor", (object?)entry.Actor ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@sourceComponent", (object?)entry.SourceComponent ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@captureReason", (object?)entry.CaptureReason ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@windowTitleHash", (object?)entry.WindowTitleHash ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@elementCount", (object?)entry.ElementCount ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@scrubberVersion", (object?)entry.ScrubberVersion ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@storageId", (object?)entry.StorageId ?? DBNull.Value);
-            cmd.ExecuteNonQuery();
+            var newHash = AppendAuditEntryLocked(entry, timestamp, tx);
             tx.Commit();
             return newHash;
         }
+    }
+
+    /// <summary>
+    /// Inserts one chained audit row on an ALREADY-OPEN transaction, assuming the caller holds
+    /// <c>_auditWriteLock</c>. Does NOT open or commit the transaction — so it can be composed with
+    /// another write into a SINGLE atomic commit (e.g. <see cref="UpsertSelectorPatchWithAudit"/>)
+    /// without nesting transactions, which Microsoft.Data.Sqlite forbids. Returns the new chain hash.
+    /// </summary>
+    private string AppendAuditEntryLocked(AuditEntry entry, string timestamp, Microsoft.Data.Sqlite.SqliteTransaction tx)
+    {
+        var prevHash = GetLastAuditHashLocked() ?? _auditChainSeed;
+        var newHash = ComputeAuditHash(prevHash, entry.TaskId, entry.EventType,
+            entry.FromState, entry.ToState, entry.Trigger, timestamp);
+
+        using var cmd = _conn.CreateCommand();
+        cmd.Transaction = tx;
+        // Codex 2026-04-26: forensic metadata columns (actor / source_component / capture_reason /
+        // window_title_hash / element_count / scrubber_version / storage_id) are written alongside the
+        // chained columns but do NOT contribute to the prev_hash chain — that keeps existing rows
+        // verifiable while still recording capture intent for audit dossier reconstruction.
+        cmd.CommandText = """
+            INSERT INTO audit_entries (task_id, from_state, to_state, trigger, timestamp, prev_hash,
+                                       event_type, command_id, requester_id, rx_number,
+                                       actor, source_component, capture_reason,
+                                       window_title_hash, element_count, scrubber_version, storage_id)
+            VALUES (@taskId, @from, @to, @trigger, @timestamp, @prevHash,
+                    @eventType, @commandId, @requesterId, @rxNumber,
+                    @actor, @sourceComponent, @captureReason,
+                    @windowTitleHash, @elementCount, @scrubberVersion, @storageId)
+            """;
+        cmd.Parameters.AddWithValue("@taskId", entry.TaskId);
+        cmd.Parameters.AddWithValue("@from", entry.FromState);
+        cmd.Parameters.AddWithValue("@to", entry.ToState);
+        cmd.Parameters.AddWithValue("@trigger", entry.Trigger);
+        cmd.Parameters.AddWithValue("@timestamp", timestamp);
+        cmd.Parameters.AddWithValue("@prevHash", prevHash);
+        cmd.Parameters.AddWithValue("@eventType", entry.EventType);
+        cmd.Parameters.AddWithValue("@commandId", (object?)entry.CommandId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@requesterId", (object?)entry.RequesterId ?? DBNull.Value);
+        // Store HMAC hash of rx_number — never store raw PHI in audit log
+        var rxHash = entry.RxNumber != null ? HmacRxNumber(entry.RxNumber) : null;
+        cmd.Parameters.AddWithValue("@rxNumber", (object?)rxHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@actor", (object?)entry.Actor ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@sourceComponent", (object?)entry.SourceComponent ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@captureReason", (object?)entry.CaptureReason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@windowTitleHash", (object?)entry.WindowTitleHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@elementCount", (object?)entry.ElementCount ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@scrubberVersion", (object?)entry.ScrubberVersion ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@storageId", (object?)entry.StorageId ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+        return newHash;
     }
 
     // Same query as GetLastAuditHash but assumes the caller already holds
@@ -2662,9 +2672,33 @@ public sealed class AgentStateDb : IDisposable
 
     // --- M2b: learned selector patches (applied by the seed pipeline; read by the resolver) ---
 
-    public void UpsertSelectorPatch(SelectorPatch patch, string appliedAt)
+    public void UpsertSelectorPatch(SelectorPatch patch, string appliedAt) =>
+        UpsertSelectorPatchCore(patch, appliedAt, tx: null);
+
+    /// <summary>
+    /// Upserts the patch AND appends its chained audit entry in ONE atomic transaction. The operator
+    /// direct-correction (update_selector) needs both to commit together — but AppendChainedAuditEntry
+    /// owns its own Serializable transaction, so a caller cannot wrap the two in an OUTER transaction
+    /// (Microsoft.Data.Sqlite forbids nested transactions — the field bug on Mina's box, 2026-06-03,
+    /// where the handler's BeginTransaction + AppendChainedAuditEntry threw). Doing both writes here
+    /// under the single _auditWriteLock + one transaction is the atomic path. Returns the new chain hash.
+    /// </summary>
+    public string UpsertSelectorPatchWithAudit(SelectorPatch patch, AuditEntry auditEntry, string appliedAt)
+    {
+        lock (_auditWriteLock)
+        {
+            using var tx = _conn.BeginTransaction(System.Data.IsolationLevel.Serializable);
+            UpsertSelectorPatchCore(patch, appliedAt, tx);
+            var newHash = AppendAuditEntryLocked(auditEntry, appliedAt, tx);
+            tx.Commit();
+            return newHash;
+        }
+    }
+
+    private void UpsertSelectorPatchCore(SelectorPatch patch, string appliedAt, Microsoft.Data.Sqlite.SqliteTransaction? tx)
     {
         using var cmd = _conn.CreateCommand();
+        if (tx is not null) cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT OR REPLACE INTO selector_patches
                 (patch_id, skill_id, step_id, pms_fingerprint, screen_signature,
