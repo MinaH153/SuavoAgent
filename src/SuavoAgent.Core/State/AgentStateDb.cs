@@ -1244,7 +1244,16 @@ public sealed class AgentStateDb : IDisposable
         {
             var row = new Dictionary<string, object?>();
             for (int i = 0; i < reader.FieldCount; i++)
-                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+            {
+                var name = reader.GetName(i);
+                var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                // Defense-in-depth: scrub the free-text `error` column on export so PHI that
+                // might have leaked into a native SQL exception message can't ride into the
+                // cloud-uploaded archive. (Salvaged from PR #33, which went stale on v3.13.)
+                if (name == "error" && value is string errorText)
+                    value = Learning.PhiScrubber.ScrubText(errorText);
+                row[name] = value;
+            }
             states.Add(row);
         }
         return System.Text.Json.JsonSerializer.Serialize(states);
