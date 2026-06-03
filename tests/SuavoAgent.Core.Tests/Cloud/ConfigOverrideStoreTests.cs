@@ -177,6 +177,20 @@ public class ConfigOverrideStoreTests : IDisposable
     }
 
     [Fact]
+    public void Apply_AllowsTestHooksEnabled_AsBooleanOverride()
+    {
+        var store = NewStore();
+        store.Apply(new[]
+        {
+            Override("Agent.TestHooks.Enabled", JsonDocument.Parse("true").RootElement),
+        });
+
+        var root = JsonDocument.Parse(File.ReadAllText(_path)).RootElement;
+        var agent = root.GetProperty("Agent");
+        Assert.True(agent.GetProperty("TestHooks").GetProperty("Enabled").GetBoolean());
+    }
+
+    [Fact]
     public void Apply_RejectsOutOfBoundsRuntimeTunables()
     {
         var store = NewStore();

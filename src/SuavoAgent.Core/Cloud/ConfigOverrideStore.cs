@@ -178,6 +178,7 @@ public sealed class ConfigOverrideStore
         "Agent.TemplateLearning.Enabled",
         "Agent.TemplateLearning.RuleGeneration",
         "Agent.TemplateLearning.AutoApproveOnFingerprintMatch",
+        "Agent.TestHooks.Enabled",
         "Vision.Enabled",
         "Vision.PeriodicCapture.Enabled",
         "Vision.PeriodicCapture.RequireForegroundMatch",

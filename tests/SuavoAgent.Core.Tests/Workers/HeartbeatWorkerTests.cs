@@ -66,6 +66,7 @@ public class HeartbeatWorkerTests : IDisposable
             PharmacyId = TestPharmacyId,
             HeartbeatIntervalSeconds = 30,
             WatchdogRepairRequestPath = _repairRequestPath,
+            TestHooks = new TestHooksOptions { Enabled = true },
         });
 
         _worker = new HeartbeatWorker(
@@ -255,6 +256,122 @@ public class HeartbeatWorkerTests : IDisposable
         });
 
         // Should not throw
+        await InvokeProcessAsync(response);
+    }
+
+    // ── Command Dispatch: force_learning_phase (test-only hook, M1 gate live testing) ──
+
+    [Fact]
+    public async Task ForceLearningPhase_Enabled_AdvancesDiscoveryToPattern()
+    {
+        var sessionId = $"sess-{Guid.NewGuid():N}";
+        _db.CreateLearningSession(sessionId, TestPharmacyId);
+        Assert.Equal("discovery", _db.GetLearningSession(sessionId)!.Value.Phase);
+
+        var response = BuildResponseJson("force_learning_phase", new
+        {
+            commandId = "cmd-flp-1",
+            targetPhase = "pattern",
+            sessionId,
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Equal("pattern", _db.GetLearningSession(sessionId)!.Value.Phase);
+    }
+
+    [Fact]
+    public async Task ForceLearningPhase_NoSessionId_ResolvesActiveSession()
+    {
+        var sessionId = $"sess-{Guid.NewGuid():N}";
+        _db.CreateLearningSession(sessionId, TestPharmacyId);
+
+        var response = BuildResponseJson("force_learning_phase", new
+        {
+            commandId = "cmd-flp-2",
+            targetPhase = "pattern",
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Equal("pattern", _db.GetLearningSession(sessionId)!.Value.Phase);
+    }
+
+    [Fact]
+    public async Task ForceLearningPhase_HookDisabled_NoOp()
+    {
+        // Flip the test-hook flag OFF on the worker under test.
+        var optsField = typeof(HeartbeatWorker)
+            .GetField("_options", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var opts = (AgentOptions)optsField.GetValue(_worker)!;
+        opts.TestHooks.Enabled = false;
+
+        var sessionId = $"sess-{Guid.NewGuid():N}";
+        _db.CreateLearningSession(sessionId, TestPharmacyId);
+
+        var response = BuildResponseJson("force_learning_phase", new
+        {
+            commandId = "cmd-flp-3",
+            targetPhase = "pattern",
+            sessionId,
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Equal("discovery", _db.GetLearningSession(sessionId)!.Value.Phase); // unchanged
+    }
+
+    [Fact]
+    public async Task ForceLearningPhase_InvalidTransition_NoOp()
+    {
+        // discovery -> model is a two-step jump; UpdateLearningPhase only allows single-step.
+        var sessionId = $"sess-{Guid.NewGuid():N}";
+        _db.CreateLearningSession(sessionId, TestPharmacyId);
+
+        var response = BuildResponseJson("force_learning_phase", new
+        {
+            commandId = "cmd-flp-4",
+            targetPhase = "model",
+            sessionId,
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Equal("discovery", _db.GetLearningSession(sessionId)!.Value.Phase); // unchanged
+    }
+
+    [Fact]
+    public async Task ForceLearningPhase_ApprovedPhase_NotForceable()
+    {
+        // The hook must never reach the approval-gated phases — that would bypass approve_pom.
+        var sessionId = $"sess-{Guid.NewGuid():N}";
+        _db.CreateLearningSession(sessionId, TestPharmacyId);
+        _db.UpdateLearningPhase(sessionId, "pattern");
+        _db.UpdateLearningPhase(sessionId, "model"); // legitimately at 'model'
+
+        var response = BuildResponseJson("force_learning_phase", new
+        {
+            commandId = "cmd-flp-approved",
+            targetPhase = "approved",
+            sessionId,
+        });
+
+        await InvokeProcessAsync(response);
+
+        Assert.Equal("model", _db.GetLearningSession(sessionId)!.Value.Phase); // unchanged — refused
+        Assert.Null(_db.GetLearningSession(sessionId)!.Value.ApprovedModelDigest);
+    }
+
+    [Fact]
+    public async Task ForceLearningPhase_NoActiveSession_NoThrow()
+    {
+        var response = BuildResponseJson("force_learning_phase", new
+        {
+            commandId = "cmd-flp-5",
+            targetPhase = "pattern",
+        });
+
+        // No session exists for the pharmacy — must not throw, must be a no-op.
         await InvokeProcessAsync(response);
     }
 

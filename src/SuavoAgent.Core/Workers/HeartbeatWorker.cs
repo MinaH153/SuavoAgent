@@ -801,6 +801,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "update_selector":
                     await HandleUpdateSelectorCommandAsync(scEl, cmd, ct);
                     break;
+                case "force_learning_phase":
+                    await HandleForceLearningPhaseAsync(scEl, cmd, ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -892,6 +895,98 @@ public sealed class HeartbeatWorker : ResilientHostedService
             _logger.LogWarning(ex, "update_selector: apply failed (rolled back)");
             await AckAsync(false, null, "apply failed — see agent logs");
         }
+    }
+
+    // Test-only seam, gated by Agent.TestHooks.Enabled (default false; signed config-override to flip).
+    // Drives a SINGLE-STEP learning-phase transition on the active session so the M1 PhaseGate can be
+    // exercised end-to-end on a real box. It NEVER bypasses a gate: UpdateLearningPhase enforces
+    // IsValidPhaseTransition (one step forward only) + stamps phase_changed_at, and the PhaseGate still
+    // evaluates and holds. Double-gated (ECDSA-signed command AND the flag), inert in the field.
+    private async Task HandleForceLearningPhaseAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        if (!_options.TestHooks.Enabled)
+        {
+            _logger.LogWarning("force_learning_phase: rejected — Agent.TestHooks.Enabled is false");
+            await AckAsync(false, null, "test_hooks_disabled");
+            return;
+        }
+
+        var targetPhase = dataEl.TryGetProperty("targetPhase", out var tp) ? tp.GetString() : null;
+        if (string.IsNullOrWhiteSpace(targetPhase))
+        {
+            _logger.LogWarning("force_learning_phase: missing targetPhase");
+            await AckAsync(false, null, "missing targetPhase");
+            return;
+        }
+
+        // Only the gate-exercising learning phases may be forced. 'approved'/'active' are
+        // NEVER forceable: reaching them must go through the approve_pom digest-verified flow,
+        // and forcing them here would bypass the POM approval gate (and trigger adapter
+        // activation on an unapproved model). 'discovery' is the start state, not a forward target.
+        if (targetPhase is not ("pattern" or "model"))
+        {
+            _logger.LogWarning("force_learning_phase: phase '{Phase}' is not forceable (only pattern/model)", targetPhase);
+            await AckAsync(false, null, "phase_not_forceable");
+            return;
+        }
+
+        var explicitSession = dataEl.TryGetProperty("sessionId", out var sid) ? sid.GetString() : null;
+        var sessionId = !string.IsNullOrWhiteSpace(explicitSession)
+            ? explicitSession
+            : _stateDb.GetActiveSessionId(_options.PharmacyId ?? "");
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            _logger.LogWarning("force_learning_phase: no active learning session");
+            await AckAsync(false, null, "no_active_learning_session");
+            return;
+        }
+
+        var session = _stateDb.GetLearningSession(sessionId);
+        if (session is null)
+        {
+            _logger.LogWarning("force_learning_phase: session {Session} not found", sessionId);
+            await AckAsync(false, null, "session_not_found");
+            return;
+        }
+        var fromPhase = session.Value.Phase;
+
+        try
+        {
+            // Enforces IsValidPhaseTransition (single-step forward) + stamps phase_changed_at=now,
+            // which makes the PhaseGate's 72h calendar floor fail on the fresh phase → gate holds.
+            _stateDb.UpdateLearningPhase(sessionId, targetPhase);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "force_learning_phase: rejected transition {From} -> {To}", fromPhase, targetPhase);
+            await AckAsync(false, null, $"invalid_transition: {fromPhase} -> {targetPhase}");
+            return;
+        }
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: sessionId,
+            EventType: "test_force_phase",
+            FromState: fromPhase,
+            ToState: targetPhase,
+            Trigger: "force_learning_phase",
+            CommandId: cmd.Nonce,
+            RequesterId: "operator",
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: $"test hook forced {fromPhase} -> {targetPhase}"));
+
+        _logger.LogInformation("force_learning_phase: session {Session} forced {From} -> {To}",
+            sessionId, fromPhase, targetPhase);
+        await AckAsync(true, new { sessionId, fromPhase, toPhase = targetPhase }, null);
     }
 
     private async Task HandleShowIntentCursorAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
