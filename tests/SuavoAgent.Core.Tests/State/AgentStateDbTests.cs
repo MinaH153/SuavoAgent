@@ -49,6 +49,25 @@ public class AgentStateDbTests : IDisposable
     }
 
     [Fact]
+    public void ExportWritebackStatesJson_ScrubsErrorColumn()
+    {
+        // The free-text `error` column is populated from native SQL exception
+        // messages and could carry PHI; the export must run it through the
+        // PHI scrubber so nothing rides into the cloud-uploaded archive.
+        const string rawError = "writeback failed: SSN 123-45-6789 in exception text";
+        var scrubbed = SuavoAgent.Core.Learning.PhiScrubber.ScrubText(rawError);
+        Assert.NotEqual(rawError, scrubbed); // sanity: scrubber actually changes it
+
+        _db.UpsertWritebackState("task-1", "RX001", WritebackState.ManualReview, 1, rawError);
+
+        using var doc = System.Text.Json.JsonDocument.Parse(_db.ExportWritebackStatesJson());
+        var exportedError = doc.RootElement[0].GetProperty("error").GetString();
+
+        Assert.Equal(scrubbed, exportedError);
+        Assert.DoesNotContain("123-45-6789", exportedError);
+    }
+
+    [Fact]
     public void AuditEntries_AppendAndCount()
     {
         _db.AppendAuditEntry("task-1", WritebackState.Queued, WritebackState.Claimed, WritebackTrigger.Claim, null);
