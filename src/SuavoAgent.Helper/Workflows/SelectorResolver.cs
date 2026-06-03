@@ -44,8 +44,11 @@ public sealed class SelectorResolver
 
     /// <summary>
     /// The highest-version active patch whose step matches and whose (optional) PMS/screen gates
-    /// are satisfied by the live context. A null gate on the patch is a wildcard; a null context
-    /// can't exclude a gated patch (we don't know the context, so we don't block on it).
+    /// are satisfied by the live context. A null gate on the patch is a fleet-wide wildcard.
+    ///
+    /// Gating is FAIL-CLOSED: a non-null gate is a restriction, so it must MATCH the live context —
+    /// and if the patch is gated but we don't know the live PMS/screen (context null), the patch is
+    /// excluded. We never fire a version/screen-specific fix where we can't confirm the version/screen.
     /// </summary>
     public SelectorPatch? ActivePatchFor(SelectorStepId step)
     {
@@ -53,9 +56,9 @@ public sealed class SelectorResolver
         foreach (var p in _patches)
         {
             if (p.StepId != step) continue;
-            if (p.PmsFingerprint is not null && _pmsFingerprint is not null
+            if (p.PmsFingerprint is not null
                 && !string.Equals(p.PmsFingerprint, _pmsFingerprint, StringComparison.Ordinal)) continue;
-            if (p.ScreenSignatureV1 is not null && _screenSignature is not null
+            if (p.ScreenSignatureV1 is not null
                 && !string.Equals(p.ScreenSignatureV1, _screenSignature, StringComparison.Ordinal)) continue;
             if (best is null || p.Version > best.Version) best = p;
         }

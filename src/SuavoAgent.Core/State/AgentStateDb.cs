@@ -2719,7 +2719,9 @@ public sealed class AgentStateDb : IDisposable
     {
         try
         {
-            Enum.TryParse<SelectorStepId>(reader.GetString(2), out var step);
+            // A corrupt step_id must be skipped, NOT defaulted to step 0 (which would silently
+            // re-target the patch to the wrong step).
+            if (!Enum.TryParse<SelectorStepId>(reader.GetString(2), out var step)) return null;
             var target = System.Text.Json.JsonSerializer.Deserialize<ElementSignature>(reader.GetString(5));
             if (target is null) return null;
             var fallbacks = System.Text.Json.JsonSerializer

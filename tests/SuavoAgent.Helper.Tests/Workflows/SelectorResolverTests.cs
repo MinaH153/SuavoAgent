@@ -116,6 +116,20 @@ public class SelectorResolverTests
     }
 
     [Fact]
+    public void GatedPatch_NullLiveContext_ExcludedFailClosed()
+    {
+        // A PMS/screen-gated patch must NOT fire when we can't confirm the live context —
+        // a gate is a restriction, so unknown context excludes it (fail-closed).
+        var pmsGated = new SelectorResolver(
+            new[] { Patch(pms: "v1.2") }, pmsFingerprint: null, screenSignature: null);
+        Assert.Null(pmsGated.ActivePatchFor(SelectorStepId.QuickSearchField));
+
+        var screenGated = new SelectorResolver(
+            new[] { Patch(screen: "scrA") }, pmsFingerprint: null, screenSignature: null);
+        Assert.Null(screenGated.ActivePatchFor(SelectorStepId.QuickSearchField));
+    }
+
+    [Fact]
     public void GateMatch_OrWildcard_SelectsPatch()
     {
         var matched = new SelectorResolver(
