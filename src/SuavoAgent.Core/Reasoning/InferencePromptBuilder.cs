@@ -50,6 +50,12 @@ public static class InferencePromptBuilder
     private const int MaxElementNameLen = 100;
     private const int MaxElements = 24;
     private const int MaxFlags = 16;
+    private const int MaxScreenTextRegions = 16;
+    private const int MaxScreenTextLen = 120;
+    private const int MaxScreenElements = 24;
+    // Aggregate char budget across screen_text + screen_elements so vision can't blow the
+    // Tier-2 small-token discipline regardless of how many regions/elements are present.
+    private const int MaxScreenCharBudget = 1000;
 
     /// <summary>
     /// The user message — a compact JSON description of the current state.
@@ -72,15 +78,59 @@ public static class InferencePromptBuilder
                 kv => Truncate(kv.Key, MaxFieldLen),
                 kv => Truncate(kv.Value, MaxFieldLen));
 
-        var state = new
+        // Vision grounding: when a ScreenFrame has been merged into the context (vision on),
+        // surface the on-screen text + elements so the LLM reasons over what's literally shown.
+        // When vision is off (both empty) we emit the EXACT legacy object — byte-identical output.
+        object state;
+        if (ctx.ScreenText.Count == 0 && ctx.ScreenElements.Count == 0)
         {
-            skill = Truncate(ctx.SkillId, MaxFieldLen),
-            process = Truncate(ctx.ProcessName, MaxFieldLen),
-            window = Truncate(ctx.WindowTitle, MaxFieldLen),
-            visible_elements = elements,
-            operator_idle_ms = ctx.OperatorIdleMs,
-            flags = cappedFlags,
-        };
+            state = new
+            {
+                skill = Truncate(ctx.SkillId, MaxFieldLen),
+                process = Truncate(ctx.ProcessName, MaxFieldLen),
+                window = Truncate(ctx.WindowTitle, MaxFieldLen),
+                visible_elements = elements,
+                operator_idle_ms = ctx.OperatorIdleMs,
+                flags = cappedFlags,
+            };
+        }
+        else
+        {
+            // Highest-confidence-first, bounded by both a count cap AND a shared char budget.
+            var budget = MaxScreenCharBudget;
+            var screenText = new List<string>();
+            foreach (var t in ctx.ScreenText
+                .OrderByDescending(t => t.Confidence)
+                .ThenByDescending(t => t.Bounds.Area))
+            {
+                if (screenText.Count >= MaxScreenTextRegions || budget <= 0) break;
+                var s = Truncate(t.Text, Math.Min(MaxScreenTextLen, budget));
+                if (s.Length == 0) continue;
+                screenText.Add(s);
+                budget -= s.Length;
+            }
+
+            var screenElements = new List<object>();
+            foreach (var e in ctx.ScreenElements.OrderByDescending(e => e.Confidence))
+            {
+                if (screenElements.Count >= MaxScreenElements || budget <= 0) break;
+                var role = Truncate(e.Role, MaxFieldLen);
+                var name = Truncate(e.Name, Math.Min(MaxElementNameLen, budget));
+                screenElements.Add(new { role, name });
+                budget -= role.Length + name.Length;
+            }
+            state = new
+            {
+                skill = Truncate(ctx.SkillId, MaxFieldLen),
+                process = Truncate(ctx.ProcessName, MaxFieldLen),
+                window = Truncate(ctx.WindowTitle, MaxFieldLen),
+                visible_elements = elements,
+                operator_idle_ms = ctx.OperatorIdleMs,
+                flags = cappedFlags,
+                screen_text = screenText,
+                screen_elements = screenElements,
+            };
+        }
         var allowed = request.AllowedActions
             .OrderBy(a => a.ToString(), StringComparer.Ordinal)
             .Select(a => a.ToString())

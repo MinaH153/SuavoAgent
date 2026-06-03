@@ -1,7 +1,9 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Learning;
 
 namespace SuavoAgent.Core.Cloud;
 
@@ -23,6 +25,11 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     private readonly AgentOptions _options;
 
     public SuavoCloudClient(AgentOptions options)
+        : this(options, CreateHandler(options))
+    {
+    }
+
+    internal SuavoCloudClient(AgentOptions options, HttpMessageHandler handler)
     {
         _options = options;
         _signer = new HmacSigner(options.ApiKey ?? throw new InvalidOperationException("ApiKey is required"));
@@ -31,6 +38,11 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         if (uri.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException($"CloudUrl must use HTTPS, got: {uri.Scheme}");
 
+        _http = new HttpClient(handler) { BaseAddress = uri, Timeout = TimeSpan.FromSeconds(30) };
+    }
+
+    private static HttpMessageHandler CreateHandler(AgentOptions options)
+    {
         var handler = new HttpClientHandler();
         if (!string.IsNullOrEmpty(options.CloudCertPin))
         {
@@ -44,7 +56,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
                 return pins.Any(pin => pin.Equals(certHash, StringComparison.Ordinal));
             };
         }
-        _http = new HttpClient(handler) { BaseAddress = uri, Timeout = TimeSpan.FromSeconds(30) };
+        return handler;
     }
 
     public async Task<JsonElement?> HeartbeatAsync(object payload, CancellationToken ct)
@@ -81,6 +93,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     public async Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct)
     {
         var body = JsonSerializer.Serialize(payload);
+        OutboundPhiGuard.AssertAllowed(path, body, _options);
         var timestamp = DateTimeOffset.UtcNow.ToString("o");
         var signature = _signer.Sign(timestamp, body);
 
@@ -91,7 +104,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         request.Headers.Add("x-agent-signature", signature);
 
         using var response = await _http.SendAsync(request, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureCloudSuccessAsync(response, path, ct).ConfigureAwait(false);
 
         var responseBody = await response.Content.ReadAsStringAsync(ct);
         if (string.IsNullOrWhiteSpace(responseBody))
@@ -103,6 +116,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     public async Task<JsonElement?> PostSignedVerifiedAsync(string path, object payload, string publicKeyDer, CancellationToken ct)
     {
         var body = JsonSerializer.Serialize(payload);
+        OutboundPhiGuard.AssertAllowed(path, body, _options);
         var timestamp = DateTimeOffset.UtcNow.ToString("o");
         var signature = _signer.Sign(timestamp, body);
 
@@ -113,7 +127,7 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         request.Headers.Add("x-agent-signature", signature);
 
         using var response = await _http.SendAsync(request, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureCloudSuccessAsync(response, path, ct).ConfigureAwait(false);
 
         var responseBody = await response.Content.ReadAsStringAsync(ct);
         if (string.IsNullOrWhiteSpace(responseBody))
@@ -128,6 +142,24 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         }
 
         return JsonSerializer.Deserialize<JsonElement>(responseBody);
+    }
+
+    private static async Task EnsureCloudSuccessAsync(
+        HttpResponseMessage response,
+        string path,
+        CancellationToken ct)
+    {
+        if (response.IsSuccessStatusCode)
+            return;
+
+        var body = response.Content == null
+            ? null
+            : await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var safeReason = CloudErrorSanitizer.FromBody(body);
+        throw new HttpRequestException(
+            $"Cloud request {path} failed with {(int)response.StatusCode} ({response.ReasonPhrase}); reason={safeReason}",
+            null,
+            response.StatusCode);
     }
 
     private static bool VerifyEcdsaSignature(string body, string signatureBase64, string publicKeyDer)
@@ -199,4 +231,172 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     }
 
     public void Dispose() => _http.Dispose();
+}
+
+internal static class OutboundPhiGuard
+{
+    private static readonly HashSet<string> BlockedFieldNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "rxnumber",
+        "rx_number",
+        "patientfirstname",
+        "patientlastname",
+        "patientlastinitial",
+        "patientname",
+        "patientphone",
+        "deliveryaddress1",
+        "deliveryaddress2",
+        "deliverycity",
+        "deliverystate",
+        "deliveryzip",
+        "firstname",
+        "lastname",
+        "lastinitial",
+        "phone",
+        "address1",
+        "address2",
+        "streetaddress",
+        "dob",
+        "dateofbirth",
+        "ssn",
+        "mrn",
+        "insuranceid",
+        "memberid",
+        "policy",
+        "rxdeliveryqueue",
+    };
+
+    public static void AssertAllowed(string path, string body, AgentOptions options)
+    {
+        if (IsExplicitPhiPath(path, options))
+            return;
+
+        using var doc = JsonDocument.Parse(body);
+        var offendingField = FindPhiField(doc.RootElement);
+        if (offendingField != null)
+        {
+            // PHI-safe diagnostic: name the FIELD that tripped the guard (never the
+            // value). Without this, a blocked heartbeat is undebuggable — which is
+            // exactly how a false-positive on legitimate telemetry can silently take
+            // an agent offline. The field name flows into logs so the offending
+            // payload field can be pinpointed and cleaned up.
+            throw new InvalidOperationException(
+                $"PHI-classified payload blocked before outbound cloud POST to {path} (field: {offendingField}).");
+        }
+    }
+
+    private static bool IsExplicitPhiPath(string path, AgentOptions options)
+    {
+        if (string.Equals(path, "/api/agent/patient-details", StringComparison.Ordinal))
+            return true;
+
+        return string.Equals(path, "/api/agent/sync", StringComparison.Ordinal) &&
+               options.EnableLegacyPhiDeliveryQueueSync;
+    }
+
+    /// <summary>
+    /// Returns the normalized NAME of the first field whose name or value classifies
+    /// as PHI, or null if the payload is clean. Returns the field name only — never
+    /// the value — so it is safe to surface in exceptions and logs.
+    /// </summary>
+    private static string? FindPhiField(JsonElement element, string? propertyName = null)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var property in element.EnumerateObject())
+                {
+                    var normalized = NormalizeFieldName(property.Name);
+                    if (BlockedFieldNames.Contains(normalized))
+                        return normalized;
+                    var nested = FindPhiField(property.Value, normalized);
+                    if (nested != null)
+                        return nested;
+                }
+
+                return null;
+
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    var nested = FindPhiField(item, propertyName);
+                    if (nested != null)
+                        return nested;
+                }
+
+                return null;
+
+            case JsonValueKind.String:
+                var value = element.GetString();
+                if (string.IsNullOrWhiteSpace(value) || IsOperationalSafeString(propertyName, value))
+                    return null;
+                // Some telemetry ships pre-validated, pre-serialized JSON as a string
+                // value (intelligenceContext, efficiencyReport, fleetSignals). Scanning
+                // the blob as opaque text trips the date pattern on its embedded ISO
+                // timestamps. Parse and recurse so each leaf gets per-field treatment:
+                // embedded timestamps are exempted; embedded PHI is still caught and
+                // named by its nested field.
+                if (TryParseNestedJson(value, out var parsed))
+                    return FindPhiField(parsed, propertyName);
+                return PhiScrubber.ContainsPhi(value) ? (propertyName ?? "(root)") : null;
+
+            default:
+                return null;
+        }
+    }
+
+    private static bool TryParseNestedJson(string value, out JsonElement element)
+    {
+        element = default;
+        var trimmed = value.AsSpan().TrimStart();
+        if (trimmed.Length == 0 || (trimmed[0] != '{' && trimmed[0] != '['))
+            return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(value);
+            element = doc.RootElement.Clone();
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    // ISO-8601 datetimes (incl. UTC "+00:00"/"Z" offsets) are operational metadata,
+    // not PHI. Requires the "T" + time, so a bare date like a "1990-01-15" DOB is NOT
+    // matched and stays subject to the PHI scan.
+    private static readonly Regex IsoTimestamp = new(
+        @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static bool IsOperationalSafeString(string? propertyName, string value)
+    {
+        if (propertyName is not null &&
+            (propertyName.EndsWith("hash", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.EndsWith("sha256", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.Contains("digest", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.Contains("timestamp", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.Contains("capturedat", StringComparison.OrdinalIgnoreCase) ||
+             propertyName.Contains("syncedat", StringComparison.OrdinalIgnoreCase) ||
+             propertyName is "ndc" or "evidenceid" or "scanwindowid" or "schemaversion" or "schemasignature" or
+                 "pms" or "pmsversion" or "status" or "outcome" or "severity" or "source" or "sourcedetail" or
+                 "classification" or "city" or "state" or "zip5" or "priority" or "temperaturerequirement"))
+        {
+            return true;
+        }
+
+        // The charset below allows the "-" of a negative UTC offset but not the "+" of a
+        // positive one, so a UTC timestamp ("...T..:..:..+00:00" — every watchdog write
+        // and every canary lastVerifiedAt) would escape this exemption and trip the date
+        // pattern, silently blocking the heartbeat from any non-negative-offset timezone.
+        if (IsoTimestamp.IsMatch(value))
+            return true;
+
+        return value.Length <= 96 &&
+               value.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '-' or '.' or ':');
+    }
+
+    private static string NormalizeFieldName(string name) =>
+        new(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 }

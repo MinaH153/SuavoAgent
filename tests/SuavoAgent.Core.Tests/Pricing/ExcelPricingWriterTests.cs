@@ -44,12 +44,12 @@ public class ExcelPricingWriterTests : IDisposable
         var ws = wb.Worksheet(1);
         var headers = GetHeaders(ws);
 
-        Assert.True(headers.ContainsKey("Supplier"));
-        Assert.True(headers.ContainsKey("Cost (per unit)"));
+        Assert.True(headers.ContainsKey(PricingJobDefaults.SupplierColumn));
+        Assert.True(headers.ContainsKey(PricingJobDefaults.CostColumn));
         Assert.True(headers.ContainsKey(ExcelPricingWriter.DefaultStatusHeader));
 
-        Assert.Equal("McKesson", ws.Cell(2, headers["Supplier"]).GetString());
-        Assert.Equal(0.0316, ws.Cell(2, headers["Cost (per unit)"]).GetDouble(), 4);
+        Assert.Equal("McKesson", ws.Cell(2, headers[PricingJobDefaults.SupplierColumn]).GetString());
+        Assert.Equal(0.0316, ws.Cell(2, headers[PricingJobDefaults.CostColumn]).GetDouble(), 4);
         Assert.Equal(StatusMarkers.Ok, ws.Cell(2, headers[ExcelPricingWriter.DefaultStatusHeader]).GetString());
     }
 
@@ -72,8 +72,8 @@ public class ExcelPricingWriterTests : IDisposable
         var ws = wb.Worksheet(1);
         var headers = GetHeaders(ws);
 
-        Assert.Equal("McKesson", ws.Cell(2, headers["Supplier"]).GetString());
-        Assert.Equal("", ws.Cell(3, headers["Supplier"]).GetString());
+        Assert.Equal("McKesson", ws.Cell(2, headers[PricingJobDefaults.SupplierColumn]).GetString());
+        Assert.Equal("", ws.Cell(3, headers[PricingJobDefaults.SupplierColumn]).GetString());
         Assert.Equal(StatusMarkers.NoSupplierRows, ws.Cell(3, headers[ExcelPricingWriter.DefaultStatusHeader]).GetString());
     }
 
@@ -99,7 +99,7 @@ public class ExcelPricingWriterTests : IDisposable
     [Fact]
     public void Write_UpdatesExistingColumnsNoDuplicates()
     {
-        var path = CreateExcel(includeSupplierCol: true);
+        var path = CreateExcel();
 
         var results = new List<SupplierPriceResult>
         {
@@ -113,15 +113,39 @@ public class ExcelPricingWriterTests : IDisposable
         var ws = wb.Worksheet(1);
         var headers = GetHeaders(ws);
 
-        Assert.Equal(1, headers.Keys.Count(k => k == "Supplier"));
-        Assert.Equal("Real Value Rx", ws.Cell(2, headers["Supplier"]).GetString());
+        Assert.Equal(1, headers.Keys.Count(k => k == PricingJobDefaults.SupplierColumn));
+        Assert.Equal("Real Value Rx", ws.Cell(2, headers[PricingJobDefaults.SupplierColumn]).GetString());
+    }
+
+    [Fact]
+    public void Write_ExplicitLegacyHeadersStillHonoredForExistingWorkflows()
+    {
+        var path = CreateExcel(includeLegacySupplierCol: true);
+
+        var result = _writer.Write(
+            path,
+            [new("job1", 2, "55111064501", true, "McKesson", 0.0316m, null)],
+            supplierColumnHeader: PricingJobDefaults.LegacySupplierColumn,
+            costColumnHeader: PricingJobDefaults.LegacyCostColumn);
+
+        Assert.True(result.Success);
+
+        using var wb = new XLWorkbook(result.OutputPath!);
+        var ws = wb.Worksheet(1);
+        var headers = GetHeaders(ws);
+
+        Assert.Equal(1, headers.Keys.Count(k => k == PricingJobDefaults.LegacySupplierColumn));
+        Assert.Equal("McKesson", ws.Cell(2, headers[PricingJobDefaults.LegacySupplierColumn]).GetString());
+        Assert.Equal(0.0316, ws.Cell(2, headers[PricingJobDefaults.LegacyCostColumn]).GetDouble(), 4);
     }
 
     [Fact]
     public void Write_MissingFile_Fails()
     {
-        var result = _writer.Write("/nonexistent/path.xlsx", []);
+        var result = _writer.Write(Path.Combine(_tempDir, "Patient Jane Doe Top500.xlsx"), []);
         Assert.False(result.Success);
+        Assert.DoesNotContain("Jane Doe", result.Error ?? "");
+        Assert.DoesNotContain("Top500.xlsx", result.Error ?? "");
     }
 
     [Fact]
@@ -155,7 +179,7 @@ public class ExcelPricingWriterTests : IDisposable
         using var wb = new XLWorkbook(path);
         var ws = wb.Worksheet(1);
         var headers = GetHeaders(ws);
-        Assert.Equal("McKesson", ws.Cell(2, headers["Supplier"]).GetString());
+        Assert.Equal("McKesson", ws.Cell(2, headers[PricingJobDefaults.SupplierColumn]).GetString());
     }
 
     private static Dictionary<string, int> GetHeaders(IXLWorksheet ws)
@@ -170,17 +194,22 @@ public class ExcelPricingWriterTests : IDisposable
         return result;
     }
 
-    private string CreateExcel(bool includeSupplierCol = false)
+    private string CreateExcel(bool includeLegacySupplierCol = false)
     {
         var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
         using var wb = new XLWorkbook();
         var ws = wb.Worksheets.Add("Sheet1");
         ws.Cell(1, 1).Value = "NDC";
         ws.Cell(1, 2).Value = "Drug Name";
-        if (includeSupplierCol)
+        if (includeLegacySupplierCol)
         {
-            ws.Cell(1, 3).Value = "Supplier";
-            ws.Cell(1, 4).Value = "Cost (per unit)";
+            ws.Cell(1, 3).Value = PricingJobDefaults.LegacySupplierColumn;
+            ws.Cell(1, 4).Value = PricingJobDefaults.LegacyCostColumn;
+        }
+        else
+        {
+            ws.Cell(1, 3).Value = PricingJobDefaults.SupplierColumn;
+            ws.Cell(1, 4).Value = PricingJobDefaults.CostColumn;
         }
         ws.Cell(2, 1).Value = "55111-0645-01";
         ws.Cell(2, 2).Value = "Omeprazole DR 40mg";

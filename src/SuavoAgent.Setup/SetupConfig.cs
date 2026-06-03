@@ -13,7 +13,8 @@ public sealed record SetupConfig(
     [property: JsonPropertyName("api_key")] string ApiKey,
     [property: JsonPropertyName("cloud_url")] string CloudUrl,
     [property: JsonPropertyName("release_tag")] string ReleaseTag,
-    [property: JsonPropertyName("learning_mode")] bool LearningMode)
+    [property: JsonPropertyName("learning_mode")] bool LearningMode,
+    [property: JsonPropertyName("agent_id")] string AgentId = "")
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -25,6 +26,9 @@ public sealed record SetupConfig(
     // H-5: Format validation patterns
     private static readonly Regex PharmacyIdPattern = new(@"^[A-Za-z0-9_\-]{1,64}$", RegexOptions.Compiled);
     private static readonly Regex ApiKeyPattern = new(@"^[A-Za-z0-9_\-\.]{0,256}$", RegexOptions.Compiled);
+    private static readonly Regex AgentIdPattern = new(
+        @"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
     /// Load config from setup.json next to the EXE, or fall back to command-line args.
@@ -69,11 +73,14 @@ public sealed record SetupConfig(
         // H-5: ApiKey format (empty allowed for cloud-optional)
         if (!ApiKeyPattern.IsMatch(config.ApiKey))
             throw new Exception($"ApiKey must match [A-Za-z0-9_\\-.] up to 256 chars — got length {config.ApiKey.Length}");
+
+        if (!AgentIdPattern.IsMatch(config.AgentId))
+            throw new Exception("AgentId must be a cloud UUID. Legacy local setup.json installs are disabled; use the dashboard bootstrap installer.");
     }
 
     private static SetupConfig? ParseArgs(string[] args)
     {
-        string? pharmacyId = null, apiKey = null, cloudUrl = null;
+        string? pharmacyId = null, apiKey = null, cloudUrl = null, agentId = null;
         string? releaseTag = null;
         bool learningMode = false;
 
@@ -83,6 +90,7 @@ public sealed record SetupConfig(
             {
                 case "--pharmacy-id": pharmacyId = args[++i]; break;
                 case "--api-key": apiKey = args[++i]; break;
+                case "--agent-id": agentId = args[++i]; break;
                 case "--cloud-url": cloudUrl = args[++i]; break;
                 case "--release-tag": releaseTag = args[++i]; break;
                 case "--learning-mode": learningMode = true; break;
@@ -101,6 +109,7 @@ public sealed record SetupConfig(
             ApiKey: apiKey,
             CloudUrl: cloudUrl ?? "https://suavollc.com",
             ReleaseTag: releaseTag ?? "v3.0.0",
-            LearningMode: learningMode);
+            LearningMode: learningMode,
+            AgentId: agentId ?? "");
     }
 }

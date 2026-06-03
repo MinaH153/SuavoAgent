@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Serilog;
 using SuavoAgent.Core;
+using SuavoAgent.Core.Adapters;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
@@ -12,13 +13,36 @@ using SuavoAgent.Core.Reasoning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Workers;
+using SuavoAgent.Diagnostics;
+
+// Diagnostic Mesh: Wire.AttachUnhandledHooks MUST be the literal first
+// executable statement (spec §7 PR 4 wire-ordering invariant; verified
+// by WireOrderingTests). Wire's LocalCrashLogPath preserves the existing
+// startup-crash.log file as defense-in-depth; LocalJournalPath adds the
+// structured events.jsonl trail; Sentry is the BAA-covered transport
+// when SUAVO_SENTRY_DSN is set.
+//
+// Why this comes BEFORE the AppDomain handler below: a crash during
+// Wire init still leaves the legacy WriteCrash sink as a fallback, but
+// once Wire is up, both fire and we get structured + plaintext audit
+// of every crash from the same handler.
+Wire.AttachUnhandledHooks(WireComponent.Core, new WireOptions
+{
+    LocalCrashLogPath = Path.Combine(CoreCrashDir(), "startup-crash.log"),
+    LocalJournalPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent", "diagnostics", "events.jsonl"),
+    Dsn = Environment.GetEnvironmentVariable("SUAVO_SENTRY_DSN"),
+    EnableSentry = true,
+});
 
 // Crash sink: before ANY other code runs, wire a last-resort handler that
 // persists unhandled exceptions to a file under ProgramData (writable by
 // LocalService/NetworkService/SYSTEM). Otherwise early-bootstrap failures
 // die silently under service context — the .NET runtime never gets a
 // chance to emit an Application event, so operators see only Windows
-// error 1067 with no underlying cause.
+// error 1067 with no underlying cause. Kept alongside Wire for
+// defense-in-depth: if Wire init fails, this still captures.
 //
 // ProgramData is preferred over SpecialFolder.ApplicationData because
 // the latter resolves to the user-scoped profile (which is empty and
@@ -36,7 +60,10 @@ static void WriteCrash(string stage, Exception ex)
     {
         var line = $"[{DateTimeOffset.Now:O}] [{stage}] {ex.GetType().FullName}: {ex.Message}"
                    + Environment.NewLine + ex.ToString() + Environment.NewLine + Environment.NewLine;
-        File.AppendAllText(Path.Combine(CoreCrashDir(), "startup-crash.log"), line);
+        File.AppendAllText(
+            Path.Combine(CoreCrashDir(), "startup-crash.log"),
+            line,
+            new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
     }
     catch { /* last resort — nothing we can do */ }
 }
@@ -60,6 +87,7 @@ try
         .WriteTo.Console()
         .WriteTo.File(
             Path.Combine(dataDir, "logs", "startup-.log"),
+            encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
             rollingInterval: RollingInterval.Day,
             retainedFileCountLimit: 7)
         .CreateLogger();
@@ -88,6 +116,7 @@ Log.Logger = new LoggerConfiguration()
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "logs", "core-.log"),
+        encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
         rollingInterval: RollingInterval.Day,
         retainedFileCountLimit: 30,
         fileSizeLimitBytes: 50_000_000,
@@ -119,6 +148,7 @@ try
         "SuavoAgent",
         "config-overrides.json");
     builder.Configuration.AddJsonFile(configOverridesPath, optional: true, reloadOnChange: true);
+    var appSettingsPath = Path.Combine(exeDir, "appsettings.json");
 
     var startupVersion = builder.Configuration.GetSection("Agent").Get<AgentOptions>()?.Version ?? "unknown";
     Log.Information("SuavoAgent.Core starting v{Version}", startupVersion);
@@ -152,8 +182,21 @@ try
 
     // H-1: Seal plaintext credentials with DPAPI on first run (Windows only)
     SuavoAgent.Core.Config.CredentialProtector.SealSecretsFile(
-        Path.Combine(AppContext.BaseDirectory, "appsettings.json"),
+        appSettingsPath,
         LoggerFactory.Create(lb => lb.AddSerilog()).CreateLogger("CredentialProtector"));
+
+    // The cloud clients below capture this local AgentOptions instance, not the
+    // later IOptions<AgentOptions>.Value object. On restart, appsettings.json
+    // already contains DPAPI-wrapped secrets, so unwrap agentOpts before any
+    // HMAC signer is constructed. Otherwise config/heartbeat clients sign with
+    // the literal "DPAPI:..." envelope and cloud correctly returns 401.
+    if (OperatingSystem.IsWindows())
+    {
+        agentOpts.ApiKey = SuavoAgent.Core.Config.CredentialProtector.Unprotect(agentOpts.ApiKey);
+        agentOpts.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(agentOpts.SqlPassword);
+        foreach (var ph in agentOpts.Pharmacies)
+            ph.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(ph.SqlPassword);
+    }
 
     Log.Information(
         "Writeback mode: {Mode} (SQL writes {Status}) — audit receipts always generated",
@@ -164,14 +207,28 @@ try
         var cloudClient = new SuavoCloudClient(agentOpts);
         builder.Services.AddSingleton(cloudClient);
         builder.Services.AddSingleton<IPostSigner>(cloudClient);
+        builder.Services.AddSingleton<PricingJobCloudUploader>();
         builder.Services.AddSingleton<SeedClient>();
+        builder.Services.AddSingleton<IAgentCredentialRecoveryClient>(sp =>
+            new AgentCredentialRecoveryClient(
+                agentOpts,
+                appSettingsPath,
+                sp.GetRequiredService<ILogger<AgentCredentialRecoveryClient>>()));
+        builder.Services.AddSingleton<CloudAuthRecoveryCoordinator>();
 
         // Cloud config-push: AgentConfigClient polls GET /api/agent/config,
         // ConfigOverrideStore flattens to config-overrides.json on disk,
         // ConfigSyncWorker runs the loop. Manual HttpClient instantiation
         // matches SuavoCloudClient's idiom — the codebase doesn't use
         // IHttpClientFactory so we don't pull in Microsoft.Extensions.Http.
-        var configHttp = new HttpClient
+        // PooledConnectionLifetime caps the DNS pin: the singleton HttpClient
+        // would otherwise hold the first-resolved IP for process lifetime and
+        // miss Vercel IP rotations until agent restart.
+        var configHandler = new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        };
+        var configHttp = new HttpClient(configHandler, disposeHandler: true)
         {
             BaseAddress = new Uri(agentOpts.CloudUrl),
             Timeout = TimeSpan.FromSeconds(10),
@@ -180,11 +237,26 @@ try
             new AgentConfigClient(
                 configHttp,
                 agentOpts,
-                sp.GetRequiredService<ILogger<AgentConfigClient>>()));
+                sp.GetRequiredService<ILogger<AgentConfigClient>>(),
+                sp.GetService<CloudAuthRecoveryCoordinator>()));
         builder.Services.AddSingleton(sp => new ConfigOverrideStore(
             configOverridesPath,
             sp.GetRequiredService<ILogger<ConfigOverrideStore>>()));
         builder.Services.AddSingleton(new ConfigSyncOptions());
+
+        // Diagnostic Mesh OTA — wire the Phase 2 ruleset distribution path
+        // (Comp 2.2). Adds IRulesetSwapper / IRulesetVerifier (eager-loads
+        // the embedded trust store) / RulesetSyncStore / IRulesetClient.
+        // ConfigSyncWorker auto-picks these up through its optional
+        // constructor params and exposes RulesetOtaEnabled = true.
+        //
+        // The cloud-side `agent-ruleset` Edge Function (Comp 2A) is not
+        // shipped yet — fetches will classify as Transient (404) and
+        // preserve the embedded Phase 1 ruleset. Heartbeat tags
+        // mesh.ruleset_swaps_total=0 give ops visibility into the
+        // missing endpoint.
+        builder.Services.AddDiagnosticMeshOta(agentOpts);
+
         builder.Services.AddHostedService<ConfigSyncWorker>();
     }
     else
@@ -193,7 +265,23 @@ try
     }
     builder.Services.AddSingleton(sp => new SeedApplicator(sp.GetRequiredService<AgentStateDb>()));
 
+    // Adapter registry — single source of per-PMS Core config + the enforced PHI-policy invariant.
+    builder.Services.AddAdapterRegistry();
+
+    // Supervised-worker health: ResilientHostedService workers record faults here; the
+    // heartbeat (HealthSnapshot.workers[]) surfaces restart-looping/escalated workers to the
+    // cloud for closed-loop remediation. Singleton so every worker + the snapshot share it.
+    builder.Services.AddSingleton<SuavoAgent.Core.Workers.WorkerHealthRegistry>();
+
     builder.Services.AddHostedService<HeartbeatWorker>();
+
+    // VisionCaptureWorker — fires periodic capture_screen IPC commands when
+    // Vision.Enabled + PeriodicCapture.Enabled + active learning session.
+    // Both gates default OFF so this is a no-op until a pilot opts in.
+    builder.Services.Configure<VisionOptions>(builder.Configuration.GetSection("Vision"));
+    builder.Services.AddSingleton<SuavoAgent.Core.Workers.VisionCaptureTelemetry>();
+    builder.Services.AddSingleton<IVisionShadowReasoner, VisionGroundedShadowReasoner>();
+    builder.Services.AddHostedService<SuavoAgent.Core.Workers.VisionCaptureWorker>();
 
     builder.Services.AddSingleton<AgentStateDb>(sp =>
     {
@@ -312,8 +400,19 @@ try
         return db;
     });
 
+    // Codex 2026-04-27 — receiver lazy-resolves the active learning session
+    // per batch via AgentStateDb.GetActiveSessionId, so events arriving
+    // before LearningWorker boots still land under the correct session id
+    // once the worker registers a session in the DB. No more session_id
+    // mismatch (Trip A) and no more pre-Configure window data loss.
     builder.Services.AddSingleton<BehavioralEventReceiver>(sp =>
-        new BehavioralEventReceiver(sp.GetRequiredService<AgentStateDb>(), sessionId: "ipc"));
+    {
+        var db = sp.GetRequiredService<AgentStateDb>();
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        return new BehavioralEventReceiver(
+            db,
+            sessionResolver: () => db.GetActiveSessionId(opts.PharmacyId ?? string.Empty));
+    });
 
     // H-10: Write ephemeral pipe nonce so Broker can pass the randomised pipe name to Helper.
     // An attacker without knowledge of the nonce cannot pre-create a squatting pipe server.
@@ -330,13 +429,69 @@ try
     // Pricing intelligence — Core→Helper command channel
     builder.Services.AddSingleton<IpcCommandClient>(sp =>
         new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()));
+    builder.Services.AddSingleton<IIpcCommandClient>(sp => sp.GetRequiredService<IpcCommandClient>());
+    builder.Services.AddSingleton<IIntentCursorClient, IntentCursorClient>();
     builder.Services.AddSingleton<ExcelPricingReader>();
     builder.Services.AddSingleton<ExcelPricingWriter>();
+    builder.Services.AddSingleton<IPricingLookupFactory, PioneerRxSqlPricingLookupFactory>();
+
+    // Register both pricing executors as concrete singletons so either can be selected at
+    // resolve time. The IPricingJobExecutor interface is bound below based on
+    // AgentOptions.PricingExecutor — SqlFirst (default) or UiaFirst (Nadim-style UIA-only
+    // pharmacies). Both implementations are fail-closed by design.
+    builder.Services.AddSingleton<SqlFirstPricingJobExecutor>();
+    builder.Services.AddSingleton<UiaFirstPricingJobExecutor>();
+    builder.Services.AddSingleton<IPricingJobExecutor>(sp =>
+    {
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        IPricingJobExecutor executor = opts.PricingExecutor switch
+        {
+            PricingExecutorMode.UiaFirst => sp.GetRequiredService<UiaFirstPricingJobExecutor>(),
+            _ => sp.GetRequiredService<SqlFirstPricingJobExecutor>(),
+        };
+        Log.Information(
+            "Pricing executor selected: {Mode} ({Type}); throttle={ThrottleMs}ms",
+            opts.PricingExecutor, executor.GetType().Name, opts.PricingThrottleMs);
+        return executor;
+    });
 
     // File discovery — Core side. Helper runs the actual locator; this client
     // wraps the find_file IPC call so HeartbeatWorker can dispatch
     // find_and_run_pricing_job without knowing IPC details.
     builder.Services.AddSingleton<SuavoAgent.Core.Discovery.DiscoveryClient>();
+
+    // SP4 Phase 5.2 — Actuation chain (Track 5). Verb registry + dispatcher +
+    // workflow executor. The HelperActuationGateway wraps the existing IPC
+    // command client so verbs delegate to the Helper-resident
+    // SendInputDriver / UiaLabelResolver. Disabled-by-default by virtue of
+    // the Helper-side ActuationGate (gate flips false unless operator
+    // approves via cloud + signs the per-pharmacy actuation.json).
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Policy.IAuthzPolicy>(sp =>
+        new SuavoAgent.Core.ActionGrammarV1.Policy.CharterDrivenAuthzPolicy());
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.VerbDispatcher>();
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.VerbRegistry>(sp =>
+        SuavoAgent.Core.ActionGrammarV1.VerbRegistry.Build(
+            new[] { typeof(SuavoAgent.Core.ActionGrammarV1.IVerb).Assembly },
+            sp.GetRequiredService<ILogger<SuavoAgent.Core.ActionGrammarV1.VerbRegistry>>()));
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.IActuationGateway>(sp =>
+        new SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.HelperActuationGateway(
+            clientFactory: () => new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()),
+            logger: sp.GetRequiredService<ILogger<SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.HelperActuationGateway>>()));
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Workflows.IWorkflowAuditClient>(sp =>
+    {
+        var cloud = sp.GetService<SuavoAgent.Core.Cloud.SuavoCloudClient>();
+        if (cloud is null)
+        {
+            // Cloud is optional in some test/runtime configurations. Returning
+            // a null-object lets workflows still execute locally for dry-run
+            // smoke tests.
+            return new SuavoAgent.Core.ActionGrammarV1.Workflows.NullWorkflowAuditClient();
+        }
+        return new SuavoAgent.Core.Cloud.WorkflowAuditCloudClient(
+            cloud,
+            sp.GetRequiredService<ILogger<SuavoAgent.Core.Cloud.WorkflowAuditCloudClient>>());
+    });
+    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Workflows.WorkflowExecutor>();
 
     // PricingJobRunner gets an optional TieredBrain evaluator wired only when
     // Reasoning.PricingBrainEnabled is true. Default: disabled — behavior is
@@ -344,7 +499,8 @@ try
     // on streak failures (Tier-1 rules) or ambiguous states (Tier-2/3).
     builder.Services.AddSingleton<PricingJobRunner>(sp =>
     {
-        var reasoning = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        var reasoning = opts.Reasoning;
         PricingBrainEvaluator? evaluator = null;
         if (reasoning.PricingBrainEnabled)
         {
@@ -365,7 +521,8 @@ try
             sp.GetRequiredService<ExcelPricingWriter>(),
             sp.GetRequiredService<AgentStateDb>(),
             sp.GetRequiredService<ILogger<PricingJobRunner>>(),
-            evaluator);
+            evaluator,
+            interLookupDelay: TimeSpan.FromMilliseconds(opts.PricingThrottleMs));
     });
 
     // Tier-1 Reasoning — rule engine. The bundled catalog is embedded in this
@@ -475,6 +632,7 @@ try
     {
         var logger = sp.GetRequiredService<ILogger<IpcPipeServer>>();
         var eventRateLimiter = new SuavoAgent.Core.Ipc.EventRateLimiter(maxEventsPerSecond: 500);
+        var helperAttestationPath = SuavoAgent.Contracts.Ipc.IpcPeerAttestationStore.GetDefaultPath();
         return new IpcPipeServer(pipeName, msg =>
         {
             logger.LogDebug("IPC: {Command}", msg.Command);
@@ -571,11 +729,27 @@ try
                     return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
                         msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
             }
-        }, logger);
+        }, logger, isBrokerAttestedHelper: pid =>
+            SuavoAgent.Contracts.Ipc.IpcPeerAttestationStore.ContainsHelper(
+                helperAttestationPath,
+                pipeNonce,
+                pid,
+                DateTimeOffset.UtcNow,
+                TimeSpan.FromMinutes(5)));
     });
 
     builder.Services.AddSingleton<RxDetectionWorker>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<RxDetectionWorker>());
+
+    // Wave 1B Track 1.4 — register the agent.health_composite emission stack so the
+    // HeartbeatWorker (HeartbeatWorker.cs:92-93) actually resolves IHealthSignals +
+    // HealthCompositeCalculator and emits the composite (helper/IPC/schema-canary/
+    // extraction) every tick. Without this they resolved as null and the box emitted
+    // ZERO composites, leaving the cloud agent-health-watch alarm blind to a silently
+    // degraded box. Must come AFTER IpcPipeServer (631), RxDetectionWorker (above), and
+    // AgentStateDb (286). See roadmap H2 #13.
+    SuavoAgent.Core.Health.HealthCompositeServiceCollectionExtensions.AddHealthComposite(builder.Services);
+
     builder.Services.AddHostedService<WritebackProcessor>();
 
     // Learning Agent — only active when LearningMode is enabled

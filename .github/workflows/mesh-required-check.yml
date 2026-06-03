@@ -1,0 +1,147 @@
+name: Mesh Required Check
+
+# Diagnostic Mesh consolidated CI gate (Mesh PR 4d). Runs the union of
+# tests across PRs 1/3/4/4b that gate any mesh-related change. Required
+# to merge any PR matching the trigger filter below.
+#
+# Trigger filter follows the spec section 7 PR 4 + PR 3 expanded list:
+# package-bump-caused crashes (Bug 24 class) get caught even when
+# src/SuavoAgent.Setup/ has no source changes.
+on:
+  pull_request:
+    paths:
+      - 'src/SuavoAgent.Diagnostics/**'
+      - 'src/SuavoAgent.Setup/**'
+      - 'src/SuavoAgent.Core/Program.cs'
+      - 'src/SuavoAgent.Broker/Program.cs'
+      - 'src/SuavoAgent.Helper/Program.cs'
+      - 'src/SuavoAgent.Watchdog/Program.cs'
+      - 'tests/SuavoAgent.Diagnostics.Tests/**'
+      - 'tests/SuavoAgent.Setup.Tests/**'
+      - 'tests/PreflightTests/**'
+      - 'tools/SuavoReportCrash/**'
+      - 'scripts/Test-QueenShipPreflight.ps1'
+      - 'publish.ps1'
+      - 'Directory.Build.props'
+      - 'global.json'
+      - 'Directory.Packages.props'
+      - '.github/workflows/mesh-required-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/SuavoAgent.Diagnostics/**'
+      - 'src/SuavoAgent.Setup/**'
+      - 'tests/SuavoAgent.Diagnostics.Tests/**'
+      - 'tests/SuavoAgent.Setup.Tests/**'
+      - 'tools/SuavoReportCrash/**'
+      - 'scripts/Test-QueenShipPreflight.ps1'
+      - 'publish.ps1'
+      - '.github/workflows/mesh-required-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostics-tests:
+    name: Diagnostics tests
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        run: dotnet restore tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj
+      - name: Build Release
+        run: dotnet build tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj --no-restore -c Release
+      - name: Run Diagnostics tests
+        run: dotnet test tests/SuavoAgent.Diagnostics.Tests/SuavoAgent.Diagnostics.Tests.csproj --no-build -c Release --logger "console;verbosity=detailed"
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-tests-logs
+          path: |
+            tests/SuavoAgent.Diagnostics.Tests/bin/**/*.log
+            tests/SuavoAgent.Diagnostics.Tests/TestResults/**/*
+          if-no-files-found: ignore
+          retention-days: 7
+
+  avalonia-smoke:
+    name: Avalonia init smoke
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        run: dotnet restore tests/SuavoAgent.Setup.Tests/SuavoAgent.Setup.Tests.csproj
+      - name: Build Release
+        run: dotnet build tests/SuavoAgent.Setup.Tests/SuavoAgent.Setup.Tests.csproj --no-restore -c Release
+      - name: Run Avalonia smoke
+        run: dotnet test tests/SuavoAgent.Setup.Tests/SuavoAgent.Setup.Tests.csproj --no-build -c Release --filter "FullyQualifiedName~AvaloniaInitSmokeTest" --logger "console;verbosity=detailed"
+
+  pester-preflight:
+    name: Pester preflight tests
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check preflight script exists
+        id: preflight-exists
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath scripts/Test-QueenShipPreflight.ps1) {
+            "exists=true" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } else {
+            "exists=false" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          }
+      - name: Install Pester 5
+        if: steps.preflight-exists.outputs.exists == 'true'
+        shell: pwsh
+        run: Install-Module -Name Pester -MinimumVersion 5.0.0 -Force -SkipPublisherCheck
+      - name: Run Pester
+        if: steps.preflight-exists.outputs.exists == 'true'
+        shell: pwsh
+        run: |
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'tests/PreflightTests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+  aot-crash-tool:
+    name: suavo-report-crash AOT publish
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check crash tool exists
+        id: tool-exists
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath tools/SuavoReportCrash/SuavoReportCrash.csproj) {
+            "exists=true" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } else {
+            "exists=false" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          }
+      - uses: actions/setup-dotnet@v4
+        if: steps.tool-exists.outputs.exists == 'true'
+        with:
+          dotnet-version: '8.0.x'
+      - name: AOT publish win-x64
+        if: steps.tool-exists.outputs.exists == 'true'
+        run: dotnet publish tools/SuavoReportCrash/SuavoReportCrash.csproj -c Release -r win-x64 --self-contained -o publish/SuavoReportCrash
+      - name: Verify executable exists
+        if: steps.tool-exists.outputs.exists == 'true'
+        shell: pwsh
+        run: |
+          $exe = "publish/SuavoReportCrash/suavo-report-crash.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            Write-Error "AOT-published exe not found at $exe"
+            exit 1
+          }
+          Write-Host "AOT exe size: $((Get-Item $exe).Length / 1MB) MB"

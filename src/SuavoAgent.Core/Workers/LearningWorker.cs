@@ -110,8 +110,15 @@ public sealed class LearningWorker : BackgroundService
         // Behavioral correlation and learning instances
         _actionCorrelator = new ActionCorrelator(_db, _sessionId,
             clockCalibrated: false);
-        _behavioralReceiver = new BehavioralEventReceiver(_db, _sessionId,
-            onInteraction: (treeHash, elementId, controlType, timestamp) =>
+        // Codex 2026-04-27 (Trip A root cause + redesign) — the singleton
+        // BehavioralEventReceiver lazy-resolves the session id per batch
+        // via AgentStateDb.GetActiveSessionId, so events automatically pick
+        // up _sessionId now that this LearningWorker has registered it. We
+        // only need to wire the post-persist interaction callback so
+        // ActionCorrelator sees UI events that arrive over IPC.
+        _behavioralReceiver = _sp.GetRequiredService<BehavioralEventReceiver>();
+        _behavioralReceiver.SetInteractionCallback(
+            (treeHash, elementId, controlType, timestamp) =>
                 _actionCorrelator.RecordUiEvent(treeHash, elementId, controlType, timestamp));
 
         // Bridge DMV observations → ActionCorrelator for UI↔SQL correlation
@@ -605,7 +612,8 @@ public sealed class LearningWorker : BackgroundService
             }
             else // model
             {
-                var result = _applicator.ApplyModelSeeds(_sessionId!, seedResp);
+                var result = _applicator.ApplyModelSeeds(
+                    _sessionId!, seedResp, _options.FleetLearning.Enabled);
                 if (!result.AlreadyApplied)
                 {
                     _activeSeedDigest = seedResp.SeedDigest;

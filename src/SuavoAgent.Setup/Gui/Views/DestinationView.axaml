@@ -13,7 +13,7 @@
             <TextBlock Text="Install destination"
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="28" FontWeight="Light"/>
-            <TextBlock Text="Confirm where SuavoAgent installs and verify the SQL Server we will connect to."
+            <TextBlock Text="Confirm where SuavoAgent installs. SQL is detected automatically — set it manually only if you already have the values."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"
                        TextWrapping="Wrap"/>
@@ -29,7 +29,7 @@
 
                 <StackPanel Spacing="6">
                     <TextBlock Text="Install path"
-                               Foreground="{DynamicResource SuavoAccentBrush}"
+                               Foreground="{DynamicResource SuavoAccentTextBrush}"
                                FontWeight="SemiBold" FontSize="12"/>
                     <TextBox Text="{Binding InstallPath, Mode=TwoWay}"
                              Background="{DynamicResource SuavoSurfaceBrush}"
@@ -42,7 +42,7 @@
 
                 <StackPanel Spacing="6">
                     <TextBlock Text="SQL Server"
-                               Foreground="{DynamicResource SuavoAccentBrush}"
+                               Foreground="{DynamicResource SuavoAccentTextBrush}"
                                FontWeight="SemiBold" FontSize="12"/>
                     <Grid ColumnDefinitions="*,*" Margin="0,0,0,0">
                         <TextBox Grid.Column="0" Margin="0,0,12,0"
@@ -58,9 +58,28 @@
                                  Foreground="{DynamicResource SuavoTextBrush}"
                                  BorderBrush="{DynamicResource SuavoBorderBrush}"/>
                     </Grid>
-                    <TextBlock Text="Pre-filled from PioneerRx auto-discovery. Override only if you know the value."
+                    <TextBlock Text="Pre-filled from auto-discovery. Override only if you know the value."
                                Foreground="{DynamicResource SuavoTextSubtleBrush}"
                                FontSize="11"/>
+
+                    <Border IsVisible="{Binding IsSqlDeferred}"
+                            Background="{DynamicResource SuavoSurfaceElevatedBrush}"
+                            BorderBrush="{DynamicResource SuavoDeferredBrush}"
+                            BorderThickness="1" CornerRadius="10" Padding="12,10" Margin="0,4,0,0">
+                        <Grid ColumnDefinitions="Auto,*">
+                            <TextBlock Grid.Column="0" Text="↻" FontSize="16" FontWeight="Bold"
+                                       VerticalAlignment="Top" Margin="0,1,10,0"
+                                       Foreground="{DynamicResource SuavoDeferredBrush}"/>
+                            <StackPanel Grid.Column="1" Spacing="2">
+                                <TextBlock Text="SQL will self-configure"
+                                           Foreground="{DynamicResource SuavoTextBrush}"
+                                           FontSize="12.5" FontWeight="SemiBold"/>
+                                <TextBlock Text="No supported system on this PC yet? Leave this blank. SuavoAgent installs now, comes online, and connects automatically the moment one is detected."
+                                           Foreground="{DynamicResource SuavoTextMutedBrush}"
+                                           FontSize="11.5" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
                 </StackPanel>
 
                 <StackPanel Spacing="6">

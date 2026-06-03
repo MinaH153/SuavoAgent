@@ -1,0 +1,52 @@
+{
+  "serializedAtUtc": "2026-05-06T15:21:00.0000000+00:00",
+  "hmacSalt": "shadow-fixture-hmac-salt-v1",
+  "hashKeyVersion": "shadow-key-v1",
+  "pharmacyId": "00000000-0000-0000-0000-000000000001",
+  "agentInstallId": "58913ab1-367d-4bfc-b19a-9ad33725799c",
+  "pmsVersion": "PioneerRx Shadow 2026.05",
+  "rxs": [
+    {
+      "rxNumber": "SHADOW-RX-0001",
+      "drugName": "ShadowMed 10mg",
+      "ndc": "00093-7180-01",
+      "dateFilled": "2026-05-06T14:55:00.0000000Z",
+      "quantity": 30,
+      "statusGuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "detectedAt": "2026-05-06T15:20:00.0000000+00:00",
+      "fillNumber": 1,
+      "daysSupply": 30,
+      "drugSchedule": 2,
+      "priority": "standard",
+      "temperatureRequirement": "ambient"
+    }
+  ],
+  "patients": [
+    {
+      "rxNumber": "SHADOW-RX-0001",
+      "firstName": "Ada",
+      "lastInitial": "L",
+      "phone": "6195550100",
+      "address1": "744 Shadow Test Ave",
+      "address2": "Suite 12",
+      "city": "San Diego",
+      "state": "CA",
+      "zip": "92101-1234"
+    }
+  ],
+  "forbiddenInCandidate": [
+    "ShadowMed",
+    "Ada",
+    "6195550100",
+    "744 Shadow Test Ave"
+  ],
+  "forbiddenEverywhere": [
+    "SHADOW-RX-0001",
+    "Ada",
+    "6195550100",
+    "744 Shadow Test Ave"
+  ],
+  "minimumNecessaryInQueue": [
+    "ShadowMed"
+  ]
+}

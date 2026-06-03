@@ -19,7 +19,7 @@ function Check($name, $test) {
             $script:fail++
         }
     } catch {
-        Write-Host "  [FAIL] $name — $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [FAIL] $name - $($_.Exception.Message)" -ForegroundColor Red
         $script:fail++
     }
 }
@@ -46,13 +46,27 @@ Check "ACL is protected (no inheritance)" {
     $acl.AreAccessRulesProtected
 }
 
-# 3. Install dir ACL — LocalService has Modify
+# 3. Install dir ACL - LocalService has Modify
 Write-Host "`n--- Install Dir ACL ---" -ForegroundColor Yellow
 Check "Install dir exists" { Test-Path $installDir }
 Check "LocalService has Modify on install dir" {
     $acl = Get-Acl $installDir
     $rules = $acl.Access | Where-Object { $_.IdentityReference -match "LOCAL SERVICE" }
     $rules | Where-Object { $_.FileSystemRights -match "Modify" }
+}
+Check "appsettings allows Core DPAPI sealing" {
+    $configPath = Join-Path $installDir "appsettings.json"
+    $acl = Get-Acl $configPath
+    $rules = $acl.Access | Where-Object { $_.IdentityReference -match "LOCAL SERVICE" }
+    $rules | Where-Object { $_.FileSystemRights -match "Modify" }
+}
+Check "appsettings keeps Broker read-only" {
+    $configPath = Join-Path $installDir "appsettings.json"
+    $acl = Get-Acl $configPath
+    $rules = $acl.Access | Where-Object { $_.IdentityReference -match "NETWORK SERVICE" }
+    $canRead = $rules | Where-Object { $_.FileSystemRights -match "Read" }
+    $canModify = $rules | Where-Object { $_.FileSystemRights -match "Modify|FullControl|Write" }
+    $canRead -and -not $canModify
 }
 
 # 4. Heartbeat (check logs)
@@ -69,11 +83,11 @@ if ($coreLog) {
     Write-Host "  [SKIP] No core log found" -ForegroundColor Yellow
 }
 
-# 5. CheckPendingUpdate test — create fake sentinel
+# 5. CheckPendingUpdate test - create fake sentinel
 Write-Host "`n--- CheckPendingUpdate (fake sentinel) ---" -ForegroundColor Yellow
 $sentinel = Join-Path $installDir "update-pending.flag"
 if (-not (Test-Path $sentinel)) {
-    # Write a deliberately INVALID sentinel (bad signature) — should be cleaned up
+    # Write a deliberately INVALID sentinel (bad signature) - should be cleaned up
     Set-Content $sentinel "invalid|manifest`ninvalid_signature"
     Stop-Service SuavoAgent.Core -Force -ErrorAction SilentlyContinue
     Start-Sleep 2
@@ -81,7 +95,7 @@ if (-not (Test-Path $sentinel)) {
     Start-Sleep 5
     Check "Invalid sentinel was cleaned up" { -not (Test-Path $sentinel) }
 } else {
-    Write-Host "  [SKIP] Sentinel already exists — not testing" -ForegroundColor Yellow
+    Write-Host "  [SKIP] Sentinel already exists - not testing" -ForegroundColor Yellow
 }
 
 # 6. IPC pipe

@@ -1,3 +1,5 @@
+using SuavoAgent.Contracts.Annotations;
+
 namespace SuavoAgent.Contracts.Models;
 
 /// <summary>
@@ -15,8 +17,11 @@ namespace SuavoAgent.Contracts.Models;
 ///
 /// The structural typing is the audit defense: any new PHI field shipped
 /// to cloud has to land here first, which makes the diff impossible to miss
-/// in code review.
+/// in code review. The <see cref="OutboundPayloadAttribute"/> formalizes this
+/// — the SUAVO0001 Roslyn analyzer fails any future build that adds a
+/// <see cref="PhiDirectAttribute"/> field to this record.
 /// </summary>
+[OutboundPayload]
 public sealed record PatientDetailsPayload(
     string? FirstName,
     string? LastInitial,

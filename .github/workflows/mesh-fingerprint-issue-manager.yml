@@ -1,0 +1,258 @@
+name: Mesh Fingerprint Issue Manager
+
+# Comp 3: receives `repository_dispatch` events from the cloud
+# `mesh-sentry-ingest` Edge Function and executes the pre-claimed
+# GH issue lifecycle action (create / bump / reopen) for one
+# coalesced fingerprint_issue_jobs row.
+#
+# Authoritative state lives in Supabase tables fingerprint_issue_jobs +
+# fingerprint_issue_links + fingerprint_registry (Comp 1 schema).
+# The Edge Function decides the action under a DB lock and dispatches
+# only the job_id + an HMAC over (job_id|attempt_token|signed_at). This
+# workflow re-fetches the row authoritatively, re-verifies HMAC + token,
+# executes the action, and marks the row succeeded via the SECURITY
+# DEFINER RPC public.complete_fingerprint_issue_job.
+#
+# Design lineage: ~/Code/SuavoAgent/docs/architecture/phase-2-drafts/
+#   component-3-gh-actions-sentry-webhook-design.md
+#
+# Required secrets (set via repo Settings > Secrets and variables):
+#   MESH_DISPATCH_SIGNING_SECRET  — shared with the cloud signer; Vault-stored
+#   SUPABASE_URL                  — https://<project>.supabase.co
+#   SUPABASE_SERVICE_ROLE_KEY     — service_role JWT for RPC + row reads
+# GITHUB_TOKEN is auto-provided.
+#
+# Dormant until the Edge Function dispatches. Comp 2A cloud
+# deployment + secret provisioning is the operational unlock.
+
+on:
+  repository_dispatch:
+    types: [mesh-fingerprint]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: mesh-fingerprint-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  process:
+    name: Process mesh-fingerprint dispatch
+    runs-on: ubuntu-latest
+    environment: mesh-prod
+    timeout-minutes: 5
+
+    # Every untrusted input from the dispatch payload flows through env:
+    # so subsequent `run:` steps never interpolate from event data
+    # directly — prevents command injection via crafted client_payload
+    # fields.
+    env:
+      JOB_ID: ${{ github.event.client_payload.job_id }}
+      ATTEMPT_TOKEN: ${{ github.event.client_payload.attempt_token }}
+      SIGNED_AT: ${{ github.event.client_payload.signed_at }}
+      DISPATCH_HMAC: ${{ github.event.client_payload.hmac }}
+      DISPATCH_SECRET: ${{ secrets.MESH_DISPATCH_SIGNING_SECRET }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Verify required secrets present
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${DISPATCH_SECRET:-}" ] && missing+=("MESH_DISPATCH_SIGNING_SECRET")
+          [ -z "${SUPABASE_URL:-}" ]   && missing+=("SUPABASE_URL")
+          [ -z "${SUPABASE_SERVICE_KEY:-}" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Validate dispatch payload shape
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${JOB_ID:-}" ]        && missing+=("job_id")
+          [ -z "${ATTEMPT_TOKEN:-}" ] && missing+=("attempt_token")
+          [ -z "${SIGNED_AT:-}" ]     && missing+=("signed_at")
+          [ -z "${DISPATCH_HMAC:-}" ] && missing+=("hmac")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::client_payload missing required fields: ${missing[*]}"
+            exit 1
+          fi
+          if ! [[ "$JOB_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::job_id is not a positive integer"
+            exit 1
+          fi
+          if ! [[ "$ATTEMPT_TOKEN" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::attempt_token is not a UUID"
+            exit 1
+          fi
+
+      - name: Verify HMAC + freshness window
+        run: |
+          set -euo pipefail
+          payload="${JOB_ID}|${ATTEMPT_TOKEN}|${SIGNED_AT}"
+          expected_hmac=$(printf '%s' "$payload" \
+            | openssl dgst -sha256 -hmac "$DISPATCH_SECRET" -binary \
+            | base64 -w0)
+          if [ "$expected_hmac" != "$DISPATCH_HMAC" ]; then
+            echo "::error::HMAC mismatch — dispatch is unauthenticated"
+            exit 1
+          fi
+          now_epoch=$(date -u +%s)
+          signed_epoch=$(date -u -d "$SIGNED_AT" +%s 2>/dev/null || echo 0)
+          if [ "$signed_epoch" -eq 0 ]; then
+            echo "::error::signed_at not parseable"
+            exit 1
+          fi
+          age=$((now_epoch - signed_epoch))
+          if [ "$age" -gt 300 ] || [ "$age" -lt -60 ]; then
+            echo "::error::signed_at outside +-5min freshness window (age=${age}s)"
+            curl -sS --fail-with-body \
+              -X POST \
+              -H "apikey: $SUPABASE_SERVICE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"p_job_id\":${JOB_ID},\"p_attempt_token\":\"${ATTEMPT_TOKEN}\",\"p_reason\":\"stale_dispatch_signed_at_outside_window\"}" \
+              "${SUPABASE_URL}/rest/v1/rpc/record_fingerprint_issue_job_failure" \
+              || echo "::warning::record_failure RPC call failed (continuing)"
+            exit 1
+          fi
+
+      - name: Fetch authoritative job row
+        run: |
+          set -euo pipefail
+          query="select=id,fingerprint_id,action,window_start,coalesced_count,first_occurrence_id,last_occurrence_id,attempt_token,succeeded_at,failure_count,fingerprint_issue_links(github_issue_number,github_repo,state,claim_expires_at),fingerprint_registry(component,signal_kind,fingerprint)&id=eq.${JOB_ID}&limit=1"
+          row=$(curl -sS --fail-with-body \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            "${SUPABASE_URL}/rest/v1/fingerprint_issue_jobs?${query}" \
+            | jq -e '.[0] // empty')
+          if [ -z "$row" ]; then
+            echo "::error::job_id ${JOB_ID} not found"
+            exit 1
+          fi
+
+          db_token=$(echo "$row" | jq -r '.attempt_token')
+          db_action=$(echo "$row" | jq -r '.action')
+          db_fp_id=$(echo "$row" | jq -r '.fingerprint_id')
+          db_succeeded=$(echo "$row" | jq -r '.succeeded_at // empty')
+          db_failure_count=$(echo "$row" | jq -r '.failure_count // 0')
+          db_first_occ=$(echo "$row" | jq -r '.first_occurrence_id // empty')
+          db_last_occ=$(echo "$row" | jq -r '.last_occurrence_id // empty')
+          db_coalesced=$(echo "$row" | jq -r '.coalesced_count // 0')
+          db_repo=$(echo "$row" | jq -r '.fingerprint_issue_links.github_repo // empty')
+          db_issue=$(echo "$row" | jq -r '.fingerprint_issue_links.github_issue_number // empty')
+          db_link_state=$(echo "$row" | jq -r '.fingerprint_issue_links.state // empty')
+          db_component=$(echo "$row" | jq -r '.fingerprint_registry.component // empty')
+          db_signal_kind=$(echo "$row" | jq -r '.fingerprint_registry.signal_kind // empty')
+          db_fp_str=$(echo "$row" | jq -r '.fingerprint_registry.fingerprint // empty')
+
+          if [ -n "$db_succeeded" ]; then
+            echo "::warning::job already succeeded — no-op"
+            exit 0
+          fi
+          if [ "$db_failure_count" -ge 5 ]; then
+            echo "::warning::job failure_count >= 5 (gave up; ops intervention required)"
+            exit 0
+          fi
+
+          if [ "$db_token" != "$ATTEMPT_TOKEN" ]; then
+            echo "::warning::Stale dispatch — row was re-claimed mid-workflow"
+            curl -sS --fail-with-body \
+              -X POST \
+              -H "apikey: $SUPABASE_SERVICE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"p_job_id\":${JOB_ID},\"p_attempt_token\":\"${db_token}\",\"p_reason\":\"stale_dispatch_token_mismatch\"}" \
+              "${SUPABASE_URL}/rest/v1/rpc/record_fingerprint_issue_job_failure" \
+              || echo "::warning::record_failure RPC call failed"
+            echo "::error::stale_completion (see docs/runbooks/mesh-stale-completion.md)"
+            exit 1
+          fi
+
+          {
+            echo "DB_ACTION=$db_action"
+            echo "DB_FP_ID=$db_fp_id"
+            echo "DB_REPO=$db_repo"
+            echo "DB_ISSUE=$db_issue"
+            echo "DB_LINK_STATE=$db_link_state"
+            echo "DB_COMPONENT=$db_component"
+            echo "DB_SIGNAL_KIND=$db_signal_kind"
+            echo "DB_FP_STR=$db_fp_str"
+            echo "DB_FIRST_OCC=$db_first_occ"
+            echo "DB_LAST_OCC=$db_last_occ"
+            echo "DB_COALESCED=$db_coalesced"
+          } >> "$GITHUB_ENV"
+
+      - name: Execute action — create
+        if: env.DB_ACTION == 'create'
+        run: |
+          set -euo pipefail
+          title="[mesh] ${DB_SIGNAL_KIND} in ${DB_COMPONENT}"
+          body=$(printf 'fp-v1: %s\n\nNew crash class observed by the Diagnostic Mesh.\n\n- Component: %s\n- Signal kind: %s\n- First occurrence id: %s\n- Last occurrence id: %s\n- Coalesced: %s\n\nAuto-generated by mesh-fingerprint-issue-manager.yml.\n' \
+            "$DB_FP_STR" "$DB_COMPONENT" "$DB_SIGNAL_KIND" "$DB_FIRST_OCC" "$DB_LAST_OCC" "$DB_COALESCED")
+          issue_url=$(gh issue create \
+            --repo "$DB_REPO" \
+            --title "$title" \
+            --body "$body" \
+            --label "mesh-fingerprint,bug,component:${DB_COMPONENT},signal:${DB_SIGNAL_KIND}")
+          new_issue=$(basename "$issue_url")
+          echo "Created issue #${new_issue} at ${issue_url}"
+          curl -sS --fail-with-body \
+            -X PATCH \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"state\":\"open\",\"github_issue_number\":${new_issue},\"last_action_at\":\"$(date -u +%FT%TZ)\"}" \
+            "${SUPABASE_URL}/rest/v1/fingerprint_issue_links?fingerprint_id=eq.${DB_FP_ID}"
+
+      - name: Execute action — bump
+        if: env.DB_ACTION == 'bump' && env.DB_ISSUE != '' && env.DB_COALESCED != '1'
+        run: |
+          set -euo pipefail
+          body=$(printf '%s new occurrence(s) coalesced into this window.\n\n- Last occurrence id: %s\n- Window: %s..%s\n\nAuto-generated by mesh-fingerprint-issue-manager.yml.\n' \
+            "$DB_COALESCED" "$DB_LAST_OCC" "$DB_FIRST_OCC" "$DB_LAST_OCC")
+          gh issue comment "$DB_ISSUE" --repo "$DB_REPO" --body "$body"
+          curl -sS --fail-with-body \
+            -X PATCH \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"last_action_at\":\"$(date -u +%FT%TZ)\"}" \
+            "${SUPABASE_URL}/rest/v1/fingerprint_issue_links?fingerprint_id=eq.${DB_FP_ID}"
+
+      - name: Execute action — reopen
+        if: env.DB_ACTION == 'reopen' && env.DB_ISSUE != ''
+        run: |
+          set -euo pipefail
+          comment=$(printf 'Reopened by Diagnostic Mesh — new occurrence observed at %s after issue closed.' "$DB_LAST_OCC")
+          gh issue reopen "$DB_ISSUE" --repo "$DB_REPO" --comment "$comment"
+          curl -sS --fail-with-body \
+            -X PATCH \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"state\":\"reopened\",\"last_action_at\":\"$(date -u +%FT%TZ)\"}" \
+            "${SUPABASE_URL}/rest/v1/fingerprint_issue_links?fingerprint_id=eq.${DB_FP_ID}"
+
+      - name: Mark job complete (atomic cursor advance)
+        run: |
+          set -euo pipefail
+          response=$(curl -sS --fail-with-body \
+            -X POST \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"p_job_id\":${JOB_ID},\"p_attempt_token\":\"${ATTEMPT_TOKEN}\",\"p_last_occurrence_id\":${DB_LAST_OCC:-0}}" \
+            "${SUPABASE_URL}/rest/v1/rpc/complete_fingerprint_issue_job")
+          if [ "$response" != "true" ]; then
+            echo "::error::complete_fingerprint_issue_job returned $response"
+            echo "::error::See docs/runbooks/mesh-stale-completion.md"
+            exit 1
+          fi
+          echo "::notice::job ${JOB_ID} complete, action=${DB_ACTION}"

@@ -45,27 +45,10 @@ public sealed class IpcPipeServer : IDisposable
         }
     }
 
-    // Sanitizer for IpcRejectionStats reason labels that include external
-    // input (process names from arbitrary callers). Keeps the rejection
-    // telemetry useful for diagnosis but caps cardinality so the cloud can
-    // safely group by the label without unbounded label-set growth. Returns
-    // a fixed short string for anything that isn't [A-Za-z0-9._-]{1,32}.
-    private static string SanitizeReasonLabel(string raw)
-    {
-        if (string.IsNullOrEmpty(raw)) return "_empty";
-        if (raw.Length > 32) return "_too_long";
-        foreach (var c in raw)
-        {
-            var ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                     (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
-            if (!ok) return "_other";
-        }
-        return raw;
-    }
-
     private readonly string _pipeName;
     private readonly ILogger<IpcPipeServer> _logger;
     private readonly Func<IpcRequest, Task<IpcResponse>> _handler;
+    private readonly Func<uint, bool>? _isBrokerAttestedHelper;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
     private bool _isConnected;
@@ -73,11 +56,16 @@ public sealed class IpcPipeServer : IDisposable
     public bool IsConnected => _isConnected;
     public string PipeName => _pipeName;
 
-    public IpcPipeServer(string pipeName, Func<IpcRequest, Task<IpcResponse>> handler, ILogger<IpcPipeServer> logger)
+    public IpcPipeServer(
+        string pipeName,
+        Func<IpcRequest, Task<IpcResponse>> handler,
+        ILogger<IpcPipeServer> logger,
+        Func<uint, bool>? isBrokerAttestedHelper = null)
     {
         _pipeName = pipeName;
         _handler = handler;
         _logger = logger;
+        _isBrokerAttestedHelper = isBrokerAttestedHelper;
     }
 
     public void Start(CancellationToken ct)
@@ -109,29 +97,15 @@ public sealed class IpcPipeServer : IDisposable
                         var clientProc = System.Diagnostics.Process.GetProcessById((int)clientPid);
                         var clientName = clientProc.ProcessName;
 
-                        // Verify process name is a known SuavoAgent binary
-                        if (clientName != "SuavoAgent.Helper" && clientName != "SuavoAgent.Broker")
-                        {
-                            _logger.LogWarning("IPC: Rejected connection from unauthorized process {Name} (PID {Pid})",
-                                clientName, clientPid);
-                            // Bucket the reason to keep telemetry cardinality low. Codex
-                            // flagged the prior $"unauthorized_process:{clientName}" as a
-                            // cardinality leak — an attacker (or a flaky AV) could iterate
-                            // process names and balloon the cloud-side label set. The
-                            // sanitizer drops everything that isn't a short alphanumeric
-                            // name and bins long/symbol-heavy values into "_other".
-                            IpcRejectionStats.Record($"unauthorized_process:{SanitizeReasonLabel(clientName)}");
-                            pipe.Disconnect();
-                            continue;
-                        }
-
                         // Verify executable path is under the SuavoAgent install directory (anti-spoofing).
                         // Use QueryFullProcessImageName instead of clientProc.MainModule because the
                         // latter requires PROCESS_VM_READ which SYSTEM->user-context process boundaries
                         // routinely block. QueryFullProcessImageName only needs PROCESS_QUERY_LIMITED_INFORMATION
                         // and works the same across security tokens — caught at Nadim's 2026-04-25.
-                        // Fail-closed: if path still cannot be read, reject — a cross-arch or ACL-denied
-                        // binary is exactly the shape an attacker would wear.
+                        // If both image path APIs fail, the verifier may still accept only a
+                        // Broker-attested Helper PID. That preserves the anti-spoofing boundary
+                        // on locked-down Windows hosts where even limited process queries are
+                        // denied across service/user tokens.
                         var clientPath = GetProcessImagePath(clientPid);
                         if (string.IsNullOrEmpty(clientPath))
                         {
@@ -142,33 +116,32 @@ public sealed class IpcPipeServer : IDisposable
                             }
                             catch (Exception ex)
                             {
-                                _logger.LogWarning(ex, "IPC: process image path unreadable for PID {Pid} — rejecting", clientPid);
-                                IpcRejectionStats.Record("image_path_unreadable");
-                                pipe.Disconnect();
-                                continue;
+                                _logger.LogDebug(ex, "IPC: process image path unreadable for PID {Pid}; checking Broker attestation", clientPid);
+                                clientPath = null;
                             }
                         }
 
-                        if (string.IsNullOrEmpty(clientPath))
+                        var verification = IpcPeerVerifier.Verify(
+                            processName: clientName,
+                            processId: clientPid,
+                            executablePath: clientPath,
+                            coreBaseDirectory: AppContext.BaseDirectory,
+                            isBrokerAttestedHelper: _isBrokerAttestedHelper);
+
+                        if (!verification.Accepted)
                         {
-                            _logger.LogWarning("IPC: Empty client path for PID {Pid} — rejecting", clientPid);
-                            IpcRejectionStats.Record("empty_client_path");
+                            _logger.LogWarning("IPC: rejected connection from {Name} (PID {Pid}) — {Reason}",
+                                clientName, clientPid, verification.RejectionReason);
+                            IpcRejectionStats.Record(verification.RejectionReason ?? "verification_failed");
                             pipe.Disconnect();
                             continue;
                         }
 
-                        // Use parent dir as install root (Core/Helper/Broker are sibling subdirs).
-                        // Append separator so "C:\Suavo\" doesn't match "C:\SuavoEvil\...".
-                        var installRoot = Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar))
-                            ?? AppContext.BaseDirectory;
-                        var installDir = installRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-                        if (!clientPath.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
+                        if (verification.AcceptedByBrokerAttestation)
                         {
-                            _logger.LogWarning("IPC: Rejected connection from outside install dir: {Path} (expected under {Dir})",
-                                clientPath, installDir);
-                            IpcRejectionStats.Record("path_outside_install_dir");
-                            pipe.Disconnect();
-                            continue;
+                            _logger.LogInformation(
+                                "IPC: accepted Broker-attested Helper PID {Pid} after Windows denied process image path",
+                                clientPid);
                         }
                     }
                     catch (Exception ex)

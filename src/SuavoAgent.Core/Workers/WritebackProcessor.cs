@@ -9,7 +9,7 @@ using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
 
-public sealed class WritebackProcessor : BackgroundService
+public sealed class WritebackProcessor : ResilientHostedService
 {
     private static readonly HashSet<string> AllowedTransitions =
         new(StringComparer.OrdinalIgnoreCase) { "pickup", "complete" };
@@ -36,7 +36,9 @@ public sealed class WritebackProcessor : BackgroundService
         ILogger<WritebackProcessor> logger,
         AgentStateDb stateDb,
         IpcPipeServer pipeServer,
-        IOptions<AgentOptions> options)
+        IOptions<AgentOptions> options,
+        WorkerHealthRegistry? healthRegistry = null)
+        : base(logger, healthRegistry)
     {
         _logger = logger;
         _stateDb = stateDb;
@@ -56,7 +58,16 @@ public sealed class WritebackProcessor : BackgroundService
         _logger.LogInformation("Session ID attached to WritebackProcessor: {SessionId}", sessionId);
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override string WorkerName => "writeback";
+    protected override bool RestartOnFault => _options.SelfHeal.WorkerSupervisorEnabled;
+
+    protected override Task OnEscalateAsync()
+    {
+        _logger.LogCritical("WritebackProcessor exhausted supervised restarts — writeback halted");
+        return Task.CompletedTask;
+    }
+
+    protected override async Task RunAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Writeback processor started");
 

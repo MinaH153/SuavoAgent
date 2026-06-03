@@ -16,7 +16,14 @@ public sealed record VerbContext(
     string Actor,
     IReadOnlyDictionary<string, object?> Parameters,
     IServiceProvider Services,
-    DateTimeOffset DeadlineUtc
+    DateTimeOffset DeadlineUtc,
+    // Bug 21 (MinaH153/SuavoAgent#63): workflow-level dry_run flag. Verbs
+    // that drive actuation must pass this into their IPC request DTOs;
+    // SendInputDriver effective-ORs it with ActuationGate.IsDryRun and only
+    // fires real input when BOTH are false. Defaults to false so existing
+    // call sites that construct VerbContext directly (tests, future verbs)
+    // don't silently flip the dry-run semantics.
+    bool DryRun = false
 );
 
 public sealed record VerbPreconditionResult(bool Satisfied, string? FailedPreconditionId, string? Reason)
@@ -33,8 +40,17 @@ public sealed record VerbExecutionResult(
 {
     public static VerbExecutionResult Ok(IReadOnlyDictionary<string, object?> output) =>
         new(true, output, null);
+
+    // Bug 21 follow-up (Codex review of #67 HIGH-2): failed actuation
+    // dispatches know the effective dry-run state from the Helper's
+    // ActuationResult.DryRun. Verbs MUST pass that state through to
+    // the audit chain via this overload's `output` — emitting empty
+    // output on failure produces audit rows that are indistinguishable
+    // from "no actuation surface reached", which is an audit blind spot.
     public static VerbExecutionResult Fail(string reason) =>
         new(false, new Dictionary<string, object?>(), reason);
+    public static VerbExecutionResult Fail(string reason, IReadOnlyDictionary<string, object?> output) =>
+        new(false, output, reason);
 }
 
 public sealed record VerbPostconditionResult(bool Satisfied, string? FailedPostconditionId, string? Reason)

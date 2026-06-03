@@ -1,23 +1,31 @@
 using System.Diagnostics;
+using System.Linq;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Contracts.Discovery;
+using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Models;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Core.ActionGrammarV1;
+using SuavoAgent.Core.ActionGrammarV1.Workflows;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Diagnostics;
+using SuavoAgent.Core.Health;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
+using SuavoAgent.Core.Mission;
 using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.Receipts;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
 
-public sealed class HeartbeatWorker : BackgroundService
+public sealed class HeartbeatWorker : ResilientHostedService
 {
     private readonly ILogger<HeartbeatWorker> _logger;
     private readonly AgentOptions _options;
@@ -28,10 +36,24 @@ public sealed class HeartbeatWorker : BackgroundService
     private readonly Intelligence.ContextAssembler? _contextAssembler;
     private readonly Intelligence.EfficiencyCalculator? _efficiencyCalc;
     private readonly Intelligence.FleetDataChannels? _fleetChannels;
-    private readonly PricingJobRunner? _pricingJobRunner;
+    private readonly IPricingJobExecutor? _pricingJobExecutor;
+    private readonly PricingJobCloudUploader? _pricingJobCloudUploader;
     private readonly IpcCommandClient? _ipcCommandClient;
+    private readonly IIntentCursorClient? _intentCursorClient;
     private readonly SuavoAgent.Core.Discovery.DiscoveryClient? _discoveryClient;
+    // Wave 1B Track 1.4 — health composite. Both optional so the worker
+    // still starts if Program.cs hasn't wired the health module yet (matches
+    // the existing optional-deps pattern used for cloud client, pricing,
+    // IPC command client, etc).
+    private readonly IHealthSignals? _healthSignals;
+    private readonly HealthCompositeCalculator? _healthCompositeCalculator;
+    private readonly CloudAuthRecoveryCoordinator? _cloudAuthRecovery;
+    private readonly WorkflowExecutor? _workflowExecutor;
     private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
+    private readonly SemaphoreSlim _workflowSemaphore = new(1, 1);
+    private readonly object _activeWorkflowLock = new();
+    private CancellationTokenSource? _activeWorkflowCts;
+    private string? _activeWorkflowRunId;
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
@@ -50,7 +72,9 @@ public sealed class HeartbeatWorker : BackgroundService
         ILogger<HeartbeatWorker> logger,
         IOptions<AgentOptions> options,
         IServiceProvider serviceProvider,
-        AgentStateDb stateDb)
+        AgentStateDb stateDb,
+        WorkerHealthRegistry? healthRegistry = null)
+        : base(logger, healthRegistry)
     {
         _logger = logger;
         _options = options.Value;
@@ -60,9 +84,15 @@ public sealed class HeartbeatWorker : BackgroundService
         _contextAssembler = new Intelligence.ContextAssembler(stateDb);
         _efficiencyCalc = new Intelligence.EfficiencyCalculator(stateDb);
         _fleetChannels = new Intelligence.FleetDataChannels(stateDb);
-        _pricingJobRunner = serviceProvider.GetService<PricingJobRunner>();
+        _pricingJobExecutor = serviceProvider.GetService<IPricingJobExecutor>();
+        _pricingJobCloudUploader = serviceProvider.GetService<PricingJobCloudUploader>();
         _ipcCommandClient = serviceProvider.GetService<IpcCommandClient>();
+        _intentCursorClient = serviceProvider.GetService<IIntentCursorClient>();
         _discoveryClient = serviceProvider.GetService<SuavoAgent.Core.Discovery.DiscoveryClient>();
+        _healthSignals = serviceProvider.GetService<IHealthSignals>();
+        _healthCompositeCalculator = serviceProvider.GetService<HealthCompositeCalculator>();
+        _cloudAuthRecovery = serviceProvider.GetService<CloudAuthRecoveryCoordinator>();
+        _workflowExecutor = serviceProvider.GetService<WorkflowExecutor>();
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -74,7 +104,17 @@ public sealed class HeartbeatWorker : BackgroundService
         }
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override string WorkerName => "heartbeat";
+    protected override bool RestartOnFault => _options.SelfHeal.WorkerSupervisorEnabled;
+
+    protected override Task OnEscalateAsync()
+    {
+        // The cloud silent-agent alarm already catches a dead heartbeat; log loudly and stop.
+        _logger.LogCritical("HeartbeatWorker exhausted supervised restarts — heartbeat halted");
+        return Task.CompletedTask;
+    }
+
+    protected override async Task RunAsync(CancellationToken stoppingToken)
     {
         if (_cloudClient == null)
         {
@@ -275,6 +315,12 @@ public sealed class HeartbeatWorker : BackgroundService
                     }
                 }
 
+                // Wave 1B Track 1.4 — compute + locally append the
+                // agent.health_composite event each tick. Failure is logged
+                // but does NOT block the heartbeat critical path; the agent
+                // retries on the next tick.
+                var healthComposite = EmitHealthComposite();
+
                 var pendingWbCount = _stateDb.GetPendingWritebacks().Count;
                 var failedWbCount = _stateDb.GetFailedWritebackCount();
                 var memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
@@ -317,6 +363,13 @@ public sealed class HeartbeatWorker : BackgroundService
                         rejectedReason = a.RejectedReason,
                     })
                     .ToArray();
+                var helperAttached = ipcServer?.IsConnected ?? false;
+                _helperConsecutiveFailures = helperAttached ? 0 : _helperConsecutiveFailures + 1;
+                var helperPayload = BuildHelperPayload(ipcServer);
+                var pioneerRxObservationStatus = helperAttached ? "observing" : "not_observing";
+                var visionCapture = _serviceProvider
+                    .GetService<VisionCaptureTelemetry>()?
+                    .Snapshot();
 
                 var payload = new
                 {
@@ -328,8 +381,15 @@ public sealed class HeartbeatWorker : BackgroundService
                     uptimeSeconds = (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
                     memoryMb = memoryMb,
                     memoryUsageMb = memoryMb,
+                    runtimeHealth = RuntimeHealthEvidence.Collect(),
                     status = "online",
-                    pioneerrxStatus = sqlConnected ? "connected" : "not_connected",
+                    pioneerrxStatus = pioneerRxObservationStatus,
+                    pioneerRxObservation = new
+                    {
+                        status = pioneerRxObservationStatus,
+                        helperAttached,
+                        sqlConnected,
+                    },
                     // Top-level fields for cloud stats extraction
                     learningMode = _options.LearningMode,
                     sqlConnected = sqlConnected,
@@ -363,13 +423,19 @@ public sealed class HeartbeatWorker : BackgroundService
                     {
                         enabled = _options.Vision.Enabled,
                         tesseractEnabled = _options.Vision.Tesseract.Enabled,
+                        periodicCaptureEnabled = _options.Vision.PeriodicCapture.Enabled,
+                        periodicCaptureIntervalSeconds = _options.Vision.PeriodicCapture.IntervalSeconds,
+                        capture = visionCapture?.ToPayload(),
                     },
+                    watchdog = BuildWatchdogPayload(),
                     sql = new
                     {
                         connected = sqlConnected,
                         lastRxCount = _lastRxCount
                     },
-                    helper = BuildHelperPayload(ipcServer),
+                    helper = helperPayload,
+                    // Supervised-worker liveness (self-heal Chunk 3b) — see BuildWorkersPayload.
+                    workers = BuildWorkersPayload(_serviceProvider.GetService<WorkerHealthRegistry>()),
                     writeback = new
                     {
                         pending = pendingWbCount,
@@ -400,6 +466,13 @@ public sealed class HeartbeatWorker : BackgroundService
                     efficiencyReport = efficiencyReport,
                     fleetSignals = fleetSignals,
                     consentReceipt = consentReceipt,
+                    // Wave 1B Track 1.4 — agent.health_composite payload.
+                    // Null when the health module isn't wired or computation
+                    // failed; cloud treats absent composite as "agent on a
+                    // version older than 1B". Composite presence flips
+                    // status from "heartbeating" to either "healthy" or
+                    // "heartbeating-but-unhealthy" cloud-side.
+                    healthComposite = healthComposite,
                     // v3.12.1.1 auto-rule approval mirror. Empty array when
                     // Learning:Template:Enabled is off or no templates have
                     // been extracted yet — safe to emit either way.
@@ -407,6 +480,7 @@ public sealed class HeartbeatWorker : BackgroundService
                 };
 
                 var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
+                _lastSyncAt = DateTimeOffset.UtcNow;
                 _consecutiveFailures = 0;
                 _logger.LogDebug("Heartbeat OK");
 
@@ -442,6 +516,21 @@ public sealed class HeartbeatWorker : BackgroundService
             catch (Exception ex)
             {
                 _consecutiveFailures++;
+                if (_cloudAuthRecovery is not null)
+                {
+                    try
+                    {
+                        await _cloudAuthRecovery.TryRecoverAfterAuthFailureAsync(ex, stoppingToken);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception recoveryEx)
+                    {
+                        _logger.LogWarning(recoveryEx, "Cloud credential recovery handler failed");
+                    }
+                }
                 _logger.LogWarning(ex, "Heartbeat failed ({Failures} consecutive)", _consecutiveFailures);
             }
 
@@ -467,6 +556,67 @@ public sealed class HeartbeatWorker : BackgroundService
     }
 
     /// <summary>
+    /// Wave 1B Track 1.4 — compute the agent.health_composite payload and
+    /// append a chained audit entry. Returns the composite payload (which
+    /// the caller embeds in the heartbeat body so cloud sees it on the
+    /// same tick), or null when the health module isn't wired or any step
+    /// throws. Failure is non-blocking by design: the heartbeat critical
+    /// path must keep running even if the composite computation breaks.
+    /// </summary>
+    /// <remarks>
+    /// Audit-entry shape:
+    ///   EventType = "agent.health_composite"
+    ///   FromState = previous status (best-effort — empty on first tick)
+    ///   ToState   = current status ("healthy" | "heartbeating-but-unhealthy")
+    ///   Trigger   = "heartbeat_tick"
+    ///   TaskId    = AgentId (so the entry is tenant-attributable)
+    ///
+    /// The HealthCompositePayload itself doesn't fit AuditEntry's columnar
+    /// shape, but the components are derivable from <see cref="ToState"/>
+    /// + cloud-side stitching with the heartbeat payload that ships in
+    /// the same tick. Local audit is the forensic copy; cloud heartbeat
+    /// is the live signal.
+    /// </remarks>
+    internal HealthCompositePayload? EmitHealthComposite()
+    {
+        if (_healthSignals is null || _healthCompositeCalculator is null)
+            return null;
+
+        try
+        {
+            var snapshot = _healthSignals.Snapshot();
+            var composite = _healthCompositeCalculator.Compute(snapshot, DateTimeOffset.UtcNow);
+
+            try
+            {
+                _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                    TaskId: _options.AgentId ?? "",
+                    EventType: "agent.health_composite",
+                    FromState: "",
+                    ToState: composite.Status,
+                    Trigger: "heartbeat_tick",
+                    Actor: "system",
+                    SourceComponent: "heartbeat_worker"));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "agent.health_composite audit append failed; cloud-side payload still ships. " +
+                    "Agent will retry on next tick.");
+            }
+
+            return composite;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Composite emission failed; heartbeat continues. " +
+                "Agent will retry on next tick.");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Trip A 2026-04-25 silent-IPC-failure metric. Use the atomic Snapshot()
     /// so the three telemetry fields ship together — Codex flagged the prior
     /// three-call read pattern as racy: count from Record() N could ship with
@@ -485,6 +635,55 @@ public sealed class HeartbeatWorker : BackgroundService
             lastIpcRejectReason = lastReason,
             lastIpcRejectAt = lastAt?.ToString("o"),
         };
+    }
+
+    /// <summary>
+    /// Supervised-worker liveness for the heartbeat wire — restart-looping/escalated workers so
+    /// the cloud's agent-health-watch can remediate at worker granularity (closed loop) rather
+    /// than only detecting a fully-silent agent. Empty array when no registry / no faults (safe to
+    /// emit either way). Names are static ("rx-detection", …); no PHI.
+    /// </summary>
+    internal static object[] BuildWorkersPayload(WorkerHealthRegistry? registry)
+        => (registry?.Snapshot() ?? Array.Empty<WorkerHealth>())
+            .Select(w => (object)new
+            {
+                name = w.Name,
+                restartCount = w.RestartCount,
+                escalated = w.Escalated,
+                lastFaultUtc = w.LastFaultUtc.ToString("o"),
+            })
+            .ToArray();
+
+    private object BuildWatchdogPayload()
+    {
+        var path = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent",
+            "watchdog-health.json");
+
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return new
+                {
+                    present = false,
+                    reason = "no_watchdog_telemetry_file",
+                };
+            }
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            return doc.RootElement.Clone();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Watchdog telemetry read failed");
+            return new
+            {
+                present = false,
+                reason = "watchdog_telemetry_unreadable",
+            };
+        }
     }
 
     private async Task ProcessSignedCommandAsync(JsonElement response, CancellationToken ct)
@@ -519,17 +718,19 @@ public sealed class HeartbeatWorker : BackgroundService
                 Signature: scEl.TryGetProperty("signature", out var s) ? s.GetString() ?? "" : "",
                 DataHash: dataHashValue);
 
-            // Persistent nonce check (survives restarts)
-            if (!_stateDb.TryRecordNonce(cmd.Nonce))
-            {
-                _logger.LogWarning("Command nonce already used: {Nonce}", cmd.Nonce);
-                return;
-            }
-
             var result = _commandVerifier.Verify(cmd);
             if (!result.IsValid)
             {
                 _logger.LogWarning("Signed command rejected: {Reason}", result.Reason);
+                return;
+            }
+
+            // Persistent nonce check (survives restarts). Record only AFTER
+            // cryptographic verification, otherwise an attacker can burn a
+            // future valid nonce by sending a forged envelope first.
+            if (!_stateDb.TryRecordNonce(cmd.Nonce))
+            {
+                _logger.LogWarning("Command nonce already used: {Nonce}", cmd.Nonce);
                 return;
             }
 
@@ -542,6 +743,20 @@ public sealed class HeartbeatWorker : BackgroundService
                     break;
                 case "decommission":
                     await HandleDecommissionAsync(scEl, ct);
+                    break;
+                case "repair":
+                case "repair_agent":
+                    await HandleRepairAgentAsync(scEl, ct);
+                    break;
+                case "collect_health_probe":
+                    await HandleCollectHealthProbeAsync(scEl, cmd, ct);
+                    break;
+                case "fetch_diagnostics":
+                    await HandleFetchDiagnosticsAsync(scEl, cmd, ct);
+                    break;
+                case "export_pioneerrx_shadow_fixture":
+                    await PioneerRxShadowFixtureCommand.HandleAsync(
+                        scEl, cmd, _options, _serviceProvider, _stateDb, _cloudClient, _logger, ct);
                     break;
                 case "update":
                     await HandleUpdateAsync(scEl, ct);
@@ -579,8 +794,22 @@ public sealed class HeartbeatWorker : BackgroundService
                 case "find_and_run_pricing_job":
                     _ = Task.Run(() => HandleFindAndRunPricingJobAsync(scEl, ct), ct);
                     break;
+                case "show_cursor":
+                case "show_intent_cursor":
+                    await HandleShowIntentCursorAsync(scEl, cmd, ct);
+                    break;
+                case "computer_use_observe":
+                case "computer_use_propose":
+                    await HandleComputerUseObserveProposeAsync(scEl, cmd, ct);
+                    break;
                 case "transition_auto_rule_approval":
                     HandleTransitionAutoRuleApproval(scEl);
+                    break;
+                case "run_workflow":
+                    _ = Task.Run(() => HandleRunWorkflowAsync(scEl, cmd, ct), ct);
+                    break;
+                case "abort_workflow":
+                    await HandleAbortWorkflowAsync(scEl, cmd, ct);
                     break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
@@ -590,6 +819,806 @@ public sealed class HeartbeatWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Signed command processing failed");
+        }
+    }
+
+    private async Task HandleShowIntentCursorAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+        var requesterId = dataEl.TryGetProperty("requesterId", out var rid) ? rid.GetString() : "operator";
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        if (_intentCursorClient is null)
+        {
+            _logger.LogWarning("show_intent_cursor: intent cursor client not registered");
+            await AckAsync(false, null, "intent cursor client unavailable");
+            return;
+        }
+
+        if (ContainsUnsafeIntentCursorField(dataEl))
+        {
+            _logger.LogWarning("show_intent_cursor: rejected unsafe payload shape");
+            await AckAsync(false, null, "intent cursor payload may only include numeric cursor fields plus commandId/requesterId");
+            return;
+        }
+
+        IntentCursorRequest? request;
+        try
+        {
+            request = dataEl.Deserialize<IntentCursorRequest>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "show_intent_cursor: malformed payload");
+            await AckAsync(false, null, "malformed intent cursor payload");
+            return;
+        }
+
+        if (request is null)
+        {
+            await AckAsync(false, null, "missing intent cursor payload");
+            return;
+        }
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: commandId ?? cmd.Nonce,
+            EventType: "intent_cursor_command",
+            FromState: "requested",
+            ToState: "dispatched",
+            Trigger: "signed_command",
+            CommandId: cmd.Nonce,
+            RequesterId: requesterId,
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: "visual_only_cursor_overlay"));
+
+        var result = await _intentCursorClient.ShowAsync(request, ct);
+        if (!result.Success)
+        {
+            await AckAsync(false, null, result.ErrorCode ?? "intent cursor failed");
+            return;
+        }
+
+        await AckAsync(true, result.Response, null);
+    }
+
+    private async Task HandleRunWorkflowAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        if (_workflowExecutor is null)
+        {
+            _logger.LogWarning("run_workflow received but WorkflowExecutor not registered (DI gap)");
+            await AckAsync(false, null, "workflow_executor_unavailable");
+            return;
+        }
+
+        if (!await _workflowSemaphore.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            _logger.LogWarning("run_workflow rejected: another workflow is already running");
+            await AckAsync(false, null, "workflow_already_running");
+            return;
+        }
+
+        try
+        {
+            WorkflowDefinitionDto? definition;
+            try { definition = dataEl.Deserialize<WorkflowDefinitionDto>(); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "run_workflow: malformed payload");
+                await AckAsync(false, null, "malformed_workflow_payload");
+                return;
+            }
+
+            if (definition is null
+                || string.IsNullOrEmpty(definition.WorkflowRunId)
+                || string.IsNullOrEmpty(definition.WorkflowName)
+                || definition.Steps is null
+                || definition.Steps.Count == 0)
+            {
+                await AckAsync(false, null, "invalid_workflow_definition");
+                return;
+            }
+
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: definition.WorkflowRunId,
+                EventType: "workflow_run_received",
+                FromState: "queued",
+                ToState: "starting",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: $"workflow={definition.WorkflowName}@{definition.WorkflowVersion} steps={definition.Steps.Count}"));
+
+            var charter = _serviceProvider.GetService<MissionCharter>() ?? BuildEphemeralCharter();
+            var auditChain = _serviceProvider.GetService<SuavoAgent.Core.Audit.AuditChain>()
+                ?? new SuavoAgent.Core.Audit.AuditChain();
+
+            var pharmacyId = _options.PharmacyId ?? charter.PharmacyId;
+            var actor = $"agent:{_options.AgentId ?? "?"}";
+
+            using var workflowCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            lock (_activeWorkflowLock)
+            {
+                _activeWorkflowCts = workflowCts;
+                _activeWorkflowRunId = definition.WorkflowRunId;
+            }
+
+            WorkflowExecutor.WorkflowExecutionResult execResult;
+            try
+            {
+                execResult = await _workflowExecutor.ExecuteAsync(
+                    definition,
+                    _serviceProvider,
+                    auditChain,
+                    charter,
+                    pharmacyId,
+                    actor,
+                    workflowCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_activeWorkflowLock)
+                {
+                    _activeWorkflowCts = null;
+                    _activeWorkflowRunId = null;
+                }
+            }
+
+            _logger.LogInformation(
+                "run_workflow run={RunId} outcome={Outcome} steps={Done}/{Total} reason={Reason}",
+                definition.WorkflowRunId,
+                execResult.Outcome,
+                execResult.StepsCompleted,
+                execResult.TotalSteps,
+                execResult.AbortReason);
+
+            await AckAsync(
+                ok: execResult.Outcome == WorkflowRunOutcome.Completed,
+                result: new { run_id = definition.WorkflowRunId, outcome = execResult.Outcome.ToString(), steps_completed = execResult.StepsCompleted },
+                err: execResult.AbortReason);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "run_workflow execution exception");
+            await AckAsync(false, null, ex.Message);
+        }
+        finally
+        {
+            _workflowSemaphore.Release();
+        }
+    }
+
+    private async Task HandleAbortWorkflowAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+        var requestedRunId = dataEl.TryGetProperty("workflow_run_id", out var rid) ? rid.GetString() : null;
+        var requestedReason = dataEl.TryGetProperty("reason", out var rr) ? rr.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        if (string.IsNullOrEmpty(requestedRunId))
+        {
+            await AckAsync(false, null, "missing workflow_run_id");
+            return;
+        }
+
+        CancellationTokenSource? activeCts;
+        string? activeRunId;
+        lock (_activeWorkflowLock)
+        {
+            activeCts = _activeWorkflowCts;
+            activeRunId = _activeWorkflowRunId;
+        }
+
+        if (!string.Equals(activeRunId, requestedRunId, StringComparison.Ordinal))
+        {
+            _logger.LogInformation(
+                "abort_workflow received for run {Requested}, but active run is {Active} (no-op ack)",
+                requestedRunId,
+                activeRunId ?? "<none>");
+            await AckAsync(true, new { aborted = false, reason = "no_active_run_with_id" }, null);
+            return;
+        }
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: requestedRunId,
+            EventType: "workflow_run_abort_requested",
+            FromState: "in_progress",
+            ToState: "aborting",
+            Trigger: "signed_command",
+            CommandId: cmd.Nonce,
+            RequesterId: "operator",
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: requestedReason ?? "dashboard_abort"));
+
+        try { activeCts?.Cancel(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "abort_workflow: cancel threw"); }
+
+        await AckAsync(true, new { aborted = true, run_id = requestedRunId, reason = requestedReason }, null);
+    }
+
+    private MissionCharter BuildEphemeralCharter() => new(
+        CharterId: Guid.Empty,
+        PharmacyId: _options.PharmacyId ?? "",
+        Version: 0,
+        EffectiveFrom: DateTimeOffset.UtcNow,
+        Objectives: Array.Empty<MissionObjective>(),
+        Constraints: Array.Empty<MissionConstraint>(),
+        PriorityOrdering: new MissionPriorityOrdering(Array.Empty<string>()),
+        Tolerance: new MissionToleranceThresholds(0, 0, 0.0),
+        SignedByOperator: "agent_ephemeral",
+        SignedAt: DateTimeOffset.UtcNow);
+
+    private async Task HandleComputerUseObserveProposeAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+        var requesterId = dataEl.TryGetProperty("requesterId", out var rid) ? rid.GetString() : "operator";
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        if (ContainsUnsafeComputerUseField(dataEl, cmd.Command))
+        {
+            _logger.LogWarning("{Command}: rejected unsafe observe/propose payload", cmd.Command);
+            await AckAsync(false, null, "computer-use observe/propose payload must be synthetic and non-PHI");
+            return;
+        }
+
+        var pack = dataEl.TryGetProperty("pack", out var packEl) ? packEl.GetString() : null;
+        var proposal = dataEl.TryGetProperty("proposal", out var proposalEl) ? proposalEl.GetString() : null;
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: commandId ?? cmd.Nonce,
+            EventType: cmd.Command == "computer_use_observe"
+                ? "computer_use_observe_command"
+                : "computer_use_propose_command",
+            FromState: "requested",
+            ToState: "recorded",
+            Trigger: "signed_command",
+            CommandId: cmd.Nonce,
+            RequesterId: requesterId,
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: "synthetic_non_phi_observe_propose"));
+
+        await AckAsync(true, new
+        {
+            mode = "synthetic",
+            action = cmd.Command,
+            pack,
+            proposal,
+            executed = false,
+            mutated = false,
+            screenshotsCaptured = false
+        }, null);
+    }
+
+    private async Task HandleCollectHealthProbeAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+        var requesterId = dataEl.TryGetProperty("requesterId", out var rid) ? rid.GetString() : "operator";
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        if (ContainsUnsafeHealthProbeField(dataEl))
+        {
+            _logger.LogWarning("collect_health_probe: rejected unsafe payload");
+            await AckAsync(false, null, "health probe payload must be reason-only and non-PHI");
+            return;
+        }
+
+        var reason = dataEl.TryGetProperty("reason", out var reasonEl)
+            ? reasonEl.GetString() ?? "dashboard_diagnostics"
+            : "dashboard_diagnostics";
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: commandId ?? cmd.Nonce,
+            EventType: "health_probe_command",
+            FromState: "requested",
+            ToState: "collected",
+            Trigger: "signed_command",
+            CommandId: cmd.Nonce,
+            RequesterId: requesterId,
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: "non_phi_health_probe"));
+
+        await AckAsync(true, BuildHealthProbeResult(reason), null);
+    }
+
+    /// <summary>
+    /// <c>fetch_diagnostics</c> — gathers a PHI-safe snapshot of the box's config,
+    /// SQL connectivity, helper/IPC health, and error-mesh counters and acks it to
+    /// the cloud. Read-only: never drives the PMS, never mutates the box. This is
+    /// how Claude debugs an agent remotely without touching the PHI workstation.
+    /// Secrets (ApiKey/SqlPassword/HmacSalt/CloudCertPin) are never gathered;
+    /// <see cref="DiagnosticsSnapshotBuilder"/> enforces the safe field set and the
+    /// ack POST runs the snapshot through OutboundPhiGuard.
+    /// </summary>
+    private async Task HandleFetchDiagnosticsAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+        var requesterId = dataEl.TryGetProperty("requesterId", out var rid) ? rid.GetString() : "operator";
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        // Build + audit + ack inside a try so a throw NEVER leaves the command stuck
+        // at 'sent'. AckCommandAsync is best-effort cloud-side, but the cloud can only
+        // resolve a command it hears about — if snapshot build (RuntimeHealthEvidence
+        // .Collect / BuildWatchdogPayload / DiagnosticsSnapshotBuilder.Build) or the
+        // audit append throws, no ack would be sent and the operator's cockpit would
+        // spin forever. On failure, ack 'failed' with a SAFE, exception-TYPE-only reason
+        // (never the message — it could carry a path or other infra detail).
+        try
+        {
+            var rxWorker = _serviceProvider.GetService<RxDetectionWorker>();
+            var pharmacies = _options.GetEffectivePharmacies();
+            var firstPharmacy = pharmacies.Count > 0 ? pharmacies[0] : null;
+            var sql = new DiagnosticsSnapshotBuilder.SqlDiagnostics(
+                Configured: pharmacies.Count > 0,
+                Connected: rxWorker?.IsSqlConnected ?? false,
+                Server: firstPharmacy?.SqlServer ?? _options.SqlServer,
+                Database: firstPharmacy?.SqlDatabase ?? _options.SqlDatabase,
+                User: firstPharmacy?.SqlUser ?? _options.SqlUser);
+
+            var wire = new DiagnosticsSnapshotBuilder.WireDiagnostics(
+                SentryInitialized: global::SuavoAgent.Diagnostics.Wire.SentryInitialized,
+                EventsEmittedTotal: global::SuavoAgent.Diagnostics.Wire.EventsEmittedTotal,
+                WireHandlerFailedTotal: global::SuavoAgent.Diagnostics.Wire.WireHandlerFailedTotal,
+                SentryEnqueuedTotal: global::SuavoAgent.Diagnostics.Wire.SentryEnqueuedTotal,
+                SentryEnqueueFailedTotal: global::SuavoAgent.Diagnostics.Wire.SentryEnqueueFailedTotal,
+                SentryBeforeSendFailedTotal: global::SuavoAgent.Diagnostics.Wire.SentryBeforeSendFailedTotal,
+                RulesetVersion: global::SuavoAgent.Diagnostics.Wire.RulesetVersion);
+
+            var snapshot = DiagnosticsSnapshotBuilder.Build(
+                _options,
+                sql,
+                wire,
+                helper: BuildHelperPayload(_serviceProvider.GetService<IpcPipeServer>()),
+                watchdog: BuildWatchdogPayload(),
+                runtimeHealth: RuntimeHealthEvidence.Collect(),
+                commandPipeConnected: _ipcCommandClient?.IsConnected ?? false,
+                uptimeSeconds: (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
+                processId: Environment.ProcessId,
+                collectedAtUtc: DateTimeOffset.UtcNow);
+
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: commandId ?? cmd.Nonce,
+                EventType: "fetch_diagnostics_command",
+                FromState: "requested",
+                ToState: "collected",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: requesterId,
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: "non_phi_diagnostics"));
+
+            await AckAsync(true, snapshot, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "fetch_diagnostics snapshot build failed");
+            // Exception TYPE only — safe to surface; the message may contain infra detail.
+            await AckAsync(false, null, $"diagnostics_collection_failed:{ex.GetType().Name}");
+        }
+    }
+
+    private object BuildHealthProbeResult(string reason)
+    {
+        var runtime = RuntimeHealthEvidence.Collect();
+        var bootstrapPath = Path.Combine(RuntimeHealthEvidence.ProgramDataRoot, "bootstrap.ps1");
+        var crashEvidenceCount = runtime.CrashLogs.Count(log => log.Exists && log.Bytes > 0);
+        var configFailed =
+            runtime.ConfigSync.Present &&
+            (string.Equals(runtime.ConfigSync.Status, "failed", StringComparison.OrdinalIgnoreCase) ||
+             runtime.ConfigSync.ConsecutiveFailures >= 3);
+        var cloudAuthFailed =
+            runtime.CloudAuth.Present &&
+            !string.Equals(runtime.CloudAuth.Status, "ok", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(runtime.CloudAuth.Status, "success", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(runtime.CloudAuth.Status, "recovered", StringComparison.OrdinalIgnoreCase);
+        var status = configFailed || cloudAuthFailed || crashEvidenceCount > 0 ? "needs_attention" : "healthy";
+
+        return new
+        {
+            schema = "suavo.agent.health_probe.v1",
+            status,
+            reason,
+            checkedAtUtc = DateTimeOffset.UtcNow.ToString("o"),
+            screenshotsCaptured = false,
+            mutated = false,
+            agent = new
+            {
+                version = _options.Version,
+                uptimeSeconds = (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
+                processId = Environment.ProcessId,
+            },
+            install = new
+            {
+                bootstrapPresent = File.Exists(bootstrapPath),
+                bootstrapSha256Prefix = SafeFileSha256Prefix(bootstrapPath),
+            },
+            configSync = runtime.ConfigSync,
+            cloudAuth = runtime.CloudAuth,
+            crashLogs = runtime.CrashLogs,
+            audit = new
+            {
+                chainValid = _lastAuditChainValid,
+                entryCount = _stateDb.GetAuditEntryCount(),
+            },
+            serviceProbe = CollectServiceProbe(),
+        };
+    }
+
+    private static object CollectServiceProbe()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return new
+            {
+                platform = "non_windows",
+                supported = false,
+                services = Array.Empty<object>(),
+            };
+        }
+
+        var services = new List<object>();
+        foreach (var serviceName in new[] { "SuavoAgent.Core", "SuavoAgent.Broker", "SuavoAgent.Watchdog" })
+        {
+            try
+            {
+                using var controller = new System.ServiceProcess.ServiceController(serviceName);
+                services.Add(new
+                {
+                    serviceName,
+                    status = controller.Status.ToString(),
+                    canStop = controller.CanStop,
+                });
+            }
+            catch
+            {
+                services.Add(new
+                {
+                    serviceName,
+                    status = "not_found",
+                    canStop = false,
+                });
+            }
+        }
+
+        return new
+        {
+            platform = "windows",
+            supported = true,
+            services,
+        };
+    }
+
+    private static string? SafeFileSha256Prefix(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var hash = SHA256.HashData(stream);
+            return Convert.ToHexString(hash).ToLowerInvariant()[..16];
+        }
+        catch
+        {
+            return "unreadable";
+        }
+    }
+
+    private static bool ContainsUnsafeHealthProbeField(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return true;
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            var normalized = NormalizeIntentCursorFieldName(property.Name);
+            if (normalized is not ("reason" or "commandid" or "requesterid") ||
+                property.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array ||
+                IsBlockedComputerUseField(property.Name) ||
+                HasUnsafeHealthProbeValue(normalized, property.Value))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasUnsafeHealthProbeValue(string normalizedName, JsonElement value)
+    {
+        return normalizedName switch
+        {
+            "reason" => value.ValueKind != JsonValueKind.String ||
+                value.GetString() is not (
+                    "dashboard_diagnostics" or
+                    "post_install_probe" or
+                    "operator_requested" or
+                    "before_repair" or
+                    "after_repair" or
+                    "watchdog_unhealthy"),
+            "commandid" or "requesterid" =>
+                value.ValueKind != JsonValueKind.String || value.GetString()?.Length > 128,
+            _ => true,
+        };
+    }
+
+    private static bool ContainsUnsafeComputerUseField(JsonElement element, string command)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return true;
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!IsAllowedComputerUseField(property.Name, command) ||
+                IsBlockedComputerUseField(property.Name) ||
+                property.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array ||
+                HasUnsafeComputerUseValue(property.Name, property.Value, command))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsAllowedComputerUseField(string name, string command)
+    {
+        var normalized = NormalizeIntentCursorFieldName(name);
+        if (normalized is "pack" or "mode" or "commandid" or "requesterid")
+        {
+            return true;
+        }
+
+        return command == "computer_use_propose" && normalized == "proposal";
+    }
+
+    private static bool HasUnsafeComputerUseValue(string name, JsonElement value, string command)
+    {
+        var normalized = NormalizeIntentCursorFieldName(name);
+
+        return normalized switch
+        {
+            "pack" => value.ValueKind != JsonValueKind.String ||
+                value.GetString() is not ("workstation_health" or "pioneerrx_shadow" or "inbox_shadow"),
+            "mode" => value.ValueKind != JsonValueKind.String ||
+                value.GetString() != "synthetic",
+            "proposal" => command != "computer_use_propose" ||
+                value.ValueKind != JsonValueKind.String ||
+                value.GetString() is not ("run_diagnostics" or "queue_repair" or "show_intent_cursor" or "open_delivery_inbox"),
+            "commandid" or "requesterid" =>
+                value.ValueKind != JsonValueKind.String || value.GetString()?.Length > 128,
+            _ => true,
+        };
+    }
+
+    private static bool IsBlockedComputerUseField(string name)
+    {
+        var normalized = NormalizeIntentCursorFieldName(name);
+
+        return IsBlockedIntentCursorField(name) ||
+            normalized is
+                "screenshot" or
+                "image" or
+                "ocr" or
+                "click" or
+                "type" or
+                "key" or
+                "mouse" or
+                "coordinates" or
+                "address" or
+                "phone";
+    }
+
+    private static bool ContainsUnsafeIntentCursorField(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return true;
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!IsAllowedIntentCursorField(property.Name) ||
+                IsBlockedIntentCursorField(property.Name) ||
+                property.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array ||
+                HasUnsafeIntentCursorValue(property.Name, property.Value))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsAllowedIntentCursorField(string name)
+    {
+        var normalized = NormalizeIntentCursorFieldName(name);
+        return normalized is
+            "x" or
+            "y" or
+            "coordinatespace" or
+            "durationms" or
+            "diameterpx" or
+            "opacity" or
+            "tone" or
+            "anchor" or
+            // Glide target + easing (v3.18.x). toX/toY are numbers; toAnchor and
+            // easing are closed enums (see HasUnsafeIntentCursorValue) so none can
+            // smuggle PHI through a free-form string.
+            "tox" or
+            "toy" or
+            "toanchor" or
+            "easing" or
+            "commandid" or
+            "requesterid";
+    }
+
+    private static bool HasUnsafeIntentCursorValue(string name, JsonElement value)
+    {
+        var normalized = NormalizeIntentCursorFieldName(name);
+
+        return normalized switch
+        {
+            "coordinatespace" => value.ValueKind != JsonValueKind.String ||
+                !string.Equals(value.GetString(), IntentCursorCoordinateSpaces.Screen, StringComparison.Ordinal),
+            "tone" => value.ValueKind != JsonValueKind.String ||
+                value.GetString() is not (
+                    IntentCursorTones.Agent or
+                    IntentCursorTones.Attention or
+                    IntentCursorTones.Success or
+                    IntentCursorTones.Warning),
+            "anchor" or "toanchor" => value.ValueKind != JsonValueKind.String ||
+                !string.Equals(value.GetString(), IntentCursorAnchors.PrimaryCenter, StringComparison.Ordinal),
+            "easing" => value.ValueKind != JsonValueKind.String ||
+                value.GetString() is not (
+                    IntentCursorEasings.Linear or
+                    IntentCursorEasings.EaseInOutCubic),
+            "x" or "y" or "tox" or "toy" or "durationms" or "diameterpx" or "opacity" =>
+                value.ValueKind != JsonValueKind.Number,
+            "commandid" or "requesterid" =>
+                value.ValueKind != JsonValueKind.String || value.GetString()?.Length > 128,
+            _ => true,
+        };
+    }
+
+    private static bool IsBlockedIntentCursorField(string name)
+    {
+        var normalized = NormalizeIntentCursorFieldName(name);
+
+        return normalized is
+            "text" or
+            "label" or
+            "windowtitle" or
+            "rx" or
+            "rxnumber" or
+            "rxid" or
+            "prescription" or
+            "prescriptionid" or
+            "patient" or
+            "patientid" or
+            "patientname" or
+            "patientfirstname" or
+            "patientlastname" or
+            "medication" or
+            "ndc";
+    }
+
+    private static string NormalizeIntentCursorFieldName(string name) =>
+        new(name
+            .Where(char.IsLetterOrDigit)
+            .Select(char.ToLowerInvariant)
+            .ToArray());
+
+    private async Task HandleRepairAgentAsync(JsonElement scEl, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        // Bug 20 — reject unrecognized reasons up front instead of silently
+        // re-mapping to "remote_command". Operator gets a clear NACK that
+        // lists the allowed reasons; the closed-set persisted to the
+        // request file stays HIPAA-clean. Watchdog-side redaction (see
+        // WatchdogWorker) stays as defense-in-depth.
+        var (rawReason, validation) = WatchdogRepairRequestWriter.InspectReason(dataEl);
+        if (validation == WatchdogRepairRequestWriter.ReasonValidation.Rejected)
+        {
+            _logger.LogWarning(
+                "repair_agent: rejecting unknown reason — must be one of [{Allowed}]",
+                string.Join(", ", WatchdogRepairRequestWriter.AllowedReasons));
+            await AckAsync(
+                false,
+                new
+                {
+                    status = "rejected",
+                    rejected_reason = rawReason,
+                    allowed_reasons = WatchdogRepairRequestWriter.AllowedReasons,
+                },
+                "unknown_repair_reason");
+            return;
+        }
+
+        var reason = WatchdogRepairRequestWriter.ReadReason(dataEl);
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: _options.AgentId ?? "agent",
+            EventType: "repair_command_received",
+            FromState: "",
+            ToState: "requested",
+            Trigger: "repair_agent",
+            CommandId: commandId,
+            RequesterId: "operator",
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: "signed_remote_repair"));
+
+        try
+        {
+            var requestPath = WatchdogRepairRequestWriter.Queue(
+                _options.WatchdogRepairRequestPath,
+                commandId,
+                reason,
+                _options.AgentId);
+            _logger.LogWarning("repair_agent: queued LocalSystem Watchdog repair request at {Path}", requestPath);
+            await AckAsync(true, new { status = "queued_for_watchdog" }, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "repair_agent: failed to queue Watchdog repair request");
+            await AckAsync(false, new { status = "queue_failed" }, "failed to queue repair");
         }
     }
 
@@ -851,15 +1880,24 @@ public sealed class HeartbeatWorker : BackgroundService
     {
         if (_updateInProgress) return;
 
+        string? targetVersion = null;
+        string? targetChannel = null;
         try
         {
             var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
             var manifestStr = dataEl.TryGetProperty("manifest", out var m) ? m.GetString() : null;
             var signatureHex = dataEl.TryGetProperty("manifestSignature", out var sig) ? sig.GetString() : null;
+            targetChannel = dataEl.TryGetProperty("channel", out var ch) ? ch.GetString() : "stable";
 
             if (string.IsNullOrEmpty(manifestStr))
             {
                 _logger.LogWarning("Signed update command missing manifest — rejecting");
+                WriteUpdateHealthEvidence(
+                    "failed",
+                    targetVersion: null,
+                    lastErrorKind: "missing_manifest",
+                    consecutiveFailures: 1,
+                    channel: targetChannel);
                 return;
             }
 
@@ -867,39 +1905,100 @@ public sealed class HeartbeatWorker : BackgroundService
             if (manifest is null)
             {
                 _logger.LogWarning("Signed update command has malformed manifest — rejecting");
+                WriteUpdateHealthEvidence(
+                    "failed",
+                    targetVersion: null,
+                    lastErrorKind: "malformed_manifest",
+                    consecutiveFailures: 1,
+                    channel: targetChannel);
                 return;
             }
+            targetVersion = manifest.Version;
 
             if (manifest.Version == _options.Version)
             {
                 _logger.LogDebug("Already running v{Version} — skipping update", manifest.Version);
+                WriteUpdateHealthEvidence(
+                    "current",
+                    targetVersion,
+                    lastErrorKind: null,
+                    consecutiveFailures: 0,
+                    channel: targetChannel);
                 return;
             }
 
             // Canary channel validation: only apply updates matching our assigned channel.
             // Cloud assigns channel (stable/canary/beta) via heartbeat response.
-            var targetChannel = dataEl.TryGetProperty("channel", out var ch) ? ch.GetString() : "stable";
             var myChannel = _lastUpdateChannel ?? _options.UpdateChannel;
             if (!string.Equals(targetChannel, myChannel, StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(targetChannel, "stable", StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogDebug("Update channel mismatch: target={Target}, mine={Mine} — skipping",
                     targetChannel, myChannel);
+                WriteUpdateHealthEvidence(
+                    "skipped_channel",
+                    targetVersion,
+                    lastErrorKind: null,
+                    consecutiveFailures: 0,
+                    channel: targetChannel);
                 return;
             }
 
             _updateInProgress = true;
             _logger.LogInformation("Signed package update: v{Version} ({Count} binaries)",
                 manifest.Version, 3);
+            WriteUpdateHealthEvidence(
+                "applying",
+                targetVersion,
+                lastErrorKind: null,
+                consecutiveFailures: 0,
+                channel: targetChannel);
 
             await SelfUpdater.TryApplyPackageUpdateAsync(manifest, signatureHex ?? "", _logger, ct);
             // If we get here, update failed (TryApplyPackageUpdateAsync exits on success)
+            WriteUpdateHealthEvidence(
+                "failed",
+                targetVersion,
+                lastErrorKind: "apply_returned_without_exit",
+                consecutiveFailures: 1,
+                channel: targetChannel);
             _updateInProgress = false;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Signed update command failed");
+            WriteUpdateHealthEvidence(
+                "failed",
+                targetVersion,
+                lastErrorKind: ex.GetType().Name,
+                consecutiveFailures: 1,
+                channel: targetChannel);
             _updateInProgress = false;
+        }
+    }
+
+    private void WriteUpdateHealthEvidence(
+        string status,
+        string? targetVersion,
+        string? lastErrorKind,
+        int consecutiveFailures,
+        string? channel)
+    {
+        try
+        {
+            RuntimeHealthEvidence.WriteUpdateHealth(
+                RuntimeHealthEvidence.UpdateHealthPath(),
+                status,
+                targetVersion,
+                DateTimeOffset.UtcNow,
+                status is "current" ? DateTimeOffset.UtcNow : null,
+                consecutiveFailures,
+                lastErrorKind,
+                channel ?? _lastUpdateChannel ?? _options.UpdateChannel);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Update health evidence write failed");
         }
     }
 
@@ -1194,17 +2293,18 @@ public sealed class HeartbeatWorker : BackgroundService
 
     private async Task HandleRunPricingJobAsync(JsonElement scEl, CancellationToken ct)
     {
-        if (_pricingJobRunner == null || _ipcCommandClient == null)
+        if (_pricingJobExecutor == null)
         {
-            _logger.LogWarning("run_pricing_job: PricingJobRunner or IpcCommandClient not registered");
+            _logger.LogWarning("run_pricing_job: pricing executor not registered");
             return;
         }
 
         var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
         var excelPath = dataEl.TryGetProperty("excelPath", out var ep) ? ep.GetString() : null;
-        var ndcColumn = dataEl.TryGetProperty("ndcColumn", out var nc) ? nc.GetString() ?? "NDC" : "NDC";
-        var supplierColumn = dataEl.TryGetProperty("supplierColumn", out var sc2) ? sc2.GetString() ?? "Supplier" : "Supplier";
-        var costColumn = dataEl.TryGetProperty("costColumn", out var cc) ? cc.GetString() ?? "Cost (per unit)" : "Cost (per unit)";
+        var pricingCandidateToken = dataEl.TryGetProperty("pricingCandidateToken", out var pct) ? pct.GetString() : null;
+        var ndcColumn = dataEl.TryGetProperty("ndcColumn", out var nc) ? nc.GetString() ?? PricingJobDefaults.NdcColumn : PricingJobDefaults.NdcColumn;
+        var supplierColumn = dataEl.TryGetProperty("supplierColumn", out var sc2) ? sc2.GetString() ?? PricingJobDefaults.SupplierColumn : PricingJobDefaults.SupplierColumn;
+        var costColumn = dataEl.TryGetProperty("costColumn", out var cc) ? cc.GetString() ?? PricingJobDefaults.CostColumn : PricingJobDefaults.CostColumn;
         var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
 
         async Task AckAsync(bool ok, object? result, string? err)
@@ -1213,29 +2313,41 @@ public sealed class HeartbeatWorker : BackgroundService
             await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
         }
 
-        if (string.IsNullOrEmpty(excelPath))
+        if (string.IsNullOrEmpty(excelPath) && string.IsNullOrEmpty(pricingCandidateToken))
         {
-            _logger.LogWarning("run_pricing_job: missing excelPath");
-            await AckAsync(false, null, "missing excelPath");
+            _logger.LogWarning("run_pricing_job: missing workbook target");
+            await AckAsync(false, null, "missing workbook target");
             return;
         }
 
+        if (!string.IsNullOrEmpty(pricingCandidateToken))
+        {
+            excelPath = _stateDb.TryResolvePricingDiscoveryCandidate(pricingCandidateToken);
+            if (string.IsNullOrEmpty(excelPath))
+            {
+                _logger.LogWarning("run_pricing_job: pricing candidate token was not found");
+                await AckAsync(false, null, "pricing candidate expired - run discovery again");
+                return;
+            }
+        }
+        var workbookPath = excelPath!;
+
         // [C-1] Validate path safety: must be local absolute .xlsx, no UNC/traversal
-        var ext = Path.GetExtension(excelPath);
+        var ext = Path.GetExtension(workbookPath);
         if (!string.Equals(ext, ".xlsx", StringComparison.OrdinalIgnoreCase))
         {
             _logger.LogWarning("run_pricing_job: excelPath rejected — must be .xlsx");
             await AckAsync(false, null, "excelPath must be .xlsx");
             return;
         }
-        if (excelPath.StartsWith(@"\\") || !Path.IsPathRooted(excelPath))
+        if (workbookPath.StartsWith(@"\\") || !Path.IsPathRooted(workbookPath))
         {
             _logger.LogWarning("run_pricing_job: excelPath rejected — must be local absolute path");
             await AckAsync(false, null, "excelPath must be local absolute path");
             return;
         }
-        var canonicalPath = Path.GetFullPath(excelPath);
-        if (!string.Equals(canonicalPath, excelPath, StringComparison.OrdinalIgnoreCase))
+        var canonicalPath = Path.GetFullPath(workbookPath);
+        if (!string.Equals(canonicalPath, workbookPath, StringComparison.OrdinalIgnoreCase))
         {
             _logger.LogWarning("run_pricing_job: excelPath rejected — canonicalization changed path");
             await AckAsync(false, null, "excelPath canonicalization mismatch");
@@ -1255,34 +2367,25 @@ public sealed class HeartbeatWorker : BackgroundService
             var jobId = Guid.NewGuid().ToString("N");
             var spec = new PricingJobSpec(jobId, canonicalPath, ndcColumn, supplierColumn, costColumn);
 
-            _logger.LogInformation("Pricing job {JobId} starting: {Path}", jobId, canonicalPath);
+            _logger.LogInformation("Pricing job {JobId} starting", jobId);
 
-            if (!_ipcCommandClient.IsConnected)
-            {
-                var connected = await _ipcCommandClient.ConnectAsync(TimeSpan.FromSeconds(10), ct);
-                if (!connected)
-                {
-                    _logger.LogError("run_pricing_job: cannot connect to Helper command pipe");
-                    _stateDb.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
-                    await AckAsync(false, null, "Helper command pipe unreachable");
-                    return;
-                }
-            }
-
-            var progress = await _pricingJobRunner.RunAsync(spec, _ipcCommandClient, ct);
+            var execution = await _pricingJobExecutor.RunAsync(spec, ct);
+            var progress = execution.Progress;
+            if (_pricingJobCloudUploader != null)
+                await _pricingJobCloudUploader.UploadAsync(spec, execution, commandId, ct);
 
             _logger.LogInformation("Pricing job {JobId} finished: {Status} — {Completed}/{Total}",
                 jobId, progress.Status, progress.CompletedItems, progress.TotalItems);
 
-            var ok = progress.Status == PricingJobStatus.Completed;
-            await AckAsync(ok, new
+            await AckAsync(execution.Ok, new
             {
                 jobId,
+                mode = execution.Mode,
                 totalItems = progress.TotalItems,
                 completedItems = progress.CompletedItems,
                 failedItems = progress.FailedItems,
                 status = progress.Status.ToString(),
-            }, ok ? null : "pricing job failed — see agent logs");
+            }, execution.Ok ? null : execution.Error ?? "pricing job failed — see agent logs");
         }
         finally
         {
@@ -1307,17 +2410,17 @@ public sealed class HeartbeatWorker : BackgroundService
     /// </summary>
     private async Task HandleFindAndRunPricingJobAsync(JsonElement scEl, CancellationToken ct)
     {
-        if (_discoveryClient == null || _ipcCommandClient == null || _pricingJobRunner == null)
+        if (_discoveryClient == null || _ipcCommandClient == null || _pricingJobExecutor == null)
         {
-            _logger.LogWarning("find_and_run_pricing_job: discovery/IPC/pricing runner not registered");
+            _logger.LogWarning("find_and_run_pricing_job: discovery/IPC/pricing executor not registered");
             return;
         }
 
         var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
         var pack = dataEl.TryGetProperty("pack", out var pk) ? pk.GetString() ?? "pharmacy_rx" : "pharmacy_rx";
-        var ndcColumn = dataEl.TryGetProperty("ndcColumn", out var nc) ? nc.GetString() ?? "NDC" : "NDC";
-        var supplierColumn = dataEl.TryGetProperty("supplierColumn", out var sc2) ? sc2.GetString() ?? "Supplier" : "Supplier";
-        var costColumn = dataEl.TryGetProperty("costColumn", out var cc) ? cc.GetString() ?? "Cost (per unit)" : "Cost (per unit)";
+        var ndcColumn = dataEl.TryGetProperty("ndcColumn", out var nc) ? nc.GetString() ?? PricingJobDefaults.NdcColumn : PricingJobDefaults.NdcColumn;
+        var supplierColumn = dataEl.TryGetProperty("supplierColumn", out var sc2) ? sc2.GetString() ?? PricingJobDefaults.SupplierColumn : PricingJobDefaults.SupplierColumn;
+        var costColumn = dataEl.TryGetProperty("costColumn", out var cc) ? cc.GetString() ?? PricingJobDefaults.CostColumn : PricingJobDefaults.CostColumn;
         var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
 
         async Task AckAsync(bool ok, object? result, string? err)
@@ -1353,13 +2456,17 @@ public sealed class HeartbeatWorker : BackgroundService
 
         // Run discovery.
         var discoveryJobId = Guid.NewGuid().ToString("N");
-        var discoveryResult = await _discoveryClient.FindAsync(_ipcCommandClient, discoveryJobId, spec, ct);
-        if (discoveryResult is null)
+        var discovery = await _discoveryClient.FindAsync(_ipcCommandClient, discoveryJobId, spec, ct);
+        if (!discovery.Succeeded)
         {
-            _logger.LogError("find_and_run_pricing_job: discovery returned null");
-            await AckAsync(false, null, "discovery failed — see agent logs");
+            var failure = discovery.Failure!;
+            _logger.LogError(
+                "find_and_run_pricing_job: discovery failed reason={Reason} ipcStatus={Status} code={Code}",
+                failure.ReasonCode, failure.IpcStatus, failure.ErrorCode);
+            await AckAsync(false, failure.ToAckResult(), failure.HumanMessage);
             return;
         }
+        var discoveryResult = discovery.Result!;
 
         _logger.LogInformation(
             "find_and_run_pricing_job: discovery resolution={Resolution} best={File} confidence={Conf}",
@@ -1397,18 +2504,21 @@ public sealed class HeartbeatWorker : BackgroundService
             {
                 var jobId = Guid.NewGuid().ToString("N");
                 var jobSpec = new PricingJobSpec(jobId, canonical, ndcColumn, supplierColumn, costColumn);
-                _logger.LogInformation("find_and_run_pricing_job: auto-running pricing job {JobId} on {Path}",
-                    jobId, canonical);
+                _logger.LogInformation("find_and_run_pricing_job: auto-running pricing job {JobId}", jobId);
 
                 _stateDb.UpsertPricingJob(jobSpec, PricingJobStatus.Pending, 0, 0, 0);
-                var progress = await _pricingJobRunner.RunAsync(jobSpec, _ipcCommandClient, ct);
+                var execution = await _pricingJobExecutor.RunAsync(jobSpec, ct);
+                var progress = execution.Progress;
+                if (_pricingJobCloudUploader != null)
+                    await _pricingJobCloudUploader.UploadAsync(jobSpec, execution, commandId, ct);
 
-                var ok = progress.Status == PricingJobStatus.Completed;
-                await AckAsync(ok, new
+                await AckAsync(execution.Ok, new
                 {
                     status = "auto_ran",
                     jobId,
-                    discoveredPath = canonical,
+                    mode = execution.Mode,
+                    discoveredFileName = Path.GetFileName(canonical),
+                    discoveredBucket = discoveryResult.Best.Candidate.Candidate.Bucket.ToString(),
                     discoveryConfidence = discoveryResult.Best.Confidence,
                     discoveryReason = discoveryResult.Best.Reason,
                     discoveryTier = discoveryResult.Best.Tier.ToString(),
@@ -1416,7 +2526,7 @@ public sealed class HeartbeatWorker : BackgroundService
                     completedItems = progress.CompletedItems,
                     failedItems = progress.FailedItems,
                     pricingStatus = progress.Status.ToString(),
-                }, ok ? null : "pricing job failed — see agent logs");
+                }, execution.Ok ? null : execution.Error ?? "pricing job failed — see agent logs");
             }
             finally
             {
@@ -1475,27 +2585,32 @@ public sealed class HeartbeatWorker : BackgroundService
         return true;
     }
 
-    private static object[] BuildCandidatesPayload(FileDiscoveryResult result)
+    private object[] BuildCandidatesPayload(FileDiscoveryResult result)
     {
         var list = new List<CandidateRanking>();
         if (result.Best is not null) list.Add(result.Best);
         list.AddRange(result.Alternatives);
 
-        return list.Select(c => new
+        return list.Select(c =>
         {
-            path = c.Candidate.Candidate.AbsolutePath,
-            fileName = c.Candidate.Candidate.FileName,
-            sizeBytes = c.Candidate.Candidate.SizeBytes,
-            lastModifiedUtc = c.Candidate.Candidate.LastModifiedUtc,
-            bucket = c.Candidate.Candidate.Bucket.ToString(),
-            confidence = c.Confidence,
-            reason = c.Reason,
-            tier = c.Tier.ToString(),
-            hasErrorFromSampler = c.Candidate.ErrorMessage is not null,
-            samplerError = c.Candidate.ErrorMessage,
-            columnHeaders = (c.Candidate.Shape as TabularShapeSample)?.ColumnHeaders,
-            rowCount = (c.Candidate.Shape as TabularShapeSample)?.RowCount ?? 0,
-            primaryKeyColumnIndex = (c.Candidate.Shape as TabularShapeSample)?.PrimaryKeyColumnIndex ?? -1,
+            var candidate = c.Candidate.Candidate;
+            var token = _stateDb.SavePricingDiscoveryCandidate(candidate.AbsolutePath, candidate.FileName);
+            return new
+            {
+                pathToken = token,
+                fileName = candidate.FileName,
+                sizeBytes = candidate.SizeBytes,
+                lastModifiedUtc = candidate.LastModifiedUtc,
+                bucket = candidate.Bucket.ToString(),
+                confidence = c.Confidence,
+                reason = c.Reason,
+                tier = c.Tier.ToString(),
+                hasErrorFromSampler = c.Candidate.ErrorMessage is not null,
+                samplerError = c.Candidate.ErrorMessage,
+                columnHeaders = (c.Candidate.Shape as TabularShapeSample)?.ColumnHeaders,
+                rowCount = (c.Candidate.Shape as TabularShapeSample)?.RowCount ?? 0,
+                primaryKeyColumnIndex = (c.Candidate.Shape as TabularShapeSample)?.PrimaryKeyColumnIndex ?? -1,
+            };
         }).ToArray();
     }
 }

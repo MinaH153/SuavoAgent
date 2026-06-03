@@ -9,6 +9,7 @@ public sealed class AgentOptions
     public string? MachineFingerprint { get; set; }
     public int HeartbeatIntervalSeconds { get; set; } = 30;
     public int HeartbeatJitterSeconds { get; set; } = 5;
+    public string? WatchdogRepairRequestPath { get; set; }
     public string Version { get; set; } = "3.9.2";
     public string UpdateChannel { get; set; } = "stable";
     public string? SqlServer { get; set; }
@@ -17,10 +18,11 @@ public sealed class AgentOptions
     public string? SqlPassword { get; set; }
 
     /// <summary>
-    /// When true, SQL connections accept any server certificate (default for pharmacy LAN compatibility).
-    /// HIPAA warning logged when enabled. Set to false when SQL Server has a trusted certificate.
+    /// When true, SQL connections accept any server certificate. This is an explicit
+    /// break-glass compatibility override for pharmacies with self-signed SQL Server
+    /// certificates; default false avoids silent LAN MITM exposure.
     /// </summary>
-    public bool SqlTrustServerCertificate { get; set; } = true;
+    public bool SqlTrustServerCertificate { get; set; } = false;
 
     /// <summary>
     /// Per-agent HMAC salt for hashing PHI (Rx numbers, etc.) in audit logs and cloud sync.
@@ -38,6 +40,23 @@ public sealed class AgentOptions
     /// Maximum prescriptions per detection query. Default 100. Increase for high-volume pharmacies.
     /// </summary>
     public int MaxDetectionBatchSize { get; set; } = 100;
+
+    /// <summary>
+    /// Opt-in gate for the legacy <c>rxDeliveryQueue</c> shape on the sync
+    /// payload. Default false. Track 2 field proof uses
+    /// <c>rxOrderCandidates</c> exclusively; this shape exists only for
+    /// legacy cloud routes that haven't migrated yet.
+    /// <para>
+    /// Track 3 invariant (Codex CRITICAL #15, closed 2026-05-12): even when
+    /// this is <c>true</c>, the queue ships ONLY operational metadata —
+    /// hashed Rx number, drug name, NDC, fill date, quantity, status GUID,
+    /// detection timestamp. Patient name / phone / address are intentionally
+    /// excluded by <c>RxDetectionWorker.SerializeRxBatch</c>; they flow
+    /// exclusively through the typed signed-command path
+    /// <c>SuavoCloudClient.SendPatientDetailsAsync</c>.
+    /// </para>
+    /// </summary>
+    public bool EnableLegacyPhiDeliveryQueueSync { get; set; } = false;
 
     /// <summary>
     /// When true, agent runs in learning mode (30-day observation).
@@ -88,16 +107,52 @@ public sealed class AgentOptions
     public FleetFeaturesOptions FleetFeatures { get; set; } = new();
 
     /// <summary>
+    /// Fleet-learning rollout. Default OFF: the agent pulls fleet seeds but does
+    /// NOT apply the consensus rx_queue_shape warm-start until a pilot opts in.
+    /// </summary>
+    public FleetLearningOptions FleetLearning { get; set; } = new();
+
+    /// <summary>
     /// Vision pipeline configuration (screenshot capture + extraction). Off by
     /// default — enabling adds a new HIPAA surface (encrypted screens on disk).
     /// </summary>
     public VisionOptions Vision { get; set; } = new();
 
     /// <summary>
+    /// Self-healing knobs. WorkerSupervisor restarts a faulted worker in-process instead of
+    /// letting it die silently while the service still shows "Running". Default on; kill-switch
+    /// via config-sync if a worker ever restart-loops.
+    /// </summary>
+    public SelfHealOptions SelfHeal { get; set; } = new();
+
+    /// <summary>
     /// Multi-pharmacy config. When populated, each entry gets its own detection worker.
     /// Backwards-compatible: if empty, falls back to the top-level SqlServer/PharmacyId fields.
     /// </summary>
     public List<PharmacyConfig> Pharmacies { get; set; } = new();
+
+    /// <summary>
+    /// Which IPricingJobExecutor implementation runs <c>run_pricing_job</c> / <c>find_and_run_pricing_job</c>.
+    ///
+    /// <c>SqlFirst</c> (default): SqlFirstPricingJobExecutor reads pricing from the PioneerRx SQL backend
+    /// directly. Fast (~30s for 500 NDCs) and fail-closed — no UIA fallback if SQL is unavailable.
+    ///
+    /// <c>UiaFirst</c>: UiaFirstPricingJobExecutor drives PioneerRx through its UI (Item → Rx Item →
+    /// Quick Search → Pricing tab) for every NDC. Slower (minutes to ~half hour for 500 NDCs depending
+    /// on throttle) but stays inside the documented operator workflow — no direct DB connection,
+    /// no vendor-EULA tamper question. Use for pharmacies that have not (yet) authorized SQL access.
+    /// </summary>
+    public PricingExecutorMode PricingExecutor { get; set; } = PricingExecutorMode.SqlFirst;
+
+    /// <summary>
+    /// Delay between successive NDC lookups within a single pricing job, in milliseconds.
+    /// Throttle exists to (a) avoid hammering PioneerRx during a 500-row batch and (b) stay below
+    /// any anti-automation heuristic the vendor may apply. Default <c>1500</c> ms keeps a 500-NDC
+    /// run at ~12.5 min — comfortably human-paced under UIA mode. SQL-first mode can safely lower
+    /// this since DB lookups don't drive the operator's keyboard.
+    /// Range: clamped to [0, 30000] ms at runner construction.
+    /// </summary>
+    public int PricingThrottleMs { get; set; } = 1500;
 
     /// <summary>
     /// Returns the effective pharmacy list — either the explicit Pharmacies array
@@ -113,7 +168,7 @@ public sealed class AgentOptions
             {
                 PharmacyId = PharmacyId ?? "",
                 SqlServer = SqlServer,
-                SqlDatabase = SqlDatabase ?? "PioneerPharmacySystem",
+                SqlDatabase = SqlDatabase,
                 SqlUser = SqlUser,
                 SqlPassword = SqlPassword,
             }
@@ -121,11 +176,38 @@ public sealed class AgentOptions
     }
 }
 
+public enum PricingExecutorMode
+{
+    /// <summary>SQL-first, fail-closed (default). See <c>AgentOptions.PricingExecutor</c>.</summary>
+    SqlFirst,
+    /// <summary>UIA-first via Helper. No SQL fallback. See <c>AgentOptions.PricingExecutor</c>.</summary>
+    UiaFirst,
+}
+
+public sealed class SelfHealOptions
+{
+    /// <summary>
+    /// Restart a faulted <c>ResilientHostedService</c> worker in-process (bounded backoff) instead
+    /// of letting it die silently. Default true; set false as a kill-switch (faults then propagate
+    /// as before). Gates the workers that read AgentOptions (RxDetection, Writeback, Heartbeat);
+    /// ConfigSync is a low-risk config-poll loop and supervises unconditionally.
+    /// </summary>
+    public bool WorkerSupervisorEnabled { get; set; } = true;
+}
+
 public sealed class PharmacyConfig
 {
     public string PharmacyId { get; set; } = "";
     public string SqlServer { get; set; } = "";
-    public string SqlDatabase { get; set; } = "PioneerPharmacySystem";
+
+    /// <summary>PMS family this pharmacy runs (registry key). Defaults to PioneerRx for back-compat.</summary>
+    public string AdapterType { get; set; } = "pioneerrx";
+
+    /// <summary>
+    /// Explicit catalog override. Null = fall back to the resolved adapter's default catalog
+    /// (see <see cref="SuavoAgent.Core.Adapters.AdapterCatalog"/>); no longer hardcodes PioneerRx.
+    /// </summary>
+    public string? SqlDatabase { get; set; }
     public string? SqlUser { get; set; }
     public string? SqlPassword { get; set; }
     public bool Enabled { get; set; } = true;

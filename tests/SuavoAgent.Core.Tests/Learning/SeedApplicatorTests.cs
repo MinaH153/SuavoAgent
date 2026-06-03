@@ -262,10 +262,65 @@ public class SeedApplicatorTests : IDisposable
     private static SeedResponse MakeModelResponse(string digest,
         IReadOnlyList<SeedCorrelation>? correlations = null,
         SeedQueryShape[]? queryShapes = null,
-        SeedStatusMapping[]? statusMappings = null) =>
+        SeedStatusMapping[]? statusMappings = null,
+        SeedRxQueueShape? rxQueueShape = null) =>
         new(digest, 2, "model", new[] { "schema", "ui" },
             new UiOverlap(8, 10, 0.8), correlations,
             queryShapes ?? Array.Empty<SeedQueryShape>(),
             statusMappings ?? Array.Empty<SeedStatusMapping>(),
-            null);
+            null, RxQueueShape: rxQueueShape);
+
+    // --- ApplyModelSeeds: fleet rxQueue queue-shape warm-start (PR4) ---
+
+    private static SeedRxQueueShape RxShape() =>
+        new("dbo.Rx", "RxNumber", "Status", "FillDate", "PatientID");
+
+    [Fact]
+    public void ApplyModelSeeds_FlagOn_SeedsRxQueueCandidate()
+    {
+        var response = MakeModelResponse("digest-rxq", rxQueueShape: RxShape());
+
+        _applicator.ApplyModelSeeds(SessionId, response, applyFleetRxQueueShape: true);
+
+        var candidates = _db.GetRxQueueCandidates(SessionId);
+        Assert.Single(candidates);
+        Assert.Equal("dbo.Rx", candidates[0].PrimaryTable);
+        Assert.Equal("RxNumber", candidates[0].RxNumberColumn);
+        Assert.Equal("Status", candidates[0].StatusColumn);
+        Assert.Equal(0.6, candidates[0].Confidence, 2);
+    }
+
+    [Fact]
+    public void ApplyModelSeeds_FlagOff_DoesNotSeedRxQueueShape()
+    {
+        var response = MakeModelResponse("digest-rxq2", rxQueueShape: RxShape());
+
+        // Default flag OFF (observe-first): the seed is pulled but not applied.
+        _applicator.ApplyModelSeeds(SessionId, response);
+
+        Assert.Empty(_db.GetRxQueueCandidates(SessionId));
+    }
+
+    [Fact]
+    public void ApplyModelSeeds_ShapeOnly_NoCorrelations_StillAppliesAndCommits()
+    {
+        var response = MakeModelResponse("digest-rxq3", correlations: null, rxQueueShape: RxShape());
+
+        var result = _applicator.ApplyModelSeeds(SessionId, response, applyFleetRxQueueShape: true);
+
+        Assert.False(result.AlreadyApplied);
+        Assert.Single(_db.GetRxQueueCandidates(SessionId));
+        Assert.NotNull(_db.GetAppliedSeed("digest-rxq3")); // recorded → idempotent on re-pull
+    }
+
+    [Fact]
+    public void ApplyModelSeeds_AlreadyApplied_DoesNotDuplicateRxQueueCandidate()
+    {
+        var response = MakeModelResponse("digest-rxq4", rxQueueShape: RxShape());
+        _applicator.ApplyModelSeeds(SessionId, response, applyFleetRxQueueShape: true);
+        var second = _applicator.ApplyModelSeeds(SessionId, response, applyFleetRxQueueShape: true);
+
+        Assert.True(second.AlreadyApplied);
+        Assert.Single(_db.GetRxQueueCandidates(SessionId)); // not duplicated on re-apply
+    }
 }

@@ -16,6 +16,7 @@ public interface IServiceCommand
 {
     ServiceState Query(string serviceName);
     bool Start(string serviceName, TimeSpan timeout);
+    bool Stop(string serviceName, TimeSpan timeout);
     bool InvokeRepair(string bootstrapPath, TimeSpan timeout);
 }
 
@@ -36,6 +37,27 @@ public sealed class ServiceCommand : IServiceCommand
         // sc.exe start returns START_PENDING on success; RUNNING if already up.
         return output.Contains("START_PENDING", StringComparison.OrdinalIgnoreCase)
             || output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public bool Stop(string serviceName, TimeSpan timeout)
+    {
+        // sc.exe stop returns STOP_PENDING (or 1062 "service not started") immediately;
+        // we must WAIT for the process to actually exit before a subsequent Start, or the
+        // start races a stopping service and SCM rejects it. Poll Query until STOPPED.
+        var output = RunCapture("sc.exe", $"stop \"{serviceName}\"", TimeSpan.FromSeconds(10));
+        // 1062 = "The service has not been started" — already stopped, success.
+        if (output is not null && output.Contains("1062", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            var state = Query(serviceName);
+            if (state is ServiceState.Stopped or ServiceState.NotInstalled)
+                return true;
+            Thread.Sleep(250);
+        }
+        return Query(serviceName) == ServiceState.Stopped;
     }
 
     public bool InvokeRepair(string bootstrapPath, TimeSpan timeout)

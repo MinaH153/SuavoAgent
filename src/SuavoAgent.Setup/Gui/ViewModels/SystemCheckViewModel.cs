@@ -1,5 +1,7 @@
 using System.Collections.ObjectModel;
-using System.Windows.Input;
+using System.ComponentModel;
+using System.Linq;
+using Avalonia.Threading;
 using SuavoAgent.Setup.Gui.Services;
 
 namespace SuavoAgent.Setup.Gui.ViewModels;
@@ -9,9 +11,16 @@ public sealed class CheckItem : ViewModelBase
     private CheckState _state = CheckState.Pending;
     private string _detail = "Checking…";
 
-    public CheckItem(string title) => Title = title;
+    public CheckItem(string title, CheckTier tier)
+    {
+        Title = title;
+        Tier = tier;
+    }
 
     public string Title { get; }
+
+    /// <summary>Whether this probe can block the install, or only informs it.</summary>
+    public CheckTier Tier { get; }
 
     public CheckState State
     {
@@ -21,6 +30,7 @@ public sealed class CheckItem : ViewModelBase
             SetField(ref _state, value);
             RaisePropertyChanged(nameof(Icon));
             RaisePropertyChanged(nameof(ColorHex));
+            RaisePropertyChanged(nameof(StatusLabel));
         }
     }
 
@@ -34,32 +44,55 @@ public sealed class CheckItem : ViewModelBase
     {
         CheckState.Ok => "✓",
         CheckState.Warn => "!",
-        CheckState.Fail => "✗",
-        _ => "·",
+        CheckState.Fail => "✕",
+        CheckState.Deferred => "↻",
+        _ => "•",
     };
 
     public string ColorHex => _state switch
     {
-        CheckState.Ok => "#7A9B6E",
-        CheckState.Warn => "#E8B65C",
-        CheckState.Fail => "#C95454",
-        _ => "#6E6A62",
+        CheckState.Ok => "#7A9B6E",        // sage — ready
+        CheckState.Warn => "#E8B65C",      // amber — attention
+        CheckState.Fail => "#C95454",      // wine — blocks
+        CheckState.Deferred => "#C9A24C",  // muted gold — self-configures
+        _ => "#6E6A62",                    // subtle — still scanning
+    };
+
+    /// <summary>Right-aligned pill text — the human verdict for this row.</summary>
+    public string StatusLabel => _state switch
+    {
+        CheckState.Ok => "Ready",
+        CheckState.Warn => Tier == CheckTier.Required ? "Required" : "Recommended",
+        CheckState.Fail => "Required",
+        CheckState.Deferred => "Self-configures",
+        _ => "Checking…",
     };
 }
 
-public enum CheckState { Pending, Ok, Warn, Fail }
+public enum CheckState { Pending, Ok, Warn, Fail, Deferred }
+
+/// <summary>
+/// Required checks can block the install. Informational checks only annotate it —
+/// their failure becomes a warning or a deferred (self-healing) item, never a wall.
+/// </summary>
+public enum CheckTier { Required, Informational }
 
 internal sealed class SystemCheckViewModel : ViewModelBase
 {
     private readonly InstallContext _ctx;
     private readonly Action _onReady;
+    private readonly Func<bool> _probeIsWindows10;
+    private readonly Func<PioneerRxDiscovery.DiscoveryResult?> _probePioneer;
+    private readonly Func<string, SqlCredentialDiscovery.SqlCredentials?> _probeSql;
     private bool _isReady;
 
-    public CheckItem OsCheck { get; } = new("Windows 10 / 11");
-    public CheckItem DiskCheck { get; } = new("Disk space (≥ 2 GB)");
-    public CheckItem BitLockerCheck { get; } = new("BitLocker status");
-    public CheckItem PioneerCheck { get; } = new("PioneerRx installation");
-    public CheckItem SqlCheck { get; } = new("SQL Server credentials");
+    // Required = the only thing the binaries truly need to land + run.
+    public CheckItem OsCheck { get; } = new("Windows 10 / 11", CheckTier.Required);
+    public CheckItem DiskCheck { get; } = new("Disk space (≥ 2 GB)", CheckTier.Required);
+    // Informational = the agent self-heals or only-recommends these.
+    public CheckItem BitLockerCheck { get; } = new("BitLocker status", CheckTier.Informational);
+    public CheckItem PioneerCheck { get; } = new("PioneerRx installation", CheckTier.Informational);
+    public CheckItem SqlCheck { get; } = new("SQL Server credentials", CheckTier.Informational);
 
     public ObservableCollection<CheckItem> Items { get; }
 
@@ -75,61 +108,163 @@ internal sealed class SystemCheckViewModel : ViewModelBase
         }
     }
 
-    public SystemCheckViewModel(InstallContext ctx, Action onReady)
+    /// <summary>One-line banner verdict that updates live as probes resolve.</summary>
+    public string ReadinessHeadline => OsCheck.State switch
+    {
+        CheckState.Fail => "This workstation can't run SuavoAgent",
+        _ when !IsReady => "Checking this workstation…",
+        _ => "Ready to install",
+    };
+
+    public string ReadinessDetail => OsCheck.State switch
+    {
+        CheckState.Fail => "Windows 10 or newer (64-bit) is required.",
+        _ when !IsReady => "Confirming the essentials. The rest configures itself.",
+        _ => "PioneerRx and SQL connect automatically once they're detected.",
+    };
+
+    public string ReadinessIcon => OsCheck.State switch
+    {
+        CheckState.Fail => "✕",
+        _ when !IsReady => "↻",
+        _ => "✓",
+    };
+
+    public string ReadinessColorHex => OsCheck.State switch
+    {
+        CheckState.Fail => "#C95454",
+        _ when !IsReady => "#C9A24C",
+        _ => "#7A9B6E",
+    };
+
+    public SystemCheckViewModel(
+        InstallContext ctx,
+        Action onReady,
+        Func<bool>? probeIsWindows10 = null,
+        Func<PioneerRxDiscovery.DiscoveryResult?>? probePioneer = null,
+        Func<string, SqlCredentialDiscovery.SqlCredentials?>? probeSql = null)
     {
         _ctx = ctx;
         _onReady = onReady;
+        // Probes are injectable so the scan is unit-testable without a Windows box;
+        // defaults are the real Win32/registry/SQL implementations.
+        _probeIsWindows10 = probeIsWindows10 ?? (() => OperatingSystem.IsWindowsVersionAtLeast(10));
+        _probePioneer = probePioneer ?? PioneerRxDiscovery.Discover;
+        _probeSql = probeSql ?? SqlCredentialDiscovery.TryAutoDiscover;
+
         Items = new ObservableCollection<CheckItem>
         {
             OsCheck, DiskCheck, BitLockerCheck, PioneerCheck, SqlCheck,
         };
+
+        // Readiness is a live function of the probe states — the Continue button
+        // lights up the moment the required checks pass, regardless of the
+        // self-healing ones.
+        foreach (var item in Items)
+            item.PropertyChanged += OnCheckChanged;
+
         ContinueCommand = new RelayCommand(_onReady, () => IsReady);
     }
 
-    /// <summary>
-    /// Runs every probe on a background thread. Thread-hops back to the UI
-    /// via property setters, which raise INotifyPropertyChanged on the
-    /// dispatcher Avalonia is already listening on.
-    /// </summary>
-    public Task RunChecksAsync() => Task.Run(RunChecks);
-
-    private void RunChecks()
+    private void OnCheckChanged(object? sender, PropertyChangedEventArgs e)
     {
-        // OS
-        if (OperatingSystem.IsWindowsVersionAtLeast(10))
-        {
-            OsCheck.State = CheckState.Ok;
-            OsCheck.Detail = Environment.OSVersion.VersionString;
-        }
-        else
-        {
-            OsCheck.State = CheckState.Fail;
-            OsCheck.Detail = "Windows 10 or newer required.";
-        }
+        if (e.PropertyName != nameof(CheckItem.State)) return;
+        RecomputeReadiness();
+        // The hero banner is derived from the check states (esp. OS), so refresh
+        // it on every probe result — not only when IsReady flips.
+        RaisePropertyChanged(nameof(ReadinessHeadline));
+        RaisePropertyChanged(nameof(ReadinessDetail));
+        RaisePropertyChanged(nameof(ReadinessIcon));
+        RaisePropertyChanged(nameof(ReadinessColorHex));
+    }
 
-        // Disk
+    /// <summary>
+    /// Minimum-viable-control gate: every Required check has resolved to a
+    /// non-blocking state, and none is still scanning. PioneerRx / SQL absence
+    /// is <see cref="CheckState.Deferred"/>, never a blocker — the agent
+    /// self-heals them after it's online.
+    /// </summary>
+    private void RecomputeReadiness() =>
+        IsReady = Items.All(i => i.State != CheckState.Pending)
+                  && Items.Where(i => i.Tier == CheckTier.Required)
+                          .All(i => i.State != CheckState.Fail);
+
+    /// <summary>
+    /// Runs every probe on a background thread (manage-bde, registry, SQL — all
+    /// blocking I/O), then applies the results back on the UI thread. Avalonia
+    /// only reliably reflects bound-property + command changes raised on the UI
+    /// thread, so the probing and the view-model mutation are split deliberately.
+    /// </summary>
+    public Task RunChecksAsync() => Task.Run(() =>
+    {
+        var outcome = Probe();
+        Dispatcher.UIThread.Post(() => Apply(outcome));
+    });
+
+    /// <summary>Pure, background-safe: runs all probes, never mutates the view-model.</summary>
+    internal ProbeOutcome Probe()
+    {
+        var os = ProbeOs();
+        var disk = ProbeDisk();
+        var bitLocker = ProbeBitLocker();
+        var (pioneerState, pioneerDetail, pioneer) = ProbePioneer();
+        var (sqlState, sqlDetail, sqlCreds) = ProbeSql(pioneer);
+        return new ProbeOutcome(
+            os, disk, bitLocker,
+            (pioneerState, pioneerDetail), (sqlState, sqlDetail),
+            pioneer, sqlCreds);
+    }
+
+    /// <summary>UI-thread only: applies probe results to the bound view-model.</summary>
+    internal void Apply(ProbeOutcome o)
+    {
+        (OsCheck.State, OsCheck.Detail) = o.Os;
+        (DiskCheck.State, DiskCheck.Detail) = o.Disk;
+        (BitLockerCheck.State, BitLockerCheck.Detail) = o.BitLocker;
+        (PioneerCheck.State, PioneerCheck.Detail) = o.Pioneer;
+        (SqlCheck.State, SqlCheck.Detail) = o.Sql;
+        _ctx.Pioneer = o.PioneerResult;
+        if (o.SqlCreds != null) _ctx.SqlCredentials = o.SqlCreds;
+        RecomputeReadiness();
+    }
+
+    // ── Individual probes — each fully isolated so one failure can never strand
+    //    the scan (the "if some fail, self-heal moves along" principle). ────────
+
+    private (CheckState, string) ProbeOs()
+    {
+        try
+        {
+            return _probeIsWindows10()
+                ? (CheckState.Ok, Environment.OSVersion.VersionString)
+                : (CheckState.Fail, "Windows 10 or newer (64-bit) required.");
+        }
+        catch
+        {
+            // Can't confirm a compatible OS → block (the one hard requirement).
+            return (CheckState.Fail, "Could not confirm Windows version.");
+        }
+    }
+
+    private (CheckState, string) ProbeDisk()
+    {
         try
         {
             var drive = new DriveInfo(Path.GetPathRoot(_ctx.InstallDir) ?? "C:\\");
             var freeGb = drive.AvailableFreeSpace / (1024.0 * 1024 * 1024);
-            if (freeGb >= 2)
-            {
-                DiskCheck.State = CheckState.Ok;
-                DiskCheck.Detail = $"{freeGb:F1} GB free on {drive.Name}";
-            }
-            else
-            {
-                DiskCheck.State = CheckState.Warn;
-                DiskCheck.Detail = $"Only {freeGb:F1} GB free — install may be tight.";
-            }
+            return freeGb >= 2
+                ? (CheckState.Ok, $"{freeGb:F1} GB free on {drive.Name}")
+                : (CheckState.Warn, $"Only {freeGb:F1} GB free — install may be tight.");
         }
         catch (Exception ex)
         {
-            DiskCheck.State = CheckState.Warn;
-            DiskCheck.Detail = ex.Message;
+            return (CheckState.Warn, ex.Message);
         }
+    }
 
-        // BitLocker — best-effort via manage-bde
+    private (CheckState, string) ProbeBitLocker()
+    {
+        // Off is a loud recommendation (PHI-at-rest), not a blocker.
         try
         {
             var psi = new System.Diagnostics.ProcessStartInfo("manage-bde", "-status C:")
@@ -141,59 +276,67 @@ internal sealed class SystemCheckViewModel : ViewModelBase
             using var proc = System.Diagnostics.Process.Start(psi);
             var output = proc?.StandardOutput.ReadToEnd() ?? string.Empty;
             proc?.WaitForExit(5000);
-            if (output.Contains("Protection On", StringComparison.OrdinalIgnoreCase))
-            {
-                BitLockerCheck.State = CheckState.Ok;
-                BitLockerCheck.Detail = "BitLocker protection enabled on C:";
-            }
-            else
-            {
-                BitLockerCheck.State = CheckState.Warn;
-                BitLockerCheck.Detail = "BitLocker not enabled — recommended for HIPAA.";
-            }
+            return output.Contains("Protection On", StringComparison.OrdinalIgnoreCase)
+                ? (CheckState.Ok, "BitLocker protection enabled on C:")
+                : (CheckState.Warn, "PHI at rest is unencrypted — enable BitLocker on C: (HIPAA).");
         }
         catch
         {
-            BitLockerCheck.State = CheckState.Warn;
-            BitLockerCheck.Detail = "Could not query BitLocker. Continuing.";
+            return (CheckState.Warn, "Could not query BitLocker. Continuing.");
         }
+    }
 
-        // PioneerRx
-        var pioneer = PioneerRxDiscovery.Discover();
-        if (pioneer != null)
+    private (CheckState, string, PioneerRxDiscovery.DiscoveryResult?) ProbePioneer()
+    {
+        // Absence is deferred, not a failure — the agent watches for it and
+        // connects automatically once it appears.
+        try
         {
-            _ctx.Pioneer = pioneer;
-            PioneerCheck.State = CheckState.Ok;
-            PioneerCheck.Detail = pioneer.PioneerDir;
+            var pioneer = _probePioneer();
+            return pioneer != null
+                ? (CheckState.Ok, pioneer.PioneerDir, pioneer)
+                : (CheckState.Deferred,
+                   "Not detected yet — SuavoAgent connects automatically once PioneerRx is installed.",
+                   (PioneerRxDiscovery.DiscoveryResult?)null);
         }
-        else
+        catch
         {
-            PioneerCheck.State = CheckState.Fail;
-            PioneerCheck.Detail = "PioneerRx not installed on this machine.";
+            return (CheckState.Deferred,
+                "Detection deferred — SuavoAgent will keep watching and connect automatically.",
+                null);
         }
+    }
 
-        // SQL
-        if (pioneer != null)
-        {
-            var creds = SqlCredentialDiscovery.TryAutoDiscover(pioneer.PioneerConfig);
-            if (creds != null)
-            {
-                _ctx.SqlCredentials = creds;
-                SqlCheck.State = CheckState.Ok;
-                SqlCheck.Detail = $"{creds.Server} / {creds.Database} ({(creds.IsWindowsAuth ? "Windows" : $"SQL: {creds.User}")})";
-            }
-            else
-            {
-                SqlCheck.State = CheckState.Warn;
-                SqlCheck.Detail = "Auto-discovery failed — you'll enter credentials manually.";
-            }
-        }
-        else
-        {
-            SqlCheck.State = CheckState.Pending;
-            SqlCheck.Detail = "Waiting on PioneerRx.";
-        }
+    private (CheckState, string, SqlCredentialDiscovery.SqlCredentials?) ProbeSql(
+        PioneerRxDiscovery.DiscoveryResult? pioneer)
+    {
+        if (pioneer == null)
+            return (CheckState.Deferred, "Configures itself once PioneerRx is detected.", null);
 
-        IsReady = PioneerCheck.State == CheckState.Ok;
+        try
+        {
+            var creds = _probeSql(pioneer.PioneerConfig);
+            return creds != null
+                ? (CheckState.Ok,
+                   $"{creds.Server} / {creds.Database} ({(creds.IsWindowsAuth ? "Windows" : $"SQL: {creds.User}")})",
+                   creds)
+                : (CheckState.Warn,
+                   "Auto-discovery failed — you'll enter credentials manually.",
+                   (SqlCredentialDiscovery.SqlCredentials?)null);
+        }
+        catch
+        {
+            return (CheckState.Warn, "Auto-discovery failed — you'll enter credentials manually.", null);
+        }
     }
 }
+
+/// <summary>Immutable result of one background scan — applied to the VM on the UI thread.</summary>
+internal sealed record ProbeOutcome(
+    (CheckState State, string Detail) Os,
+    (CheckState State, string Detail) Disk,
+    (CheckState State, string Detail) BitLocker,
+    (CheckState State, string Detail) Pioneer,
+    (CheckState State, string Detail) Sql,
+    PioneerRxDiscovery.DiscoveryResult? PioneerResult,
+    SqlCredentialDiscovery.SqlCredentials? SqlCreds);

@@ -70,6 +70,13 @@ Each entry documents:
 - Payload: `{version: string, process: string, exception_type: string, crash_log_id?: string}`
 - Notes: `crash_log_id` references a pre-uploaded crash log in the audit chain.
 
+### `agent.health_composite`
+- Category: `runtime`
+- Severity: `info` (when status is "healthy" or "initializing") / `warn` (when status is "heartbeating-but-unhealthy")
+- Actor: `agent`
+- Payload: `{status: string, components: {helper_attached: bool, ipc_connected: bool, schema_canary_green: bool, extraction_recent: bool}, computed_at: string}`
+- Notes: `status` enum: `"healthy"` | `"heartbeating-but-unhealthy"` | `"initializing"`. The `"silent"` state is cloud-derived and never emitted by the agent. Mirrors C# `HealthCompositePayload` in `SuavoAgent.Contracts.Models`. See `docs/superpowers/specs/2026-05-02-track-1-4-health-composite-design.md`.
+
 ---
 
 ## `service.*` — Windows service events (Watchdog + Setup)
@@ -392,6 +399,29 @@ Each entry documents:
 
 ---
 
+## `wave.*` — Roadmap meta-gate events (added 2026-05-01)
+
+Events emitted to track wave gate progress for the meta-roadmap defined in
+`docs/superpowers/specs/2026-05-01-suavoagent-v4-roadmap-design.md`. Persisted
+to the `roadmap_gates` operational table (Suavo cloud — Wave 1 deliverable to
+apply).
+
+### `wave.gate_tripped`
+- Category: `governance`
+- Severity: `info`
+- Actor: `system` | `operator`
+- Payload: `{wave_id: string, evidence_summary: string, certified_by: string, evidence_event_ids: string[], tripped_at: timestamptz}`
+- Notes: `wave_id` is `"W0"` | `"W1"` | ... | `"MASTER"`. `certified_by` is `"ci"` | `"pilot:<pharmacy_id_hash>"` | `"joshua"`. `evidence_event_ids` are pointers to supporting `audit_events` rows.
+
+### `wave.gate_failed`
+- Category: `governance`
+- Severity: `warn`
+- Actor: `system` | `operator`
+- Payload: `{wave_id: string, attempt_number: number, failure_summary: string, root_cause_class: string, remediation_plan_committed_at: string|null, next_attempt_estimated: string}`
+- Notes: `root_cause_class` enum: `"code-bug"` | `"scope-error"` | `"blocker-external"` | `"architectural-error"` | `"pilot-crash-midsoak"`. `next_attempt_estimated` enum: `"unknown"` | `"when-blocker-clears"` | `"after-fix"`.
+
+---
+
 ## Adding a new event type
 
 1. Open PR touching this file
@@ -405,3 +435,5 @@ Each entry documents:
 ## Change log
 
 - **2026-04-21 v0.1** — Initial draft. 40+ event types across 11 domains. Locks to v1.0 post-Nadim.
+- **2026-05-01 v0.2** — Added `wave.*` namespace (`wave.gate_tripped`, `wave.gate_failed`) for meta-roadmap gate tracking.
+- **2026-05-02 v0.3** — Added `agent.health_composite` for Track 1+4 composite signal (Wave 1 sub-project B).

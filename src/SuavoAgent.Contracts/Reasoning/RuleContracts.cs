@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using SuavoAgent.Contracts.Behavioral;
+using SuavoAgent.Contracts.Vision;
 
 namespace SuavoAgent.Contracts.Reasoning;
 
@@ -102,7 +103,28 @@ public sealed record RulePredicate
     /// that tolerance and must survive YAML round-trip.
     /// </summary>
     public int? MinRequiredCount { get; init; }
+
+    /// <summary>
+    /// Visual predicate (W4b): substrings that must ALL appear (case-insensitive) in some
+    /// <see cref="RuleContext.ScreenText"/> region. Empty = no constraint. Lets a rule fire on
+    /// what is literally on screen, app-agnostically — no hardcoded process/element names.
+    /// </summary>
+    public IReadOnlyList<string> TextPresent { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Spatial visual predicate: each entry requires on-screen text to sit NEAR a control of a
+    /// given role. Empty = no constraint. Grounds rules on screen layout, app-agnostically.
+    /// </summary>
+    public IReadOnlyList<SpatialTextPredicate> TextNearElement { get; init; } = Array.Empty<SpatialTextPredicate>();
 }
+
+/// <summary>
+/// One "text near a control" spatial constraint: <paramref name="Text"/> must appear
+/// (case-insensitive) in some <see cref="RuleContext.ScreenText"/> region whose bounding-box
+/// center is within <paramref name="MaxDistancePx"/> pixels of some <see cref="RuleContext.ScreenElements"/>
+/// element of role <paramref name="ElementRole"/> (case-insensitive).
+/// </summary>
+public sealed record SpatialTextPredicate(string Text, string ElementRole, int MaxDistancePx = 100);
 
 /// <summary>
 /// A single action the rule emits when matched. Parameters are string-keyed so
@@ -206,6 +228,18 @@ public sealed record RuleContext
     /// </summary>
     public IReadOnlyList<ElementSignature> ElementFingerprints { get; init; } =
         Array.Empty<ElementSignature>();
+
+    /// <summary>
+    /// PHI-scrubbed OCR text regions from the current screen (from a captured
+    /// <see cref="ScreenFrame"/> via the vision pipeline). Empty when vision is off.
+    /// </summary>
+    public IReadOnlyList<TextRegion> ScreenText { get; init; } = Array.Empty<TextRegion>();
+
+    /// <summary>
+    /// PHI-scrubbed visual UI elements (role, name, bounds) from the current screen.
+    /// Empty when vision is off.
+    /// </summary>
+    public IReadOnlyList<VisualElement> ScreenElements { get; init; } = Array.Empty<VisualElement>();
 
     /// <summary>Timestamp of context capture. Used for audit trails.</summary>
     public DateTimeOffset CapturedAt { get; init; } = DateTimeOffset.UtcNow;

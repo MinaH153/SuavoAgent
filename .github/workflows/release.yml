@@ -7,11 +7,61 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  release-signing-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require eSigner cloud-signing configuration
+        env:
+          SIGNING_ENABLED: ${{ vars.SIGNING_ENABLED }}
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          if [[ "$SIGNING_ENABLED" != "true" ]]; then
+            echo "::error::SIGNING_ENABLED must be set to true before cutting a Queen/field release."
+            exit 1
+          fi
+          missing=()
+          for var in ES_USERNAME ES_PASSWORD ES_CREDENTIAL_ID ES_TOTP_SECRET; do
+            if [[ -z "${!var}" ]]; then
+              missing+=("$var")
+            fi
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Missing eSigner cloud-signing secret(s): ${missing[*]}. See docs/signing.md."
+            exit 1
+          fi
+
+  bootstrap-windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse bootstrap.ps1 with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          $source = Get-Content -Raw -LiteralPath .\bootstrap.ps1
+          $null = [scriptblock]::Create($source)
+          $parseErrors = $null
+          [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
+          if ($parseErrors -and $parseErrors.Count -gt 0) {
+            $parseErrors | Format-List * | Out-String | Write-Host
+            throw "bootstrap.ps1 has Windows PowerShell 5.1 parse errors"
+          }
+
   # --- Build unsigned binaries on Linux -----------------------------------
   build:
     runs-on: ubuntu-latest
+    needs: [release-signing-preflight, bootstrap-windows-smoke]
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
       version_numeric: ${{ steps.version.outputs.VERSION_NUMERIC }}
@@ -28,6 +78,10 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION_NUMERIC="${TAG#v}"
+          # Strip pre-release suffix (e.g. v3.13.99-esigner-smoke → 3.13.99) so
+          # .NET AssemblyVersion (numeric-only) accepts the value. VERSION
+          # itself keeps the full tag for artifact naming + release receipts.
+          VERSION_NUMERIC="${VERSION_NUMERIC%%-*}"
           echo "VERSION=$TAG" >> "$GITHUB_OUTPUT"
           echo "VERSION_NUMERIC=$VERSION_NUMERIC" >> "$GITHUB_OUTPUT"
 
@@ -54,98 +108,144 @@ jobs:
           path: release/
           retention-days: 7
 
-  # --- Authenticode sign with Yubikey (self-hosted Windows runner) --------
-  # Runs only when repo variable SIGNING_ENABLED=true AND a labeled self-hosted
-  # Windows runner with Yubikey is online. Otherwise the passthrough job below
-  # runs instead. Flip SIGNING_ENABLED to true once the Yubikey has arrived
-  # and the self-hosted runner is registered. See docs/signing.md.
+  # --- Authenticode sign via SSL.com eSigner cloud HSM --------------------
+  # Runs only when repo variable SIGNING_ENABLED=true. No self-hosted runner
+  # required; CodeSignTool talks to SSL.com's cloud HSM over HTTPS and signs
+  # each binary in-place. Flip SIGNING_ENABLED to true once the four ES_*
+  # secrets are configured. See docs/signing.md.
   sign_windows:
     if: ${{ vars.SIGNING_ENABLED == 'true' }}
     needs: build
-    runs-on: [self-hosted, windows, yubikey]
+    runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download unsigned binaries
         uses: actions/download-artifact@v4
         with:
           name: suavoagent-unsigned-${{ needs.build.outputs.version }}
           path: release
 
-      - name: Sign binaries with signtool
-        shell: pwsh
-        env:
-          CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
-          TIMESTAMP_URL: ${{ vars.SIGNING_TIMESTAMP_URL }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (-not $env:CERT_THUMBPRINT) {
-            throw "Secret SIGNING_CERT_THUMBPRINT is not set. See docs/signing.md."
-          }
-          $ts = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { 'http://ts.ssl.com' }
+      - name: Prepare signed output directory
+        run: mkdir -p "${{ github.workspace }}/release/signed"
 
-          # Locate signtool.exe from installed Windows SDKs. Prefer the newest.
-          $candidates = @(
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
-            "${env:ProgramFiles}\Windows Kits\10\bin"
-          ) | Where-Object { Test-Path $_ } | ForEach-Object { Get-ChildItem $_ -Directory } | Sort-Object Name -Descending
-          $signtool = $null
-          foreach ($dir in $candidates) {
-            $path = Join-Path $dir 'x64\signtool.exe'
-            if (Test-Path $path) { $signtool = $path; break }
-          }
-          if (-not $signtool) { throw 'signtool.exe not found. Install Windows 10 SDK.' }
-          Write-Host "Using signtool: $signtool"
+      - name: Sign SuavoAgent.Core.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoAgent.Core.exe
+          output_path: ${{ github.workspace }}/release/signed
 
-          $targets = @(
-            'release/SuavoAgent.Core.exe',
-            'release/SuavoAgent.Broker.exe',
-            'release/SuavoAgent.Helper.exe',
-            'release/SuavoAgent.Watchdog.exe',
-            'release/SuavoSetup.exe'
-          )
-          foreach ($t in $targets) {
-            if (-not (Test-Path $t)) { throw "Missing binary: $t" }
-            Write-Host "Signing $t"
-            & $signtool sign /fd SHA256 /tr $ts /td SHA256 /sha1 $env:CERT_THUMBPRINT $t
-            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $t (exit $LASTEXITCODE)" }
-            & $signtool verify /pa /v $t
-            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed on $t (exit $LASTEXITCODE)" }
-          }
+      - name: Sign SuavoAgent.Broker.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoAgent.Broker.exe
+          output_path: ${{ github.workspace }}/release/signed
+
+      - name: Sign SuavoAgent.Helper.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoAgent.Helper.exe
+          output_path: ${{ github.workspace }}/release/signed
+
+      - name: Sign SuavoAgent.Watchdog.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoAgent.Watchdog.exe
+          output_path: ${{ github.workspace }}/release/signed
+
+      - name: Sign SuavoSetup.exe
+        uses: sslcom/actions-codesigner@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/release/SuavoSetup.exe
+          output_path: ${{ github.workspace }}/release/signed
 
       - name: Upload signed binaries
         uses: actions/upload-artifact@v4
         with:
           name: suavoagent-final-${{ needs.build.outputs.version }}
-          path: release/
+          path: release/signed/
           retention-days: 7
 
-  # --- Passthrough when signing is disabled -------------------------------
-  # Keeps the release pipeline functional without a Yubikey. Renames the
-  # artifact to the name the release job expects.
-  sign_passthrough:
-    if: ${{ vars.SIGNING_ENABLED != 'true' }}
-    needs: build
-    runs-on: ubuntu-latest
+  # --- Windows release artifact smoke -------------------------------------
+  windows-release-smoke:
+    needs: [build, sign_windows]
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      needs.sign_windows.result == 'success'
+    runs-on: windows-latest
     steps:
-      - name: Download unsigned binaries
+      - uses: actions/checkout@v4
+
+      - name: Download final binaries
         uses: actions/download-artifact@v4
         with:
-          name: suavoagent-unsigned-${{ needs.build.outputs.version }}
+          name: suavoagent-final-${{ needs.build.outputs.version }}
           path: release
 
-      - name: Upload as final (unsigned)
+      - name: Build release zip
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "suavoagent-${{ needs.build.outputs.version }}-win-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          $binaries = Get-ChildItem -LiteralPath release -Filter *.exe -File
+          if (-not $binaries -or $binaries.Count -eq 0) {
+            throw "No release binaries found to zip"
+          }
+          $binaries | Compress-Archive -DestinationPath $zip -Force
+
+      - name: Expand zip and run no-PHI release probe
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "suavoagent-${{ needs.build.outputs.version }}-win-x64.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP 'suavoagent-release-expanded'
+          if (Test-Path $expanded) { Remove-Item $expanded -Recurse -Force }
+          New-Item -ItemType Directory -Path $expanded -Force | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $expanded -Force
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $expanded -BootstrapPath .\bootstrap.ps1 -RequireAuthenticodeSignature -Json
+
+      - name: Upload smoked release zip
         uses: actions/upload-artifact@v4
         with:
-          name: suavoagent-final-${{ needs.build.outputs.version }}
-          path: release/
+          name: suavoagent-smoked-zip-${{ needs.build.outputs.version }}
+          path: suavoagent-${{ needs.build.outputs.version }}-win-x64.zip
           retention-days: 7
 
   # --- Checksums, manifest, GitHub release --------------------------------
   release:
-    needs: [build, sign_windows, sign_passthrough]
+    needs: [build, sign_windows, windows-release-smoke]
     if: |
       always() &&
       needs.build.result == 'success' &&
-      (needs.sign_windows.result == 'success' || needs.sign_passthrough.result == 'success')
+      needs.sign_windows.result == 'success' &&
+      needs.windows-release-smoke.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -156,10 +256,72 @@ jobs:
           name: suavoagent-final-${{ needs.build.outputs.version }}
           path: release
 
+      - name: Download smoked release zip
+        uses: actions/download-artifact@v4
+        with:
+          name: suavoagent-smoked-zip-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Generate field release receipt
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release
+          ZIP="suavoagent-${VERSION}-win-x64.zip"
+          ZIP_SHA=$(sha256sum "$ZIP" | awk '{print $1}')
+          ROLLBACK_TAG="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,isDraft,isPrerelease --jq '[.[] | select(.isDraft == false and .isPrerelease == false and .tagName != env.VERSION)][0].tagName // ""')"
+          if [[ -z "$ROLLBACK_TAG" ]]; then
+            echo "::error::No previous non-prerelease release found for rollback."
+            exit 1
+          fi
+          ROLLBACK_ZIP="suavoagent-${ROLLBACK_TAG}-win-x64.zip"
+          ROLLBACK_TMP="$(mktemp -d)"
+          gh release download "$ROLLBACK_TAG" --repo "$GITHUB_REPOSITORY" --pattern checksums.sha256 --dir "$ROLLBACK_TMP"
+          ROLLBACK_SHA="$(awk -v zip="$ROLLBACK_ZIP" '$2 == zip {print $1}' "$ROLLBACK_TMP/checksums.sha256")"
+          if [[ ! "$ROLLBACK_SHA" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "::error::Previous release $ROLLBACK_TAG does not expose a checksums.sha256 entry for $ROLLBACK_ZIP."
+            exit 1
+          fi
+          export ZIP ZIP_SHA ROLLBACK_TAG ROLLBACK_ZIP ROLLBACK_SHA
+          python3 - <<'PY'
+          import json
+          import os
+
+          version = os.environ["VERSION"]
+          rollback_tag = os.environ["ROLLBACK_TAG"]
+          receipt = {
+              "releaseTag": version,
+              "version": os.environ["VERSION_NUMERIC"],
+              "sourceCommit": os.environ["GITHUB_SHA"],
+              "artifact": os.environ["ZIP"],
+              "artifactSha256": os.environ["ZIP_SHA"],
+              "authenticode": "required-valid",
+              "checksumSignature": "checksums.sha256.sig",
+              "manifestSignature": f"update-manifest-{version}.sig",
+              "track2QueenValidation": "do-not-run-against-older-tags",
+              "rollbackArtifact": {
+                  "releaseTag": rollback_tag,
+                  "artifact": os.environ["ROLLBACK_ZIP"],
+                  "artifactSha256": os.environ["ROLLBACK_SHA"],
+                  "releaseUrl": (
+                      "https://github.com/"
+                      f"{os.environ['GITHUB_REPOSITORY']}/releases/download/{rollback_tag}/"
+                      f"{os.environ['ROLLBACK_ZIP']}"
+                  ),
+              },
+          }
+          with open("field-release-receipt.json", "w", encoding="utf-8") as fh:
+              json.dump(receipt, fh, indent=2, sort_keys=True)
+              fh.write("\n")
+          PY
+
       - name: Generate checksums
         run: |
           cd release
-          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe > checksums.sha256
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe SuavoSetup.exe suavoagent-${{ needs.build.outputs.version }}-win-x64.zip field-release-receipt.json > checksums.sha256
           cat checksums.sha256
 
       - name: Sign checksums (ECDSA P-256)
@@ -184,20 +346,12 @@ jobs:
           # <core_url>|<core_sha>|<broker_url>|<broker_sha>|<helper_url>|<helper_sha>|<version>|net8.0|win-x64
           MANIFEST="${BASE_URL}/SuavoAgent.Core.exe|${CORE_SHA}|${BASE_URL}/SuavoAgent.Broker.exe|${BROKER_SHA}|${BASE_URL}/SuavoAgent.Helper.exe|${HELPER_SHA}|${VERSION_NUMERIC}|net8.0|win-x64"
           printf '%s' "$MANIFEST" > "update-manifest-${VERSION}.txt"
-          printf '%s' "$MANIFEST" | openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") | xxd -p -c 256 > "update-manifest-${VERSION}.sig"
+          DER_SIG="$(mktemp)"
+          printf '%s' "$MANIFEST" | openssl dgst -sha256 -sign <(echo "$SIGNING_KEY") -out "$DER_SIG"
+          python3 ../scripts/ecdsa_der_to_p1363.py "$DER_SIG" "update-manifest-${VERSION}.sig"
+          test "$(wc -c < update-manifest-${VERSION}.sig)" -eq 128
           echo "Manifest bytes: $(wc -c < update-manifest-${VERSION}.txt)"
           echo "Signature bytes: $(wc -c < update-manifest-${VERSION}.sig)"
-
-      - name: Determine release mode
-        id: mode
-        env:
-          SIGN_RESULT: ${{ needs.sign_windows.result }}
-        run: |
-          if [[ "$SIGN_RESULT" == "success" ]]; then
-            echo "MODE=signed" >> "$GITHUB_OUTPUT"
-          else
-            echo "MODE=unsigned" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -209,8 +363,11 @@ jobs:
             Automated release from CI/CD pipeline.
 
             **Tests:** All passing
+            **Windows smoke:** Release zip expanded and passed no-PHI binary/bootstrap probe on windows-latest
+            **Source commit:** ${{ github.sha }}
             **Checksums:** ECDSA P-256 signed
-            **Authenticode:** ${{ steps.mode.outputs.MODE == 'signed' && 'Signed (Yubikey EV)' || 'Unsigned (SmartScreen warning expected)' }}
+            **Authenticode:** Signed (SSL.com eSigner Cloud EV)
+            **Installer URL:** https://github.com/${{ github.repository }}/releases/download/${{ needs.build.outputs.version }}/suavoagent-${{ needs.build.outputs.version }}-win-x64.zip
 
             ### How to update existing agents
             Push the update command from the fleet dashboard. Agents auto-update on next heartbeat (30s).
@@ -225,9 +382,16 @@ jobs:
             release/SuavoAgent.Helper.exe
             release/SuavoAgent.Watchdog.exe
             release/SuavoSetup.exe
+            release/suavoagent-*-win-x64.zip
+            release/field-release-receipt.json
             release/checksums.sha256
             release/checksums.sha256.sig
             release/update-manifest-v*.txt
             release/update-manifest-v*.sig
           draft: false
-          prerelease: false
+          # A tag with a pre-release suffix (e.g. v3.17.1-rc1) must publish as a GitHub
+          # prerelease, NOT as a full release. Otherwise GitHub marks it "Latest" and
+          # bootstrap.ps1 (which resolves an empty -ReleaseTag via releases/latest) would
+          # serve unmerged rc code to every FRESH install. Pre-release tags are also then
+          # excluded from the rollback-receipt's "previous non-prerelease release" search.
+          prerelease: ${{ contains(needs.build.outputs.version, '-') }}

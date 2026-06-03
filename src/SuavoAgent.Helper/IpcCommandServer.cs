@@ -7,6 +7,8 @@ using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Discovery;
+using SuavoAgent.Helper.Actuation;
+using SuavoAgent.Helper.IntentCursor;
 using SuavoAgent.Helper.Vision;
 using SuavoAgent.Helper.Workflows;
 
@@ -64,21 +66,42 @@ public sealed class IpcCommandServer : IDisposable
     private readonly PricingWorkflow _pricing;
     private readonly ScreenCaptureController? _vision;
     private readonly FileLocatorService? _locator;
+    private readonly Func<bool>? _isPmsForeground;
+    private readonly IntentCursorController? _intentCursor;
+    private readonly ActuationCommandHandler? _actuation;
+    private readonly PioneerRxCommandHandler? _pioneerRx;
     private readonly ILogger _logger;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
+
+    private readonly bool _relaxClientPathValidation;
 
     public IpcCommandServer(
         string pipeName,
         PricingWorkflow pricing,
         ILogger logger,
         ScreenCaptureController? vision = null,
-        FileLocatorService? locator = null)
+        FileLocatorService? locator = null,
+        Func<bool>? isPmsForeground = null,
+        IntentCursorController? intentCursor = null,
+        ActuationCommandHandler? actuation = null,
+        PioneerRxCommandHandler? pioneerRx = null,
+        bool relaxClientPathValidation = false)
     {
         _pipeName = pipeName;
         _pricing = pricing;
+        _relaxClientPathValidation = relaxClientPathValidation;
         _vision = vision;
         _locator = locator;
+        // When provided, capture_screen returns a not_foreground error if
+        // the predicate is false at dispatch time. Wired from Helper.Program
+        // to () => ForegroundGuard.IsPidForeground(pioneer.ProcessId), so
+        // an alt-tabbed user's Chrome / email / banking window is never
+        // captured even with Vision.Enabled=true.
+        _isPmsForeground = isPmsForeground;
+        _intentCursor = intentCursor;
+        _actuation = actuation;
+        _pioneerRx = pioneerRx;
         _logger = logger;
     }
 
@@ -167,9 +190,116 @@ public sealed class IpcCommandServer : IDisposable
             IpcCommands.PricingLookup => HandlePricingLookupAsync(request, ct),
             IpcCommands.CaptureScreen => HandleCaptureScreenAsync(request, ct),
             IpcCommands.FindFile => HandleFindFileAsync(request, ct),
+            IpcCommands.IntentCursor => HandleIntentCursorAsync(request, ct),
             IpcCommands.Ping => Task.FromResult(Ok(request.Id, request.Command, null)),
+            ActuationIpcCommands.GetState
+                or ActuationIpcCommands.ClickByLabel
+                or ActuationIpcCommands.TypeText
+                or ActuationIpcCommands.PressKeys
+                or ActuationIpcCommands.LaunchSandboxApp
+                => HandleActuationAsync(request, ct),
+            PioneerRxActuationIpcCommands.Click
+                or PioneerRxActuationIpcCommands.TypeText
+                or PioneerRxActuationIpcCommands.Query
+                or PioneerRxActuationIpcCommands.WritebackRxDelivery
+                => HandlePioneerRxActuationAsync(request, ct),
             _ => Task.FromResult(Error(request.Id, request.Command, "unknown_command", $"Unknown command: {request.Command}"))
         };
+    }
+
+    private async Task<IpcResponse> HandlePioneerRxActuationAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (_pioneerRx is null)
+        {
+            return Error(request.Id, request.Command, "pioneerrx_unavailable",
+                "Helper started without PioneerRxCommandHandler — drop pioneerrx.json into ProgramData\\SuavoAgent and restart");
+        }
+        try
+        {
+            var result = await _pioneerRx.HandleAsync(request.Command, request.Data, ct).ConfigureAwait(false);
+            var payload = JsonSerializer.SerializeToElement(result);
+            return Ok(request.Id, request.Command, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: pioneerrx dispatch failure for {Command}", request.Command);
+            return Error(request.Id, request.Command, "pioneerrx_dispatch_exception", ex.Message);
+        }
+    }
+
+    private async Task<IpcResponse> HandleActuationAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (_actuation is null)
+        {
+            return Error(request.Id, request.Command, "actuation_unavailable",
+                "Helper started without ActuationCommandHandler — check Actuation:Enabled / SystemEnabled config");
+        }
+
+        try
+        {
+            if (request.Command == ActuationIpcCommands.GetState)
+            {
+                var state = _actuation.GetState();
+                var json = JsonSerializer.SerializeToElement(state);
+                return Ok(request.Id, request.Command, json);
+            }
+
+            var result = await _actuation.HandleAsync(request.Command, request.Data, ct).ConfigureAwait(false);
+            var payload = JsonSerializer.SerializeToElement(result);
+            // Always 200 at the IPC layer — the ActuationResult.Ok bit is the
+            // semantic outcome. Cloud audit + WorkflowExecutor read .Ok / .RejectionCode.
+            return Ok(request.Id, request.Command, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: actuation dispatch failure for {Command}", request.Command);
+            return Error(request.Id, request.Command, "actuation_dispatch_exception", ex.Message);
+        }
+    }
+
+    private async Task<IpcResponse> HandleIntentCursorAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (_intentCursor is null)
+        {
+            return Error(request.Id, request.Command, "intent_cursor_unavailable",
+                "Intent cursor not configured in this Helper instance");
+        }
+
+        if (request.Data is null)
+        {
+            return Error(request.Id, request.Command, "bad_request", "Missing data", IpcStatus.BadRequest);
+        }
+
+        IntentCursorRequest? cursorReq;
+        try
+        {
+            cursorReq = JsonSerializer.Deserialize<IntentCursorRequest>(request.Data.Value);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: intent_cursor bad request — requestId={Id}", request.Id);
+            return Error(request.Id, request.Command, "bad_request", "Could not deserialize intent cursor request",
+                IpcStatus.BadRequest);
+        }
+
+        var result = await _intentCursor.ShowAsync(cursorReq!, ct).ConfigureAwait(false);
+        if (!result.Accepted || result.Rendered is null)
+        {
+            return Error(request.Id, request.Command, result.ErrorCode ?? "intent_cursor_rejected",
+                "Intent cursor request rejected", IpcStatus.BadRequest);
+        }
+
+        _logger.Information(
+            "IpcCommandServer: intent_cursor shown — requestId={Id} duration={DurationMs}ms tone={Tone}",
+            request.Id, result.Rendered.DurationMs, result.Rendered.Tone);
+
+        var payload = JsonSerializer.SerializeToElement(new IntentCursorResponse(
+            Shown: true,
+            CoordinateSpace: IntentCursorCoordinateSpaces.Screen,
+            DurationMs: result.Rendered.DurationMs,
+            DiameterPx: result.Rendered.DiameterPx,
+            Tone: result.Rendered.Tone));
+        return Ok(request.Id, request.Command, payload);
     }
 
     // ------------------------------------------------------------------
@@ -196,6 +326,19 @@ public sealed class IpcCommandServer : IDisposable
         {
             return Error(request.Id, request.Command, "vision_unavailable",
                 "Vision not configured in this Helper instance");
+        }
+
+        // HIPAA gate: refuse capture when PMS is not the foreground window.
+        // Closes the Codex 2026-04-26 review gap that flagged this handler
+        // would otherwise capture whatever the user happened to be looking
+        // at (Chrome, email, banking) when Core's worker fired its cadence.
+        if (_isPmsForeground != null && !_isPmsForeground())
+        {
+            _logger.Information(
+                "IpcCommandServer: capture_screen rejected — PMS not foreground (requestId={Id})",
+                request.Id);
+            return Error(request.Id, request.Command, "not_foreground",
+                "Capture refused — PMS process is not the foreground window");
         }
 
         // Helper-side dispatch log — pairs with Core-side AppendChainedAuditEntry
@@ -314,8 +457,8 @@ public sealed class IpcCommandServer : IDisposable
     private static IpcResponse Ok(string id, string command, System.Text.Json.JsonElement? data) =>
         new(id, IpcStatus.Ok, command, data, null);
 
-    private static IpcResponse Error(string id, string command, string code, string message) =>
-        new(id, IpcStatus.InternalError, command, null,
+    private static IpcResponse Error(string id, string command, string code, string message, int status = IpcStatus.InternalError) =>
+        new(id, status, command, null,
             new IpcError(code, message, false, 1));
 
     /// <summary>
@@ -391,6 +534,11 @@ public sealed class IpcCommandServer : IDisposable
                 }
                 catch (Exception ex)
                 {
+                    if (_relaxClientPathValidation)
+                    {
+                        _logger.Warning(ex, "IpcCommandServer: process image path unreadable for PID {Pid} (ProcessName=SuavoAgent.Core verified) — accepting due to RelaxIpcClientPathValidation=true", clientPid);
+                        return true;
+                    }
                     _logger.Warning(ex, "IpcCommandServer: process image path unreadable for PID {Pid} — rejecting", clientPid);
                     return false;
                 }
@@ -398,6 +546,11 @@ public sealed class IpcCommandServer : IDisposable
 
             if (string.IsNullOrEmpty(clientPath))
             {
+                if (_relaxClientPathValidation)
+                {
+                    _logger.Warning("IpcCommandServer: empty client path for PID {Pid} (ProcessName=SuavoAgent.Core verified) — accepting due to RelaxIpcClientPathValidation=true", clientPid);
+                    return true;
+                }
                 _logger.Warning("IpcCommandServer: empty client path for PID {Pid} — rejecting", clientPid);
                 return false;
             }

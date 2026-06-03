@@ -73,7 +73,7 @@ public static class PioneerRxConstants
         "PatientID", "PersonID"
     };
 
-    private static readonly string[] PhiColumnPatterns =
+    internal static readonly IReadOnlyList<string> PhiColumnPatterns = new[]
     {
         "patient", "ssn", "dob", "birth", "phone", "address",
         "email", "person", "contact", "emergency", "guardian",

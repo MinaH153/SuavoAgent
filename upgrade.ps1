@@ -41,7 +41,7 @@ foreach ($svc in $services) {
 }
 
 # 3. Replace binaries
-Write-Host "[3/4] Installing new binaries..." -ForegroundColor Yellow
+Write-Host "[3/5] Installing new binaries..." -ForegroundColor Yellow
 foreach ($bin in $binaries) {
     $src = Join-Path $tmpDir $bin
     $dst = Join-Path $InstallDir $bin
@@ -49,8 +49,32 @@ foreach ($bin in $binaries) {
     Write-Host "  $bin replaced"
 }
 
-# 4. Start services
-Write-Host "[4/4] Starting services..." -ForegroundColor Yellow
+# 4. H-8: regenerate binaries.manifest so the Broker will launch the new Helper.
+# This is a MANUAL file-copy swap — it does NOT go through the agent's
+# CheckPendingUpdate/SwapBinaries path (which regenerates the manifest in C#), so
+# without this the manifest keeps the OLD Helper hash and the Broker's H-8 integrity
+# guard (SessionWatcher.VerifyHelperIntegrity) refuses the new Helper. The agent then
+# goes BLIND (vision/UIA offline) with no crash and no app-log error — exactly the
+# field failure on Mina's box after the v3.17.0 manual swap. Services are stopped
+# here (step 2), so a direct write is race-free. Mirrors install.ps1's H-8 writer;
+# regenerates from whatever Core/Broker/Helper/Watchdog are now on disk.
+Write-Host "[4/5] Regenerating binaries.manifest (H-8)..." -ForegroundColor Yellow
+$dataDir = "$env:ProgramData\SuavoAgent"
+New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+$manifest = @{}
+foreach ($sub in @("Core", "Broker", "Helper", "Watchdog")) {
+    $exePath = Join-Path $InstallDir "SuavoAgent.$sub.exe"
+    if (-not (Test-Path $exePath)) { continue }
+    $hash = (Get-FileHash $exePath -Algorithm SHA256).Hash.ToLower()
+    $manifest["SuavoAgent.$sub.exe"] = $hash
+    Write-Host "  SuavoAgent.$sub.exe: $hash" -ForegroundColor Gray
+}
+$manifestPath = Join-Path $dataDir "binaries.manifest"
+$manifest | ConvertTo-Json | Set-Content $manifestPath -Encoding UTF8
+Write-Host "  binaries.manifest updated ($($manifest.Count) binaries)" -ForegroundColor Gray
+
+# 5. Start services
+Write-Host "[5/5] Starting services..." -ForegroundColor Yellow
 foreach ($svc in ($services | Sort-Object -Descending)) {
     Start-Service -Name $svc
     Write-Host "  $svc started"

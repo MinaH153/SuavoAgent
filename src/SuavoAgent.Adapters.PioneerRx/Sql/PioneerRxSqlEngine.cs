@@ -21,7 +21,7 @@ public sealed class PioneerRxSqlEngine : IDisposable
     public Guid? ConnectionId => _connection?.ClientConnectionId;
 
     public PioneerRxSqlEngine(string server, string database, ILogger<PioneerRxSqlEngine> logger,
-        string? sqlUser = null, string? sqlPassword = null, bool trustServerCertificate = true)
+        string? sqlUser = null, string? sqlPassword = null, bool trustServerCertificate = false)
     {
         _logger = logger;
 
@@ -423,9 +423,12 @@ ORDER BY rt.DateFilled DESC";
             SELECT TOP {batchSize}
                 r.RxNumber,
                 rt.DateFilled,
+                rt.RefillNumber,
                 rt.DispensedQuantity,
+                rt.DaysSupply,
                 i.ItemName AS TradeName,
                 i.NDC,
+                i.DeaSchedule,
                 rt.RxTransactionStatusTypeID AS StatusGuid
             FROM Prescription.RxTransaction rt
             JOIN Prescription.Rx r ON rt.RxID = r.RxID
@@ -467,7 +470,10 @@ ORDER BY rt.DateFilled DESC";
                     ? null : reader.GetDateTime(reader.GetOrdinal("DateFilled")),
                 Quantity: GetDecimalOrDefault(reader, "DispensedQuantity"),
                 StatusGuid: GetGuidOrDefault(reader, "StatusGuid"),
-                DetectedAt: DateTimeOffset.UtcNow));
+                DetectedAt: DateTimeOffset.UtcNow,
+                FillNumber: GetIntOrDefault(reader, "RefillNumber"),
+                DaysSupply: GetIntOrDefault(reader, "DaysSupply"),
+                DrugSchedule: GetNullableInt(reader, "DeaSchedule")));
         }
 
         _logger.LogDebug("Read {Count} ready metadata (PHI-free) from SQL", results.Count);

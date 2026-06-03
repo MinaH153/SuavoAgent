@@ -1,0 +1,116 @@
+{
+  "ruleset_version": "v1.0",
+  "ruleset_version_int": 10,
+  "key_id": "ruleset-v1-key-2026-05-13",
+  "signed_at": "2026-05-13T00:00:00Z",
+  "expires_at": null,
+  "signature_alg": "ECDSA_P256_SHA256",
+
+  "_comment": "Phase 1 ruleset for the Diagnostic Mesh Queen-first spec. Codex re-review 2026-05-13 v1.0 LOCKED. Calibration fingerprints (Bug 22/23/24) are the ONLY entries that count as coverage. Candidate patterns are dashboard-hidden until observed.",
+
+  "calibration_fingerprints": {
+    "bug-22": "Helper|win32|System.ComponentModel.Win32Exception|native_error=5|SendInput/actuation-token|",
+    "bug-23": "Core|invariant_violation|||SuavoAgent.Core.Workflows.WorkflowExecutor.Complete(1)|complete-zero-actuation-log",
+    "bug-24": "Setup|managed_exception|System.InvalidCastException||SuavoAgent.Setup.Gui.MainWindow.InitializeComponent(2,System.Boolean,System.Boolean)|resource=MainWindow.axaml"
+  },
+
+  "invariant_catalog": {
+    "complete-zero-actuation-log": {
+      "id": "complete-zero-actuation-log",
+      "component": "Core",
+      "description": "WorkflowExecutor.Complete() returned success with zero actuation_log rows — HIPAA chain-of-custody hole at orchestration layer.",
+      "severity": "critical"
+    }
+  },
+
+  "candidate_patterns": [
+    {
+      "name": "win32-access-denied",
+      "source": "seed",
+      "confidence": "low",
+      "first_observed_at": null,
+      "observed_count": 0,
+      "counts_as_coverage": false,
+      "signal_kind": "win32",
+      "exception_type": "System.ComponentModel.Win32Exception",
+      "stable_error_code": "native_error=5",
+      "notes": "ERROR_ACCESS_DENIED. Bug 22's family — DuplicateTokenEx + Session 0 + UIAutomation."
+    },
+    {
+      "name": "win32-not-implemented",
+      "source": "seed",
+      "confidence": "low",
+      "first_observed_at": null,
+      "observed_count": 0,
+      "counts_as_coverage": false,
+      "signal_kind": "win32",
+      "exception_type": "System.ComponentModel.Win32Exception",
+      "stable_error_code": "native_error=1326",
+      "notes": "ERROR_LOGON_FAILURE."
+    },
+    {
+      "name": "win32-paged-pool-exhausted",
+      "source": "seed",
+      "confidence": "low",
+      "first_observed_at": null,
+      "observed_count": 0,
+      "counts_as_coverage": false,
+      "signal_kind": "win32",
+      "exception_type": "System.ComponentModel.Win32Exception",
+      "stable_error_code": "native_error=1450",
+      "notes": "ERROR_NO_SYSTEM_RESOURCES."
+    },
+    {
+      "name": "clr-access-violation",
+      "source": "seed",
+      "confidence": "low",
+      "first_observed_at": null,
+      "observed_count": 0,
+      "counts_as_coverage": false,
+      "signal_kind": "exit_code",
+      "exception_type": null,
+      "stable_error_code": "exit_code=0xC0000005",
+      "notes": "STATUS_ACCESS_VIOLATION fast-fail. Common P/Invoke crash class."
+    },
+    {
+      "name": "clr-managed-fast-fail",
+      "source": "seed",
+      "confidence": "low",
+      "first_observed_at": null,
+      "observed_count": 0,
+      "counts_as_coverage": false,
+      "signal_kind": "exit_code",
+      "exception_type": null,
+      "stable_error_code": "exit_code=0xE0434352",
+      "notes": "CLR unhandled-exception fast-fail. Bug 24's parent-process surface."
+    },
+    {
+      "name": "windows-service-terminated",
+      "source": "seed",
+      "confidence": "low",
+      "first_observed_at": null,
+      "observed_count": 0,
+      "counts_as_coverage": false,
+      "signal_kind": "exit_code",
+      "exception_type": null,
+      "stable_error_code": "exit_code=0x42B",
+      "notes": "ERROR_SERVICE_NOT_ACTIVE (1067) — Windows service died unexpectedly."
+    },
+    {
+      "name": "avalonia-xaml-load-failure",
+      "source": "seed",
+      "confidence": "low",
+      "first_observed_at": null,
+      "observed_count": 0,
+      "counts_as_coverage": false,
+      "signal_kind": "managed_exception",
+      "exception_type": "System.InvalidCastException",
+      "stable_error_code": null,
+      "notes": "Bug 24's class. DynamicResource type mismatch at XAML load."
+    }
+  ],
+
+  "patient_names_seed": [],
+
+  "signature_base64": ""
+}

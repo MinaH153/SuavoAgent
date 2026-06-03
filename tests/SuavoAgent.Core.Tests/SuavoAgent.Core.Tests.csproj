@@ -22,4 +22,10 @@
     <ProjectReference Include="..\..\src\SuavoAgent.Core\SuavoAgent.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="Fixtures\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

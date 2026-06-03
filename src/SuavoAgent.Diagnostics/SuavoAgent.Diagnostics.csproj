@@ -1,0 +1,86 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Diagnostic Mesh shared library (Mesh PR 4). Implements the v1.0-locked
+    diagnostic-mesh-queen-first.md spec: agent-edge fingerprint compute
+    (fp-v1), SDK-side PhiScrubber with NonBacktracking regex, embedded
+    ruleset-v1, Sentry transport sink (Wire owns unhandled hooks), and
+    the MeshHeartbeatWorker liveness contract.
+
+    Universal entry points (Core / Broker / Helper / Watchdog) reference
+    this project. The Avalonia-specific dispatcher hook ships in a
+    Setup-local file to keep the universal library Avalonia-free.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SuavoAgent.Diagnostics</RootNamespace>
+    <AssemblyName>SuavoAgent.Diagnostics</AssemblyName>
+    <NoWarn>CA1416</NoWarn>
+    <!--
+      Required for MSBuild generated BuildContext.GitSha (build-time git
+      rev-parse HEAD short SHA embedded as a constant).
+    -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Sentry .NET SDK 4.x — BAA-covered transport sink for crash signals.
+         Wire owns unhandled hooks; Sentry is transport-only (no SDK
+         AppDomain/UnobservedTask hooks). -->
+    <PackageReference Include="JsonCanonicalizer" Version="1.0.0" />
+    <PackageReference Include="Sentry" Version="4.13.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="8.0.0" />
+    <!-- JsonSchema.Net for build-time + runtime ruleset-v1 validation.
+         Runtime path is loaded-from-embedded-resource only; the runtime
+         crash reporter does NOT depend on this package (AOT compat). -->
+    <PackageReference Include="JsonSchema.Net" Version="7.2.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Embedded ruleset (calibration fingerprints + candidate patterns)
+         and its JSON Schema. Build-time schema validation gate in
+         build/ValidateRulesetSchema.targets. -->
+    <EmbeddedResource Include="Resources\ruleset-v1.json" />
+    <EmbeddedResource Include="Resources\ruleset-v1.schema.json" />
+    <!-- Multi-key trust store. Phase 2 OTA verifies every fetched ruleset
+         against one of N embedded ECDsa P-256 public keys; the bundle's
+         key_id selects which. Resource naming convention:
+         `ruleset-signing-key-<key_id>.pub.pem`. Codex Comp 2 chunk C HIGH
+         RESOLVED. Generate new keys via scripts/generate-ruleset-signing-key.sh. -->
+    <EmbeddedResource Include="Resources\ruleset-signing-key-*.pub.pem" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Tests need access to internal helpers (ExtractKeyId,
+         CanonicalizeForSigning) on RulesetSignatureVerifier. -->
+    <InternalsVisibleTo Include="SuavoAgent.Diagnostics.Tests" />
+  </ItemGroup>
+
+  <!--
+    Build-time git SHA embedding. WriteSourceCodeOnly target emits a
+    BuildContext.GitSha constant via partial-class injection. Runs before
+    BeforeCompile so the compiler sees the generated file.
+  -->
+  <Target Name="EmbedGitSha" BeforeTargets="BeforeCompile">
+    <Exec Command="git rev-parse --short=12 HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitShaShort" />
+    </Exec>
+    <PropertyGroup>
+      <GitShaShortSafe Condition="'$(GitShaShort)' == ''">unknown</GitShaShortSafe>
+      <GitShaShortSafe Condition="'$(GitShaShort)' != ''">$(GitShaShort)</GitShaShortSafe>
+    </PropertyGroup>
+    <ItemGroup>
+      <BuildContextGenerated Include="$(IntermediateOutputPath)BuildContext.Generated.cs" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(IntermediateOutputPath)BuildContext.Generated.cs" Lines="// &lt;auto-generated/&gt;%0Anamespace SuavoAgent.Diagnostics%3B%0A%0Apublic static partial class BuildContext%0A%7B%0A    public const string GitSha = &quot;$(GitShaShortSafe)&quot;%3B%0A    public const string BuildTimestampUtc = &quot;$([System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))&quot;%3B%0A%7D%0A" Overwrite="true" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)BuildContext.Generated.cs" />
+    </ItemGroup>
+  </Target>
+
+</Project>

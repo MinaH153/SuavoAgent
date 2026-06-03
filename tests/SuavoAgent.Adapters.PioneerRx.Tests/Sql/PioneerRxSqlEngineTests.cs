@@ -1,4 +1,6 @@
 using SuavoAgent.Adapters.PioneerRx;
+using System.Reflection;
+using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Adapters.PioneerRx.Sql;
 using Xunit;
 
@@ -6,6 +8,27 @@ namespace SuavoAgent.Adapters.PioneerRx.Tests.Sql;
 
 public class PioneerRxSqlEngineTests
 {
+    [Theory]
+    [InlineData(false, "Trust Server Certificate=False")]
+    [InlineData(true, "Trust Server Certificate=True")]
+    public void Constructor_RespectsTrustServerCertificateOption(
+        bool trustServerCertificate,
+        string expectedFragment)
+    {
+        var engine = new PioneerRxSqlEngine(
+            "127.0.0.1,1433",
+            "PioneerPharmacySystem",
+            NullLogger<PioneerRxSqlEngine>.Instance,
+            trustServerCertificate: trustServerCertificate);
+
+        var field = typeof(PioneerRxSqlEngine).GetField(
+            "_connectionString",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        var connectionString = Assert.IsType<string>(field?.GetValue(engine));
+
+        Assert.Contains(expectedFragment, connectionString);
+    }
+
     [Fact]
     public void BuildDeliveryQuery_UsesRealSchema()
     {
@@ -148,6 +171,20 @@ public class PioneerRxSqlEngineTests
     public void StatusPattern_MatchesPickupVariants(string statusDesc)
     {
         Assert.True(PioneerRxConstants.MatchesDeliveryReadyPattern(statusDesc));
+    }
+
+    [Fact]
+    public void DeliveryReadyStatusNames_PinObservedPilotReadyStates()
+    {
+        Assert.Equal(new[]
+        {
+            "Waiting for Pick up",
+            "Waiting for Delivery",
+            "To Be Put in Bin"
+        }, PioneerRxConstants.DeliveryReadyStatusNames);
+
+        Assert.DoesNotContain("Out for Delivery", PioneerRxConstants.DeliveryReadyStatusNames);
+        Assert.DoesNotContain("Completed", PioneerRxConstants.DeliveryReadyStatusNames);
     }
 
     [Theory]

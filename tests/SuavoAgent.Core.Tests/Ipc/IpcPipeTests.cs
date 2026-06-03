@@ -77,13 +77,86 @@ public class IpcPipeTests
         using var clientPipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
         await clientPipe.ConnectAsync(5000, cts.Token);
 
-        await Task.Delay(200); // Let server process
+        // Poll for the server to mark itself connected. 200ms was tight on
+        // shared CI runners; the poll bails fast in the happy path while
+        // tolerating up to 3s of scheduler jitter under load.
+        await WaitForAsync(() => server.IsConnected, TimeSpan.FromSeconds(3), cts.Token);
         Assert.True(server.IsConnected);
 
         clientPipe.Close();
-        await Task.Delay(500); // Let server detect disconnect
+        await WaitForAsync(() => !server.IsConnected, TimeSpan.FromSeconds(3), cts.Token);
         Assert.False(server.IsConnected);
 
         server.Dispose();
+    }
+
+    // --- Chunk 2: SendAsync reconnect-on-demand (transient Helper drop self-recovers) ---
+
+    private static Task<IpcResponse> Echo(IpcRequest msg)
+        => Task.FromResult(new IpcResponse(msg.Id, IpcStatus.Ok, msg.Command, null, null));
+
+    [Fact]
+    public async Task SendAsync_ConnectsOnDemand_WhenNeverConnected()
+    {
+        var pipeName = $"SuavoTest_{Guid.NewGuid():N}";
+        using var server = new IpcPipeServer(pipeName, Echo, NullLogger<IpcPipeServer>.Instance);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        server.Start(cts.Token);
+        await Task.Delay(100);
+
+        await using var client = new IpcCommandClient(pipeName, NullLogger<IpcCommandClient>.Instance);
+
+        // ConnectAsync was never called — _pipe is null. SendAsync must connect on demand.
+        var resp = await client.SendAsync(
+            new IpcRequest("r1", IpcCommands.Ping, 1, null), TimeSpan.FromSeconds(5), cts.Token);
+
+        Assert.NotNull(resp);
+        Assert.Equal(IpcStatus.Ok, resp!.Status);
+        Assert.Equal("r1", resp.Id);
+    }
+
+    [Fact]
+    public async Task SendAsync_Reconnects_AfterServerRestart()
+    {
+        var pipeName = $"SuavoTest_{Guid.NewGuid():N}";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        var server1 = new IpcPipeServer(pipeName, Echo, NullLogger<IpcPipeServer>.Instance);
+        server1.Start(cts.Token);
+        await Task.Delay(100);
+
+        await using var client = new IpcCommandClient(pipeName, NullLogger<IpcCommandClient>.Instance);
+        Assert.True(await client.ConnectAsync(TimeSpan.FromSeconds(5), cts.Token));
+        var first = await client.SendAsync(
+            new IpcRequest("r1", IpcCommands.Ping, 1, null), TimeSpan.FromSeconds(5), cts.Token);
+        Assert.NotNull(first);
+
+        // Drop: kill the server so the client's pipe breaks, then bring a fresh
+        // server up on the same name. SendAsync must self-recover (broken send
+        // tears down the stale pipe; the next send reconnects on demand).
+        server1.Dispose();
+        using var server2 = new IpcPipeServer(pipeName, Echo, NullLogger<IpcPipeServer>.Instance);
+        server2.Start(cts.Token);
+        await Task.Delay(100);
+
+        IpcResponse? recovered = null;
+        for (var i = 0; i < 3 && recovered == null; i++)
+        {
+            recovered = await client.SendAsync(
+                new IpcRequest($"r-{i}", IpcCommands.Ping, 1, null), TimeSpan.FromSeconds(5), cts.Token);
+        }
+
+        Assert.NotNull(recovered);
+        Assert.Equal(IpcStatus.Ok, recovered!.Status);
+    }
+
+    private static async Task WaitForAsync(Func<bool> predicate, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (predicate()) return;
+            await Task.Delay(50, cancellationToken);
+        }
     }
 }

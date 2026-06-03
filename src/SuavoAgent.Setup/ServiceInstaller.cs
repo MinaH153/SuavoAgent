@@ -56,9 +56,22 @@ internal static class ServiceInstaller
         RunSc($"failureflag {CoreServiceName} 1");
         ConsoleUI.WriteOk($"{CoreServiceName} service registered");
 
-        // Broker — runs as NetworkService (needs SeTcbPrivilege for WTSQueryUserToken + CreateProcessAsUser)
-        // NetworkService has SeTcbPrivilege when configured as a service. LocalSystem was excessive.
-        RunSc($"create {BrokerServiceName} binPath= \"\\\"{brokerPath}\\\"\" start= delayed-auto obj= \"NT AUTHORITY\\NetworkService\"");
+        // Broker — MUST run as LocalSystem. Its core job is the cross-session
+        // launch dance: WTSQueryUserToken + DuplicateTokenEx + CreateProcessAsUser
+        // to spawn the Helper inside the interactive console session (Session 1).
+        // WTSQueryUserToken requires SeTcbPrivilege ("Caller must be running in
+        // the LocalSystem account and must have the SE_TCB_NAME privilege" —
+        // MSDN). NetworkService does NOT hold SeTcbPrivilege, so the call fails
+        // 1314 (ERROR_PRIVILEGE_NOT_HELD), NativeProcess.LaunchInSession returns
+        // null, and SessionWatcher silently falls back to launching the Helper in
+        // the Broker's OWN session (Session 0) — an invisible desktop where the
+        // intent cursor, screen capture, and UIA never render. That regression
+        // (a prior "LocalSystem was excessive" edit) blinded the pilot box on
+        // 2026-06-01. install.ps1 + bootstrap.ps1 already register LocalSystem;
+        // this keeps the GUI/console installer in sync. Not a privilege grab —
+        // the Helper itself drops to the de-privileged user token; only the
+        // supervisor needs SeTcb.
+        RunSc($"create {BrokerServiceName} binPath= \"\\\"{brokerPath}\\\"\" start= delayed-auto obj= \"LocalSystem\"");
         RunSc($"description {BrokerServiceName} \"Suavo pharmacy agent - session broker\"");
         RunSc($"failure {BrokerServiceName} reset= 3600 actions= restart/5000/restart/30000/restart/60000");
         RunSc($"failureflag {BrokerServiceName} 1");
@@ -110,6 +123,19 @@ internal static class ServiceInstaller
             ConsoleUI.WriteWarn($"{WatchdogServiceName} may not be running yet");
 
         return coreRunning; // Core must be up; Watchdog will repair Broker if needed.
+    }
+
+    /// <summary>
+    /// Stops all three SuavoAgent services in watchdog-first order so they
+    /// cannot auto-restart each other. Safe to call when services are absent
+    /// (StopAndRemove handles FAILED 1060). Call this before overwriting
+    /// binaries on upgrade so the EXEs are not locked.
+    /// </summary>
+    public static void StopServices()
+    {
+        StopAndRemove(WatchdogServiceName);
+        StopAndRemove(BrokerServiceName);
+        StopAndRemove(CoreServiceName);
     }
 
     private static void StopAndRemove(string serviceName)

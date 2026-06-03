@@ -1,7 +1,10 @@
+using System.Reflection;
 using Avalonia.Controls;
 using Avalonia.Threading;
 using SuavoAgent.Setup.Gui.Services;
 using SuavoAgent.Setup.Gui.Views;
+// DeviceCodeService, SetupConfig, DeviceCodePairing live in the root namespace.
+using SuavoAgent.Setup;
 
 namespace SuavoAgent.Setup.Gui.ViewModels;
 
@@ -14,7 +17,11 @@ namespace SuavoAgent.Setup.Gui.ViewModels;
 /// </summary>
 internal sealed class MainWindowViewModel : ViewModelBase
 {
-    private readonly InstallContext? _ctx;
+    private const string DefaultCloudUrl = "https://suavollc.com";
+
+    // _ctx is null until the installer has a config — either from setup.json/CLI
+    // (App.TryLoadContext) or from device-code pairing (BuildDeviceCodePairing).
+    private InstallContext? _ctx;
     private readonly Action<int>? _shutdown;
 
     private UserControl _currentView;
@@ -46,10 +53,53 @@ internal sealed class MainWindowViewModel : ViewModelBase
         _ctx = ctx;
         _shutdown = shutdown;
 
+        // No config → fall into device-code pairing (the consumer self-serve
+        // path) rather than dead-ending on the no-config error. Pairing yields
+        // a SetupConfig, which we turn into an InstallContext and run the normal
+        // install flow.
         _currentView = ctx == null
-            ? BuildNoConfigError()
+            ? BuildDeviceCodePairing()
             : BuildWelcome();
     }
+
+    // ── Device-code pairing (no setup.json) ────────────────────────────────
+
+    private UserControl BuildDeviceCodePairing()
+    {
+        StepLabel = "Connect workstation";
+
+        var fingerprint = MachineFingerprint.Get();
+        var version = InstallerVersion();
+        var service = new DeviceCodeService(DefaultCloudUrl);
+
+        var vm = new DeviceCodePairingViewModel(
+            service,
+            DefaultCloudUrl,
+            fingerprint,
+            version,
+            onPaired: config => OnPaired(config, fingerprint, version),
+            onCancelled: () => CurrentView = BuildNoConfigError());
+
+        var view = new DeviceCodePairingView { DataContext = vm };
+        _ = vm.StartAsync();
+        return view;
+    }
+
+    private void OnPaired(SetupConfig config, string fingerprint, string version)
+    {
+        // Pairing returns an empty ReleaseTag — the installer and the agent
+        // binaries ship under the same tag, so use the installer's own version
+        // as the release to download.
+        var tagged = config with { ReleaseTag = $"v{version}" };
+        _ctx = new InstallContext(tagged) { MachineFingerprint = fingerprint };
+
+        // We're already on the UI thread (pairing awaited on the captured
+        // context), but post defensively to be safe across hosts.
+        Dispatcher.UIThread.Post(() => CurrentView = BuildWelcome());
+    }
+
+    private static string InstallerVersion() =>
+        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
 
     // ── Step transitions ───────────────────────────────────────────────
 

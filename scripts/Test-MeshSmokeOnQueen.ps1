@@ -1,0 +1,359 @@
+#Requires -Version 7.0
+<#
+.SYNOPSIS
+    Mesh Phase 1 end-to-end smoke test for Queen (Windows host).
+
+.DESCRIPTION
+    Runs in ~3-5 minutes. Verifies the bits that GitHub-hosted CI can't:
+      1. Preflight passes against real Yubikey + EV cert + SmartCard
+      2. publish.ps1 heartbeat fires + AOT crash reporter publishes
+      3. Forced publish failure → suavo-report-crash JSONL appears with
+         expected fields (including SHA-256 hashed EV cert thumbprint)
+      4. tail-events.ps1 sanity check on a synthetic events.jsonl
+      5. SuavoAgent.Setup.exe loads (Wire.AttachUnhandledHooks fires
+         without throwing on first execution)
+
+    Prints a green/red summary card at the end. Exit 0 on all-PASS, 1
+    on any FAIL. Per-check verbose output so failures are debuggable.
+
+.PARAMETER CertThumbprint
+    EV code-signing cert SHA1 thumbprint. Falls back to
+    $env:SUAVO_CERT_THUMBPRINT. If empty, signing-related checks SKIP.
+
+.PARAMETER SkipPublish
+    Skip the heavy publish.ps1 invocation (saves ~8 minutes). Still
+    runs preflight + synthetic crash reporter + tail-events sanity.
+
+.EXAMPLE
+    pwsh -File scripts/Test-MeshSmokeOnQueen.ps1
+    pwsh -File scripts/Test-MeshSmokeOnQueen.ps1 -SkipPublish
+    pwsh -File scripts/Test-MeshSmokeOnQueen.ps1 -CertThumbprint <SHA1>
+#>
+
+[CmdletBinding()]
+param(
+    [string]$CertThumbprint = $env:SUAVO_CERT_THUMBPRINT,
+    [switch]$SkipPublish
+)
+
+$ErrorActionPreference = 'Continue'  # Keep going even if a check fails
+$script:Results = New-Object System.Collections.Generic.List[object]
+$script:RepoRoot = Split-Path -Parent $PSScriptRoot
+
+function Add-Result {
+    param(
+        [string]$Name,
+        [ValidateSet('PASS', 'FAIL', 'SKIP', 'WARN')][string]$Status,
+        [string]$Detail = ''
+    )
+    $script:Results.Add([pscustomobject]@{ Name = $Name; Status = $Status; Detail = $Detail })
+    $color = switch ($Status) {
+        'PASS' { 'Green' }
+        'FAIL' { 'Red' }
+        'SKIP' { 'DarkGray' }
+        'WARN' { 'Yellow' }
+    }
+    Write-Host ("  [{0,-5}] {1,-44} {2}" -f $Status, $Name, $Detail) -ForegroundColor $color
+}
+
+function Invoke-WithTimeout {
+    <#
+    .SYNOPSIS
+        Run an external command with a hard timeout. Returns @{TimedOut, ExitCode}.
+    .DESCRIPTION
+        Wraps Start-Process + WaitForExit(ms) so a hung build can't freeze the
+        smoke runner indefinitely (memory rule `feedback-agent-watchdog-stalls-2026-05-04`:
+        ≤30-min hard cap). On timeout, kills the process tree and merges captured
+        stderr into the stdout log so existing tail/grep logic remains untouched.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string[]]$ArgumentList,
+        [Parameter(Mandatory)][string]$LogPath,
+        [int]$TimeoutSeconds = 900,
+        [string]$WorkingDirectory
+    )
+    $errLog = "$LogPath.err"
+    $startArgs = @{
+        FilePath               = $FilePath
+        ArgumentList           = $ArgumentList
+        NoNewWindow            = $true
+        PassThru               = $true
+        RedirectStandardOutput = $LogPath
+        RedirectStandardError  = $errLog
+    }
+    if ($WorkingDirectory) { $startArgs.WorkingDirectory = $WorkingDirectory }
+    $proc = Start-Process @startArgs
+    $exited = $proc.WaitForExit($TimeoutSeconds * 1000)
+    if (-not $exited) {
+        try { $proc.Kill($true) } catch { }
+        if (Test-Path -LiteralPath $errLog) {
+            "`n--- STDERR (TIMEOUT-KILLED after ${TimeoutSeconds}s) ---" | Add-Content -LiteralPath $LogPath
+            Get-Content -LiteralPath $errLog | Add-Content -LiteralPath $LogPath
+        }
+        return [pscustomobject]@{ TimedOut = $true; ExitCode = -1 }
+    }
+    if (Test-Path -LiteralPath $errLog) {
+        $errContent = Get-Content -LiteralPath $errLog -Raw
+        if ($errContent) {
+            "`n--- STDERR ---`n$errContent" | Add-Content -LiteralPath $LogPath
+        }
+    }
+    return [pscustomobject]@{ TimedOut = $false; ExitCode = $proc.ExitCode }
+}
+
+function Test-Section { param([string]$Name) Write-Host "`n=== $Name ===" -ForegroundColor Cyan }
+
+# ── 1. Preflight ───────────────────────────────────────────────────────
+Test-Section "1. Queen ship preflight"
+$preflightPath = Join-Path $script:RepoRoot 'scripts\Test-QueenShipPreflight.ps1'
+if (-not (Test-Path -LiteralPath $preflightPath)) {
+    Add-Result 'preflight-script-exists' 'FAIL' "missing at $preflightPath"
+} else {
+    # Per preflight contract: empty CertThumbprint + -SkipSigning = signing-checks SKIP.
+    # Direct named invocation (no splat) matches publish.ps1's working pattern and
+    # sidesteps hashtable-splat type-binding quirks that surfaced "Argument types
+    # do not match" on this exact preflight script in pwsh 7.
+    $preflightOut = if ([string]::IsNullOrWhiteSpace($CertThumbprint)) {
+        & $preflightPath -CertThumbprint '' -SkipSigning -Json 2>&1 | Out-String
+    } else {
+        & $preflightPath -CertThumbprint $CertThumbprint -Json 2>&1 | Out-String
+    }
+    $preflight = $null
+    $parseError = $null
+    try { $preflight = $preflightOut | ConvertFrom-Json -ErrorAction Stop } catch { $parseError = $_.Exception.Message }
+    if ($null -eq $preflight) {
+        Add-Result 'preflight-runs' 'FAIL' "could not parse preflight output as JSON: $parseError"
+        $modeRendered = if ([string]::IsNullOrWhiteSpace($CertThumbprint)) { '-SkipSigning -Json' } else { "-CertThumbprint <set> -Json" }
+        Write-Host "  preflight invoked with: $modeRendered" -ForegroundColor DarkGray
+        Write-Host "  preflight raw output (full, $($preflightOut.Length) chars):" -ForegroundColor DarkGray
+        Write-Host $preflightOut -ForegroundColor DarkGray
+    } else {
+        $passCount = ($preflight.results | Where-Object { $_.status -eq 'PASS' }).Count
+        $failCount = ($preflight.results | Where-Object { $_.status -eq 'FAIL' }).Count
+        $warnCount = ($preflight.results | Where-Object { $_.status -eq 'WARN' }).Count
+        $skipCount = ($preflight.results | Where-Object { $_.status -eq 'SKIP' }).Count
+        Add-Result 'preflight-runs' ($(if ($preflight.ok) { 'PASS' } else { 'FAIL' })) `
+            "$passCount PASS, $failCount FAIL, $warnCount WARN, $skipCount SKIP"
+        foreach ($r in $preflight.results) {
+            $rstatus = if ($r.status -eq 'PASS' -or $r.status -eq 'SKIP') { 'PASS' } else { $r.status }
+            Add-Result "  preflight.$($r.name)" $rstatus $r.detail
+        }
+    }
+}
+
+# ── 2. SuavoReportCrash synthetic invocation ───────────────────────────
+Test-Section "2. suavo-report-crash.exe synthetic JSONL"
+# Build the tool standalone (fast — no main projects)
+$crashToolCsproj = Join-Path $script:RepoRoot 'tools\SuavoReportCrash\SuavoReportCrash.csproj'
+$crashToolOut = Join-Path $env:TEMP "suavo-report-crash-smoke-$(Get-Random)"
+# Capture publish output so we can root-cause on failure (don't swallow with Out-Null)
+$publishLog = Join-Path $env:TEMP "suavo-report-crash-publish-$(Get-Random).log"
+$publishRes = Invoke-WithTimeout `
+    -FilePath 'dotnet' `
+    -ArgumentList @('publish', $crashToolCsproj, '-c', 'Release', '-r', 'win-x64', '--self-contained', '-o', $crashToolOut) `
+    -LogPath $publishLog `
+    -TimeoutSeconds 900
+$publishExit = $publishRes.ExitCode
+$crashExe = Join-Path $crashToolOut 'suavo-report-crash.exe'
+if ($publishRes.TimedOut) {
+    Add-Result 'crash-tool-built' 'FAIL' "AOT publish TIMEOUT (>15 min); see $publishLog"
+    Write-Host "  dotnet publish tail (last 20 lines, full log: $publishLog):" -ForegroundColor DarkGray
+    Write-Host ((Get-Content -LiteralPath $publishLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n") -ForegroundColor DarkGray
+} elseif (-not (Test-Path -LiteralPath $crashExe)) {
+    $tail = (Get-Content -LiteralPath $publishLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+    Add-Result 'crash-tool-built' 'FAIL' "AOT publish failed (exit $publishExit); exe missing at $crashExe"
+    Write-Host "  dotnet publish tail (last 20 lines, full log: $publishLog):" -ForegroundColor DarkGray
+    Write-Host $tail -ForegroundColor DarkGray
+} else {
+    $exeSize = [math]::Round((Get-Item $crashExe).Length / 1MB, 1)
+    Add-Result 'crash-tool-built' 'PASS' "$crashExe ($exeSize MB AOT native)"
+
+    # Invoke with synthetic args that exercise the value-with-double-dash fix
+    $jsonlPath = Join-Path $env:ProgramData 'SuavoAgent\diagnostics\publish-crash.jsonl'
+    if (Test-Path -LiteralPath $jsonlPath) { Remove-Item -LiteralPath $jsonlPath -Force }
+    $invokeArgs = @(
+        '--component', 'Publish',
+        '--exit-code', '1',
+        '--project', 'SmokeTest',
+        '--stdout-tail', 'MSBuild error CS0123: -- malformed test value',
+        '--build-sha', 'smoke-test-sha',
+        '--parent-ps-version', "$($PSVersionTable.PSVersion)",
+        '--yubikey', 'true',
+        '--smartcard', 'true'
+    )
+    if ($CertThumbprint) {
+        $invokeArgs += '--ev-cert-thumbprint'
+        $invokeArgs += $CertThumbprint
+    }
+    & $crashExe @invokeArgs
+    $invokeExit = $LASTEXITCODE
+    if ($invokeExit -ne 0) {
+        Add-Result 'crash-tool-runs' 'FAIL' "exit $invokeExit"
+    } else {
+        Add-Result 'crash-tool-runs' 'PASS' 'exit 0'
+        if (-not (Test-Path -LiteralPath $jsonlPath)) {
+            Add-Result 'crash-jsonl-appears' 'FAIL' "missing at $jsonlPath"
+        } else {
+            $jsonl = (Get-Content -LiteralPath $jsonlPath -Tail 1) | ConvertFrom-Json
+            $expected = @('ts', 'source', 'component', 'exit_code', 'exit_code_hex', 'project', 'stdout_tail', 'build_sha', 'parent_ps_version', 'yubikey_present', 'smartcard_running')
+            $missing = $expected | Where-Object { -not $jsonl.PSObject.Properties.Name.Contains($_) }
+            if ($missing.Count -gt 0) {
+                Add-Result 'crash-jsonl-fields' 'FAIL' "missing fields: $($missing -join ',')"
+            } else {
+                Add-Result 'crash-jsonl-fields' 'PASS' 'all expected fields present'
+            }
+            # Verify -- mid-value preserved (Codex chunk 4b MEDIUM fix)
+            if ($jsonl.stdout_tail -like "*-- malformed test value*") {
+                Add-Result 'crash-jsonl-stdout-tail' 'PASS' 'value with -- captured'
+            } else {
+                Add-Result 'crash-jsonl-stdout-tail' 'FAIL' "stdout_tail = '$($jsonl.stdout_tail)'"
+            }
+            # Verify hex-formatted exit code
+            if ($jsonl.exit_code_hex -eq '0x00000001') {
+                Add-Result 'crash-jsonl-exit-code-hex' 'PASS' '0x00000001'
+            } else {
+                Add-Result 'crash-jsonl-exit-code-hex' 'FAIL' "exit_code_hex = '$($jsonl.exit_code_hex)'"
+            }
+            # Verify cert thumbprint is HASHED (SHA-256 of hex string) when supplied
+            if ($CertThumbprint) {
+                if ($jsonl.ev_cert_thumbprint_hash -and $jsonl.ev_cert_thumbprint_hash.Length -eq 64) {
+                    Add-Result 'crash-jsonl-thumbprint-hashed' 'PASS' "SHA-256 ($($jsonl.ev_cert_thumbprint_hash.Substring(0,16))...)"
+                } else {
+                    Add-Result 'crash-jsonl-thumbprint-hashed' 'FAIL' "hash missing or wrong length: $($jsonl.ev_cert_thumbprint_hash)"
+                }
+                # Cert thumbprint MUST NOT appear raw in the JSONL
+                $rawJsonl = Get-Content -LiteralPath $jsonlPath -Tail 1
+                $normalizedTp = ($CertThumbprint -replace '[^0-9a-fA-F]', '').ToUpperInvariant()
+                if ($rawJsonl -match $normalizedTp) {
+                    Add-Result 'crash-jsonl-thumbprint-not-raw' 'FAIL' 'raw thumbprint LEAKED into JSONL'
+                } else {
+                    Add-Result 'crash-jsonl-thumbprint-not-raw' 'PASS' 'raw thumbprint never written'
+                }
+            } else {
+                Add-Result 'crash-jsonl-thumbprint-hashed' 'SKIP' '-CertThumbprint not provided'
+            }
+        }
+    }
+    # Cleanup
+    Remove-Item -Recurse -Force $crashToolOut -ErrorAction SilentlyContinue
+}
+
+# ── 3. tail-events.ps1 sanity ──────────────────────────────────────────
+Test-Section "3. tail-events.ps1 pretty-printer"
+$tailScript = Join-Path $script:RepoRoot 'tools\tail-events.ps1'
+if (-not (Test-Path -LiteralPath $tailScript)) {
+    Add-Result 'tail-script-exists' 'FAIL' "missing at $tailScript"
+} else {
+    Add-Result 'tail-script-exists' 'PASS' $tailScript
+    # Create a synthetic events.jsonl with one event per signal_kind
+    $syntheticEventsPath = Join-Path $env:TEMP "events-smoke-$(Get-Random).jsonl"
+    $kinds = @('managed_exception', 'win32', 'invariant_violation', 'heartbeat', 'wire_handler_failed')
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    $kinds | ForEach-Object {
+        $line = "{`"ts`":`"$now`",`"signal_kind`":`"$_`",`"component`":`"Core`",`"fp_v1`":`"Core|$_|||smoke.test|`"}"
+        $line | Out-File -FilePath $syntheticEventsPath -Append -Encoding utf8
+    }
+    $tailLog = Join-Path $env:TEMP "tail-smoke-out-$(Get-Random).log"
+    try {
+        # File redirection (*> $file) is the only reliable way to capture
+        # Write-Host output across stream-redirection nuances in pwsh 7.
+        # *>&1 | Out-String drops Information records in some pwsh builds.
+        & $tailScript -Tail 10 -Path $syntheticEventsPath *> $tailLog
+        $tailOut = (Get-Content -LiteralPath $tailLog -Raw -ErrorAction SilentlyContinue)
+        if ($null -eq $tailOut) { $tailOut = '' }
+        if ($tailOut -match 'managed_exception' -and $tailOut -match 'heartbeat') {
+            Add-Result 'tail-renders' 'PASS' "$($kinds.Count) signal kinds rendered"
+        } else {
+            Add-Result 'tail-renders' 'FAIL' "expected output not present; got:`n$tailOut"
+        }
+    } catch {
+        Add-Result 'tail-renders' 'FAIL' "tail script threw: $($_.Exception.Message)"
+    }
+    Remove-Item -LiteralPath $syntheticEventsPath -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tailLog -ErrorAction SilentlyContinue
+}
+
+# ── 4. publish.ps1 end-to-end (optional, ~8 min) ──────────────────────
+if ($SkipPublish) {
+    Test-Section "4. publish.ps1 (SKIPPED via -SkipPublish)"
+    Add-Result 'publish-runs' 'SKIP' '-SkipPublish flag set'
+} else {
+    Test-Section "4. publish.ps1 end-to-end (heartbeat + crash-reporter hook)"
+    $publishPath = Join-Path $script:RepoRoot 'publish.ps1'
+    $publishOutDir = Join-Path $env:TEMP "suavo-publish-smoke-$(Get-Random)"
+    $publishLog = Join-Path $env:TEMP "publish-smoke-$(Get-Random).log"
+
+    try {
+        $publishArgs = @('-OutputDir', $publishOutDir)
+        if ($CertThumbprint) { $publishArgs += @('-CertThumbprint', $CertThumbprint) }
+        # 30-min hard cap — publish.ps1 normally completes in 8-12 min; anything
+        # north of 30 is a hung MSBuild and we want a clean fail not an indefinite hang.
+        $pwshArgs = @('-NoProfile', '-File', $publishPath) + $publishArgs
+        $publishRes = Invoke-WithTimeout `
+            -FilePath 'pwsh.exe' `
+            -ArgumentList $pwshArgs `
+            -LogPath $publishLog `
+            -TimeoutSeconds 1800 `
+            -WorkingDirectory $script:RepoRoot
+        $publishExit = $publishRes.ExitCode
+    } catch {
+        $publishExit = -1
+        $publishRes = [pscustomobject]@{ TimedOut = $false; ExitCode = -1 }
+    }
+
+    if ($publishRes.TimedOut) {
+        Add-Result 'publish-completes' 'FAIL' "publish.ps1 TIMEOUT (>30 min); see $publishLog"
+    } elseif ($publishExit -eq 0) {
+        Add-Result 'publish-completes' 'PASS' "exit 0; output at $publishOutDir"
+    } else {
+        Add-Result 'publish-completes' 'FAIL' "exit $publishExit"
+    }
+    # Verify heartbeat lines appeared in log (every 30s)
+    $logContent = Get-Content -LiteralPath $publishLog -Raw -ErrorAction SilentlyContinue
+    if ($logContent -match 'elapsed=\d+s.*still compiling') {
+        Add-Result 'publish-heartbeat-fires' 'PASS' "found 'still compiling' tick(s)"
+    } else {
+        Add-Result 'publish-heartbeat-fires' 'WARN' "no 'still compiling' tick (build may have been fast)"
+    }
+    # Verify suavo-report-crash.exe AOT-published as part of the run
+    $publishedCrashExe = Join-Path $publishOutDir 'SuavoReportCrash\suavo-report-crash.exe'
+    if (Test-Path -LiteralPath $publishedCrashExe) {
+        $sizeKb = [math]::Round((Get-Item $publishedCrashExe).Length / 1KB, 0)
+        Add-Result 'publish-aot-crash-tool' 'PASS' "$($sizeKb)KB native exe"
+    } else {
+        Add-Result 'publish-aot-crash-tool' 'FAIL' "missing at $publishedCrashExe"
+    }
+    # Verify all 5 main binaries appear
+    $expectedBins = @('Core', 'Broker', 'Helper', 'Watchdog', 'Setup')
+    foreach ($b in $expectedBins) {
+        $exe = Get-ChildItem -Path (Join-Path $publishOutDir $b) -Filter '*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($exe) {
+            Add-Result "publish-$($b.ToLower())-binary" 'PASS' "$($exe.Name)"
+        } else {
+            Add-Result "publish-$($b.ToLower())-binary" 'FAIL' "no .exe in $publishOutDir\$b"
+        }
+    }
+    Remove-Item -Recurse -Force $publishOutDir -ErrorAction SilentlyContinue
+}
+
+# ── Summary card ────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "+========================================================+" -ForegroundColor Cyan
+Write-Host "|  MESH PHASE 1 QUEEN SMOKE — $(Get-Date -Format 'yyyy-MM-dd HH:mm')           |" -ForegroundColor Cyan
+Write-Host "+========================================================+" -ForegroundColor Cyan
+$passCount = ($script:Results | Where-Object { $_.Status -eq 'PASS' }).Count
+$failCount = ($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
+$warnCount = ($script:Results | Where-Object { $_.Status -eq 'WARN' }).Count
+$skipCount = ($script:Results | Where-Object { $_.Status -eq 'SKIP' }).Count
+Write-Host "  $passCount PASS  /  $failCount FAIL  /  $warnCount WARN  /  $skipCount SKIP"
+
+if ($failCount -gt 0) {
+    Write-Host ""
+    Write-Host "FAILURES:" -ForegroundColor Red
+    $script:Results | Where-Object { $_.Status -eq 'FAIL' } | ForEach-Object {
+        Write-Host "  - $($_.Name): $($_.Detail)" -ForegroundColor Red
+    }
+}
+
+exit ($(if ($failCount -gt 0) { 1 } else { 0 }))

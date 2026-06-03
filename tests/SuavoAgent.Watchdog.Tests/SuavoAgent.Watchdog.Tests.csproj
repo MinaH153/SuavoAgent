@@ -12,10 +12,15 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+    <!-- Bumped to 8.0.2 to match SuavoAgent.Diagnostics's transitive
+         requirement (NU1605 downgrade guard). Diagnostics is referenced
+         by Watchdog from Mesh PR 4b entry-point integration. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- Direct pin overrides transitive 8.0.0 (GHSA-hh2w-p6rv-4g7w + GHSA-8g4q-xg66-9fp4, both HIGH DoS). -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 
   <ItemGroup>

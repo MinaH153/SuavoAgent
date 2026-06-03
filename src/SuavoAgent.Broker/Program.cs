@@ -1,9 +1,24 @@
 using Serilog;
 using SuavoAgent.Broker;
+using SuavoAgent.Diagnostics;
+
+// Diagnostic Mesh: Wire.AttachUnhandledHooks MUST be the literal first
+// executable statement (spec §7 PR 4 wire-ordering invariant; verified
+// by WireOrderingTests). Legacy crash sink below kept as defense-in-depth.
+Wire.AttachUnhandledHooks(WireComponent.Broker, new WireOptions
+{
+    LocalCrashLogPath = Path.Combine(BrokerCrashDir(), "broker-crash.log"),
+    LocalJournalPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent", "diagnostics", "events.jsonl"),
+    Dsn = Environment.GetEnvironmentVariable("SUAVO_SENTRY_DSN"),
+    EnableSentry = true,
+});
 
 // Crash sink: wire a last-resort handler that persists unhandled exceptions
 // to C:\ProgramData\SuavoAgent\logs\broker-crash.log even when the process
-// dies before .NET's exception machinery or Serilog are ready.
+// dies before .NET's exception machinery or Serilog are ready. Kept
+// alongside Wire so a Wire-init failure still leaves a plaintext audit.
 static string BrokerCrashDir()
 {
     var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
@@ -17,7 +32,10 @@ static void WriteBrokerCrash(string stage, Exception ex)
     {
         var line = $"[{DateTimeOffset.Now:O}] [{stage}] {ex.GetType().FullName}: {ex.Message}"
                    + Environment.NewLine + ex.ToString() + Environment.NewLine + Environment.NewLine;
-        File.AppendAllText(Path.Combine(BrokerCrashDir(), "broker-crash.log"), line);
+        File.AppendAllText(
+            Path.Combine(BrokerCrashDir(), "broker-crash.log"),
+            line,
+            new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
     }
     catch { }
 }
@@ -34,6 +52,7 @@ Log.Logger = new LoggerConfiguration()
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "logs", "broker-.log"),
+        encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
         rollingInterval: RollingInterval.Day,
         retainedFileCountLimit: 14)
     .CreateLogger();

@@ -2,10 +2,28 @@ using FlaUI.UIA2;
 using Serilog;
 using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Diagnostics;
 using SuavoAgent.Helper;
+using SuavoAgent.Helper.Actuation;
 using SuavoAgent.Helper.Behavioral;
 using SuavoAgent.Helper.SystemObservers;
 using SuavoAgent.Helper.Workflows;
+
+// Diagnostic Mesh: Wire.AttachUnhandledHooks MUST be the literal first
+// executable statement (spec §7 PR 4 wire-ordering invariant; verified
+// by WireOrderingTests). Helper had no pre-existing crash sink; Wire's
+// LocalCrashLogPath fills that gap with a structured journal.
+Wire.AttachUnhandledHooks(WireComponent.Helper, new WireOptions
+{
+    LocalCrashLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent", "logs", "helper-crash.log"),
+    LocalJournalPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent", "diagnostics", "events.jsonl"),
+    Dsn = Environment.GetEnvironmentVariable("SUAVO_SENTRY_DSN"),
+    EnableSentry = true,
+});
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Is(Environment.GetEnvironmentVariable("SUAVO_DEBUG") == "1"
@@ -16,6 +34,7 @@ Log.Logger = new LoggerConfiguration()
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "logs", "helper-.log"),
+        encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
         rollingInterval: RollingInterval.Day,
         retainedFileCountLimit: 14)
     .CreateLogger();
@@ -64,6 +83,11 @@ try
     // Returns null (no vision) when disabled, which is the default.
     var visionController = SuavoAgent.Helper.Vision.VisionBootstrap.TryBuild(Log.Logger);
 
+    // Intent cursor — visual-only pointer overlay. It runs in Helper because
+    // Helper owns the interactive desktop session. It does not move/click/type
+    // and carries no text labels or screen content across IPC.
+    var intentCursor = SuavoAgent.Helper.IntentCursor.IntentCursorBootstrap.Build(Log.Logger);
+
     // File discovery — runs in Helper (interactive user session) because
     // Core runs as LocalSystem and doesn't see the user's Desktop/
     // Documents. Heuristic-only ranker in v3.13; LLM tier plugs in later.
@@ -73,7 +97,40 @@ try
         sampler: new SuavoAgent.Core.Discovery.TabularShapeSampler(),
         ranker: new SuavoAgent.Core.Discovery.HeuristicOnlyRanker());
 
-    using var cmdServer = new IpcCommandServer(cmdPipeName, pricingWorkflow, Log.Logger, visionController, fileLocator);
+    // Actuation runtime — Phase 5.2 sandbox actuation chain. Disabled +
+    // dry-run by default; flipped per-pharmacy via appsettings or operator
+    // override. Owns the WH_KEYBOARD_LL/WH_MOUSE_LL hooks and the
+    // Ctrl+Shift+Esc hotkey on dedicated STA threads.
+    var actuationConfig = ActuationBootstrap.LoadConfig(Log.Logger);
+    var actuationGate = new ActuationGate(actuationConfig, Log.Logger);
+    var pioneerRxConfig = PioneerRxBootstrap.LoadConfig(Log.Logger);
+    SendInputDriver? sendInputDriver = null;
+    UiaLabelResolver? uiaResolver = null;
+    ActuationCommandHandler? actuationHandler = null;
+    PioneerRxCommandHandler? pioneerRxHandler = null;
+    ActuationRuntime? actuationRuntime = null;
+    if (OperatingSystem.IsWindows())
+    {
+        sendInputDriver = new SendInputDriver(actuationGate, actuationConfig, Log.Logger);
+        uiaResolver = new UiaLabelResolver(Log.Logger);
+        actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger);
+        pioneerRxHandler = new PioneerRxCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, pioneerRxConfig, Log.Logger);
+        var observer = new UserInputObserver(actuationGate, Log.Logger);
+        var hotkey = new HotkeyKillSwitch(actuationGate, Log.Logger, requireRegistration: actuationConfig.RequireKillSwitchHotkey);
+        actuationRuntime = new ActuationRuntime(actuationGate, observer, hotkey, Log.Logger);
+        actuationRuntime.Start();
+    }
+
+    // Pass a foreground-PID check that always re-reads pioneer.ProcessId so
+    // capture_screen's HIPAA gate stays accurate as PMS detaches/re-attaches.
+    using var cmdServer = new IpcCommandServer(
+        cmdPipeName, pricingWorkflow, Log.Logger, visionController, fileLocator,
+        isPmsForeground: () => SuavoAgent.Helper.SystemObservers.ForegroundGuard
+            .IsPidForeground(pioneer.ProcessId),
+        intentCursor: intentCursor,
+        actuation: actuationHandler,
+        pioneerRx: pioneerRxHandler,
+        relaxClientPathValidation: actuationConfig.RelaxIpcClientPathValidation);
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
@@ -248,6 +305,38 @@ try
         multiAppUia.OnAppFocused(processName, null); // no raw titles
     });
 
+    // Pre-flight: skip the entire attach polling loop on hosts where
+    // PioneerRx isn't installed. Pre-2026-05-06 this loop spammed 30
+    // "PioneerRx not found" warnings every 5 minutes on no-PMS sandboxes
+    // (Queen, dev workstations) and forced Helper to exit-and-respawn
+    // for no operational reason. Detection is path+registry only — never
+    // process-state — so a PMS box that simply hasn't started PioneerRx
+    // yet still enters the polling loop and waits, as designed.
+    if (!PioneerRxInstallDetector.IsInstalled(Log.Logger))
+    {
+        Log.Information(
+            "PioneerRx not installed on this host — skipping attach polling. " +
+            "Helper remains alive for IPC + actuation runtime + observers, " +
+            "but PioneerRx-specific behavior is disabled.");
+        await ipcClient.TrySendAsync(
+            "pioneer_not_installed",
+            System.Text.Json.JsonSerializer.Serialize(new { reason = "absent_from_host" }),
+            cts.Token);
+        // Park here until cancellation. Helper does NOT exit — Broker
+        // would respawn it and we'd loop forever. Other parts of Helper
+        // (hotkey pump, IPC server, ResourceBudgetGuard, observers) are
+        // already running on background tasks at this point.
+        try
+        {
+            await Task.Delay(Timeout.Infinite, cts.Token);
+        }
+        catch (TaskCanceledException)
+        {
+            // Normal shutdown path.
+        }
+        return;
+    }
+
     // Retry attachment — PioneerRx may not be running when Helper starts
     while (!cts.Token.IsCancellationRequested && !attached)
     {
@@ -351,6 +440,8 @@ try
     printObsCts?.Cancel();
     printObserver?.Dispose();
     systemBuffer?.Dispose();
+    actuationRuntime?.Dispose();
+    uiaResolver?.Dispose();
 
     // Final cleanup
     StopBehavioralObservers();

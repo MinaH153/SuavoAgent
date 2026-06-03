@@ -3,72 +3,174 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:SuavoAgent.Setup.Gui.ViewModels"
-             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="540"
+             mc:Ignorable="d" d:DesignWidth="960" d:DesignHeight="600"
              x:Class="SuavoAgent.Setup.Gui.Views.SystemCheckView"
-             x:DataType="vm:SystemCheckViewModel">
+             x:DataType="vm:SystemCheckViewModel"
+             Background="{DynamicResource SuavoBackgroundGradientBrush}">
 
-    <Grid RowDefinitions="Auto,*,Auto" Margin="80,40,80,32">
+    <UserControl.Styles>
+        <!-- Check rows: transparent until hovered, then a warm elevated wash. -->
+        <Style Selector="Border.checkRow">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Transitions">
+                <Transitions>
+                    <BrushTransition Property="Background" Duration="0:0:0.18" />
+                </Transitions>
+            </Setter>
+        </Style>
+        <Style Selector="Border.checkRow:pointerover">
+            <Setter Property="Background" Value="{DynamicResource SuavoSurfaceElevatedBrush}" />
+        </Style>
 
-        <StackPanel Grid.Row="0" Spacing="6">
+        <!-- Primary CTA: gold gradient, dark ink, intentional disabled state. -->
+        <Style Selector="Button.cta">
+            <Setter Property="Background" Value="{DynamicResource SuavoAccentGradientBrush}" />
+            <Setter Property="Foreground" Value="#1A1407" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Padding" Value="32,13" />
+            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="BorderThickness" Value="0" />
+        </Style>
+        <Style Selector="Button.cta:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource SuavoAccentHoverBrush}" />
+        </Style>
+        <Style Selector="Button.cta:disabled /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource SuavoSurfaceElevatedBrush}" />
+            <Setter Property="TextElement.Foreground" Value="{DynamicResource SuavoTextSubtleBrush}" />
+        </Style>
+
+        <!-- Breathing glow behind the CTA, only while it's actionable. -->
+        <Style Selector="Border.ctaGlow">
+            <Style.Animations>
+                <Animation Duration="0:0:2.4" IterationCount="INFINITE" PlaybackDirection="Alternate">
+                    <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.20" /></KeyFrame>
+                    <KeyFrame Cue="100%"><Setter Property="Opacity" Value="0.55" /></KeyFrame>
+                </Animation>
+            </Style.Animations>
+        </Style>
+    </UserControl.Styles>
+
+    <Grid RowDefinitions="Auto,*,Auto,Auto" Margin="56,36,56,28">
+
+        <!-- ── Hero ──────────────────────────────────────────────────────── -->
+        <StackPanel Grid.Row="0" Spacing="10">
+            <TextBlock Text="WORKSTATION READINESS"
+                       Foreground="{DynamicResource SuavoAccentTextBrush}"
+                       FontSize="11" FontWeight="SemiBold" />
             <TextBlock Text="System check"
                        Foreground="{DynamicResource SuavoTextBrush}"
-                       FontSize="28" FontWeight="Light"/>
-            <TextBlock Text="Confirming this workstation is ready for SuavoAgent."
+                       FontSize="32" FontWeight="Light" />
+            <Border Height="2" Width="128" HorizontalAlignment="Left" CornerRadius="1"
+                    Background="{DynamicResource SuavoAccentRuleBrush}" />
+            <TextBlock Text="We only need a couple of essentials to take control — SuavoAgent configures the rest itself."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
-                       FontSize="14"/>
+                       FontSize="14" MaxWidth="640" HorizontalAlignment="Left"
+                       TextWrapping="Wrap" />
         </StackPanel>
 
-        <Border Grid.Row="1" Margin="0,24"
-                Background="{DynamicResource SuavoCardBrush}"
+        <!-- ── Checks card ──────────────────────────────────────────────── -->
+        <Border Grid.Row="1" Margin="0,22,0,18"
+                Background="{DynamicResource SuavoCardGradientBrush}"
                 BorderBrush="{DynamicResource SuavoBorderBrush}"
-                BorderThickness="1"
-                CornerRadius="{DynamicResource SuavoRadiusLarge}"
-                Padding="24">
-            <ItemsControl ItemsSource="{Binding Items}">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="vm:CheckItem">
-                        <Grid ColumnDefinitions="28,*,Auto" Margin="0,8">
-                            <TextBlock Grid.Column="0"
-                                       Text="{Binding Icon}"
-                                       FontWeight="Bold"
-                                       FontSize="16"
-                                       VerticalAlignment="Center">
-                                <TextBlock.Foreground>
-                                    <SolidColorBrush Color="{Binding ColorHex}" />
-                                </TextBlock.Foreground>
-                            </TextBlock>
-                            <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="{Binding Title}"
-                                           Foreground="{DynamicResource SuavoTextBrush}"
-                                           FontSize="14" FontWeight="SemiBold"/>
-                                <TextBlock Text="{Binding Detail}"
-                                           Foreground="{DynamicResource SuavoTextMutedBrush}"
-                                           FontSize="12"
-                                           TextWrapping="Wrap"/>
-                            </StackPanel>
-                        </Grid>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+                BorderThickness="1" CornerRadius="16" Padding="10"
+                BoxShadow="0 18 44 -16 #99000000">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding Items}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:CheckItem">
+                            <Border Classes="checkRow" CornerRadius="12" Padding="14,12" Margin="2">
+                                <Grid ColumnDefinitions="Auto,*,Auto">
+
+                                    <!-- Status icon chip -->
+                                    <Border Grid.Column="0" Width="42" Height="42" CornerRadius="12"
+                                            Background="{DynamicResource SuavoSurfaceElevatedBrush}"
+                                            BorderThickness="1.5" VerticalAlignment="Center">
+                                        <Border.BorderBrush>
+                                            <SolidColorBrush Color="{Binding ColorHex}" Opacity="0.55" />
+                                        </Border.BorderBrush>
+                                        <TextBlock Text="{Binding Icon}" FontSize="18" FontWeight="Bold"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <TextBlock.Foreground>
+                                                <SolidColorBrush Color="{Binding ColorHex}" />
+                                            </TextBlock.Foreground>
+                                        </TextBlock>
+                                    </Border>
+
+                                    <!-- Title + detail -->
+                                    <StackPanel Grid.Column="1" Margin="16,0" Spacing="3" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Title}"
+                                                   Foreground="{DynamicResource SuavoTextBrush}"
+                                                   FontSize="14.5" FontWeight="SemiBold" />
+                                        <TextBlock Text="{Binding Detail}"
+                                                   Foreground="{DynamicResource SuavoTextMutedBrush}"
+                                                   FontSize="12.5" TextWrapping="Wrap" />
+                                    </StackPanel>
+
+                                    <!-- Verdict pill -->
+                                    <Border Grid.Column="2" VerticalAlignment="Center"
+                                            CornerRadius="999" Padding="13,5" BorderThickness="1"
+                                            Background="{DynamicResource SuavoSurfaceElevatedBrush}">
+                                        <Border.BorderBrush>
+                                            <SolidColorBrush Color="{Binding ColorHex}" Opacity="0.40" />
+                                        </Border.BorderBrush>
+                                        <TextBlock Text="{Binding StatusLabel}" FontSize="11.5" FontWeight="SemiBold">
+                                            <TextBlock.Foreground>
+                                                <SolidColorBrush Color="{Binding ColorHex}" />
+                                            </TextBlock.Foreground>
+                                        </TextBlock>
+                                    </Border>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
         </Border>
 
-        <DockPanel Grid.Row="2" LastChildFill="False">
-            <TextBlock DockPanel.Dock="Left"
-                       Text="Checks run locally. Nothing is uploaded until consent is captured."
-                       Foreground="{DynamicResource SuavoTextSubtleBrush}"
-                       FontSize="11"
-                       VerticalAlignment="Center"/>
-            <Button DockPanel.Dock="Right"
-                    Content="Continue"
-                    Command="{Binding ContinueCommand}"
-                    IsEnabled="{Binding IsReady}"
-                    Padding="24,12"
-                    Background="{DynamicResource SuavoAccentBrush}"
-                    Foreground="#101010"
-                    BorderThickness="0"
-                    FontWeight="SemiBold"
-                    CornerRadius="10"/>
-        </DockPanel>
+        <!-- ── Live readiness banner ────────────────────────────────────── -->
+        <Border Grid.Row="2" Margin="0,0,0,16" CornerRadius="14" ClipToBounds="True"
+                Background="{DynamicResource SuavoCardGradientBrush}"
+                BorderBrush="{DynamicResource SuavoBorderBrush}" BorderThickness="1">
+            <Grid ColumnDefinitions="Auto,Auto,*">
+                <Border Grid.Column="0" Width="4">
+                    <Border.Background>
+                        <SolidColorBrush Color="{Binding ReadinessColorHex}" />
+                    </Border.Background>
+                </Border>
+                <Border Grid.Column="1" Width="44" Height="44" CornerRadius="12" Margin="16,14"
+                        Background="{DynamicResource SuavoSurfaceElevatedBrush}" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding ReadinessIcon}" FontSize="20" FontWeight="Bold"
+                               HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <TextBlock.Foreground>
+                            <SolidColorBrush Color="{Binding ReadinessColorHex}" />
+                        </TextBlock.Foreground>
+                    </TextBlock>
+                </Border>
+                <StackPanel Grid.Column="2" Margin="6,0,16,0" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding ReadinessHeadline}"
+                               Foreground="{DynamicResource SuavoTextBrush}"
+                               FontSize="15" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding ReadinessDetail}"
+                               Foreground="{DynamicResource SuavoTextMutedBrush}"
+                               FontSize="12.5" TextWrapping="Wrap" />
+                </StackPanel>
+            </Grid>
+        </Border>
 
+        <!-- ── Footer ───────────────────────────────────────────────────── -->
+        <Grid Grid.Row="3" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+            <TextBlock Grid.Column="0" VerticalAlignment="Center" MaxWidth="520" TextWrapping="Wrap"
+                       Text="Everything runs locally. Nothing leaves this workstation until you approve it."
+                       Foreground="{DynamicResource SuavoTextSubtleBrush}" FontSize="11.5" />
+            <Panel Grid.Column="1">
+                <Border Classes="ctaGlow" IsVisible="{Binding IsReady}" CornerRadius="12" Margin="-6"
+                        Background="{DynamicResource SuavoAccentBrush}" Opacity="0.35"
+                        BoxShadow="0 0 26 2 #66D4A24C" />
+                <Button Classes="cta" Content="Continue"
+                        Command="{Binding ContinueCommand}"
+                        IsEnabled="{Binding IsReady}" />
+            </Panel>
+        </Grid>
     </Grid>
 </UserControl>
