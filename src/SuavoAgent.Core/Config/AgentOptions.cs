@@ -214,6 +214,18 @@ public sealed class AgentOptions
     /// </summary>
     public string? PricingQuantityColumn { get; set; }
 
+    /// <summary>Plausibility guard: reject a baseline per-unit cost at/above this (a data/column/unit
+    /// error). Generous — specialty drugs are costly; this only catches magnitude blunders.</summary>
+    public decimal PricingMaxPlausibleUnitCost { get; set; } = 1_000_000m;
+
+    /// <summary>Plausibility guard: reject an aggregate quantity at/above this (a data error).</summary>
+    public decimal PricingMaxPlausibleQuantity { get; set; } = 100_000_000m;
+
+    /// <summary>Plausibility guard: FLAG (don't suppress) a savings whose fraction of baseline is
+    /// at/above this for human review — a real generic switch can save this much, so a human
+    /// verifies the column/units rather than the agent hiding a genuine win. Default 90%.</summary>
+    public decimal PricingSuspiciousSavingsFraction { get; set; } = 0.9m;
+
     /// <summary>
     /// RxTransaction status descriptions that count as a real dispense for the SQL volume SUM
     /// (e.g. "Sold", "Dispensed", "Completed"). MUST be ground-truthed against the live PioneerRx

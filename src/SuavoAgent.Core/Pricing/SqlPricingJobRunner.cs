@@ -29,11 +29,10 @@ public sealed class SqlPricingJobRunner
     // with the pharmacy's baseline cost + dispensed quantity (by SQL or Vision) so the cloud can
     // compute a dollar savings. Null = today's cheapest-cost-only behavior (savings stays NULL).
     private readonly IPharmacyBaselineVolumeProvider? _baselineVolume;
-    // M1 savings: optional workbook column headers carrying the pharmacist's own current cost +
-    // dispensed volume. When present they are the most honest baseline (and need no PMS/Vision);
-    // the provider only fills whatever the workbook omits.
-    private readonly string? _baselineCostColumnHint;
-    private readonly string? _quantityColumnHint;
+    // M1 savings config: optional workbook column hints (the pharmacist's own current cost + volume
+    // — the most honest baseline, no PMS/Vision needed) + the plausibility-guard caps. Null = no
+    // savings enrichment (today's cheapest-cost-only run).
+    private readonly PricingSavingsOptions? _savings;
 
     private static readonly TimeSpan InterLookupDelay = TimeSpan.FromMilliseconds(20);
 
@@ -44,8 +43,7 @@ public sealed class SqlPricingJobRunner
         ISupplierPriceLookup lookup,
         ILogger<SqlPricingJobRunner> logger,
         IPharmacyBaselineVolumeProvider? baselineVolume = null,
-        string? baselineCostColumnHint = null,
-        string? quantityColumnHint = null)
+        PricingSavingsOptions? savings = null)
     {
         _reader = reader;
         _writer = writer;
@@ -53,14 +51,13 @@ public sealed class SqlPricingJobRunner
         _lookup = lookup;
         _logger = logger;
         _baselineVolume = baselineVolume;
-        _baselineCostColumnHint = baselineCostColumnHint;
-        _quantityColumnHint = quantityColumnHint;
+        _savings = savings;
     }
 
     public async Task<PricingJobProgress> RunAsync(PricingJobSpec spec, CancellationToken ct)
     {
         var readResult = _reader.Read(
-            spec.ExcelPath, spec.NdcColumn, _baselineCostColumnHint, _quantityColumnHint);
+            spec.ExcelPath, spec.NdcColumn, _savings?.BaselineColumnHint, _savings?.QuantityColumnHint);
         if (!readResult.Success)
         {
             _logger.LogError("SqlPricingJobRunner: cannot read Excel — {Error}", readResult.Error);
@@ -135,6 +132,25 @@ public sealed class SqlPricingJobRunner
                             "SqlPricingJobRunner: baseline/volume enrichment failed for NDC {Ndc}; gap left null",
                             row.NdcNormalized);
                     }
+                }
+
+                // Plausibility guard: drop impossible baseline/quantity (data/column/unit error) so
+                // no garbage savings can form; flag a merely-very-large savings for human review.
+                if (_savings is { } sv && (baseline is not null || quantity is not null))
+                {
+                    var guard = SavingsPlausibilityGuard.Evaluate(
+                        baseline, result.CostPerUnit, quantity,
+                        sv.MaxUnitCost, sv.MaxQuantity, sv.SuspiciousSavingsFraction);
+                    if (guard.RejectReason is not null)
+                        _logger.LogWarning(
+                            "SqlPricingJobRunner: savings dropped for NDC {Ndc} — {Reason}",
+                            row.NdcNormalized, guard.RejectReason);
+                    if (guard.ReviewFlag is not null)
+                        _logger.LogWarning(
+                            "SqlPricingJobRunner: savings flagged for review, NDC {Ndc} — {Flag}",
+                            row.NdcNormalized, guard.ReviewFlag);
+                    baseline = guard.Baseline;
+                    quantity = guard.Quantity;
                 }
 
                 if (baseline is not null || quantity is not null)
