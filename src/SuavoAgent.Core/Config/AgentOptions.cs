@@ -188,6 +188,20 @@ public sealed class AgentOptions
     public PricingExecutorMode PricingExecutor { get; set; } = PricingExecutorMode.SqlFirst;
 
     /// <summary>
+    /// M3 autonomy: master enable for UNSUPERVISED execution of EARNED tasks. OFF by default
+    /// (fail-closed) — a task that has graduated to Eligible still does not run unattended until
+    /// this is explicitly turned on for the deployment. The ledger only ever raises capability; this
+    /// flag is the human flipping the switch.
+    /// </summary>
+    public bool EnableTaskAutonomy { get; set; } = false;
+
+    /// <summary>
+    /// M3 autonomy: consecutive clean verified runs a (task, pharmacy) must earn before it becomes
+    /// Eligible for unsupervised execution. Default 12 (mirrors the "12/12 clean → eligible" gate).
+    /// </summary>
+    public int TaskAutonomyCleanRunsThreshold { get; set; } = 12;
+
+    /// <summary>
     /// M1 savings: when true, a pricing run enriches each found cheapest-cost result with the
     /// pharmacy's baseline cost + dispensed quantity so the cloud can compute a dollar savings.
     /// OFF by default (fail-closed): the figure must be verified against the live box before it is

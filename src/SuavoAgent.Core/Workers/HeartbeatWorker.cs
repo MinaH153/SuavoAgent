@@ -38,6 +38,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
     private readonly Intelligence.FleetDataChannels? _fleetChannels;
     private readonly IPricingJobExecutor? _pricingJobExecutor;
     private readonly PricingJobCloudUploader? _pricingJobCloudUploader;
+    private readonly SuavoAgent.Core.Autonomy.TaskAutonomyLedger? _taskAutonomy;
     private readonly IpcCommandClient? _ipcCommandClient;
     private readonly IIntentCursorClient? _intentCursorClient;
     private readonly SuavoAgent.Core.Discovery.DiscoveryClient? _discoveryClient;
@@ -86,6 +87,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
         _fleetChannels = new Intelligence.FleetDataChannels(stateDb);
         _pricingJobExecutor = serviceProvider.GetService<IPricingJobExecutor>();
         _pricingJobCloudUploader = serviceProvider.GetService<PricingJobCloudUploader>();
+        _taskAutonomy = serviceProvider.GetService<SuavoAgent.Core.Autonomy.TaskAutonomyLedger>();
         _ipcCommandClient = serviceProvider.GetService<IpcCommandClient>();
         _intentCursorClient = serviceProvider.GetService<IIntentCursorClient>();
         _discoveryClient = serviceProvider.GetService<SuavoAgent.Core.Discovery.DiscoveryClient>();
@@ -2461,6 +2463,28 @@ public sealed class HeartbeatWorker : ResilientHostedService
         await Task.CompletedTask;
     }
 
+    /// <summary>
+    /// M3: feed the per-task autonomy ledger from a finished pricing run. Best-effort + fail-soft —
+    /// a ledger error must never affect the run. A completed run earns a clean-streak tick; the
+    /// ledger only ever raises CAPABILITY (unsupervised execution stays separately fail-closed).
+    /// </summary>
+    private void RecordPricingAutonomy(PricingJobExecutionResult execution)
+    {
+        if (_taskAutonomy is null) return;
+        try
+        {
+            _taskAutonomy.RecordRun(
+                taskKey: "pricing",
+                pharmacyId: _options.PharmacyId ?? "",
+                clean: execution.Ok,
+                outcome: execution.Progress.Status.ToString());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TaskAutonomy: failed to record pricing run (non-fatal)");
+        }
+    }
+
     private async Task HandleRunPricingJobAsync(JsonElement scEl, CancellationToken ct)
     {
         if (_pricingJobExecutor == null)
@@ -2560,6 +2584,8 @@ public sealed class HeartbeatWorker : ResilientHostedService
             var progress = execution.Progress;
             if (_pricingJobCloudUploader != null)
                 await _pricingJobCloudUploader.UploadAsync(spec, execution, commandId, ct);
+
+            RecordPricingAutonomy(execution);
 
             _logger.LogInformation("Pricing job {JobId} finished: {Status} — {Completed}/{Total}",
                 jobId, progress.Status, progress.CompletedItems, progress.TotalItems);
@@ -2712,6 +2738,8 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 var progress = execution.Progress;
                 if (_pricingJobCloudUploader != null)
                     await _pricingJobCloudUploader.UploadAsync(jobSpec, execution, commandId, ct);
+
+                RecordPricingAutonomy(execution);
 
                 await AckAsync(execution.Ok, new
                 {

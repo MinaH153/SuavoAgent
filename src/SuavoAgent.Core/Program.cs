@@ -272,6 +272,11 @@ try
     }
     builder.Services.AddSingleton(sp => new SeedApplicator(sp.GetRequiredService<AgentStateDb>()));
 
+    // M3 per-task autonomy graduation ledger (fed by finished pricing/workflow runs).
+    builder.Services.AddSingleton(sp => new SuavoAgent.Core.Autonomy.TaskAutonomyLedger(
+        sp.GetRequiredService<AgentStateDb>(),
+        sp.GetRequiredService<IOptions<AgentOptions>>().Value.TaskAutonomyCleanRunsThreshold));
+
     // Adapter registry — single source of per-PMS Core config + the enforced PHI-policy invariant.
     builder.Services.AddAdapterRegistry();
 
