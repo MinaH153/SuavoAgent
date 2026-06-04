@@ -223,6 +223,64 @@ public sealed class SuavoCloudClientTests
         Assert.Equal(1, handler.SendCount);
     }
 
+    [Fact]
+    public async Task SendPatientDetailsAsync_FailsClosedByDefault_DoesNotShipPhi()
+    {
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions
+            {
+                ApiKey = "agent-secret",
+                CloudUrl = "https://suavollc.com",
+                // EnableAuditedPatientDetailsEgress defaults to false
+            },
+            handler);
+
+        var sent = await client.SendPatientDetailsAsync(
+            "RX123456",
+            new SuavoAgent.Contracts.Models.PatientDetailsPayload(
+                "Jane", "R", "555-123-4567", "123 Main Street", null, "San Diego", "CA", "92101"),
+            "cmd_1",
+            CancellationToken.None);
+
+        // Precedence-1: no patient PHI may leave the box until the audited
+        // /api/agent/patient-details route + phi_egress_audit exist (Stage A1).
+        Assert.False(sent);
+        Assert.Equal(0, handler.SendCount);
+    }
+
+    [Fact]
+    public async Task SendPatientDetailsAsync_ShipsOnlyWhenAuditedEgressExplicitlyEnabled()
+    {
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions
+            {
+                ApiKey = "agent-secret",
+                CloudUrl = "https://suavollc.com",
+                EnableAuditedPatientDetailsEgress = true,
+            },
+            handler);
+
+        var sent = await client.SendPatientDetailsAsync(
+            "RX123456",
+            new SuavoAgent.Contracts.Models.PatientDetailsPayload(
+                "Jane", "R", "555-123-4567", "123 Main Street", null, "San Diego", "CA", "92101"),
+            "cmd_1",
+            CancellationToken.None);
+
+        Assert.True(sent);
+        Assert.Equal(1, handler.SendCount);
+    }
+
     private sealed class FixedHandler : HttpMessageHandler
     {
         private readonly HttpResponseMessage _response;

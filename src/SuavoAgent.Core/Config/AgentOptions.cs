@@ -59,6 +59,22 @@ public sealed class AgentOptions
     public bool EnableLegacyPhiDeliveryQueueSync { get; set; } = false;
 
     /// <summary>
+    /// Fail-closed gate for outbound patient-detail PHI egress
+    /// (<c>SuavoCloudClient.SendPatientDetailsAsync</c> →
+    /// <c>/api/agent/patient-details</c>). Default <c>false</c>.
+    /// <para>
+    /// Closed 2026-06-04 (precedence-1): the cloud
+    /// <c>/api/agent/patient-details</c> route does NOT exist in the canonical
+    /// tree and <c>OutboundPhiGuard</c> unconditionally exempts the path, so an
+    /// enabled egress shipped unscrubbed PHI (driver name/address) over the wire
+    /// to a 404 — leaking into edge/proxy logs. Until the audited route + typed
+    /// positive-allowlist contract + <c>phi_egress_audit</c> land (plan Stage A1),
+    /// this stays <c>false</c> and the agent never POSTs patient PHI.
+    /// </para>
+    /// </summary>
+    public bool EnableAuditedPatientDetailsEgress { get; set; } = false;
+
+    /// <summary>
     /// When true, agent runs in learning mode (30-day observation).
     /// When false, uses the existing PioneerRx adapter directly.
     /// </summary>
