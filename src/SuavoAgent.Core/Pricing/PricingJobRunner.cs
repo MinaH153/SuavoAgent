@@ -58,7 +58,7 @@ public sealed class PricingJobRunner
     /// </summary>
     public async Task<PricingJobProgress> RunAsync(
         PricingJobSpec spec,
-        IpcCommandClient commandClient,
+        IIpcCommandClient commandClient,
         CancellationToken ct)
     {
         var readResult = _reader.Read(spec.ExcelPath, spec.NdcColumn);
@@ -178,7 +178,7 @@ public sealed class PricingJobRunner
     }
 
     private async Task<SupplierPriceResult> LookupNdcAsync(
-        string jobId, NdcRow row, IpcCommandClient commandClient,
+        string jobId, NdcRow row, IIpcCommandClient commandClient,
         IReadOnlyList<SelectorPatch> patches, CancellationToken ct)
     {
         try

@@ -1,5 +1,8 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.State;
 using Xunit;
@@ -82,6 +85,46 @@ public class PricingExecutorConfigTests : IDisposable
             interLookupDelay: TimeSpan.FromMilliseconds(throttleMs));
 
         Assert.NotNull(runner);
+    }
+
+    [Fact]
+    public async Task UiaFirstExecutor_BlindRunGate_RefusesToRun_WhenHelperNotInteractive()
+    {
+        // Executor invariant: the UIA-first executor must NOT touch the live screen unless the
+        // Helper pre-flight passes (reachable + answering + SI=1). This gate now lives in the
+        // EXECUTOR so any caller (not just heartbeat dispatch) is fail-closed. Here the Helper
+        // pipe is unreachable → the executor must return Failed WITHOUT invoking the runner.
+        var reader = new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance);
+        var writer = new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance);
+        var runner = new PricingJobRunner(reader, writer, _db, NullLogger<PricingJobRunner>.Instance);
+
+        var executor = new UiaFirstPricingJobExecutor(
+            runner,
+            new UnreachableIpcCommandClient(),
+            _db,
+            NullLogger<UiaFirstPricingJobExecutor>.Instance);
+
+        var spec = new PricingJobSpec(
+            JobId: "job-blindrun-1",
+            ExcelPath: Path.Combine(_tempDir, "does-not-matter.xlsx"),
+            NdcColumn: PricingJobDefaults.NdcColumn,
+            SupplierColumn: PricingJobDefaults.SupplierColumn,
+            CostColumn: PricingJobDefaults.CostColumn);
+
+        var result = await executor.RunAsync(spec, CancellationToken.None);
+
+        Assert.False(result.Ok);
+        Assert.Equal(PricingJobStatus.Failed, result.Progress.Status);
+        Assert.NotNull(result.Error); // operator-facing pre-flight reason, never a silent run
+    }
+
+    /// <summary>Fake Helper IPC that never connects — drives the pre-flight to fail-closed.</summary>
+    private sealed class UnreachableIpcCommandClient : IIpcCommandClient
+    {
+        public bool IsConnected => false;
+        public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct) => Task.FromResult(false);
+        public Task<IpcResponse?> SendAsync(IpcRequest request, TimeSpan timeout, CancellationToken ct) =>
+            throw new InvalidOperationException("SendAsync must not be called when the pipe is unreachable");
     }
 
     [Fact]
