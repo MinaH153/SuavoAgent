@@ -121,8 +121,14 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
             lookupResult.Lookup,
             _loggerFactory.CreateLogger<SqlPricingJobRunner>(),
             lookupResult.Provider,
-            savingsEnabled ? _options.PricingBaselineCostColumn : null,
-            savingsEnabled ? _options.PricingQuantityColumn : null);
+            savingsEnabled
+                ? new PricingSavingsOptions(
+                    _options.PricingBaselineCostColumn,
+                    _options.PricingQuantityColumn,
+                    _options.PricingMaxPlausibleUnitCost,
+                    _options.PricingMaxPlausibleQuantity,
+                    _options.PricingSuspiciousSavingsFraction)
+                : null);
 
         var progress = await runner.RunAsync(spec, ct);
         var ok = progress.Status == PricingJobStatus.Completed;

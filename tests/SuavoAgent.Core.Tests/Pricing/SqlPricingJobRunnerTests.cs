@@ -272,7 +272,16 @@ public class SqlPricingJobRunnerTests : IDisposable
         Assert.Equal(800m, r.Quantity);               // provider filled the blank
     }
 
-    private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup) => NewRunner(lookup, null);
+    // Generous caps so realistic test values pass the plausibility guard untouched.
+    private static PricingSavingsOptions Savings(string? baselineHint, string? quantityHint) =>
+        new(baselineHint, quantityHint, MaxUnitCost: 1_000_000m, MaxQuantity: 100_000_000m, SuspiciousSavingsFraction: 0.9m);
+
+    private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup) =>
+        new(
+            new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
+            new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
+            _db, lookup, NullLogger<SqlPricingJobRunner>.Instance,
+            baselineVolume: null, savings: null);
 
     private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup, IPharmacyBaselineVolumeProvider? provider) =>
         NewRunner(lookup, provider, null, null);
@@ -289,8 +298,7 @@ public class SqlPricingJobRunnerTests : IDisposable
             lookup,
             NullLogger<SqlPricingJobRunner>.Instance,
             provider,
-            baselineHint,
-            quantityHint);
+            Savings(baselineHint, quantityHint));
 
     private string CreateExcelWithBaselineQuantity(
         string ndc, decimal baseline, decimal? quantity, string baselineHeader, string quantityHeader)
