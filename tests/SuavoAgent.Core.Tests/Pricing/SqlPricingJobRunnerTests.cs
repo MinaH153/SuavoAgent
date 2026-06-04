@@ -309,13 +309,54 @@ public class SqlPricingJobRunnerTests : IDisposable
     }
 
     private SqlFirstPricingJobExecutor NewExecutor(IPricingLookupFactory lookupFactory) =>
+        NewExecutor(lookupFactory, new SuavoAgent.Core.Config.AgentOptions());
+
+    private SqlFirstPricingJobExecutor NewExecutor(
+        IPricingLookupFactory lookupFactory, SuavoAgent.Core.Config.AgentOptions options) =>
         new(
             new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
             new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
             _db,
             lookupFactory,
             NullLoggerFactory.Instance,
-            Microsoft.Extensions.Options.Options.Create(new SuavoAgent.Core.Config.AgentOptions()));
+            Microsoft.Extensions.Options.Options.Create(options));
+
+    [Theory]
+    [InlineData(true)]   // per-unit basis confirmed → Excel baseline applied
+    [InlineData(false)]  // sourced cost is per-pack → enrichment suppressed (unit-unsafe)
+    public async Task SqlFirstExecutor_UnitSafetyGatesExcelSavingsEnrichment(bool unitSafe)
+    {
+        var xlsx = CreateExcelWithBaselineQuantity(
+            "55111-0645-01", baseline: 0.0500m, quantity: 1200m,
+            baselineHeader: "Current Cost", quantityHeader: "Monthly Qty");
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var options = new SuavoAgent.Core.Config.AgentOptions
+        {
+            EnablePricingSavingsEnrichment = true,
+            PricingBaselineCostColumn = "Current Cost",
+            PricingQuantityColumn = "Monthly Qty",
+        };
+        var executor = NewExecutor(new FakeLookupFactory(lookup, null, savingsUnitSafe: unitSafe), options);
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        await executor.RunAsync(spec, CancellationToken.None);
+
+        var r = Assert.Single(_db.GetPricingResults(spec.JobId));
+        if (unitSafe)
+        {
+            Assert.Equal(0.0500m, r.BaselineCostPerUnit);
+            Assert.Equal(1200m, r.Quantity);
+        }
+        else
+        {
+            Assert.Null(r.BaselineCostPerUnit); // suppressed — never a unit-mixed savings
+            Assert.Null(r.Quantity);
+        }
+    }
 
     private string CreateExcel(IReadOnlyList<string> ndcs)
     {
@@ -380,17 +421,19 @@ public class SqlPricingJobRunnerTests : IDisposable
     {
         private readonly ISupplierPriceLookup? _lookup;
         private readonly string? _error;
+        private readonly bool _savingsUnitSafe;
 
-        public FakeLookupFactory(ISupplierPriceLookup? lookup, string? error)
+        public FakeLookupFactory(ISupplierPriceLookup? lookup, string? error, bool savingsUnitSafe = false)
         {
             _lookup = lookup;
             _error = error;
+            _savingsUnitSafe = savingsUnitSafe;
         }
 
         public Task<PricingLookupFactoryResult> TryCreateAsync(CancellationToken ct) =>
             Task.FromResult(_lookup is null
                 ? PricingLookupFactoryResult.Fail(_error ?? "unavailable")
-                : PricingLookupFactoryResult.Success(_lookup, "sql", null));
+                : PricingLookupFactoryResult.Success(_lookup, "sql", null, provider: null, savingsUnitSafe: _savingsUnitSafe));
     }
 
     private sealed class FakeBaselineVolume : IPharmacyBaselineVolumeProvider

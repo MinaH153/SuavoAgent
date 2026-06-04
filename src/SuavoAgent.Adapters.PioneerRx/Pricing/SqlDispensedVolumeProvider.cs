@@ -23,6 +23,7 @@ public sealed class SqlDispensedVolumeProvider : IPharmacyBaselineVolumeProvider
     private readonly ILogger<SqlDispensedVolumeProvider> _logger;
     private readonly string? _query;
     private readonly int _windowDays;
+    private readonly IReadOnlyList<string> _dispensedStatusNames;
 
     private const int CommandTimeoutSeconds = 5;
 
@@ -30,13 +31,17 @@ public sealed class SqlDispensedVolumeProvider : IPharmacyBaselineVolumeProvider
         DiscoveredPricingSchema schema,
         Func<CancellationToken, Task<SqlConnection>> connectionFactory,
         int windowDays,
+        IReadOnlyList<string> dispensedStatusNames,
         ILogger<SqlDispensedVolumeProvider> logger)
     {
         ArgumentNullException.ThrowIfNull(schema);
         _connectionFactory = connectionFactory ?? throw new ArgumentNullException(nameof(connectionFactory));
         _windowDays = windowDays > 0 ? windowDays : 90;
+        _dispensedStatusNames = dispensedStatusNames ?? Array.Empty<string>();
         _logger = logger;
-        _query = SqlVolumeQueryBuilder.BuildDispensedQuantityQuery(schema);
+        // Null query when the schema is unmappable OR no dispensed-status filter is configured —
+        // the provider then yields no quantity (fail-safe: never count voids / overcount).
+        _query = SqlVolumeQueryBuilder.BuildDispensedQuantityQuery(schema, _dispensedStatusNames);
     }
 
     public async Task<PharmacyBaselineVolume> GetAsync(string ndc11, CancellationToken ct)
@@ -54,6 +59,9 @@ public sealed class SqlDispensedVolumeProvider : IPharmacyBaselineVolumeProvider
             cmd.Parameters.Add(new SqlParameter(
                 SqlVolumeQueryBuilder.WindowStartParameter,
                 DateTime.UtcNow.Date.AddDays(-_windowDays)));
+            for (var i = 0; i < _dispensedStatusNames.Count; i++)
+                cmd.Parameters.Add(new SqlParameter(
+                    $"{SqlVolumeQueryBuilder.StatusParameterPrefix}{i}", _dispensedStatusNames[i]));
 
             var scalar = await cmd.ExecuteScalarAsync(ct);
             return new PharmacyBaselineVolume(BaselineCostPerUnit: null, Quantity: ReadDecimal(scalar));
