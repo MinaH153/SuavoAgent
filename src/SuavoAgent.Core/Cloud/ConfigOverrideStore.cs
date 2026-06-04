@@ -173,6 +173,10 @@ public sealed class ConfigOverrideStore
 
     private static readonly HashSet<string> BooleanOnlyPaths = new(StringComparer.OrdinalIgnoreCase)
     {
+        // M1 savings: this flag gates a money figure leaving the box — a malformed override must
+        // never coerce it true. Type-locked to boolean. (The column/status overrides stay free-form
+        // strings/arrays; their values are pharmacy data, not a safety switch.)
+        "Agent.EnablePricingSavingsEnrichment",
         "Agent.LearningMode",
         "Agent.SqlTrustServerCertificate",
         "Agent.TemplateLearning.Enabled",
