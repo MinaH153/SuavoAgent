@@ -379,7 +379,27 @@ internal static class OutboundPhiGuard
                         // exempted; embedded PHI is still caught and named by its nested field.
                         if (TryParseNestedJson(value, out var parsed))
                             return FindPhiField(parsed, strict, propertyName);
-                        return PhiScrubber.ContainsPhi(value) ? (propertyName ?? "(root)") : null;
+
+                        // EnforcedDenylist — EXACTLY today's Core PHI patterns, incl. the broad
+                        // DatePattern (blueprint fix #3). A match blocks the outbound POST.
+                        if (PhiScrubber.ContainsPhi(value))
+                            return propertyName ?? "(root)";
+
+                        // ShadowDenylist (blueprint fix #5) — the Diagnostics-origin staged rules
+                        // (NDC / narrow DOB / Windows path / PioneerRx / checksum-DEA / member-id)
+                        // are NOT enforced yet. Log the would-block so false-positives are measured
+                        // on a real pilot before promotion. Field name + rule name only — never the
+                        // value (parallels the charset-path shadow log above).
+                        var shadowRule = PhiScrubber.ShadowDenylistMatch(value);
+                        if (shadowRule is not null)
+                        {
+                            Serilog.Log.Warning(
+                                "OutboundPhiGuard shadow-denylist: field {Field} would be BLOCKED by "
+                                + "staged rule {Rule} (not yet enforced). No value logged — review "
+                                + "before promotion.",
+                                propertyName ?? "(root)", shadowRule);
+                        }
+                        return null;
                 }
 
             default:

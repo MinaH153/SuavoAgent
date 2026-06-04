@@ -1,225 +1,36 @@
 // src/SuavoAgent.Core/Learning/PhiScrubber.cs
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.RegularExpressions;
+using SuavoAgent.Diagnostics.Phi;
 
 namespace SuavoAgent.Core.Learning;
 
 /// <summary>
 /// In-memory PHI detection and scrubbing. Runs before any observation is persisted.
-/// Implements observe-hash-discard pattern per HIPAA Safe Harbor (45 CFR 164.514).
+/// Implements observe-hash-discard per HIPAA Safe Harbor (45 CFR 164.514).
+///
+/// <para>As of the single-source PHI merge this is a THIN FAÇADE: every rule now lives in the
+/// shared <see cref="PhiRuleCatalog"/> and is materialized by
+/// <see cref="PhiTextScrubber"/> (in the leaf <c>SuavoAgent.Diagnostics</c> project, so both
+/// scrub surfaces draw from one catalog and can never drift). The static API and the
+/// <c>SuavoAgent.Core.Learning</c> namespace are preserved so the ~24 existing call sites
+/// compile unchanged.</para>
 /// </summary>
-public static partial class PhiScrubber
+public static class PhiScrubber
 {
-    private const string Redacted = "[REDACTED]";
-
-    // Phone: (555) 123-4567, 555-123-4567, 5551234567
-    [GeneratedRegex(@"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", RegexOptions.Compiled)]
-    private static partial Regex PhonePattern();
-
-    // SSN: 123-45-6789
-    [GeneratedRegex(@"\b\d{3}-\d{2}-\d{4}\b", RegexOptions.Compiled)]
-    private static partial Regex SsnPattern();
-
-    // Date: 01/15/1990, 1990-01-15, 01-15-1990
-    [GeneratedRegex(@"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b", RegexOptions.Compiled)]
-    private static partial Regex DatePattern();
-
-    // MRN: MRN: ABC12345, MRN:12345 — preserve prefix, scrub value
-    [GeneratedRegex(@"(?<=MRN[:\s]+)\w+", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex MrnPattern();
-
-    // Name heuristic: "Patient: First Last", "DOB: 01/15/1990" — preserve keyword, scrub value.
-    // Codex 2026-04-27 review fix: negative lookahead `(?!Address[:\s])` prevents
-    // false-firing on "Patient Address: 1234 Maple Street" — without it, this
-    // pattern would scrub "Address: 1234" as if it were a patient name and
-    // erase the structural Address: label that downstream auditing depends on.
-    [GeneratedRegex(@"(?<=(?:Patient|Name|DOB|SSN)[:\s]+)(?!Address[:\s])\S+(?:\s+\S+)?", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex NameContextPattern();
-
-    // Capitalized name pair at start of string: "John Smith - ..."
-    [GeneratedRegex(@"^[A-Z][a-z]+\s+[A-Z][a-z]+(?=\s+-)", RegexOptions.Compiled)]
-    private static partial Regex LeadingNamePattern();
-
-    // Contextual name: 2-word capitalized name near a PHI keyword
-    [GeneratedRegex(@"\b(?:Patient|Name|Rx|DOB|SSN|Phone|Address)\s*[:=\-|]\s*([A-Z][a-z]+\s+[A-Z][a-z]+)", RegexOptions.Compiled)]
-    private static partial Regex ContextualNamePattern();
-
-    // NPI: 10-digit National Provider Identifier (HIPAA Safe Harbor identifier #6)
-    [GeneratedRegex(@"\bNPI[:\s#]?\s*\d{10}\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex NpiPattern();
-
-    // DEA number: 2 letters + 7 digits (e.g. AB1234567)
-    [GeneratedRegex(@"\b[A-Z]{2}\d{7}\b", RegexOptions.Compiled)]
-    private static partial Regex DeaPattern();
-
-    // Rx number in context: "Rx #12345", "RxNo: 12345", "Rx Number 12345"
-    [GeneratedRegex(@"\bRx\s*[#Nn]o?[:\s.]+\d{4,10}\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex RxNumberPattern();
-
-    // ──────────────────────────────────────────────────────────────────────
-    // Codex 2026-04-26 audit gap closures. PMS systems commonly display
-    // patient names in formats the original scrubber did not catch:
-    //
-    //   LastFirstPattern        — "Doe, John" / "Doe, John A" / "Doe, John A."
-    //   AllCapsNameContext      — "Patient: DOE, JOHN" / "Name: DOE JOHN"
-    //   IcdContextPattern       — diagnosis codes adjacent to keyword
-    //
-    // Each is anchored on either a punctuation pattern (comma) or a
-    // prefix keyword to keep false-positive rates low. UI labels like
-    // "Submit" and acronyms like "USA" stay intact.
-    // ──────────────────────────────────────────────────────────────────────
-
-    // "Doe, John" or "Doe, John A" or "Doe, John A." — the canonical pharmacy
-    // PMS display format. Anchor on the comma to avoid matching incidental
-    // capitalized two-word phrases. Replaces capture group 1 (full name).
-    [GeneratedRegex(@"\b([A-Z][a-z]+,\s+[A-Z][a-z]+(?:\s+[A-Z]\.?)?)\b", RegexOptions.Compiled)]
-    private static partial Regex LastFirstPattern();
-
-    // "Patient: DOE, JOHN", "Name: DOE JOHN A", etc. — uppercase names
-    // following a PHI-context keyword. Requires the keyword + colon/equals
-    // separator + ≥2 caps tokens. False-positive resistant because random
-    // ALLCAPS in the wild rarely follows a keyword separator.
-    [GeneratedRegex(@"(?<=\b(?:Patient|Name|DOB|Caregiver)[:\s=\-|]+)([A-Z]{2,}(?:[\s,]+[A-Z]{2,}(?:\s+[A-Z]\.?)?)+)\b", RegexOptions.Compiled)]
-    private static partial Regex AllCapsNameContextPattern();
-
-    // ICD-10 diagnosis codes — "E11.9", "F32.1", "Z79.4". HIPAA Safe Harbor
-    // identifier #18 (any other unique identifying number, characteristic
-    // or code that could re-identify a patient when combined with other
-    // data). Require keyword context to avoid matching button labels like
-    // "B12" or alphanumeric IDs that happen to fit the ICD shape.
-    [GeneratedRegex(@"(?<=\b(?:Dx|Diagnosis|ICD|Code)[:\s=]+)([A-TV-Z][0-9][0-9AB](?:\.[0-9A-TV-Z]{1,4})?)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex IcdContextPattern();
-
-    // ──────────────────────────────────────────────────────────────────────
-    // Codex 2026-04-26 P1.3 + 2026-04-27 review-fix — street-address coverage.
-    // PMS pharmacy windows display patient mailing addresses; the prior
-    // scrubber had no address pattern, so addresses crossed the IPC + cloud
-    // boundary. Coverage matrix:
-    //
-    //   AddressContextPattern  — value scrubbing after "Address:" / "Addr:" /
-    //                            "Mailing|Home|Work|Shipping|Billing Address:"
-    //                            keyword. Lookahead stops at the next field
-    //                            keyword (DOB|SSN|Phone|MRN|Patient|Name|...)
-    //                            so a multi-field line preserves adjacent
-    //                            structural labels rather than collapsing
-    //                            everything into a single replacement.
-    //   StreetSuffixPattern    — bare addresses with a recognised street-type
-    //                            suffix. Full forms (Street/Avenue/Boulevard)
-    //                            always allowed; 2-letter abbreviations
-    //                            (St/Ave/Dr/Ln) require a period OR a comma
-    //                            OR an apt-keyword tail to disambiguate
-    //                            against pharmacist titles ("Dr Smith") and
-    //                            inventory labels ("12 Months Old"). Civic
-    //                            numbers may be hyphenated (1234-A); ordinal
-    //                            street names (5th Avenue) supported.
-    //   PoBoxPattern           — bare "PO Box / P.O. Box / P.O.B. / P O Box
-    //                            <digits>" with case-insensitive matching.
-    //   MilitaryAddressPattern — APO|FPO|DPO + AA|AE|AP + 5-digit ZIP.
-    //   RuralRoutePattern      — RR|HC + digits + Box + digits.
-    //
-    // Replacement label is the universal [REDACTED] for downstream-consumer
-    // consistency with NPI/DEA/SSN/Phone scrubbing (Codex 2026-04-27 review).
-    // ──────────────────────────────────────────────────────────────────────
-
-    // Codex 2026-04-27 round-2 review: stop-keywords MUST be followed by a
-    // colon or equals sign, not just any whitespace — otherwise a street
-    // name like "State Street" or "City Drive" terminates the address
-    // capture early and leaks the rest of the value. `\s*[:=]` requires
-    // an explicit field delimiter; pipe / EOL / EOF still terminate
-    // unconditionally as natural delimiters.
-    [GeneratedRegex(
-        @"(?<=\b(?:Mailing|Home|Work|Shipping|Billing|Patient|Primary)?\s*Addr(?:ess)?[:\s]+)((?:\d|P\.?\s*O\.?|APO|FPO|DPO|RR|HC).*?)(?=\s*(?:\||$|\r|\n|\b(?:DOB|SSN|Phone|MRN|Patient|Name|Status|ID|Email|Tel|City|State|Zip|Notes|Allergy|Insurance|Caregiver|Member|Subscriber|Group|Policy|Plan)\s*[:=]))",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Multiline)]
-    private static partial Regex AddressContextPattern();
-
-    [GeneratedRegex(
-        @"\b\d{1,5}(?:-[A-Za-z]\d?)?\s+(?:[NSEW][NSEW]?\.?\s+)?(?:(?:\d{1,3}(?:st|nd|rd|th)|[A-Za-z][A-Za-z'-]+)\s+){1,4}(?:Street|Avenue|Boulevard|Highway|Parkway|Terrace|Circle|Drive|Place|Court|Road|Lane|Way|(?:St|Ave|Blvd|Hwy|Pkwy|Ter|Cir|Dr|Pl|Ct|Rd|Ln)(?:\.|(?=,|\s+(?:Apartment|Apt|Suite|Ste|Unit|#)\b)))(?:\s*,?\s*(?:Apartment|Apt|Suite|Ste|Unit|#)\.?\s*[A-Za-z0-9]{1,6})?",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex StreetSuffixPattern();
-
-    [GeneratedRegex(@"\bP\.?\s*O\.?\s*(?:Box|B)\.?\s+\d+\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex PoBoxPattern();
-
-    [GeneratedRegex(@"\b(?:APO|FPO|DPO)\s+(?:AA|AE|AP)\s+\d{5}\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex MilitaryAddressPattern();
-
-    [GeneratedRegex(@"\b(?:RR|HC)\s+\d+\s+Box\s+\d+\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex RuralRoutePattern();
-
-    // Codex 2026-04-27 round-2 review (HIPAA Safe Harbor #5): health-plan
-    // beneficiary numbers — Member ID / Subscriber ID / Group / Policy /
-    // Insurance / Plan / Beneficiary / Carrier — keyword-anchored,
-    // value-scrubbing pattern. Bound to ≥3 alphanumerics so labels like
-    // "Group: A" don't false-fire on placeholder content.
-    [GeneratedRegex(@"(?<=\b(?:Member|Subscriber|Group|Policy|Insurance|Plan|Beneficiary|Carrier)(?:\s*(?:ID|Number|#|No)\.?)?\s*[:=]\s*)[A-Z0-9-]{3,}",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase)]
-    private static partial Regex InsuranceIdPattern();
-
-    private static readonly Regex[] PhiPatterns =
-    [
-        // Address patterns first — keyword-anchored AddressContext consumes "Address: 1234 Maple Street, Apt 2"
-        // wholesale before LastFirstPattern sees "Street, Apt" and mis-scrubs only the suffix.
-        // Order within the address group: more-specific first so the lazy AddressContext lookahead
-        // doesn't swallow a military/rural pattern that should be reported by its own label.
-        MilitaryAddressPattern(), RuralRoutePattern(),
-        AddressContextPattern(), StreetSuffixPattern(), PoBoxPattern(),
-        InsuranceIdPattern(),
-        SsnPattern(), PhonePattern(), DatePattern(), MrnPattern(),
-        NameContextPattern(), LeadingNamePattern(),
-        NpiPattern(), DeaPattern(), RxNumberPattern(), ContextualNamePattern(),
-        LastFirstPattern(), AllCapsNameContextPattern(), IcdContextPattern(),
-    ];
-
-    public static string? ScrubText(string? text)
-    {
-        if (text is null) return null;
-
-        var result = text;
-        foreach (var pattern in PhiPatterns)
-        {
-            // Patterns that capture the PHI substring inside a structural
-            // wrapper (keyword prefix + value) replace only group 1. Plain
-            // patterns that match PHI directly replace the whole match.
-            if (pattern == ContextualNamePattern() ||
-                pattern == LastFirstPattern() ||
-                pattern == AllCapsNameContextPattern() ||
-                pattern == IcdContextPattern())
-            {
-                result = pattern.Replace(result, m =>
-                {
-                    if (m.Groups.Count > 1 && m.Groups[1].Success)
-                    {
-                        var phi = m.Groups[1].Value;
-                        var label = pattern == IcdContextPattern() ? "[CODE]" : "[NAME]";
-                        return m.Value.Replace(phi, label);
-                    }
-                    return Redacted;
-                });
-            }
-            else
-            {
-                result = pattern.Replace(result, Redacted);
-            }
-        }
-        return result;
-    }
-
-    public static bool ContainsPhi(string text)
-    {
-        foreach (var pattern in PhiPatterns)
-            if (pattern.IsMatch(text)) return true;
-        return false;
-    }
+    /// <summary>Scrub PHI from <paramref name="text"/>. Null in → null out.</summary>
+    public static string? ScrubText(string? text) => PhiTextScrubber.ScrubText(text);
 
     /// <summary>
-    /// HMAC-SHA256 hash with per-pharmacy salt. Not dictionary-attackable like plain SHA-256.
+    /// High-recall PHI-present test (the EnforcedDenylist used by <c>OutboundPhiGuard</c>).
     /// </summary>
-    public static string HmacHash(string value, string salt)
-    {
-        var key = Encoding.UTF8.GetBytes(salt);
-        var data = Encoding.UTF8.GetBytes(value);
-        var hash = HMACSHA256.HashData(key, data);
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
+    public static bool ContainsPhi(string text) => PhiTextScrubber.ContainsPhi(text);
+
+    /// <summary>
+    /// ShadowDenylist scan: NAME of the first untrusted-origin (Diagnostics) rule that WOULD
+    /// redact <paramref name="text"/>, or null. Shadow-mode measurement only — never enforced
+    /// here. The rule name is operational metadata, never PHI.
+    /// </summary>
+    public static string? ShadowDenylistMatch(string text) => PhiTextScrubber.ShadowDenylistMatch(text);
+
+    /// <summary>HMAC-SHA256 hash with per-pharmacy salt. Not dictionary-attackable.</summary>
+    public static string HmacHash(string value, string salt) => PhiTextScrubber.HmacHash(value, salt);
 }

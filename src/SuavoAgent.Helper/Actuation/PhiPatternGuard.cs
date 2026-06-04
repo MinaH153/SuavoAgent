@@ -13,8 +13,12 @@ namespace SuavoAgent.Helper.Actuation;
 /// second layer that runs in the Helper process, after every transformation.
 ///
 /// Patterns mirror <c>src/lib/phi-scrub.ts</c> on the cloud side, plus the
-/// in-agent <c>SuavoAgent.Core.Audit.PhiScrubber</c> additions from
+/// in-agent <c>SuavoAgent.Core.Learning.PhiScrubber</c> additions from
 /// p1-production-criticals (memory: PIAG-1 ship complete 2026-04-26).
+///
+/// NOTE: this is a third, independent PHI guard (keyboard-surface actuation). It is
+/// deliberately out of scope of the single-source <c>PhiRuleCatalog</c> merge; see the
+/// follow-up issue to consolidate it. Do not assume its patterns match the catalog's.
 /// </summary>
 public static partial class PhiPatternGuard
 {

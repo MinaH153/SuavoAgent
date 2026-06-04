@@ -1,0 +1,502 @@
+[
+  {
+    "Input": "John Smith - Prescription",
+    "Scrub": "[REDACTED] - Prescription",
+    "Contains": true
+  },
+  {
+    "Input": "Patient: Jane Doe",
+    "Scrub": "Patient: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "RX for 555-123-4567",
+    "Scrub": "RX for [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "DOB: 01/15/1990",
+    "Scrub": "DOB: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "SSN 123-45-6789",
+    "Scrub": "SSN [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "MRN: ABC12345",
+    "Scrub": "MRN: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Point of Sale",
+    "Scrub": "Point of Sale",
+    "Contains": false
+  },
+  {
+    "Input": "PioneerRx - Pharmacy Management",
+    "Scrub": "PioneerRx - Pharmacy Management",
+    "Contains": false
+  },
+  {
+    "Input": "Rx: John Smith | Status: Ready",
+    "Scrub": "Rx: [NAME] | Status: Ready",
+    "Contains": true
+  },
+  {
+    "Input": "Address: John Williams",
+    "Scrub": "Address: [NAME]",
+    "Contains": true
+  },
+  {
+    "Input": "Point Sale — Status Type",
+    "Scrub": "Point Sale — Status Type",
+    "Contains": false
+  },
+  {
+    "Input": "Rx: Jane Doe | ID: 999",
+    "Scrub": "Rx: [NAME] | ID: 999",
+    "Contains": true
+  },
+  {
+    "Input": "Phone: 555-1234 Address: John Williams",
+    "Scrub": "Phone: 555-1234 Address: [NAME]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: 1234 Maple Street, Apt 2",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: 1234 Maple Street Apt 2",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: 1234 Maple St",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Addr: 555 Main Street",
+    "Scrub": "Addr: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Mailing Address: 9876 Oak Avenue",
+    "Scrub": "Mailing Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "ADDRESS: 42 Elm Drive Suite 100",
+    "Scrub": "ADDRESS: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "1234 Maple Street, Apt 2",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "1234 Maple Street",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "1234 Maple St.",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "9876 Oak Avenue",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "555 Main Boulevard",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "42 Elm Drive Suite 100",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "17 N Cherry Lane #4",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Page 1 of 5",
+    "Scrub": "Page 1 of 5",
+    "Contains": false
+  },
+  {
+    "Input": "Zone 12 Active",
+    "Scrub": "Zone 12 Active",
+    "Contains": false
+  },
+  {
+    "Input": "Version 2.0 Build 1234",
+    "Scrub": "Version 2.0 Build 1234",
+    "Contains": false
+  },
+  {
+    "Input": "Window 3 Open",
+    "Scrub": "Window 3 Open",
+    "Contains": false
+  },
+  {
+    "Input": "Item 7 Quantity 12",
+    "Scrub": "Item 7 Quantity 12",
+    "Contains": false
+  },
+  {
+    "Input": "Tab 4 Selected",
+    "Scrub": "Tab 4 Selected",
+    "Contains": false
+  },
+  {
+    "Input": "Aisle 12 Bin 4",
+    "Scrub": "Aisle 12 Bin 4",
+    "Contains": false
+  },
+  {
+    "Input": "12 Months Old Dr Smith",
+    "Scrub": "12 Months Old Dr Smith",
+    "Contains": false
+  },
+  {
+    "Input": "Lot Box 4567",
+    "Scrub": "Lot Box 4567",
+    "Contains": false
+  },
+  {
+    "Input": "30.5 N 120.3 W Way",
+    "Scrub": "30.5 N 120.3 W Way",
+    "Contains": false
+  },
+  {
+    "Input": "Last 3 Records Active",
+    "Scrub": "Last 3 Records Active",
+    "Contains": false
+  },
+  {
+    "Input": "Patient verified | Address: 1234 Maple Street | Status: Ready",
+    "Scrub": "Patient [REDACTED] Address: [REDACTED] | Status: Ready",
+    "Contains": true
+  },
+  {
+    "Input": "Address: 1234 Maple Street DOB: 01/15/1990",
+    "Scrub": "Address: [REDACTED] DOB: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "123 Maple St, Apt 5 PatientID 999",
+    "Scrub": "[REDACTED] PatientID 999",
+    "Contains": true
+  },
+  {
+    "Input": "Address: PO Box 1234",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: P.O. Box 9876",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "PO Box 1234, San Diego",
+    "Scrub": "[REDACTED], San Diego",
+    "Contains": true
+  },
+  {
+    "Input": "P.O.B. 1234",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "P O Box 1234",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "PO BOX 9876",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "p.o. box 5555",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "1234-A Main Street",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "1234-B Oak Avenue",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: 1234-A Main Street, Apt 2",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "APO AE 09012",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "FPO AP 96662",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "DPO AA 34001",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "RR 1 Box 5",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "HC 67 Box 23",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: RR 2 Box 99",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "1234 5th Avenue",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "567 42nd Street",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "89 1st Boulevard",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "100 3rd Court",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: 123 State Street",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: 456 City Drive",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: 789 Insurance Court",
+    "Scrub": "Address: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Address: 5678 Forest Drive City: San Diego ZIP: 92101 DOB: 03/15/1980",
+    "Scrub": "Address: [REDACTED] City: San Diego ZIP: 92101 DOB: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Member ID: ABC123",
+    "Scrub": "Member ID: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Subscriber ID: XYZ789",
+    "Scrub": "Subscriber ID: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Group: 5500",
+    "Scrub": "Group: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Policy Number: P-9876",
+    "Scrub": "Policy Number: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Insurance: BlueCross",
+    "Scrub": "Insurance: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Plan: Premium-Gold",
+    "Scrub": "Plan: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Doe, John",
+    "Scrub": "[NAME]",
+    "Contains": true
+  },
+  {
+    "Input": "Doe, John A",
+    "Scrub": "[NAME]",
+    "Contains": true
+  },
+  {
+    "Input": "Doe, John A.",
+    "Scrub": "[NAME].",
+    "Contains": true
+  },
+  {
+    "Input": "Patient: DOE, JOHN",
+    "Scrub": "Patient: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Name: DOE JOHN A",
+    "Scrub": "Name: [REDACTED] A",
+    "Contains": true
+  },
+  {
+    "Input": "Dx: E11.9",
+    "Scrub": "Dx: [CODE]",
+    "Contains": true
+  },
+  {
+    "Input": "Diagnosis: F32.1",
+    "Scrub": "Diagnosis: [CODE]",
+    "Contains": true
+  },
+  {
+    "Input": "ICD: Z79.4",
+    "Scrub": "ICD: [CODE]",
+    "Contains": true
+  },
+  {
+    "Input": "Code: B12",
+    "Scrub": "Code: [CODE]",
+    "Contains": true
+  },
+  {
+    "Input": "NPI: 1234567890",
+    "Scrub": "NPI: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "npi 1234567890",
+    "Scrub": "npi [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "prescriber DEA AB1234563 wrote",
+    "Scrub": "prescriber DEA [REDACTED] wrote",
+    "Contains": true
+  },
+  {
+    "Input": "AB1111111",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "DEA XY7654321",
+    "Scrub": "DEA [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Rx #12345",
+    "Scrub": "Rx #12345",
+    "Contains": false
+  },
+  {
+    "Input": "RxNo: 12345",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Rx Number 123456",
+    "Scrub": "Rx Number 123456",
+    "Contains": false
+  },
+  {
+    "Input": "Call 555-123-4567",
+    "Scrub": "Call [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "(555) 123-4567",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "5551234567",
+    "Scrub": "[REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Port 12345",
+    "Scrub": "Port 12345",
+    "Contains": false
+  },
+  {
+    "Input": "ID: 12345",
+    "Scrub": "ID: 12345",
+    "Contains": false
+  },
+  {
+    "Input": "Version 2.0.0",
+    "Scrub": "Version 2.0.0",
+    "Contains": false
+  },
+  {
+    "Input": "Page 12 of 50",
+    "Scrub": "Page 12 of 50",
+    "Contains": false
+  },
+  {
+    "Input": "Workflow completed successfully with no PHI present in this string.",
+    "Scrub": "Workflow completed successfully with no PHI present in this string.",
+    "Contains": false
+  },
+  {
+    "Input": "The May release Will ship in King City after Brown gives Price approval.",
+    "Scrub": "The May release Will ship in King City after Brown gives Price approval.",
+    "Contains": false
+  },
+  {
+    "Input": "Address: 1234 Maple Street\nDOB: 01/15/1990",
+    "Scrub": "Address: [REDACTED]\nDOB: [REDACTED]",
+    "Contains": true
+  },
+  {
+    "Input": "Line one\nPatient: Jane Doe\nLine three",
+    "Scrub": "Line one\nPatient: [REDACTED]\nLine three",
+    "Contains": true
+  },
+  {
+    "Input": "",
+    "Scrub": "",
+    "Contains": false
+  },
+  {
+    "Input": "   ",
+    "Scrub": "   ",
+    "Contains": false
+  }
+]
