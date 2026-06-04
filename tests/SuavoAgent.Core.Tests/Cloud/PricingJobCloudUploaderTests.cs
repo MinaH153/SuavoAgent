@@ -144,6 +144,82 @@ public sealed class PricingJobCloudUploaderTests : IDisposable
         Assert.DoesNotContain("SqlFirst", json);
     }
 
+    [Fact]
+    public async Task UploadAsync_CarriesBaselineCostAndQuantity_ForSavingsComputation()
+    {
+        // M1: the cloud computes savings_total = (baselineCostPerUnit - costPerUnit) * quantity,
+        // only when all three are present + found. Pin the EXACT field names the route reads.
+        var spec = new PricingJobSpec(
+            "dddddddddddddddddddddddddddddddd",
+            @"C:\Users\queen\Desktop\Top500.xlsx",
+            "NDC",
+            "Supplier",
+            "Cost (per unit)");
+        _db.UpsertPricingJob(spec, PricingJobStatus.Completed, 1, 1, 0);
+        _db.SavePricingResult(new SupplierPriceResult(
+            spec.JobId,
+            4,
+            "55111064501",
+            Found: true,
+            SupplierName: "McKesson",
+            CostPerUnit: 0.0316m,
+            ErrorMessage: null,
+            Observations: null,
+            BaselineCostPerUnit: 0.0500m,
+            Quantity: 1200m));
+        var signer = new RecordingPostSigner();
+        var uploader = new PricingJobCloudUploader(signer, _db, NullLogger<PricingJobCloudUploader>.Instance);
+
+        await uploader.UploadAsync(
+            spec,
+            new PricingJobExecutionResult(
+                new PricingJobProgress(spec.JobId, 1, 1, 0, PricingJobStatus.Completed),
+                "sql",
+                true,
+                null),
+            "44444444-4444-4444-4444-444444444444",
+            CancellationToken.None);
+
+        var item = JsonSerializer.SerializeToElement(signer.Payload)
+            .GetProperty("items")[0];
+        Assert.Equal(0.0500m, item.GetProperty("baselineCostPerUnit").GetDecimal());
+        Assert.Equal(1200m, item.GetProperty("quantity").GetDecimal());
+        Assert.Equal(0.0316m, item.GetProperty("costPerUnit").GetDecimal());
+    }
+
+    [Fact]
+    public async Task UploadAsync_CostOnlyRun_LeavesBaselineAndQuantityNull()
+    {
+        // A run that captured only the cheapest cost (no baseline/quantity) must upload cleanly
+        // with both null — the cloud then stores savings_total = NULL (never a wrong number).
+        var spec = new PricingJobSpec(
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            @"C:\Users\queen\Desktop\Top500.xlsx",
+            "NDC",
+            "Supplier",
+            "Cost (per unit)");
+        _db.UpsertPricingJob(spec, PricingJobStatus.Completed, 1, 1, 0);
+        _db.SavePricingResult(new SupplierPriceResult(
+            spec.JobId, 5, "55111064501", true, "Cardinal", 0.042m, null));
+        var signer = new RecordingPostSigner();
+        var uploader = new PricingJobCloudUploader(signer, _db, NullLogger<PricingJobCloudUploader>.Instance);
+
+        await uploader.UploadAsync(
+            spec,
+            new PricingJobExecutionResult(
+                new PricingJobProgress(spec.JobId, 1, 1, 0, PricingJobStatus.Completed),
+                "sql",
+                true,
+                null),
+            "55555555-5555-5555-5555-555555555555",
+            CancellationToken.None);
+
+        var item = JsonSerializer.SerializeToElement(signer.Payload)
+            .GetProperty("items")[0];
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("baselineCostPerUnit").ValueKind);
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("quantity").ValueKind);
+    }
+
     public void Dispose()
     {
         _db.Dispose();
