@@ -26,13 +26,15 @@ public sealed record PricingLookupFactoryResult(
     ISupplierPriceLookup? Lookup,
     string Mode,
     string? Error,
-    IAsyncDisposable? Lease)
+    IAsyncDisposable? Lease,
+    IPharmacyBaselineVolumeProvider? Provider = null)
 {
     public static PricingLookupFactoryResult Success(
         ISupplierPriceLookup lookup,
         string mode,
-        IAsyncDisposable? lease) =>
-        new(true, lookup, mode, null, lease);
+        IAsyncDisposable? lease,
+        IPharmacyBaselineVolumeProvider? provider = null) =>
+        new(true, lookup, mode, null, lease, provider);
 
     public static PricingLookupFactoryResult Fail(string error, string mode = "sql") =>
         new(false, null, mode, error, null);
@@ -106,7 +108,8 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
             _writer,
             _db,
             lookupResult.Lookup,
-            _loggerFactory.CreateLogger<SqlPricingJobRunner>());
+            _loggerFactory.CreateLogger<SqlPricingJobRunner>(),
+            lookupResult.Provider);
 
         var progress = await runner.RunAsync(spec, ct);
         var ok = progress.Status == PricingJobStatus.Completed;
@@ -173,10 +176,23 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
                 _ => Task.FromResult(connection),
                 _loggerFactory.CreateLogger<SqlSupplierPriceLookup>());
 
+            // M1 savings enrichment — OFF by default (fail-closed): a savings dollar figure must be
+            // verified against the live box before it is trusted, so we never emit an unverified
+            // number in production until EnablePricingSavingsEnrichment is set. When on, the SQL
+            // provider sources dispensed quantity; baseline is supplied by the Vision path.
+            IPharmacyBaselineVolumeProvider? provider = _options.EnablePricingSavingsEnrichment
+                ? new SqlDispensedVolumeProvider(
+                    outcome.Schema,
+                    _ => Task.FromResult(connection),
+                    _options.PricingSavingsWindowDays,
+                    _loggerFactory.CreateLogger<SqlDispensedVolumeProvider>())
+                : null;
+
             return PricingLookupFactoryResult.Success(
                 lookup,
                 "sql",
-                new SqlConnectionLease(connection));
+                new SqlConnectionLease(connection),
+                provider);
         }
         catch (OperationCanceledException)
         {

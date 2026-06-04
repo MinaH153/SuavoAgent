@@ -188,6 +188,20 @@ public sealed class AgentOptions
     public PricingExecutorMode PricingExecutor { get; set; } = PricingExecutorMode.SqlFirst;
 
     /// <summary>
+    /// M1 savings: when true, a pricing run enriches each found cheapest-cost result with the
+    /// pharmacy's baseline cost + dispensed quantity so the cloud can compute a dollar savings.
+    /// OFF by default (fail-closed): the figure must be verified against the live box before it is
+    /// trusted, so an unverified savings number is never emitted in production until this is enabled.
+    /// </summary>
+    public bool EnablePricingSavingsEnrichment { get; set; } = false;
+
+    /// <summary>
+    /// Trailing window (days) over which dispensed quantity is aggregated for the savings figure.
+    /// Default 90 — a realistic recurring volume per NDC.
+    /// </summary>
+    public int PricingSavingsWindowDays { get; set; } = 90;
+
+    /// <summary>
     /// Delay between successive NDC lookups within a single pricing job, in milliseconds.
     /// Throttle exists to (a) avoid hammering PioneerRx during a 500-row batch and (b) stay below
     /// any anti-automation heuristic the vendor may apply. Default <c>1500</c> ms keeps a 500-NDC
