@@ -58,13 +58,15 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
     private readonly IPricingLookupFactory _lookupFactory;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SqlFirstPricingJobExecutor> _logger;
+    private readonly AgentOptions _options;
 
     public SqlFirstPricingJobExecutor(
         ExcelPricingReader reader,
         ExcelPricingWriter writer,
         AgentStateDb db,
         IPricingLookupFactory lookupFactory,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        IOptions<AgentOptions> options)
     {
         _reader = reader;
         _writer = writer;
@@ -72,6 +74,7 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
         _lookupFactory = lookupFactory;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SqlFirstPricingJobExecutor>();
+        _options = options.Value;
     }
 
     public async Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
@@ -109,7 +112,9 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
             _db,
             lookupResult.Lookup,
             _loggerFactory.CreateLogger<SqlPricingJobRunner>(),
-            lookupResult.Provider);
+            lookupResult.Provider,
+            _options.EnablePricingSavingsEnrichment ? _options.PricingBaselineCostColumn : null,
+            _options.EnablePricingSavingsEnrichment ? _options.PricingQuantityColumn : null);
 
         var progress = await runner.RunAsync(spec, ct);
         var ok = progress.Status == PricingJobStatus.Completed;

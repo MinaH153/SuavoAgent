@@ -29,6 +29,11 @@ public sealed class SqlPricingJobRunner
     // with the pharmacy's baseline cost + dispensed quantity (by SQL or Vision) so the cloud can
     // compute a dollar savings. Null = today's cheapest-cost-only behavior (savings stays NULL).
     private readonly IPharmacyBaselineVolumeProvider? _baselineVolume;
+    // M1 savings: optional workbook column headers carrying the pharmacist's own current cost +
+    // dispensed volume. When present they are the most honest baseline (and need no PMS/Vision);
+    // the provider only fills whatever the workbook omits.
+    private readonly string? _baselineCostColumnHint;
+    private readonly string? _quantityColumnHint;
 
     private static readonly TimeSpan InterLookupDelay = TimeSpan.FromMilliseconds(20);
 
@@ -38,7 +43,9 @@ public sealed class SqlPricingJobRunner
         AgentStateDb db,
         ISupplierPriceLookup lookup,
         ILogger<SqlPricingJobRunner> logger,
-        IPharmacyBaselineVolumeProvider? baselineVolume = null)
+        IPharmacyBaselineVolumeProvider? baselineVolume = null,
+        string? baselineCostColumnHint = null,
+        string? quantityColumnHint = null)
     {
         _reader = reader;
         _writer = writer;
@@ -46,11 +53,14 @@ public sealed class SqlPricingJobRunner
         _lookup = lookup;
         _logger = logger;
         _baselineVolume = baselineVolume;
+        _baselineCostColumnHint = baselineCostColumnHint;
+        _quantityColumnHint = quantityColumnHint;
     }
 
     public async Task<PricingJobProgress> RunAsync(PricingJobSpec spec, CancellationToken ct)
     {
-        var readResult = _reader.Read(spec.ExcelPath, spec.NdcColumn);
+        var readResult = _reader.Read(
+            spec.ExcelPath, spec.NdcColumn, _baselineCostColumnHint, _quantityColumnHint);
         if (!readResult.Success)
         {
             _logger.LogError("SqlPricingJobRunner: cannot read Excel — {Error}", readResult.Error);
@@ -91,28 +101,36 @@ public sealed class SqlPricingJobRunner
                 spec.JobId, row.RowIndex, row.NdcNormalized, ct);
 
             // M1 savings: enrich a found result with the pharmacy's baseline cost + dispensed
-            // quantity. Fail-soft — any error leaves both null (savings NULL, never a wrong number).
-            if (_baselineVolume is not null && result.Found)
+            // quantity. Precedence: the pharmacist's OWN workbook values (most honest) first, then
+            // the provider (SQL volume / Vision baseline) fills only what the workbook omits.
+            // Fail-soft — any provider error leaves the gap null (savings NULL, never a wrong number).
+            if (result.Found)
             {
-                try
+                var baseline = row.BaselineCostPerUnit;
+                var quantity = row.Quantity;
+
+                if (_baselineVolume is not null && (baseline is null || quantity is null))
                 {
-                    var bv = await _baselineVolume.GetAsync(row.NdcNormalized, ct);
-                    result = result with
+                    try
                     {
-                        BaselineCostPerUnit = bv.BaselineCostPerUnit,
-                        Quantity = bv.Quantity,
-                    };
+                        var bv = await _baselineVolume.GetAsync(row.NdcNormalized, ct);
+                        baseline ??= bv.BaselineCostPerUnit;
+                        quantity ??= bv.Quantity;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "SqlPricingJobRunner: baseline/volume enrichment failed for NDC {Ndc}; gap left null",
+                            row.NdcNormalized);
+                    }
                 }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "SqlPricingJobRunner: baseline/volume enrichment failed for NDC {Ndc}; savings left null",
-                        row.NdcNormalized);
-                }
+
+                if (baseline is not null || quantity is not null)
+                    result = result with { BaselineCostPerUnit = baseline, Quantity = quantity };
             }
 
             _db.SavePricingResult(result);

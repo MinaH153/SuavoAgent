@@ -225,16 +225,88 @@ public class SqlPricingJobRunnerTests : IDisposable
         Assert.Null(r.Quantity);
     }
 
+    [Fact]
+    public async Task RunAsync_WithExcelBaselineAndQuantityColumns_EnrichesFromWorkbook()
+    {
+        // The pharmacist's own workbook carries his current cost + volume — the most honest
+        // baseline, needing no PMS query or Vision.
+        var xlsx = CreateExcelWithBaselineQuantity(
+            "55111-0645-01", baseline: 0.0500m, quantity: 1200m,
+            baselineHeader: "Current Cost", quantityHeader: "Monthly Qty");
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var runner = NewRunner(lookup, provider: null, baselineHint: "Current Cost", quantityHint: "Monthly Qty");
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        await runner.RunAsync(spec, CancellationToken.None);
+
+        var r = Assert.Single(_db.GetPricingResults(spec.JobId));
+        Assert.Equal(0.0316m, r.CostPerUnit);
+        Assert.Equal(0.0500m, r.BaselineCostPerUnit);
+        Assert.Equal(1200m, r.Quantity);
+    }
+
+    [Fact]
+    public async Task RunAsync_ExcelBaselineTakesPrecedence_ProviderFillsMissingQuantity()
+    {
+        // Excel supplies baseline only (quantity blank); the provider fills the quantity gap.
+        var xlsx = CreateExcelWithBaselineQuantity(
+            "55111-0645-01", baseline: 0.0500m, quantity: null,
+            baselineHeader: "Current Cost", quantityHeader: "Monthly Qty");
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var provider = new FakeBaselineVolume(_ => new PharmacyBaselineVolume(0.0999m, 800m));
+        var runner = NewRunner(lookup, provider, baselineHint: "Current Cost", quantityHint: "Monthly Qty");
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        await runner.RunAsync(spec, CancellationToken.None);
+
+        var r = Assert.Single(_db.GetPricingResults(spec.JobId));
+        Assert.Equal(0.0500m, r.BaselineCostPerUnit); // Excel wins (not the provider's 0.0999)
+        Assert.Equal(800m, r.Quantity);               // provider filled the blank
+    }
+
     private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup) => NewRunner(lookup, null);
 
     private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup, IPharmacyBaselineVolumeProvider? provider) =>
+        NewRunner(lookup, provider, null, null);
+
+    private SqlPricingJobRunner NewRunner(
+        ISupplierPriceLookup lookup,
+        IPharmacyBaselineVolumeProvider? provider,
+        string? baselineHint,
+        string? quantityHint) =>
         new(
             new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
             new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
             _db,
             lookup,
             NullLogger<SqlPricingJobRunner>.Instance,
-            provider);
+            provider,
+            baselineHint,
+            quantityHint);
+
+    private string CreateExcelWithBaselineQuantity(
+        string ndc, decimal baseline, decimal? quantity, string baselineHeader, string quantityHeader)
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        ws.Cell(1, 1).Value = "NDC";
+        ws.Cell(1, 2).Value = baselineHeader;
+        ws.Cell(1, 3).Value = quantityHeader;
+        ws.Cell(2, 1).Value = ndc;
+        ws.Cell(2, 2).Value = baseline;
+        if (quantity is not null) ws.Cell(2, 3).Value = quantity.Value;
+        wb.SaveAs(path);
+        return path;
+    }
 
     private SqlFirstPricingJobExecutor NewExecutor(IPricingLookupFactory lookupFactory) =>
         new(
@@ -242,7 +314,8 @@ public class SqlPricingJobRunnerTests : IDisposable
             new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
             _db,
             lookupFactory,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            Microsoft.Extensions.Options.Options.Create(new SuavoAgent.Core.Config.AgentOptions()));
 
     private string CreateExcel(IReadOnlyList<string> ndcs)
     {

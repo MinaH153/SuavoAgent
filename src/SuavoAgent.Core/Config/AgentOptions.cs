@@ -202,6 +202,19 @@ public sealed class AgentOptions
     public int PricingSavingsWindowDays { get; set; } = 90;
 
     /// <summary>
+    /// Header (case-insensitive partial match) of the workbook column carrying the pharmacy's OWN
+    /// current cost per NDC. When set and present, this is the baseline (most honest — what he says
+    /// he pays — and needs no PMS/Vision). Null = don't read it; baseline comes from the provider.
+    /// </summary>
+    public string? PricingBaselineCostColumn { get; set; }
+
+    /// <summary>
+    /// Header (case-insensitive partial match) of the workbook column carrying dispensed quantity
+    /// per NDC. When set and present, used instead of the SQL volume read. Null = don't read it.
+    /// </summary>
+    public string? PricingQuantityColumn { get; set; }
+
+    /// <summary>
     /// Delay between successive NDC lookups within a single pricing job, in milliseconds.
     /// Throttle exists to (a) avoid hammering PioneerRx during a 500-row batch and (b) stay below
     /// any anti-automation heuristic the vendor may apply. Default <c>1500</c> ms keeps a 500-NDC
