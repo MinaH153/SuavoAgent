@@ -1843,8 +1843,11 @@ public sealed class HeartbeatWorker : ResilientHostedService
             // raw RxNumber inside the record alongside the hashed key.
             var payload = SuavoAgent.Contracts.Models.PatientDetailsPayload
                 .FromRxPatientDetails(details);
-            await _cloudClient.SendPatientDetailsAsync(rxNumber, payload, cmd.Nonce, ct);
-            _logger.LogInformation("fetch_patient: sent details for Rx {RxHash}", hashedRx[..12]);
+            var sent = await _cloudClient.SendPatientDetailsAsync(rxNumber, payload, cmd.Nonce, ct);
+            if (sent)
+                _logger.LogInformation("fetch_patient: sent details for Rx {RxHash}", hashedRx[..12]);
+            else
+                _logger.LogWarning("fetch_patient: details NOT sent for Rx {RxHash} — patient PHI egress is fail-closed (pending audited route)", hashedRx[..12]);
         }
     }
 

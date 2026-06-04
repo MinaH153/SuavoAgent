@@ -80,14 +80,32 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     /// only <c>rxNumberHash</c> ships, and the payload record deliberately
     /// omits a RxNumber field.
     /// </summary>
-    public async Task SendPatientDetailsAsync(
+    /// <returns><c>true</c> if PHI was dispatched; <c>false</c> if egress is
+    /// gated off (fail-closed) and nothing left the box.</returns>
+    public async Task<bool> SendPatientDetailsAsync(
         string rxNumber,
         SuavoAgent.Contracts.Models.PatientDetailsPayload details,
         string commandId,
         CancellationToken ct)
     {
+        // Precedence-1 fail-closed gate (2026-06-04). The cloud
+        // /api/agent/patient-details route does not exist in the canonical tree
+        // and OutboundPhiGuard exempts the path, so an unguarded POST shipped
+        // unscrubbed patient PHI to a 404 (edge/proxy logs). Do NOT touch the
+        // wire until the audited route + typed contract + phi_egress_audit exist
+        // (plan Stage A1). Log is PHI-safe: no patient fields, no Rx number.
+        if (!_options.EnableAuditedPatientDetailsEgress)
+        {
+            Serilog.Log.Warning(
+                "patient-details egress is fail-closed (EnableAuditedPatientDetailsEgress=false); "
+                + "audited cloud route not yet built — patient PHI NOT sent (commandId {CommandId}).",
+                commandId);
+            return false;
+        }
+
         var rxNumberHash = Learning.PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "[no-hmac-salt]");
         await PostSignedAsync("/api/agent/patient-details", new { rxNumberHash, details, commandId }, ct);
+        return true;
     }
 
     public async Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct)
