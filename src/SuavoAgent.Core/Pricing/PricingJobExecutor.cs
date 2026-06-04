@@ -267,13 +267,13 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
 public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor
 {
     private readonly PricingJobRunner _runner;
-    private readonly IpcCommandClient _commandClient;
+    private readonly IIpcCommandClient _commandClient;
     private readonly AgentStateDb _db;
     private readonly ILogger<UiaFirstPricingJobExecutor> _logger;
 
     public UiaFirstPricingJobExecutor(
         PricingJobRunner runner,
-        IpcCommandClient commandClient,
+        IIpcCommandClient commandClient,
         AgentStateDb db,
         ILogger<UiaFirstPricingJobExecutor> logger)
     {
@@ -285,9 +285,32 @@ public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor
 
     public async Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
     {
+        // BLIND-RUN GATE (executor invariant, fail-closed). Reaching this method means we are
+        // about to drive the LIVE PMS screen via UIA. The Helper must be reachable, answering,
+        // and in the interactive console session (SI=1, re-derived in Core from raw session ids
+        // — never a self-reported bool). This gate lives in the EXECUTOR, not only at heartbeat
+        // dispatch, so EVERY caller (heartbeat, idle-autopilot, chatbox, mission loop) is gated
+        // — a future caller cannot reach _runner.RunAsync without proving the screen is visible.
+        // See feedback-helper-must-run-in-interactive-session + never-blind-run-on-live-PMS.
+        var preflight = await HelperInteractivePreflight.CheckAsync(
+            _commandClient, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(5), ct);
+        if (!preflight.Ok)
+        {
+            _logger.LogError(
+                "UiaFirstPricingJobExecutor: blind-run gate BLOCKED job {JobId} — {Error}",
+                spec.JobId, preflight.Error);
+            _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+            return new PricingJobExecutionResult(
+                new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed),
+                Mode: "uia",
+                Ok: false,
+                Error: preflight.Error
+                    ?? "Helper interactive pre-flight failed — refusing to drive the live screen");
+        }
+
         _logger.LogInformation(
-            "UiaFirstPricingJobExecutor: starting job {JobId} (UIA-via-IPC path; Excel={Path})",
-            spec.JobId, spec.ExcelPath);
+            "UiaFirstPricingJobExecutor: starting job {JobId} (UIA-via-IPC path; Excel={Path}; Helper session {Session})",
+            spec.JobId, spec.ExcelPath, preflight.HelperSessionId);
 
         try
         {
