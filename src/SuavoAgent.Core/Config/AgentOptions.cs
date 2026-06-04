@@ -188,6 +188,41 @@ public sealed class AgentOptions
     public PricingExecutorMode PricingExecutor { get; set; } = PricingExecutorMode.SqlFirst;
 
     /// <summary>
+    /// M1 savings: when true, a pricing run enriches each found cheapest-cost result with the
+    /// pharmacy's baseline cost + dispensed quantity so the cloud can compute a dollar savings.
+    /// OFF by default (fail-closed): the figure must be verified against the live box before it is
+    /// trusted, so an unverified savings number is never emitted in production until this is enabled.
+    /// </summary>
+    public bool EnablePricingSavingsEnrichment { get; set; } = false;
+
+    /// <summary>
+    /// Trailing window (days) over which dispensed quantity is aggregated for the savings figure.
+    /// Default 90 — a realistic recurring volume per NDC.
+    /// </summary>
+    public int PricingSavingsWindowDays { get; set; } = 90;
+
+    /// <summary>
+    /// Header (case-insensitive partial match) of the workbook column carrying the pharmacy's OWN
+    /// current cost per NDC. When set and present, this is the baseline (most honest — what he says
+    /// he pays — and needs no PMS/Vision). Null = don't read it; baseline comes from the provider.
+    /// </summary>
+    public string? PricingBaselineCostColumn { get; set; }
+
+    /// <summary>
+    /// Header (case-insensitive partial match) of the workbook column carrying dispensed quantity
+    /// per NDC. When set and present, used instead of the SQL volume read. Null = don't read it.
+    /// </summary>
+    public string? PricingQuantityColumn { get; set; }
+
+    /// <summary>
+    /// RxTransaction status descriptions that count as a real dispense for the SQL volume SUM
+    /// (e.g. "Sold", "Dispensed", "Completed"). MUST be ground-truthed against the live PioneerRx
+    /// box — empty means the SQL volume read is disabled (fail-safe: never count voids/reversals).
+    /// Only the workbook quantity path works until this is configured.
+    /// </summary>
+    public List<string> PricingDispensedStatusNames { get; set; } = new();
+
+    /// <summary>
     /// Delay between successive NDC lookups within a single pricing job, in milliseconds.
     /// Throttle exists to (a) avoid hammering PioneerRx during a 500-row batch and (b) stay below
     /// any anti-automation heuristic the vendor may apply. Default <c>1500</c> ms keeps a 500-NDC

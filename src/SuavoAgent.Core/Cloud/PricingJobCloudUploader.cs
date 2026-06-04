@@ -60,6 +60,11 @@ public sealed class PricingJobCloudUploader
                     found = r.Found,
                     supplierName = r.SupplierName,
                     costPerUnit = r.CostPerUnit,
+                    // M1 savings inputs — null until a run captures them via SQL or Vision. The
+                    // cloud computes savings_total = (baselineCostPerUnit - costPerUnit) * quantity.
+                    // PHI-negative: drug cost + aggregate quantity, no patient identifier.
+                    baselineCostPerUnit = r.BaselineCostPerUnit,
+                    quantity = r.Quantity,
                     status = r.Found ? "found" : "not_found",
                     warning = r.Found ? null : SafeWarning(r.ErrorMessage),
                     confidence = r.Found ? 0.95m : 0.35m,

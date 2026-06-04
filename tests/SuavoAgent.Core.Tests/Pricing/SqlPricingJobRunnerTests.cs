@@ -163,21 +163,200 @@ public class SqlPricingJobRunnerTests : IDisposable
         AssertCellEquals(output, "Supplier", 2, "McKesson");
     }
 
-    private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup) =>
+    [Fact]
+    public async Task RunAsync_WithBaselineVolumeProvider_EnrichesFoundResultsForSavings()
+    {
+        var xlsx = CreateExcel(new[] { "55111-0645-01" });
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var provider = new FakeBaselineVolume(_ => new PharmacyBaselineVolume(0.0500m, 1200m));
+        var runner = NewRunner(lookup, provider);
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        await runner.RunAsync(spec, CancellationToken.None);
+
+        var r = Assert.Single(_db.GetPricingResults(spec.JobId));
+        Assert.Equal(0.0316m, r.CostPerUnit);            // sourced (cheapest) retained
+        Assert.Equal(0.0500m, r.BaselineCostPerUnit);    // baseline enriched
+        Assert.Equal(1200m, r.Quantity);                 // quantity enriched
+    }
+
+    [Fact]
+    public async Task RunAsync_NoProvider_LeavesBaselineAndQuantityNull()
+    {
+        var xlsx = CreateExcel(new[] { "55111-0645-01" });
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var runner = NewRunner(lookup); // no enrichment provider — today's behavior
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        await runner.RunAsync(spec, CancellationToken.None);
+
+        var r = Assert.Single(_db.GetPricingResults(spec.JobId));
+        Assert.Null(r.BaselineCostPerUnit);
+        Assert.Null(r.Quantity);
+    }
+
+    [Fact]
+    public async Task RunAsync_ProviderThrows_FailsSoftAndCompletesWithNullSavings()
+    {
+        var xlsx = CreateExcel(new[] { "55111-0645-01" });
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var provider = new FakeBaselineVolume(_ => throw new InvalidOperationException("schema not resolved"));
+        var runner = NewRunner(lookup, provider);
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        var progress = await runner.RunAsync(spec, CancellationToken.None);
+
+        Assert.Equal(PricingJobStatus.Completed, progress.Status); // run not derailed
+        var r = Assert.Single(_db.GetPricingResults(spec.JobId));
+        Assert.Equal(0.0316m, r.CostPerUnit);   // cheapest cost retained
+        Assert.Null(r.BaselineCostPerUnit);      // fail-soft → null, never a wrong number
+        Assert.Null(r.Quantity);
+    }
+
+    [Fact]
+    public async Task RunAsync_WithExcelBaselineAndQuantityColumns_EnrichesFromWorkbook()
+    {
+        // The pharmacist's own workbook carries his current cost + volume — the most honest
+        // baseline, needing no PMS query or Vision.
+        var xlsx = CreateExcelWithBaselineQuantity(
+            "55111-0645-01", baseline: 0.0500m, quantity: 1200m,
+            baselineHeader: "Current Cost", quantityHeader: "Monthly Qty");
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var runner = NewRunner(lookup, provider: null, baselineHint: "Current Cost", quantityHint: "Monthly Qty");
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        await runner.RunAsync(spec, CancellationToken.None);
+
+        var r = Assert.Single(_db.GetPricingResults(spec.JobId));
+        Assert.Equal(0.0316m, r.CostPerUnit);
+        Assert.Equal(0.0500m, r.BaselineCostPerUnit);
+        Assert.Equal(1200m, r.Quantity);
+    }
+
+    [Fact]
+    public async Task RunAsync_ExcelBaselineTakesPrecedence_ProviderFillsMissingQuantity()
+    {
+        // Excel supplies baseline only (quantity blank); the provider fills the quantity gap.
+        var xlsx = CreateExcelWithBaselineQuantity(
+            "55111-0645-01", baseline: 0.0500m, quantity: null,
+            baselineHeader: "Current Cost", quantityHeader: "Monthly Qty");
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var provider = new FakeBaselineVolume(_ => new PharmacyBaselineVolume(0.0999m, 800m));
+        var runner = NewRunner(lookup, provider, baselineHint: "Current Cost", quantityHint: "Monthly Qty");
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        await runner.RunAsync(spec, CancellationToken.None);
+
+        var r = Assert.Single(_db.GetPricingResults(spec.JobId));
+        Assert.Equal(0.0500m, r.BaselineCostPerUnit); // Excel wins (not the provider's 0.0999)
+        Assert.Equal(800m, r.Quantity);               // provider filled the blank
+    }
+
+    private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup) => NewRunner(lookup, null);
+
+    private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup, IPharmacyBaselineVolumeProvider? provider) =>
+        NewRunner(lookup, provider, null, null);
+
+    private SqlPricingJobRunner NewRunner(
+        ISupplierPriceLookup lookup,
+        IPharmacyBaselineVolumeProvider? provider,
+        string? baselineHint,
+        string? quantityHint) =>
         new(
             new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
             new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
             _db,
             lookup,
-            NullLogger<SqlPricingJobRunner>.Instance);
+            NullLogger<SqlPricingJobRunner>.Instance,
+            provider,
+            baselineHint,
+            quantityHint);
+
+    private string CreateExcelWithBaselineQuantity(
+        string ndc, decimal baseline, decimal? quantity, string baselineHeader, string quantityHeader)
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        ws.Cell(1, 1).Value = "NDC";
+        ws.Cell(1, 2).Value = baselineHeader;
+        ws.Cell(1, 3).Value = quantityHeader;
+        ws.Cell(2, 1).Value = ndc;
+        ws.Cell(2, 2).Value = baseline;
+        if (quantity is not null) ws.Cell(2, 3).Value = quantity.Value;
+        wb.SaveAs(path);
+        return path;
+    }
 
     private SqlFirstPricingJobExecutor NewExecutor(IPricingLookupFactory lookupFactory) =>
+        NewExecutor(lookupFactory, new SuavoAgent.Core.Config.AgentOptions());
+
+    private SqlFirstPricingJobExecutor NewExecutor(
+        IPricingLookupFactory lookupFactory, SuavoAgent.Core.Config.AgentOptions options) =>
         new(
             new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
             new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
             _db,
             lookupFactory,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            Microsoft.Extensions.Options.Options.Create(options));
+
+    [Theory]
+    [InlineData(true)]   // per-unit basis confirmed → Excel baseline applied
+    [InlineData(false)]  // sourced cost is per-pack → enrichment suppressed (unit-unsafe)
+    public async Task SqlFirstExecutor_UnitSafetyGatesExcelSavingsEnrichment(bool unitSafe)
+    {
+        var xlsx = CreateExcelWithBaselineQuantity(
+            "55111-0645-01", baseline: 0.0500m, quantity: 1200m,
+            baselineHeader: "Current Cost", quantityHeader: "Monthly Qty");
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.0316m),
+        });
+        var options = new SuavoAgent.Core.Config.AgentOptions
+        {
+            EnablePricingSavingsEnrichment = true,
+            PricingBaselineCostColumn = "Current Cost",
+            PricingQuantityColumn = "Monthly Qty",
+        };
+        var executor = NewExecutor(new FakeLookupFactory(lookup, null, savingsUnitSafe: unitSafe), options);
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        await executor.RunAsync(spec, CancellationToken.None);
+
+        var r = Assert.Single(_db.GetPricingResults(spec.JobId));
+        if (unitSafe)
+        {
+            Assert.Equal(0.0500m, r.BaselineCostPerUnit);
+            Assert.Equal(1200m, r.Quantity);
+        }
+        else
+        {
+            Assert.Null(r.BaselineCostPerUnit); // suppressed — never a unit-mixed savings
+            Assert.Null(r.Quantity);
+        }
+    }
 
     private string CreateExcel(IReadOnlyList<string> ndcs)
     {
@@ -242,16 +421,26 @@ public class SqlPricingJobRunnerTests : IDisposable
     {
         private readonly ISupplierPriceLookup? _lookup;
         private readonly string? _error;
+        private readonly bool _savingsUnitSafe;
 
-        public FakeLookupFactory(ISupplierPriceLookup? lookup, string? error)
+        public FakeLookupFactory(ISupplierPriceLookup? lookup, string? error, bool savingsUnitSafe = false)
         {
             _lookup = lookup;
             _error = error;
+            _savingsUnitSafe = savingsUnitSafe;
         }
 
         public Task<PricingLookupFactoryResult> TryCreateAsync(CancellationToken ct) =>
             Task.FromResult(_lookup is null
                 ? PricingLookupFactoryResult.Fail(_error ?? "unavailable")
-                : PricingLookupFactoryResult.Success(_lookup, "sql", null));
+                : PricingLookupFactoryResult.Success(_lookup, "sql", null, provider: null, savingsUnitSafe: _savingsUnitSafe));
+    }
+
+    private sealed class FakeBaselineVolume : IPharmacyBaselineVolumeProvider
+    {
+        private readonly Func<string, PharmacyBaselineVolume> _fn;
+        public FakeBaselineVolume(Func<string, PharmacyBaselineVolume> fn) => _fn = fn;
+        public Task<PharmacyBaselineVolume> GetAsync(string ndc11, CancellationToken ct) =>
+            Task.FromResult(_fn(ndc11));
     }
 }

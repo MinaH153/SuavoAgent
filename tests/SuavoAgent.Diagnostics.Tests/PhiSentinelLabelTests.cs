@@ -38,7 +38,9 @@ public sealed class PhiSentinelLabelTests
     [Fact]
     public void IsDefinitelyPhi_is_false_for_a_pure_sentinel_string()
     {
-        var scrubber = new PhiScrubber(new RulesetV1(), TimeSpan.FromMilliseconds(200));
+        // Generous 2s deadline — asserts IsDefinitelyPhi behavior, not the timeout; avoids cold
+        // NonBacktracking-DFA flakiness on CI (feedback-regex-compiled-coldjit-vs-tight-timeout).
+        var scrubber = new PhiScrubber(new RulesetV1(), TimeSpan.FromSeconds(2));
         Assert.False(scrubber.IsDefinitelyPhi(
             "[NAME] [CODE] [PHONE] [MRN] [ADDRESS] [SSN] [DEA] [NDC] [PIONEERRX_ID]"));
     }

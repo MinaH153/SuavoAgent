@@ -18,7 +18,11 @@ public sealed class ExcelPricingReader
         _logger = logger;
     }
 
-    public ReadResult Read(string path, string ndcColumnHint = "ndc")
+    public ReadResult Read(
+        string path,
+        string ndcColumnHint = "ndc",
+        string? baselineCostColumnHint = null,
+        string? quantityColumnHint = null)
     {
         if (!File.Exists(path))
             return ReadResult.Fail("File not found");
@@ -39,6 +43,14 @@ public sealed class ExcelPricingReader
             if (ndcCol == -1)
                 return ReadResult.Fail($"Could not find column matching '{ndcColumnHint}' in row 1");
 
+            // M1 savings: optionally capture the pharmacist's OWN current cost + dispensed volume
+            // columns if the workbook carries them. This is the most honest baseline (what he says
+            // he pays) and needs no PMS query or Vision. Absent column -> -1 -> left null (fail-soft).
+            var baselineCol = string.IsNullOrWhiteSpace(baselineCostColumnHint)
+                ? -1 : FindColumn(ws, baselineCostColumnHint!, lastCol);
+            var quantityCol = string.IsNullOrWhiteSpace(quantityColumnHint)
+                ? -1 : FindColumn(ws, quantityColumnHint!, lastCol);
+
             var rows = new List<NdcRow>();
             var invalid = new List<InvalidNdcRow>();
             for (int r = 2; r <= lastRow; r++)
@@ -49,7 +61,10 @@ public sealed class ExcelPricingReader
                 var outcome = NdcNormalizer.Normalize(raw);
                 if (outcome.Ok && outcome.Canonical11 is not null)
                 {
-                    rows.Add(new NdcRow(r, outcome.Canonical11, raw));
+                    rows.Add(new NdcRow(
+                        r, outcome.Canonical11, raw,
+                        BaselineCostPerUnit: ReadDecimalCell(ws, r, baselineCol),
+                        Quantity: ReadDecimalCell(ws, r, quantityCol)));
                 }
                 else
                 {
@@ -86,9 +101,29 @@ public sealed class ExcelPricingReader
         }
         return -1;
     }
+
+    /// <summary>Reads a positive decimal from a cell; null for an absent column, blank, or
+    /// non-positive value (a blank/zero baseline must not produce a phantom savings).</summary>
+    private static decimal? ReadDecimalCell(IXLWorksheet ws, int row, int col)
+    {
+        if (col < 1) return null;
+        var cell = ws.Cell(row, col);
+        if (cell.TryGetValue(out decimal d)) return d > 0 ? d : null;
+        var raw = cell.GetString()?.Trim();
+        if (!string.IsNullOrEmpty(raw) &&
+            decimal.TryParse(raw.TrimStart('$'), System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+            return parsed > 0 ? parsed : null;
+        return null;
+    }
 }
 
-public record NdcRow(int RowIndex, string NdcNormalized, string NdcRaw);
+public record NdcRow(
+    int RowIndex,
+    string NdcNormalized,
+    string NdcRaw,
+    decimal? BaselineCostPerUnit = null,
+    decimal? Quantity = null);
 
 public record InvalidNdcRow(int RowIndex, string NdcRaw, string Reason);
 

@@ -17,6 +17,14 @@ public record NdcPricingRequest(
 /// Returned by Helper to Core after reading the Pricing tab for one NDC.
 /// <c>Observations</c> carries the GREEN-tier selector-resolution telemetry for the run's
 /// steps (M2a capture); null/empty for the SQL path, which drives no selectors.
+///
+/// <para>M1 savings: <c>CostPerUnit</c> is the SOURCED (cheapest-supplier) cost. To make the
+/// cloud's savings ledger non-zero, the run must also capture — by SQL or Vision —
+/// <c>BaselineCostPerUnit</c> (what the pharmacy pays TODAY, per NDC) and <c>Quantity</c>
+/// (aggregate dispensed units over the window). The cloud computes
+/// <c>savings_total = (BaselineCostPerUnit − CostPerUnit) × Quantity</c>; all three must be
+/// non-null and Found for a dollar figure to appear. Both are nullable so today's
+/// cheapest-cost-only runs still upload cleanly (savings stays NULL — never a wrong number).</para>
 /// </summary>
 public record SupplierPriceResult(
     string JobId,
@@ -26,7 +34,9 @@ public record SupplierPriceResult(
     string? SupplierName,
     decimal? CostPerUnit,
     string? ErrorMessage,
-    IReadOnlyList<SelectorObservation>? Observations = null);
+    IReadOnlyList<SelectorObservation>? Observations = null,
+    decimal? BaselineCostPerUnit = null,
+    decimal? Quantity = null);
 
 /// <summary>
 /// Persisted in AgentStateDb; describes a full pricing job run.

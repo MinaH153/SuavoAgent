@@ -26,13 +26,20 @@ public sealed record PricingLookupFactoryResult(
     ISupplierPriceLookup? Lookup,
     string Mode,
     string? Error,
-    IAsyncDisposable? Lease)
+    IAsyncDisposable? Lease,
+    IPharmacyBaselineVolumeProvider? Provider = null,
+    // True only when the sourced costPerUnit is a genuine PER-UNIT value (the catalog has a
+    // dedicated per-unit cost column). When false the sourced cost is a pack cost, so subtracting a
+    // per-unit baseline would be unit-unsafe — savings enrichment must be suppressed (Codex blocker).
+    bool SavingsUnitSafe = false)
 {
     public static PricingLookupFactoryResult Success(
         ISupplierPriceLookup lookup,
         string mode,
-        IAsyncDisposable? lease) =>
-        new(true, lookup, mode, null, lease);
+        IAsyncDisposable? lease,
+        IPharmacyBaselineVolumeProvider? provider = null,
+        bool savingsUnitSafe = false) =>
+        new(true, lookup, mode, null, lease, provider, savingsUnitSafe);
 
     public static PricingLookupFactoryResult Fail(string error, string mode = "sql") =>
         new(false, null, mode, error, null);
@@ -56,13 +63,15 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
     private readonly IPricingLookupFactory _lookupFactory;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SqlFirstPricingJobExecutor> _logger;
+    private readonly AgentOptions _options;
 
     public SqlFirstPricingJobExecutor(
         ExcelPricingReader reader,
         ExcelPricingWriter writer,
         AgentStateDb db,
         IPricingLookupFactory lookupFactory,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        IOptions<AgentOptions> options)
     {
         _reader = reader;
         _writer = writer;
@@ -70,6 +79,7 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
         _lookupFactory = lookupFactory;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SqlFirstPricingJobExecutor>();
+        _options = options.Value;
     }
 
     public async Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
@@ -101,12 +111,18 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
         }
 
         await using var lease = lookupResult.Lease;
+        // Excel baseline/quantity columns are also unit-gated: the workbook baseline is per-unit, so
+        // only trust it when the sourced cost is per-unit too (SavingsUnitSafe).
+        var savingsEnabled = _options.EnablePricingSavingsEnrichment && lookupResult.SavingsUnitSafe;
         var runner = new SqlPricingJobRunner(
             _reader,
             _writer,
             _db,
             lookupResult.Lookup,
-            _loggerFactory.CreateLogger<SqlPricingJobRunner>());
+            _loggerFactory.CreateLogger<SqlPricingJobRunner>(),
+            lookupResult.Provider,
+            savingsEnabled ? _options.PricingBaselineCostColumn : null,
+            savingsEnabled ? _options.PricingQuantityColumn : null);
 
         var progress = await runner.RunAsync(spec, ct);
         var ok = progress.Status == PricingJobStatus.Completed;
@@ -173,10 +189,33 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
                 _ => Task.FromResult(connection),
                 _loggerFactory.CreateLogger<SqlSupplierPriceLookup>());
 
+            // M1 savings enrichment — OFF by default (fail-closed): a savings dollar figure must be
+            // verified against the live box before it is trusted. Additionally unit-gated: the
+            // sourced costPerUnit is only a true PER-UNIT value when the catalog has a dedicated
+            // per-unit column; otherwise it is a pack cost and (per-unit baseline − pack sourced)
+            // would be garbage, so enrichment is suppressed (Codex blocker — never emit a
+            // unit-unsafe number).
+            var savingsUnitSafe = outcome.Schema.CostPerUnitColumn is not null;
+            var savingsEnabled = _options.EnablePricingSavingsEnrichment && savingsUnitSafe;
+            if (_options.EnablePricingSavingsEnrichment && !savingsUnitSafe)
+                _logger.LogWarning(
+                    "Pricing savings enrichment suppressed: catalog has no per-unit cost column, so sourced cost is per-pack (unit-unsafe).");
+
+            IPharmacyBaselineVolumeProvider? provider = savingsEnabled
+                ? new SqlDispensedVolumeProvider(
+                    outcome.Schema,
+                    _ => Task.FromResult(connection),
+                    _options.PricingSavingsWindowDays,
+                    _options.PricingDispensedStatusNames,
+                    _loggerFactory.CreateLogger<SqlDispensedVolumeProvider>())
+                : null;
+
             return PricingLookupFactoryResult.Success(
                 lookup,
                 "sql",
-                new SqlConnectionLease(connection));
+                new SqlConnectionLease(connection),
+                provider,
+                savingsUnitSafe);
         }
         catch (OperationCanceledException)
         {

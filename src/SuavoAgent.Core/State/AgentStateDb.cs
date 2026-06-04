@@ -632,6 +632,8 @@ public sealed class AgentStateDb : IDisposable
                 found INTEGER NOT NULL DEFAULT 0,
                 supplier_name TEXT,
                 cost_per_unit REAL,
+                baseline_cost_per_unit REAL,
+                quantity REAL,
                 error_message TEXT,
                 observations_json TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
@@ -641,6 +643,10 @@ public sealed class AgentStateDb : IDisposable
         Execute("CREATE INDEX IF NOT EXISTS idx_pricing_results_job ON pricing_results(job_id)");
         // M2a: GREEN-tier selector-resolution telemetry for existing DBs created before the column.
         TryAlter("ALTER TABLE pricing_results ADD COLUMN observations_json TEXT");
+        // M1 savings: baseline (today's cost) + aggregate quantity, captured by SQL or Vision, so
+        // the cloud can compute (baseline - sourced) * quantity. Nullable — cost-only runs unaffected.
+        TryAlter("ALTER TABLE pricing_results ADD COLUMN baseline_cost_per_unit REAL");
+        TryAlter("ALTER TABLE pricing_results ADD COLUMN quantity REAL");
 
         Execute("""
             CREATE TABLE IF NOT EXISTS pricing_discovery_candidates (
@@ -4039,8 +4045,8 @@ public sealed class AgentStateDb : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             INSERT OR REPLACE INTO pricing_results
-                (job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message, observations_json)
-            VALUES (@job, @row, @ndc, @found, @supplier, @cost, @error, @observations)
+                (job_id, row_index, ndc, found, supplier_name, cost_per_unit, baseline_cost_per_unit, quantity, error_message, observations_json)
+            VALUES (@job, @row, @ndc, @found, @supplier, @cost, @baseline, @quantity, @error, @observations)
             """;
         var observationsJson = result.Observations is { Count: > 0 }
             ? System.Text.Json.JsonSerializer.Serialize(result.Observations)
@@ -4051,6 +4057,8 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@found", result.Found ? 1 : 0);
         cmd.Parameters.AddWithValue("@supplier", (object?)result.SupplierName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@cost", (object?)result.CostPerUnit ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@baseline", (object?)result.BaselineCostPerUnit ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@quantity", (object?)result.Quantity ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@error", (object?)result.ErrorMessage ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@observations", (object?)observationsJson ?? DBNull.Value);
         cmd.ExecuteNonQuery();
@@ -4059,7 +4067,7 @@ public sealed class AgentStateDb : IDisposable
     public List<SupplierPriceResult> GetPricingResults(string jobId)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit, error_message, observations_json FROM pricing_results WHERE job_id = @job ORDER BY row_index";
+        cmd.CommandText = "SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit, baseline_cost_per_unit, quantity, error_message, observations_json FROM pricing_results WHERE job_id = @job ORDER BY row_index";
         cmd.Parameters.AddWithValue("@job", jobId);
         using var reader = cmd.ExecuteReader();
         var results = new List<SupplierPriceResult>();
@@ -4072,10 +4080,12 @@ public sealed class AgentStateDb : IDisposable
                 Found: reader.GetInt32(3) == 1,
                 SupplierName: reader.IsDBNull(4) ? null : reader.GetString(4),
                 CostPerUnit: reader.IsDBNull(5) ? null : (decimal)reader.GetDouble(5),
-                ErrorMessage: reader.IsDBNull(6) ? null : reader.GetString(6),
-                Observations: reader.IsDBNull(7)
+                ErrorMessage: reader.IsDBNull(8) ? null : reader.GetString(8),
+                Observations: reader.IsDBNull(9)
                     ? null
-                    : System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Learning.SelectorObservation>>(reader.GetString(7))));
+                    : System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Learning.SelectorObservation>>(reader.GetString(9)),
+                BaselineCostPerUnit: reader.IsDBNull(6) ? null : (decimal)reader.GetDouble(6),
+                Quantity: reader.IsDBNull(7) ? null : (decimal)reader.GetDouble(7)));
         }
         return results;
     }
