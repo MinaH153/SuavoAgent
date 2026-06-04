@@ -658,6 +658,21 @@ public sealed class AgentStateDb : IDisposable
         """);
         Execute("CREATE INDEX IF NOT EXISTS idx_pricing_discovery_candidates_created ON pricing_discovery_candidates(created_at)");
 
+        // M3 per-task autonomy graduation ledger — how far a (task, pharmacy) has EARNED up the FSD
+        // autonomy ladder via consecutive clean verified runs. Capability only; unsupervised
+        // execution is gated separately + fail-closed.
+        Execute("""
+            CREATE TABLE IF NOT EXISTS task_autonomy (
+                task_key TEXT NOT NULL,
+                pharmacy_id TEXT NOT NULL,
+                consecutive_clean INTEGER NOT NULL DEFAULT 0,
+                total_runs INTEGER NOT NULL DEFAULT 0,
+                last_outcome TEXT,
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (task_key, pharmacy_id)
+            )
+        """);
+
         // v3.12 — numbered transactional migrations (Codex Area 5 fix).
         // schema_migrations tracks applied versions so new migrations can fail-closed.
         // Existing TryAlter migrations are left intact for backward compatibility.
@@ -4099,6 +4114,43 @@ public sealed class AgentStateDb : IDisposable
         var rows = new HashSet<int>();
         while (reader.Read()) rows.Add(reader.GetInt32(0));
         return rows;
+    }
+
+    // ── M3 task-autonomy ledger ──
+
+    /// <summary>Raw streak/total/last-outcome for a (task, pharmacy); zeros if never recorded.</summary>
+    public (int ConsecutiveClean, int TotalRuns, string? LastOutcome) GetTaskAutonomyRaw(
+        string taskKey, string pharmacyId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT consecutive_clean, total_runs, last_outcome FROM task_autonomy WHERE task_key = @t AND pharmacy_id = @p";
+        cmd.Parameters.AddWithValue("@t", taskKey);
+        cmd.Parameters.AddWithValue("@p", pharmacyId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return (0, 0, null);
+        return (
+            reader.GetInt32(0),
+            reader.GetInt32(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2));
+    }
+
+    public void UpsertTaskAutonomy(
+        string taskKey, string pharmacyId, int consecutiveClean, int totalRuns, string? lastOutcome)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO task_autonomy (task_key, pharmacy_id, consecutive_clean, total_runs, last_outcome, updated_at)
+            VALUES (@t, @p, @c, @n, @o, datetime('now'))
+            ON CONFLICT(task_key, pharmacy_id) DO UPDATE SET
+                consecutive_clean = @c, total_runs = @n, last_outcome = @o, updated_at = datetime('now')
+            """;
+        cmd.Parameters.AddWithValue("@t", taskKey);
+        cmd.Parameters.AddWithValue("@p", pharmacyId);
+        cmd.Parameters.AddWithValue("@c", consecutiveClean);
+        cmd.Parameters.AddWithValue("@n", totalRuns);
+        cmd.Parameters.AddWithValue("@o", (object?)lastOutcome ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
     }
 
     public string SavePricingDiscoveryCandidate(string absolutePath, string? fileName = null)
