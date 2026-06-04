@@ -68,6 +68,14 @@ public sealed class SqlPricingJobRunner
             return new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed);
         }
 
+        // PHI-safe column discovery: surface the workbook's column shape (headers + numeric ranges,
+        // never text values) so the baseline-cost + quantity columns can be identified from telemetry
+        // and wired via the cloud config-override — the path to remote M1 go-live without shipping the
+        // workbook off the box.
+        _logger.LogInformation(
+            "SqlPricingJobRunner: workbook columns for {JobId} — {Columns}",
+            spec.JobId, PricingWorkbookInspector.Summarize(PricingWorkbookInspector.Describe(spec.ExcelPath)));
+
         var rows = readResult.Rows;
         var totalItems = rows.Count + readResult.Invalid.Count;
         var previousResults = _db.GetPricingResults(spec.JobId);
