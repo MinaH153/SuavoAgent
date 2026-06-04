@@ -11,11 +11,13 @@ public class PhiScrubberTests
     private static PhiScrubber Scrubber()
     {
         var ruleset = new RulesetV1();
-        // 200ms timeout — production default is 10ms (spec §4 contract).
-        // Tests need headroom for cold JIT on Linux CI runner where the
-        // regex compile + first-match for 13 pharmacy patterns can
-        // exceed 50ms on the first invocation.
-        return new PhiScrubber(ruleset, TimeSpan.FromMilliseconds(200));
+        // Generous 2s deadline — these tests assert redaction OUTPUT, not the timeout. The
+        // NonBacktracking DFA is built lazily on the first match and that cold cost counts against
+        // the per-rule deadline; on a loaded/cold CI runner 200ms could be exceeded -> a spurious
+        // [SCRUB_TIMEOUT] and a flaky "[PIONEERRX_ID] not found" failure. (Production uses 10ms; the
+        // fail-closed sentinel there is acceptable for crash telemetry.) See
+        // feedback-regex-compiled-coldjit-vs-tight-timeout.
+        return new PhiScrubber(ruleset, TimeSpan.FromSeconds(2));
     }
 
     // ── PioneerRx-specific identifiers ──
