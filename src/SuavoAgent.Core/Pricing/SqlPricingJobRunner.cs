@@ -25,6 +25,10 @@ public sealed class SqlPricingJobRunner
     private readonly AgentStateDb _db;
     private readonly ISupplierPriceLookup _lookup;
     private readonly ILogger<SqlPricingJobRunner> _logger;
+    // M1 savings enrichment (optional). When present, each FOUND cheapest-cost result is enriched
+    // with the pharmacy's baseline cost + dispensed quantity (by SQL or Vision) so the cloud can
+    // compute a dollar savings. Null = today's cheapest-cost-only behavior (savings stays NULL).
+    private readonly IPharmacyBaselineVolumeProvider? _baselineVolume;
 
     private static readonly TimeSpan InterLookupDelay = TimeSpan.FromMilliseconds(20);
 
@@ -33,13 +37,15 @@ public sealed class SqlPricingJobRunner
         ExcelPricingWriter writer,
         AgentStateDb db,
         ISupplierPriceLookup lookup,
-        ILogger<SqlPricingJobRunner> logger)
+        ILogger<SqlPricingJobRunner> logger,
+        IPharmacyBaselineVolumeProvider? baselineVolume = null)
     {
         _reader = reader;
         _writer = writer;
         _db = db;
         _lookup = lookup;
         _logger = logger;
+        _baselineVolume = baselineVolume;
     }
 
     public async Task<PricingJobProgress> RunAsync(PricingJobSpec spec, CancellationToken ct)
@@ -83,6 +89,32 @@ public sealed class SqlPricingJobRunner
 
             var result = await _lookup.FindCheapestSupplierAsync(
                 spec.JobId, row.RowIndex, row.NdcNormalized, ct);
+
+            // M1 savings: enrich a found result with the pharmacy's baseline cost + dispensed
+            // quantity. Fail-soft — any error leaves both null (savings NULL, never a wrong number).
+            if (_baselineVolume is not null && result.Found)
+            {
+                try
+                {
+                    var bv = await _baselineVolume.GetAsync(row.NdcNormalized, ct);
+                    result = result with
+                    {
+                        BaselineCostPerUnit = bv.BaselineCostPerUnit,
+                        Quantity = bv.Quantity,
+                    };
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "SqlPricingJobRunner: baseline/volume enrichment failed for NDC {Ndc}; savings left null",
+                        row.NdcNormalized);
+                }
+            }
+
             _db.SavePricingResult(result);
 
             if (result.Found) completed++;
