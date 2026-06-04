@@ -20,11 +20,12 @@ namespace SuavoAgent.Diagnostics.Phi;
 public static class PhiTextScrubber
 {
     /// <summary>
-    /// Per-rule regex deadline on the trusted path. Generous (real OCR/window-title strings are
-    /// tiny and finish in microseconds) but bounds the worst case so a hostile/degenerate input
-    /// can never hang the calling thread.
+    /// Per-rule regex deadline. A ReDoS backstop, NOT a tight perf bound: real OCR/window-title
+    /// strings finish in microseconds, so 1s only ever trips on genuine catastrophic backtracking
+    /// (which runs effectively forever). Deliberately generous so a cold/slow CI runner's first
+    /// match never spuriously trips it and fails closed on legitimate input.
     /// </summary>
-    private static readonly TimeSpan _ruleTimeout = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan _ruleTimeout = TimeSpan.FromSeconds(1);
 
     /// <summary>Fail-closed sentinel returned by <see cref="ScrubText"/> on a rule timeout.</summary>
     public const string ScrubTimeoutSentinel = "[SCRUB_TIMEOUT]";
@@ -41,9 +42,15 @@ public static class PhiTextScrubber
         for (var i = 0; i < rules.Length; i++)
         {
             var spec = PhiRuleCatalog.Trusted[i];
-            // Trusted path is always the Standard engine + Compiled (matches the legacy
-            // [GeneratedRegex] partials) + a per-rule timeout. NonBacktracking is never added here.
-            var regex = new Regex(spec.Pattern, RegexOptions.Compiled | spec.Options, _ruleTimeout);
+            // Standard (backtracking) engine + per-rule timeout. NonBacktracking is never added
+            // here. Deliberately NOT RegexOptions.Compiled: the legacy Core rules were
+            // source-generated ([GeneratedRegex], compiled at build time with no runtime cost),
+            // whereas runtime Compiled pays a cold reflection-emit JIT on FIRST match. That cold
+            // JIT, on a slow/cold runner, can push the first match past the per-rule deadline and
+            // fail closed on legitimate input (observed in CI: ContainsPhi → true, ScrubText →
+            // sentinel). The interpreted engine has no such cold spike, so the deadline cleanly
+            // bounds matching time only; per-match cost on these short PHI strings is negligible.
+            var regex = new Regex(spec.Pattern, spec.Options, _ruleTimeout);
             rules[i] = new CompiledTrustedRule(spec, regex);
         }
         return rules;

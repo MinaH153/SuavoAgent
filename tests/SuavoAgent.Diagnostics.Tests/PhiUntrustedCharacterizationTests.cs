@@ -105,8 +105,12 @@ public sealed class PhiUntrustedCharacterizationTests
     }
 
     private static PhiScrubber Scrubber()
-        // 200ms — matches the existing Diagnostics PhiScrubberTests headroom for cold JIT.
-        => new(new RulesetV1(), TimeSpan.FromMilliseconds(200));
+        // Generous 5s deadline: this gate characterizes the SCRUBBING OUTPUT, not the timeout.
+        // The NonBacktracking DFA is built lazily on first match and that cold cost — which counts
+        // against the per-rule deadline — can exceed a tight budget on a cold/slow CI runner and
+        // spuriously return [SCRUB_TIMEOUT] (observed in CI at 200ms). 5s removes that flakiness
+        // while still bounding a genuine hang.
+        => new(new RulesetV1(), TimeSpan.FromSeconds(5));
 
     private static string GoldenPath([CallerFilePath] string thisFile = "")
         => Path.Combine(Path.GetDirectoryName(thisFile)!, "phi-golden-untrusted.json");
