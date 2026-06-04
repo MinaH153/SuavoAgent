@@ -1,16 +1,22 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
+using SuavoAgent.Diagnostics.Phi;
 
 namespace SuavoAgent.Diagnostics;
 
 /// SDK-side PHI scrub. Spec §3 + §164.502(b) minimum-necessary contract:
 /// only the smallest signal that identifies the crash crosses the wire.
-/// All regexes use <c>RegexOptions.NonBacktracking</c> to defeat
-/// catastrophic-backtracking attacks (Codex §8.1 RESOLVED v1.0).
 ///
-/// Patterns ordered by selectivity — most-specific first so JSON/XML/SQL
-/// field-context patterns catch identifiers before the bare-number patterns
-/// (NPI Luhn, NDC unhyphenated) trigger on neighboring digits.
+/// As of the single-source PHI merge, the rule set is materialized from the shared
+/// <see cref="PhiRuleCatalog"/> (the Untrusted subset) rather than defined inline, so this
+/// hostile-input path and the trusted <c>PhiTextScrubber</c> path can never drift. The OTA
+/// hot-swap contract is unchanged: the instance ctor <c>(RulesetV1, TimeSpan)</c> +
+/// <c>Sanitize</c>/<c>IsDefinitelyPhi</c>/<c>RulesetVersion</c> are byte-for-byte identical.
+///
+/// Every rule uses <c>RegexOptions.NonBacktracking</c> (catastrophic-backtracking immunity,
+/// Codex §8.1 RESOLVED v1.0) EXCEPT the XML matching-tag rule, which needs a backreference and
+/// therefore falls back to the Standard engine with a per-rule timeout (catalog
+/// <see cref="PhiEngineClass.Standard"/>).
 public sealed class PhiScrubber
 {
     private readonly TimeSpan _timeout;
@@ -136,154 +142,47 @@ public sealed class PhiScrubber
     }
 
     /// <summary>
-    /// All scrubber replacement sentinels emitted by the rules in
-    /// <see cref="BuildRules"/>. Used by <see cref="IsDefinitelyPhi"/> to
-    /// distinguish "still has PHI" from "was scrubbed correctly".
+    /// All scrubber replacement sentinels emitted by the catalog rules. Used by
+    /// <see cref="IsDefinitelyPhi"/> to distinguish "still has PHI" from "was scrubbed
+    /// correctly". Catalog-derived single source (blueprint fix #6): the label set lives in
+    /// <see cref="PhiRuleCatalog.SentinelLabels"/>. Kept NonBacktracking.
     /// </summary>
     private static readonly Regex ScrubberSentinelPattern = new(
-        @"\[(?:PIONEERRX_ID|MEMBER_ID|NPI|NDC|DEA|SSN|RX_NUM|USER|DOB|PATIENT|SCRUB_TIMEOUT|SCRUB_FAILED)\]",
+        @"\[(?:" + string.Join("|", PhiRuleCatalog.SentinelLabels) + @")\]",
         RegexOptions.Compiled | RegexOptions.NonBacktracking);
 
+    /// <summary>
+    /// Materialize the Untrusted subset of the shared <see cref="PhiRuleCatalog"/> into the
+    /// NonBacktracking scrub pipeline. Order, options, replacement, high-confidence flag and
+    /// post-validator are all carried by the catalog, so this path and the trusted path cannot
+    /// drift. Each rule gets the per-rule <paramref name="timeout"/>.
+    /// </summary>
     private static List<ScrubRule> BuildRules(TimeSpan timeout)
     {
-        var opts = RegexOptions.NonBacktracking | RegexOptions.IgnoreCase;
-        // NonBacktracking does not support backreferences (Codex chunk 2b
-        // LOW confirmed via .NET 8 docs; lazy quantifiers ARE supported).
-        // Only the XML matching-tag rule uses \1, so it alone falls back
-        // to the standard engine with a per-rule timeout.
-        var optsWithBackref = RegexOptions.IgnoreCase;
-
-        return new List<ScrubRule>
+        var rules = new List<ScrubRule>(PhiRuleCatalog.Untrusted.Count);
+        foreach (var spec in PhiRuleCatalog.Untrusted)
         {
-            // ── PioneerRx field-context (highest selectivity, run first) ──
-            // Codex chunk 2b CRITICAL: previous value class [^",}\s]+
-            // stopped at first space, leaking the rest of quoted values
-            // like "John Doe". Now matches either a full quoted string
-            // (with spaces / commas inside) OR an unquoted compact value.
-            new("PioneerRx-JSON",
-                new Regex(@"""(RxNumber|PatientID|PrescriberID|PharmacyChainID)""\s*:\s*(?:""[^""]*""|[^,}\s]+)",
-                    opts, timeout),
-                "\"$1\":\"[PIONEERRX_ID]\"",
-                highConfidence: true),
-            new("PioneerRx-XML",
-                new Regex(@"<(RxNumber|PatientID|PrescriberID|PharmacyChainID)>[^<]+</\1>",
-                    optsWithBackref, timeout),
-                "<$1>[PIONEERRX_ID]</$1>",
-                highConfidence: true),
-            new("PioneerRx-SQL",
-                new Regex(@"\b(RxNumber|PatientID|PrescriberID|PharmacyChainID)\s*=\s*'[^']+'",
-                    opts, timeout),
-                "$1='[PIONEERRX_ID]'",
-                highConfidence: true),
+            var options = spec.Options;
+            if (spec.Engine == PhiEngineClass.NonBacktracking)
+                options |= RegexOptions.NonBacktracking;
 
-            // ── Insurance member IDs (field-context required) ──
-            // Lazy .{0,24}? skips filler words between context keyword and
-            // the member-ID-shaped token. Codex chunk 2b LOW corrected:
-            // .NET 8 NonBacktracking DOES support lazy quantifiers (only
-            // backreferences + lookarounds are unsupported), so these
-            // rules now use the NonBacktracking engine for catastrophic-
-            // backtracking immunity.
-            new("BCBS-Member",
-                new Regex(@"\b(bcbs|blue\s*cross|member_?id)\b.{0,24}?\b[A-Z]{3}\d{6,14}\b",
-                    opts, timeout),
-                "$1 [MEMBER_ID]"),
-            new("Aetna-Member",
-                new Regex(@"\b(aetna|member_?id)\b.{0,24}?\bW\d{8,12}\b",
-                    opts, timeout),
-                "$1 [MEMBER_ID]"),
-            new("Cigna-Member",
-                new Regex(@"\b(cigna|member_?id)\b.{0,24}?\bU?\d{9,12}\b",
-                    opts, timeout),
-                "$1 [MEMBER_ID]"),
-
-            // ── Prescriber NPI (field-context required, more reliable than naked-Luhn) ──
-            // Permissive separator handles JSON ("npi":"..."), YAML
-            // (npi: ...), env (NPI=...), and plain text.
-            new("Prescriber-NPI-field",
-                new Regex(@"\b(prescriber_?npi|provider_?npi|npi)\s*""?\s*[:=]\s*""?\d{10}""?",
-                    opts, timeout),
-                "$1=[NPI]",
-                highConfidence: true),
-
-            // ── NDC variants (5 hyphenation formats) ──
-            new("NDC-4-4-2",
-                new Regex(@"\b\d{4}-\d{4}-\d{2}\b", opts, timeout),
-                "[NDC]"),
-            new("NDC-5-4-2",
-                new Regex(@"\b\d{5}-\d{4}-\d{2}\b", opts, timeout),
-                "[NDC]"),
-            new("NDC-5-3-2",
-                new Regex(@"\b\d{5}-\d{3}-\d{2}\b", opts, timeout),
-                "[NDC]"),
-            new("NDC-5-4-1",
-                new Regex(@"\b\d{5}-\d{4}-\d\b", opts, timeout),
-                "[NDC]"),
-            new("NDC-unhyphenated-with-label",
-                new Regex(@"\b(ndc|national[_\s-]?drug[_\s-]?code)\s*""?\s*[:=]\s*""?\d{10,11}""?",
-                    opts, timeout),
-                "$1=[NDC]"),
-
-            // ── Rx-number (PioneerRx pattern). MUST run BEFORE DEA shape
-            //     because "RX1234567" is 9 chars matching both patterns
-            //     and we want it labeled RX_NUM not DEA. ──
-            new("Rx-number-PioneerRx",
-                new Regex(@"\bRX\d{6,12}\b", opts, timeout),
-                "[RX_NUM]",
-                highConfidence: true),
-
-            // ── DEA number (2 letters + 7 digits + Luhn-like checksum) ──
-            // Pattern matches shape; checksum validation happens in a
-            // second pass via DeaChecksumValid below to keep the regex
-            // NonBacktracking-compatible. NonBacktracking doesn't support
-            // lookarounds, so DEA can't (?!RX) negatively-anchor; rule
-            // ordering above handles the RX/DEA collision instead.
-            new("DEA-number-shape",
-                new Regex(@"\b[A-Z]{2}\d{7}\b", opts, timeout),
-                "[DEA]",
-                highConfidence: true,
-                postValidator: DeaChecksumValid),
-
-            // ── Standard PHI shapes ──
-            new("SSN",
-                new Regex(@"\b\d{3}-\d{2}-\d{4}\b", opts, timeout),
-                "[SSN]",
-                highConfidence: true),
-            new("DOB-shape",
-                new Regex(@"\b(0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])[-/](19|20)\d{2}\b",
-                    opts, timeout),
-                "[DOB]"),
-
-            // ── File path scrub (PII via username in path) ──
-            new("Windows-user-path",
-                new Regex(@"[\\/]Users[\\/][^\\/\s""'<>:|?*]+", opts, timeout),
-                "/Users/[USER]"),
-        };
+            rules.Add(new ScrubRule(
+                spec.Name,
+                new Regex(spec.Pattern, options, timeout),
+                spec.Replacement,
+                highConfidence: spec.HighConfidence,
+                postValidator: PhiValidators.Resolve(spec.PostValidator)));
+        }
+        return rules;
     }
 
     /// <summary>
     /// DEA number checksum: (digit1+digit3+digit5) + 2*(digit2+digit4+digit6)
-    /// mod 10 must equal digit7. Used as a post-regex validator since
-    /// NonBacktracking can't express the checksum constraint.
+    /// mod 10 must equal digit7. Retained as a public API (existing callers/tests); delegates
+    /// to the shared <see cref="PhiValidators.DeaChecksumValid"/>.
     /// </summary>
-    public static bool DeaChecksumValid(string deaCandidate)
-    {
-        if (deaCandidate.Length != 9) return false;
-        var digits = deaCandidate.AsSpan(2);
-        if (digits.Length != 7) return false;
-        for (int i = 0; i < 7; i++)
-        {
-            if (!char.IsDigit(digits[i])) return false;
-        }
-        var n1 = digits[0] - '0';
-        var n2 = digits[1] - '0';
-        var n3 = digits[2] - '0';
-        var n4 = digits[3] - '0';
-        var n5 = digits[4] - '0';
-        var n6 = digits[5] - '0';
-        var n7 = digits[6] - '0';
-        var checksum = (n1 + n3 + n5) + 2 * (n2 + n4 + n6);
-        return checksum % 10 == n7;
-    }
+    public static bool DeaChecksumValid(string deaCandidate) =>
+        PhiValidators.DeaChecksumValid(deaCandidate);
 
     private sealed class ScrubRule
     {
