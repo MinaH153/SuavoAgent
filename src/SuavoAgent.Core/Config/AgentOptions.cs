@@ -75,6 +75,24 @@ public sealed class AgentOptions
     public bool EnableAuditedPatientDetailsEgress { get; set; } = false;
 
     /// <summary>
+    /// Switches the outbound PHI guard's value check from a deny-list to a positive
+    /// token allow-list. Default <c>false</c> (SHADOW MODE): behavior is unchanged —
+    /// the guard logs what strict mode WOULD block (field name only, never the value)
+    /// so false-positives can be measured on a real pilot before enforcement. When
+    /// <c>true</c> (STRICT): any outbound string that is not on the operational token
+    /// allow-list (hash/uuid/ndc/iso/semver/enum…) — and any geographic field
+    /// (city/state/zip5) — is BLOCKED before the POST, closing the
+    /// <c>&lt;=96-char safe-charset</c> escape hatch that lets a packed identifier
+    /// (e.g. <c>DOE-JOHN-1990</c>) egress unscanned.
+    /// <para>
+    /// Flip to <c>true</c> ONLY after the shadow would-block logs show no legitimate
+    /// telemetry is caught (the #105/#106/#107 false-positive lesson — a too-strict
+    /// allow-list silently takes the agent offline on a live PMS).
+    /// </para>
+    /// </summary>
+    public bool StrictOutboundTokenAllowlist { get; set; } = false;
+
+    /// <summary>
     /// When true, agent runs in learning mode (30-day observation).
     /// When false, uses the existing PioneerRx adapter directly.
     /// </summary>

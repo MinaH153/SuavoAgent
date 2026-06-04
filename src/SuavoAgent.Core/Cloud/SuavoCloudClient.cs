@@ -290,7 +290,7 @@ internal static class OutboundPhiGuard
             return;
 
         using var doc = JsonDocument.Parse(body);
-        var offendingField = FindPhiField(doc.RootElement);
+        var offendingField = FindPhiField(doc.RootElement, options.StrictOutboundTokenAllowlist);
         if (offendingField != null)
         {
             // PHI-safe diagnostic: name the FIELD that tripped the guard (never the
@@ -317,7 +317,7 @@ internal static class OutboundPhiGuard
     /// as PHI, or null if the payload is clean. Returns the field name only — never
     /// the value — so it is safe to surface in exceptions and logs.
     /// </summary>
-    private static string? FindPhiField(JsonElement element, string? propertyName = null)
+    private static string? FindPhiField(JsonElement element, bool strict, string? propertyName = null)
     {
         switch (element.ValueKind)
         {
@@ -327,7 +327,7 @@ internal static class OutboundPhiGuard
                     var normalized = NormalizeFieldName(property.Name);
                     if (BlockedFieldNames.Contains(normalized))
                         return normalized;
-                    var nested = FindPhiField(property.Value, normalized);
+                    var nested = FindPhiField(property.Value, strict, normalized);
                     if (nested != null)
                         return nested;
                 }
@@ -337,7 +337,7 @@ internal static class OutboundPhiGuard
             case JsonValueKind.Array:
                 foreach (var item in element.EnumerateArray())
                 {
-                    var nested = FindPhiField(item, propertyName);
+                    var nested = FindPhiField(item, strict, propertyName);
                     if (nested != null)
                         return nested;
                 }
@@ -346,17 +346,41 @@ internal static class OutboundPhiGuard
 
             case JsonValueKind.String:
                 var value = element.GetString();
-                if (string.IsNullOrWhiteSpace(value) || IsOperationalSafeString(propertyName, value))
+                if (string.IsNullOrWhiteSpace(value))
                     return null;
-                // Some telemetry ships pre-validated, pre-serialized JSON as a string
-                // value (intelligenceContext, efficiencyReport, fleetSignals). Scanning
-                // the blob as opaque text trips the date pattern on its embedded ISO
-                // timestamps. Parse and recurse so each leaf gets per-field treatment:
-                // embedded timestamps are exempted; embedded PHI is still caught and
-                // named by its nested field.
-                if (TryParseNestedJson(value, out var parsed))
-                    return FindPhiField(parsed, propertyName);
-                return PhiScrubber.ContainsPhi(value) ? (propertyName ?? "(root)") : null;
+
+                switch (ClassifyOutboundString(propertyName, value))
+                {
+                    case OutboundDecision.OperationalSafe:
+                        return null;
+
+                    // Geographic field (Safe-Harbor identifier) OR a string that only passes the
+                    // legacy <=96-char charset without matching a known operational token shape
+                    // (the packed-identifier hole, e.g. "DOE-JOHN-1990"). Today both are allowed;
+                    // STRICT mode blocks them (positive allow-list). SHADOW mode preserves today's
+                    // behavior but logs the would-block so false-positives are measured on a real
+                    // pilot before enforcement. Field name only — never the value.
+                    case OutboundDecision.GeographicExempt:
+                    case OutboundDecision.UnrecognizedToken:
+                        if (strict)
+                            return propertyName ?? "(root)";
+                        Serilog.Log.Warning(
+                            "OutboundPhiGuard shadow: field {Field} would be BLOCKED under "
+                            + "StrictOutboundTokenAllowlist (not on the operational token allow-list). "
+                            + "No value logged — review before enabling strict mode.",
+                            propertyName ?? "(root)");
+                        return null;
+
+                    case OutboundDecision.NeedsDenylistScan:
+                    default:
+                        // Some telemetry ships pre-validated, pre-serialized JSON as a string
+                        // value (intelligenceContext, efficiencyReport, fleetSignals). Parse and
+                        // recurse so each leaf gets per-field treatment: embedded timestamps are
+                        // exempted; embedded PHI is still caught and named by its nested field.
+                        if (TryParseNestedJson(value, out var parsed))
+                            return FindPhiField(parsed, strict, propertyName);
+                        return PhiScrubber.ContainsPhi(value) ? (propertyName ?? "(root)") : null;
+                }
 
             default:
                 return null;
@@ -388,8 +412,37 @@ internal static class OutboundPhiGuard
         @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private static bool IsOperationalSafeString(string? propertyName, string value)
+    private enum OutboundDecision
     {
+        /// <summary>Operational by field name or a recognized machine token shape — never PHI.</summary>
+        OperationalSafe,
+        /// <summary>Geographic field (city/state/zip5) — a HIPAA Safe-Harbor identifier.</summary>
+        GeographicExempt,
+        /// <summary>Passes the legacy &lt;=96-char charset but matches no known token — the closed hole.</summary>
+        UnrecognizedToken,
+        /// <summary>Free-form text — scan with the deny-list (and recurse into nested JSON).</summary>
+        NeedsDenylistScan,
+    }
+
+    // Known OPERATIONAL token shapes (positive allow-list). Deliberately tight: bare single
+    // words are NOT allowed by value (a surname would hide there) — legitimate enum values
+    // arrive under operational field names (status/outcome/severity/classification/mode…) and
+    // are exempted by NAME instead. Tune this via the shadow would-block logs before enabling
+    // StrictOutboundTokenAllowlist.
+    private static readonly Regex KnownOperationalToken = new(
+        @"^(?:" +
+        @"[0-9a-fA-F]{16,128}" +                                                 // hex hash / digest
+        @"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" + // uuid
+        @"|\d{1,5}-\d{1,4}-\d{1,2}" +                                            // hyphenated NDC (5-4-2 family)
+        @"|\d{6,}" +                                                             // long numeric id (>=6; excludes 5-digit zip)
+        @"|v?\d+\.\d+(?:\.\d+)?(?:[-.][0-9A-Za-z]+)*" +                          // semver / version
+        @"|[a-z][a-z0-9]*(?:_[a-z0-9]+)+" +                                      // snake_case enum (sql_first, rx_delivery_queue)
+        @")$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static OutboundDecision ClassifyOutboundString(string? propertyName, string value)
+    {
+        // Hard-safe operational field NAMES (hash/digest/timestamps/machine ids/enums).
         if (propertyName is not null &&
             (propertyName.EndsWith("hash", StringComparison.OrdinalIgnoreCase) ||
              propertyName.EndsWith("sha256", StringComparison.OrdinalIgnoreCase) ||
@@ -399,20 +452,34 @@ internal static class OutboundPhiGuard
              propertyName.Contains("syncedat", StringComparison.OrdinalIgnoreCase) ||
              propertyName is "ndc" or "evidenceid" or "scanwindowid" or "schemaversion" or "schemasignature" or
                  "pms" or "pmsversion" or "status" or "outcome" or "severity" or "source" or "sourcedetail" or
-                 "classification" or "city" or "state" or "zip5" or "priority" or "temperaturerequirement"))
+                 "classification" or "priority" or "temperaturerequirement"))
         {
-            return true;
+            return OutboundDecision.OperationalSafe;
         }
 
-        // The charset below allows the "-" of a negative UTC offset but not the "+" of a
-        // positive one, so a UTC timestamp ("...T..:..:..+00:00" — every watchdog write
-        // and every canary lastVerifiedAt) would escape this exemption and trip the date
-        // pattern, silently blocking the heartbeat from any non-negative-offset timezone.
-        if (IsoTimestamp.IsMatch(value))
-            return true;
+        // Geographic field names — exempt today, but Safe-Harbor identifiers. Separated so
+        // strict mode can block them (city + state + zip5 is a re-identification vector at a
+        // small pharmacy) while shadow mode logs + allows.
+        if (propertyName is "city" or "state" or "zip5")
+            return OutboundDecision.GeographicExempt;
 
-        return value.Length <= 96 &&
-               value.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '-' or '.' or ':');
+        // ISO-8601 datetimes (incl. "Z"/"+00:00" offsets) are operational metadata. Requires the
+        // "T" + time, so a bare date like a "1990-01-15" DOB is NOT matched and stays scanned.
+        if (IsoTimestamp.IsMatch(value))
+            return OutboundDecision.OperationalSafe;
+
+        // Strings with spaces/punctuation outside the safe charset are free-form → deny-list scan
+        // (today's behavior, preserved for both modes).
+        var charsetOk = value.Length <= 96 &&
+                        value.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '-' or '.' or ':');
+        if (!charsetOk)
+            return OutboundDecision.NeedsDenylistScan;
+
+        // Charset-clean: SAFE only if it matches a known operational token shape. Anything else
+        // (the old escape hatch — a packed identifier like "DOE-JOHN-1990") is unrecognized.
+        return KnownOperationalToken.IsMatch(value)
+            ? OutboundDecision.OperationalSafe
+            : OutboundDecision.UnrecognizedToken;
     }
 
     private static string NormalizeFieldName(string name) =>

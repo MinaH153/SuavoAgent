@@ -281,6 +281,103 @@ public sealed class SuavoCloudClientTests
         Assert.Equal(1, handler.SendCount);
     }
 
+    [Fact]
+    public async Task PostSignedAsync_ShadowMode_AllowsUnrecognizedToken_PreservingAvailability()
+    {
+        // Default (shadow) mode must NOT change behavior — a packed identifier that passes the
+        // legacy <=96-char charset but is not a known token shape is STILL allowed, so the guard
+        // never silently takes the agent offline. (It logs a would-block; we assert it sends.)
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions { ApiKey = "agent-secret", CloudUrl = "https://suavollc.com" }, // StrictOutboundTokenAllowlist defaults false
+            handler);
+
+        await client.PostSignedAsync(
+            "/api/agent/heartbeat",
+            new { status = "ok", marker = "DOE-JOHN-1990" }, // charset-clean, NOT a known token
+            CancellationToken.None);
+
+        Assert.Equal(1, handler.SendCount);
+    }
+
+    [Fact]
+    public async Task PostSignedAsync_StrictMode_BlocksUnrecognizedTokenBeforeSending()
+    {
+        // Strict mode closes the <=96-char escape hatch: a packed identifier that matches no
+        // operational token shape is BLOCKED before the POST.
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions { ApiKey = "agent-secret", CloudUrl = "https://suavollc.com", StrictOutboundTokenAllowlist = true },
+            handler);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.PostSignedAsync(
+                "/api/agent/heartbeat",
+                new { status = "ok", marker = "DOE-JOHN-1990" },
+                CancellationToken.None));
+
+        Assert.Contains("PHI-classified payload", ex.Message);
+        Assert.Equal(0, handler.SendCount);
+    }
+
+    [Fact]
+    public async Task PostSignedAsync_StrictMode_BlocksGeographicField()
+    {
+        // city/state/zip5 are Safe-Harbor identifiers — strict mode blocks them on non-PHI paths.
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions { ApiKey = "agent-secret", CloudUrl = "https://suavollc.com", StrictOutboundTokenAllowlist = true },
+            handler);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.PostSignedAsync(
+                "/api/agent/sync",
+                new { snapshotType = "x", data = new { zip5 = "92101" } },
+                CancellationToken.None));
+
+        Assert.Equal(0, handler.SendCount);
+    }
+
+    [Fact]
+    public async Task PostSignedAsync_StrictMode_AllowsKnownTokenShapes()
+    {
+        // Machine token shapes (uuid, hex hash, semver) stay safe even under strict mode and even
+        // under non-operational field names.
+        using var handler = new RecordingHandler(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"ok":true}""", Encoding.UTF8, "application/json"),
+            });
+        using var client = new SuavoCloudClient(
+            new AgentOptions { ApiKey = "agent-secret", CloudUrl = "https://suavollc.com", StrictOutboundTokenAllowlist = true },
+            handler);
+
+        await client.PostSignedAsync(
+            "/api/agent/heartbeat",
+            new
+            {
+                status = "ok",
+                runToken = "3f2504e0-4f89-41d3-9a0c-0305e82c3301", // uuid
+                build = "v3.19.4",                                  // semver
+                fingerprint = new string('a', 32),                 // hex hash
+            },
+            CancellationToken.None);
+
+        Assert.Equal(1, handler.SendCount);
+    }
+
     private sealed class FixedHandler : HttpMessageHandler
     {
         private readonly HttpResponseMessage _response;
