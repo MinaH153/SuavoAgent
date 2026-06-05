@@ -230,6 +230,49 @@ internal static class BinaryDownloader
     }
 
     /// <summary>
+    /// Writes binaries.manifest (name -> sha256 of the on-disk binary) to ProgramData. The Broker's
+    /// integrity guard (SessionWatcher.VerifyHelperIntegrity) refuses to launch the Helper if its
+    /// on-disk hash != this manifest, then calls Application.Exit -> the agent goes BLIND with no
+    /// crash and no app-log error. SelfUpdater.RegenerateBinariesManifest does this after an OTA swap,
+    /// but the GUI installer did NOT — so installing/reinstalling over existing binaries left a STALE
+    /// manifest and the new Helper was rejected. (Live brick on Mina's box 2026-06-05.) This mirrors
+    /// SelfUpdater's manifest shape exactly so OTA and install agree. Call AFTER all binaries are
+    /// placed and BEFORE the services start. Must NOT throw — a missing manifest fails the Broker
+    /// closed, so surface the error but let the caller decide.
+    /// </summary>
+    public static void WriteBinariesManifest(string installDir, string? manifestPathOverride = null)
+    {
+        string[] all =
+        [
+            "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe",
+            "SuavoAgent.Helper.exe", "SuavoAgent.Watchdog.exe",
+        ];
+        var entries = new List<string>();
+        foreach (var bin in all)
+        {
+            var path = Path.Combine(installDir, bin);
+            if (!File.Exists(path)) continue; // e.g. a box without the Watchdog
+            entries.Add($"  \"{bin}\": \"{ComputeSha256(path)}\"");
+        }
+        if (entries.Count == 0)
+        {
+            ConsoleUI.WriteWarn("binaries.manifest NOT written — no binaries found in install dir");
+            return;
+        }
+
+        var json = "{\n" + string.Join(",\n", entries) + "\n}\n";
+        var manifestPath = manifestPathOverride ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "binaries.manifest");
+        Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
+        var tmp = manifestPath + ".tmp";
+        File.WriteAllText(tmp, json, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        if (File.Exists(manifestPath)) File.Replace(tmp, manifestPath, null);
+        else File.Move(tmp, manifestPath);
+        ConsoleUI.WriteOk($"binaries.manifest written ({entries.Count} binaries) — Broker Helper-integrity root");
+    }
+
+    /// <summary>
     /// Retries an HTTP operation on transient failures (network errors + 5xx)
     /// with exponential backoff (1s / 3s / 9s). Non-transient failures
     /// (auth, 4xx, file IO) surface immediately on the first attempt.
