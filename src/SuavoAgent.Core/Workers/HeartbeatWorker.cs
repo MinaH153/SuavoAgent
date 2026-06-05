@@ -75,6 +75,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
     private DateOnly _lastPruneDate;
     private DateTimeOffset? _lastSyncAt;
     private bool _consentReceiptSent;
+    private bool _otaHealthConfirmed;
 
     public HeartbeatWorker(
         ILogger<HeartbeatWorker> logger,
@@ -479,6 +480,21 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 _lastSyncAt = DateTimeOffset.UtcNow;
                 _consecutiveFailures = 0;
                 _logger.LogDebug("Heartbeat OK");
+
+                // OTA crash-loop guard: a SUCCESSFUL cloud heartbeat is the real "healthy" milestone
+                // (Codex P1: must be AFTER the send succeeds, not while building the payload — else an
+                // update that breaks cloud connectivity could commit locally and delete the rollback).
+                // Commit any OTA on probation: clear the flag + reap the .old set. Once per process.
+                if (!_otaHealthConfirmed)
+                {
+                    _otaHealthConfirmed = true;
+                    var otaInstallDir = Path.GetDirectoryName(Environment.ProcessPath);
+                    if (!string.IsNullOrEmpty(otaInstallDir))
+                    {
+                        try { SuavoAgent.Core.Cloud.SelfUpdater.ConfirmHealthyAndReap(otaInstallDir, _logger); }
+                        catch (Exception ex) { _logger.LogDebug(ex, "OTA confirm-healthy non-fatal"); }
+                    }
+                }
 
                 // Echo updateChannel from server for canary rollout tracking
                 if (response.HasValue &&

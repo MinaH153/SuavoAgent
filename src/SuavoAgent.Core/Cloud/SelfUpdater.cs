@@ -314,6 +314,24 @@ public static class SelfUpdater
     {
         var installDir = Path.GetDirectoryName(Environment.ProcessPath);
         if (string.IsNullOrEmpty(installDir)) return;
+        CleanupOldBinaries(installDir, logger);
+    }
+
+    /// <summary>
+    /// Reap stale <c>.exe.old</c> rollback binaries — UNLESS an OTA is on probation, in which case
+    /// the <c>.old</c> set is the rollback target and must be preserved until the new set commits as
+    /// healthy (Codex 2026-06-04 P1: this cleanup runs at HeartbeatWorker startup BEFORE any health
+    /// confirmation, and would otherwise make downgrade impossible).
+    /// </summary>
+    public static void CleanupOldBinaries(string installDir, ILogger logger)
+    {
+        if (string.IsNullOrEmpty(installDir)) return;
+
+        if (new OtaProbationStore(installDir).HasProbation)
+        {
+            logger.LogDebug("Skipping .old cleanup — an OTA is on probation; rollback set preserved");
+            return;
+        }
 
         foreach (var oldFile in Directory.GetFiles(installDir, "*.exe.old"))
         {
@@ -327,6 +345,143 @@ public static class SelfUpdater
                 logger.LogDebug(ex, "Could not delete {File} — will retry next startup", Path.GetFileName(oldFile));
             }
         }
+    }
+
+    /// <summary>
+    /// Crash-loop downgrade: restore the last-good <c>.old</c> set over the current binaries,
+    /// ALL-OR-NOTHING with its own rollback (mirroring <see cref="SwapBinaries"/>) so a partial
+    /// restore can never leave Core/Broker/Helper version skew (Codex 2026-06-04 P1). Returns false
+    /// (changing nothing) when the full <c>.old</c> set isn't present. The caller (early bootstrap)
+    /// then queues a Watchdog restart so the restored set is actually loaded — Broker/Helper .exe are
+    /// locked while running, so this only swaps files on disk.
+    /// </summary>
+    public static bool RestoreOldBinaries(string installDir, ILogger logger)
+    {
+        var binaries = new[] { "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe" };
+
+        var missing = binaries.Where(b => !File.Exists(Path.Combine(installDir, b + ".old"))).ToList();
+        if (missing.Count > 0)
+        {
+            logger.LogWarning("Cannot downgrade — missing rollback set {Missing}; staying on current binaries",
+                string.Join(", ", missing));
+            return false;
+        }
+
+        // Each entry: (current path, the displaced-bad backup path) so we can undo a partial restore.
+        var done = new List<(string Current, string Bad)>();
+        try
+        {
+            foreach (var bin in binaries)
+            {
+                var current = Path.Combine(installDir, bin);
+                var oldFile = current + ".old";
+                var bad = current + ".bad";
+
+                if (File.Exists(bad)) File.Delete(bad);
+                if (File.Exists(current)) File.Move(current, bad);
+                File.Move(oldFile, current);
+                done.Add((current, bad));
+                logger.LogInformation("Downgraded {Binary} to last-good", bin);
+            }
+
+            // Success — discard the bad set.
+            foreach (var (_, bad) in done)
+                try { if (File.Exists(bad)) File.Delete(bad); } catch { /* best-effort */ }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Downgrade restore failed after {Count} — rolling back the restore", done.Count);
+            foreach (var (current, bad) in done)
+            {
+                try
+                {
+                    // current now holds the restored .old → put it back as .old; bad → current.
+                    if (File.Exists(current)) File.Move(current, current + ".old");
+                    if (File.Exists(bad)) File.Move(bad, current);
+                }
+                catch { /* best-effort rollback */ }
+            }
+            return false;
+        }
+    }
+
+    /// <summary>What the bootstrap should do about an OTA on probation, decided early (before risky init).</summary>
+    public enum ProbationStartupAction
+    {
+        /// <summary>No OTA on trial — normal startup.</summary>
+        NoProbation,
+        /// <summary>On trial, under the crash-loop budget — proceed with startup.</summary>
+        Continue,
+        /// <summary>Crash-loop: the <c>.old</c> set was restored — Exit so the Watchdog reloads it.</summary>
+        RestartForDowngrade,
+        /// <summary>Crash-loop but no rollback set — can't self-heal; log CRITICAL + proceed (operator needed).</summary>
+        EscalateNoRollback,
+    }
+
+    private static readonly string[] OtaBinaries = { "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe" };
+
+    private static bool AllOldPresent(string installDir) =>
+        OtaBinaries.All(b => File.Exists(Path.Combine(installDir, b + ".old")));
+
+    /// <summary>
+    /// Early-bootstrap crash-loop guard: if an OTA is on probation, increment the boot counter (atomic,
+    /// fail-closed) and let <see cref="OtaProbationEvaluator"/> decide. On Downgrade, restore the
+    /// last-good set all-or-nothing and signal a restart; if the restore can't proceed, escalate. The
+    /// caller runs this BEFORE risky init so a crash-loop converges to a downgrade.
+    /// </summary>
+    public static ProbationStartupAction HandleProbationOnStartup(string installDir, int maxProbationBoots, ILogger logger)
+    {
+        var store = new OtaProbationStore(installDir);
+        if (!store.HasProbation) return ProbationStartupAction.NoProbation;
+
+        int boots;
+        try { boots = store.IncrementBoots(); }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "OTA probation boot-count write failed — escalating (cannot guarantee crash-loop convergence)");
+            return ProbationStartupAction.EscalateNoRollback;
+        }
+
+        var state = new OtaProbationState(
+            HasPendingProbation: true,
+            HealthConfirmed: false, // health is confirmed LATE, after init; early we only check crash-loop
+            BootsSinceSwap: boots,
+            MaxProbationBoots: maxProbationBoots,
+            OldSetAvailable: AllOldPresent(installDir));
+
+        switch (OtaProbationEvaluator.Evaluate(state))
+        {
+            case OtaProbationDecision.Downgrade:
+                if (RestoreOldBinaries(installDir, logger))
+                {
+                    store.Clear();
+                    logger.LogWarning("OTA crash-loop ({Boots} boots) — downgraded to last-good; restarting", boots);
+                    return ProbationStartupAction.RestartForDowngrade;
+                }
+                logger.LogCritical("OTA crash-loop but downgrade restore FAILED — operator intervention needed");
+                return ProbationStartupAction.EscalateNoRollback;
+
+            case OtaProbationDecision.EscalateNoRollback:
+                logger.LogCritical("OTA crash-loop ({Boots} boots) with NO rollback set — operator intervention needed", boots);
+                return ProbationStartupAction.EscalateNoRollback;
+
+            default:
+                return ProbationStartupAction.Continue;
+        }
+    }
+
+    /// <summary>
+    /// Late health milestone (first good heartbeat + IPC up): commit the OTA — clear probation and reap
+    /// the <c>.old</c> rollback set. No-op when nothing is on trial.
+    /// </summary>
+    public static void ConfirmHealthyAndReap(string installDir, ILogger logger)
+    {
+        var store = new OtaProbationStore(installDir);
+        if (!store.HasProbation) return;
+        store.Clear();
+        CleanupOldBinaries(installDir, logger); // flag cleared ⇒ now permitted to reap
+        logger.LogInformation("OTA confirmed healthy — committed; rollback set reaped");
     }
 
     public static void CleanupOldBinary(ILogger logger)
@@ -501,6 +656,13 @@ public static class SelfUpdater
 
             if (SwapBinaries(installDir, logger))
             {
+                // OTA crash-loop guard: the just-swapped set is now ON PROBATION. The next startup
+                // increments the boot counter; if it crash-loops it auto-downgrades to the .old set,
+                // and a healthy first-heartbeat commits + reaps. The .old set is preserved meanwhile
+                // (CleanupOldBinaries is probation-guarded).
+                try { new OtaProbationStore(installDir).Begin(manifest.Version, DateTimeOffset.UtcNow); }
+                catch (Exception ex) { logger.LogWarning(ex, "Could not start OTA probation — proceeding without crash-loop guard"); }
+
                 // Self-heal Chunk B: swap the Watchdog separately + best-effort. If the Watchdog
                 // service is running its .exe is locked — skip without failing the (already-applied)
                 // Core/Broker/Helper swap; the .new stays for a later attempt. For a box MISSING the

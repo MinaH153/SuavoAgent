@@ -100,6 +100,21 @@ try
         serilogLogger.Information("Bootstrap update applied — restarting");
         Environment.Exit(1);
     }
+
+    // OTA crash-loop guard — runs BEFORE any risky init (DPAPI / DB / brain probe) so a crash-loop
+    // converges to a downgrade. If the just-swapped set crash-loops past its boot budget, restore the
+    // last-good .old set and restart onto it; otherwise count the boot and continue.
+    var probationInstallDir = Path.GetDirectoryName(Environment.ProcessPath);
+    if (!string.IsNullOrEmpty(probationInstallDir))
+    {
+        var probationAction = SuavoAgent.Core.Cloud.SelfUpdater.HandleProbationOnStartup(
+            probationInstallDir, SuavoAgent.Core.Cloud.OtaProbationEvaluator.DefaultMaxProbationBoots, earlyLog);
+        if (probationAction == SuavoAgent.Core.Cloud.SelfUpdater.ProbationStartupAction.RestartForDowngrade)
+        {
+            serilogLogger.Information("OTA crash-loop — downgraded to last-good binaries; restarting");
+            Environment.Exit(1);
+        }
+    }
 }
 catch (Exception ex)
 {
