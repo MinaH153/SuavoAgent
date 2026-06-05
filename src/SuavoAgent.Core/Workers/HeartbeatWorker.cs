@@ -55,6 +55,13 @@ public sealed class HeartbeatWorker : ResilientHostedService
     private readonly object _activeWorkflowLock = new();
     private CancellationTokenSource? _activeWorkflowCts;
     private string? _activeWorkflowRunId;
+
+    // navigate_app — the general agentic loop. Single-threaded + cancellable, mirroring workflows.
+    private readonly SemaphoreSlim _navigationSemaphore = new(1, 1);
+    private readonly object _activeNavigationLock = new();
+    private CancellationTokenSource? _activeNavigationCts;
+    private string? _activeNavigationRunId;
+
     private DateTimeOffset _lastContextSync = DateTimeOffset.MinValue;
     private DateTimeOffset _lastEfficiencyReport = DateTimeOffset.MinValue;
     private int _consecutiveFailures;
@@ -803,6 +810,12 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "update_selector":
                     await HandleUpdateSelectorCommandAsync(scEl, cmd, ct);
                     break;
+                case "navigate_app":
+                    _ = Task.Run(() => HandleNavigateAppAsync(scEl, cmd, ct), ct);
+                    break;
+                case "abort_navigation":
+                    await HandleAbortNavigationAsync(scEl, cmd, ct);
+                    break;
                 case "force_learning_phase":
                     await HandleForceLearningPhaseAsync(scEl, cmd, ct);
                     break;
@@ -1228,6 +1241,170 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex) { _logger.LogWarning(ex, "abort_workflow: cancel threw"); }
 
         await AckAsync(true, new { aborted = true, run_id = requestedRunId, reason = requestedReason }, null);
+    }
+
+    private async Task HandleNavigateAppAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        // ValueKind-guarded so a signed-but-malformed payload (e.g. numeric objective) acks cleanly
+        // instead of throwing GetString() unobserved in this fire-and-forget task (Codex Q5).
+        var objective = dataEl.TryGetProperty("objective", out var o) && o.ValueKind == JsonValueKind.String
+            ? o.GetString() : null;
+        var taskKey = dataEl.TryGetProperty("taskKey", out var tk) && tk.ValueKind == JsonValueKind.String
+            ? tk.GetString() : null;
+        if (string.IsNullOrWhiteSpace(objective) || string.IsNullOrWhiteSpace(taskKey))
+        {
+            await AckAsync(false, null, "malformed_navigate_payload");
+            return;
+        }
+
+        var runId = dataEl.TryGetProperty("runId", out var rid) && rid.ValueKind == JsonValueKind.String
+            && rid.GetString() is { Length: > 0 } r
+            ? r : Guid.NewGuid().ToString("n");
+        var maxSteps = dataEl.TryGetProperty("maxSteps", out var ms) && ms.TryGetInt32(out var msv) ? msv : 25;
+        var deadlineSeconds = dataEl.TryGetProperty("deadlineSeconds", out var ds) && ds.TryGetInt32(out var dsv) ? dsv : 120;
+        // Fail-safe default: dry-run unless the operator EXPLICITLY sends dryRun=false.
+        var dryRun = !(dataEl.TryGetProperty("dryRun", out var dr) && dr.ValueKind == JsonValueKind.False);
+
+        if (!await _navigationSemaphore.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            await AckAsync(false, null, "navigation_already_running");
+            return;
+        }
+
+        try
+        {
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: runId,
+                EventType: "navigate_run_received",
+                FromState: "queued",
+                ToState: "starting",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: $"navigate dryRun={dryRun} maxSteps={maxSteps}"));
+
+            var charter = _serviceProvider.GetService<MissionCharter>() ?? BuildEphemeralCharter();
+            var audit = _serviceProvider.GetService<SuavoAgent.Core.Audit.AuditChain>()
+                ?? new SuavoAgent.Core.Audit.AuditChain();
+            var pharmacyId = _options.PharmacyId ?? charter.PharmacyId;
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(deadlineSeconds);
+
+            var safetyOptions = new SuavoAgent.Core.Agentic.Adapters.NavigateSafetyOptions(
+                EnableTaskAutonomy: _options.EnableTaskAutonomy,
+                LivePms: false, // v1: navigate is sandbox/dry-run gated; live-PMS navigate is a future, explicit path
+                ExecutorMode: _options.PricingExecutor,
+                AllowLiveActuation: false);
+
+            var runner = SuavoAgent.Core.Agentic.NavigateLoopFactory.Create(
+                _serviceProvider, safetyOptions, charter, audit, deadline);
+
+            var loopOptions = new SuavoAgent.Core.Agentic.AgenticLoopOptions
+            {
+                MaxSteps = maxSteps,
+                Deadline = TimeSpan.FromSeconds(deadlineSeconds),
+                DryRun = dryRun,
+                AllowedActions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "Click", "Type", "PressKey", "WaitForElement", "VerifyElement", "Log",
+                },
+            };
+
+            var objectiveModel = new SuavoAgent.Core.Agentic.AgentObjective(objective!, taskKey!, pharmacyId);
+
+            using var navCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            lock (_activeNavigationLock)
+            {
+                _activeNavigationCts = navCts;
+                _activeNavigationRunId = runId;
+            }
+
+            SuavoAgent.Core.Agentic.AgenticLoopResult result;
+            try
+            {
+                result = await runner.RunAsync(objectiveModel, loopOptions, navCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_activeNavigationLock)
+                {
+                    _activeNavigationCts = null;
+                    _activeNavigationRunId = null;
+                }
+            }
+
+            _logger.LogInformation(
+                "navigate_app run={RunId} termination={Term} steps={Steps} cloud={Cloud} escalated={Esc}",
+                runId, result.Termination, result.StepCount, result.CloudCallsUsed, result.EscalationEmitted);
+
+            await AckAsync(
+                ok: result.Termination == SuavoAgent.Core.Agentic.TerminationReason.Done,
+                result: new
+                {
+                    run_id = runId,
+                    termination = result.Termination.ToString(),
+                    steps = result.StepCount,
+                    escalated = result.EscalationEmitted,
+                    detail = result.Detail,
+                },
+                err: result.Termination == SuavoAgent.Core.Agentic.TerminationReason.Done ? null : result.Termination.ToString());
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "navigate_app execution exception");
+            await AckAsync(false, null, ex.Message);
+        }
+        finally
+        {
+            _navigationSemaphore.Release();
+        }
+    }
+
+    private async Task HandleAbortNavigationAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+        var requestedRunId = dataEl.TryGetProperty("runId", out var rid) && rid.ValueKind == JsonValueKind.String
+            ? rid.GetString() : null;
+        var requestedReason = dataEl.TryGetProperty("reason", out var rr) && rr.ValueKind == JsonValueKind.String
+            ? rr.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        CancellationTokenSource? activeCts;
+        string? activeRunId;
+        lock (_activeNavigationLock)
+        {
+            activeCts = _activeNavigationCts;
+            activeRunId = _activeNavigationRunId;
+        }
+
+        // A specific runId that doesn't match the active run is a no-op ack; no runId ⇒ abort whatever's active.
+        if (!string.IsNullOrEmpty(requestedRunId) && !string.Equals(activeRunId, requestedRunId, StringComparison.Ordinal))
+        {
+            await AckAsync(true, new { aborted = false, reason = "no_active_run_with_id" }, null);
+            return;
+        }
+
+        try { activeCts?.Cancel(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "abort_navigation: cancel threw"); }
+
+        await AckAsync(true, new { aborted = true, run_id = activeRunId, reason = requestedReason }, null);
     }
 
     private MissionCharter BuildEphemeralCharter() => new(
