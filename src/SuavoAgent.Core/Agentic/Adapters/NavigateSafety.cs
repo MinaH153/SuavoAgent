@@ -15,7 +15,10 @@ public static class NavigateSafety
     /// <summary>Actuating verbs that change desktop state — these require the autonomy gate.</summary>
     private static readonly HashSet<string> DestructiveVerbs = new(StringComparer.OrdinalIgnoreCase)
     {
-        "click_by_label", "type_into_field", "press_keys", "launch_sandbox_app",
+        // NB: click_by_signature (template replay) MUST be here — omitting it lets replay clicks
+        // skip the M3 autonomy gate (Codex 2026-06-04 P1). Keep this in lock-step with every
+        // actuating verb the compiler/reasoner can emit.
+        "click_by_label", "click_by_signature", "type_into_field", "press_keys", "launch_sandbox_app",
     };
 
     public static bool IsDestructive(NextAction action)
