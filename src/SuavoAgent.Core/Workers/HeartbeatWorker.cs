@@ -813,6 +813,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "navigate_app":
                     _ = Task.Run(() => HandleNavigateAppAsync(scEl, cmd, ct), ct);
                     break;
+                case "replay_template":
+                    _ = Task.Run(() => HandleReplayTemplateAsync(scEl, cmd, ct), ct);
+                    break;
                 case "abort_navigation":
                     await HandleAbortNavigationAsync(scEl, cmd, ct);
                     break;
@@ -1363,6 +1366,134 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "navigate_app execution exception");
+            await AckAsync(false, null, ex.Message);
+        }
+        finally
+        {
+            _navigationSemaphore.Release();
+        }
+    }
+
+    private async Task HandleReplayTemplateAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) && cid.ValueKind == JsonValueKind.String
+            ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        var taskKey = dataEl.TryGetProperty("taskKey", out var tk) && tk.ValueKind == JsonValueKind.String ? tk.GetString() : null;
+        if (string.IsNullOrWhiteSpace(taskKey))
+        {
+            await AckAsync(false, null, "missing_taskKey");
+            return;
+        }
+
+        SuavoAgent.Contracts.Learning.WorkflowTemplate? template = null;
+        try
+        {
+            if (dataEl.TryGetProperty("template", out var t) && t.ValueKind == JsonValueKind.Object)
+                template = t.Deserialize<SuavoAgent.Contracts.Learning.WorkflowTemplate>();
+        }
+        catch (Exception) { template = null; }
+
+        if (template is null || template.Steps is null || template.Steps.Count == 0)
+        {
+            await AckAsync(false, null, "malformed_template");
+            return;
+        }
+
+        var runId = dataEl.TryGetProperty("runId", out var rid) && rid.ValueKind == JsonValueKind.String
+            && rid.GetString() is { Length: > 0 } r ? r : Guid.NewGuid().ToString("n");
+        var deadlineSeconds = dataEl.TryGetProperty("deadlineSeconds", out var ds) && ds.TryGetInt32(out var dsv) ? dsv : 120;
+        var dryRun = !(dataEl.TryGetProperty("dryRun", out var dr) && dr.ValueKind == JsonValueKind.False);
+
+        // Share the navigation semaphore: replay and navigate both actuate, so never concurrently.
+        if (!await _navigationSemaphore.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            await AckAsync(false, null, "actuation_already_running");
+            return;
+        }
+
+        try
+        {
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: runId,
+                EventType: "replay_template_received",
+                FromState: "queued",
+                ToState: "starting",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: $"replay template={template.TemplateId} dryRun={dryRun} steps={template.Steps.Count}"));
+
+            var charter = _serviceProvider.GetService<MissionCharter>() ?? BuildEphemeralCharter();
+            var audit = _serviceProvider.GetService<SuavoAgent.Core.Audit.AuditChain>()
+                ?? new SuavoAgent.Core.Audit.AuditChain();
+            var pharmacyId = _options.PharmacyId ?? charter.PharmacyId;
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(deadlineSeconds);
+
+            var safetyOptions = new SuavoAgent.Core.Agentic.Adapters.NavigateSafetyOptions(
+                EnableTaskAutonomy: _options.EnableTaskAutonomy,
+                LivePms: false,
+                ExecutorMode: _options.PricingExecutor,
+                AllowLiveActuation: false);
+
+            var replayer = SuavoAgent.Core.Agentic.Replication.ReplayFactory.Create(
+                _serviceProvider, safetyOptions, charter, audit, deadline);
+
+            var plan = SuavoAgent.Core.Agentic.Replication.TemplatePlanCompiler.Compile(template);
+            var baseContext = new SuavoAgent.Core.Agentic.ActuationContext(pharmacyId, taskKey, dryRun);
+            var objective = new SuavoAgent.Core.Agentic.AgentObjective($"replay:{template.SkillId}", taskKey, pharmacyId);
+            var options = new SuavoAgent.Core.Agentic.Replication.TemplateReplayOptions();
+
+            using var navCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            lock (_activeNavigationLock)
+            {
+                _activeNavigationCts = navCts;
+                _activeNavigationRunId = runId;
+            }
+
+            SuavoAgent.Core.Agentic.Replication.ReplayResult result;
+            try
+            {
+                result = await replayer.ReplayAsync(plan, objective, baseContext, options, navCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_activeNavigationLock)
+                {
+                    _activeNavigationCts = null;
+                    _activeNavigationRunId = null;
+                }
+            }
+
+            _logger.LogInformation(
+                "replay_template run={RunId} outcome={Outcome} steps={Steps} failedOrdinal={Ord}",
+                runId, result.Outcome, result.StepsCompleted, result.FailedOrdinal);
+
+            await AckAsync(
+                ok: result.Outcome == SuavoAgent.Core.Agentic.Replication.ReplayOutcome.Completed,
+                result: new
+                {
+                    run_id = runId,
+                    outcome = result.Outcome.ToString(),
+                    steps_completed = result.StepsCompleted,
+                    failed_ordinal = result.FailedOrdinal,
+                    detail = result.Detail,
+                },
+                err: result.Outcome == SuavoAgent.Core.Agentic.Replication.ReplayOutcome.Completed ? null : result.Outcome.ToString());
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "replay_template execution exception");
             await AckAsync(false, null, ex.Message);
         }
         finally

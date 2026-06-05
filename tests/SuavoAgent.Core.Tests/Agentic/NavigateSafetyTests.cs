@@ -119,6 +119,7 @@ public sealed class NavigateSafetyTests
 
     [Theory]
     [InlineData("click_by_label", true)]
+    [InlineData("click_by_signature", true)] // template replay — MUST be gated by autonomy (Codex P1 regression guard)
     [InlineData("type_into_field", true)]
     [InlineData("press_keys", true)]
     [InlineData("launch_sandbox_app", true)]
