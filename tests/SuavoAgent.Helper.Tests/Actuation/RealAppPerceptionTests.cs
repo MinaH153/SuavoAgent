@@ -28,6 +28,7 @@ namespace SuavoAgent.Helper.Tests.Actuation;
 /// windows-uia-smoke CI job builds the harness and sets it. No-op skip otherwise.
 /// </summary>
 [SupportedOSPlatform("windows")]
+[Collection("RealDesktopUia")]
 public sealed class RealAppPerceptionTests
 {
     [Fact]

@@ -26,6 +26,7 @@ namespace SuavoAgent.Helper.Tests.Actuation;
 /// the signature resolver + the SendInput driver + a UIA read-back, independent of that filter.
 /// </summary>
 [SupportedOSPlatform("windows")]
+[Collection("RealDesktopUia")]
 public sealed class RealNotepadUiaTests
 {
     [Fact]

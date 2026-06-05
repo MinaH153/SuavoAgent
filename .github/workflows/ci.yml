@@ -162,10 +162,10 @@ jobs:
       - name: Live-UIA real-Notepad smoke (perceive → resolve → type → read back)
         run: dotnet test tests/SuavoAgent.Helper.Tests/SuavoAgent.Helper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~RealNotepadUiaTests" -v normal
 
-      - name: Real-app loop primitives on a classic-Win32 app (perceive → resolve → act → re-perceive)
+      - name: Real-app loop on a classic-Win32 app (primitives + full AgenticLoopRunner → Done)
         env:
           SUAVOAGENT_UIA_HARNESS: ${{ github.workspace }}\tests\SuavoAgent.UiaHarness\bin\Release\net8.0-windows\SuavoAgent.UiaHarness.exe
-        run: dotnet test tests/SuavoAgent.Helper.Tests/SuavoAgent.Helper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~RealAppPerceptionTests" -v normal
+        run: dotnet test tests/SuavoAgent.Helper.Tests/SuavoAgent.Helper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~RealAppPerceptionTests|FullyQualifiedName~RealAppLoopTests" -v normal
 
   agent-merge-gate:
     name: Agent Merge Gate
