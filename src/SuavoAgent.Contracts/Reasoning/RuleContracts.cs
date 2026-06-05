@@ -243,6 +243,15 @@ public sealed record RuleContext
 
     /// <summary>Timestamp of context capture. Used for audit trails.</summary>
     public DateTimeOffset CapturedAt { get; init; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Natural-language objective for a general navigate run (e.g. "price these NDCs
+    /// then file the delivery"). Null in scoped/skill mode (backward-compatible). When
+    /// set it threads into the reasoning prompt (Tier-2 local + Tier-3 cloud scrubbed
+    /// payload) so the brain grounds its next action in the user's goal, not just the
+    /// rule context. Non-PHI free text; still passes through PhiScrubber on egress.
+    /// </summary>
+    public string? UserObjective { get; init; }
 }
 
 /// <summary>
