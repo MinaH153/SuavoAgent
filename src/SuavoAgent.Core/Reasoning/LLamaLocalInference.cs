@@ -114,12 +114,17 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
             return null;
         }
 
-        var prompt = InferencePromptBuilder.Build(request);
+        // Resolve the chat template + stop strings from the model id. A mismatched template feeds the
+        // model special tokens it doesn't know -> it emits its end-of-turn first -> 0 output. The
+        // grammar SHOULD mask that, but the win-x64 llama.cpp grammar pass was a no-op on the live box
+        // (2026-06-05), so the template itself must elicit valid JSON. (TinyLlama needs Zephyr, not Llama-3.)
+        var promptFormat = InferencePromptBuilder.ResolveFormat(ModelId);
+        var prompt = InferencePromptBuilder.Build(request, promptFormat);
 
         var inferenceParams = new InferenceParams
         {
             MaxTokens = _options.MaxOutputTokens,
-            AntiPrompts = new[] { "<|eot_id|>", "<|end_of_text|>" },
+            AntiPrompts = InferencePromptBuilder.AntiPromptsFor(promptFormat),
             SamplingPipeline = new DefaultSamplingPipeline
             {
                 Temperature = 0.1f,
