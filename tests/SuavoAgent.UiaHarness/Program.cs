@@ -1,67 +1,81 @@
 using System;
-using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace SuavoAgent.UiaHarness;
 
 /// <summary>
 /// A minimal classic-Win32 (WinForms) app that stands in for a real PMS screen the agent must drive.
-/// Its controls are classic UIA control types (Button, Edit, Text) with stable AutomationIds — exactly
-/// what the production FlaUiElementExtractor + UiaSignatureResolver read on a real Win32 app (PioneerRx).
+/// Its controls are classic UIA control types (Button) with stable AutomationIds — exactly what the
+/// production FlaUiElementExtractor + UiaSignatureResolver read on a real Win32 app (PioneerRx).
 ///
-/// Workflow: a "Save" button (AutomationId=saveButton, Name=Save) is shown. Clicking it hides the button
-/// and reveals a "Done" button (AutomationId=doneButton, Name=Done) — a real, perceivable state transition
-/// the agentic loop / template replay can drive to completion and verify. (Both are ControlType.Button, an
-/// InterestingType the production FlaUiElementExtractor perceives; a Label/Text is filtered out.)
+/// Two arg-selected workflows (a sequence of buttons, each click hides itself and reveals the next —
+/// a real, perceivable state transition the loop / template replay can drive and verify):
+///   • (default)  saveButton → doneButton          — the 1-step loop/primitive tests.
+///   • "learn"    openButton → searchButton → approveButton → doneButton — a 3-step routine the
+///                watch-&-learn pipeline can observe, mine into a template, and replay.
 /// </summary>
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
+        var learn = args.Length > 0 && string.Equals(args[0], "learn", StringComparison.OrdinalIgnoreCase);
+        var steps = learn
+            ? new[] { ("openButton", "Open"), ("searchButton", "Search"), ("approveButton", "Approve") }
+            : new[] { ("saveButton", "Save") };
+
         var form = new Form
         {
             Text = "SuavoAgent UIA Harness",
-            Width = 420,
-            Height = 240,
+            Width = 460,
+            Height = 260,
             StartPosition = FormStartPosition.CenterScreen,
             TopMost = true,
         };
 
-        var saveButton = new Button
+        // Build the button sequence: each is hidden until its turn; clicking it hides it and shows the next.
+        var buttons = steps.Select(s => new Button
         {
-            Name = "saveButton",        // → UIA AutomationId
-            Text = "Save",              // → UIA Name (accessible label)
-            AccessibleName = "Save",
-            Width = 160,
+            Name = s.Item1,            // → UIA AutomationId
+            Text = s.Item2,            // → UIA Name (accessible label)
+            AccessibleName = s.Item2,
+            Width = 200,
             Height = 48,
-            Left = 130,
-            Top = 60,
-        };
+            Left = 120,
+            Top = 70,
+            Visible = false,
+        }).ToList();
 
         var doneButton = new Button
         {
-            Name = "doneButton",        // → UIA AutomationId
-            Text = "Done",              // → UIA Name
+            Name = "doneButton",
+            Text = "Done",
             AccessibleName = "Done",
             Width = 200,
             Height = 48,
-            Left = 110,
-            Top = 120,
-            Visible = false,            // appears only after the Save click — the completion signal (no click handler)
+            Left = 120,
+            Top = 70,
+            Visible = false,           // the completion signal (no click handler)
         };
 
-        saveButton.Click += (_, _) =>
+        for (var i = 0; i < buttons.Count; i++)
         {
-            saveButton.Visible = false; // "Button:Save" disappears
-            doneButton.Visible = true;  // "Button:Done" appears
-        };
-
-        form.Controls.Add(saveButton);
+            var current = buttons[i];
+            var next = i + 1 < buttons.Count ? buttons[i + 1] : doneButton;
+            current.Click += (_, _) =>
+            {
+                current.Visible = false; // this step's "Button:<Name>" disappears
+                next.Visible = true;     // the next step (or "Button:Done") appears
+            };
+            form.Controls.Add(current);
+        }
         form.Controls.Add(doneButton);
+
+        buttons[0].Visible = true; // first step is shown on launch
         Application.Run(form);
     }
 }
