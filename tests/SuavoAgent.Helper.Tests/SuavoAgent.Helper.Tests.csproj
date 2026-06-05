@@ -18,4 +18,11 @@
     <ProjectReference Include="..\..\src\SuavoAgent.Helper\SuavoAgent.Helper.csproj" />
   </ItemGroup>
 
+  <!-- FlaUI.UIA2 needs UIAutomationClient (Microsoft.WindowsDesktop.App) at runtime. Pull it in ONLY
+       when building on Windows (the windows-uia-smoke job) so the real-UIA RealNotepadUiaTests can run;
+       the Linux build-and-test gate is unaffected (condition false → cross-platform build stays clean). -->
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+  </ItemGroup>
+
 </Project>
