@@ -136,6 +136,53 @@ internal static class ServiceInstaller
         StopAndRemove(WatchdogServiceName);
         StopAndRemove(BrokerServiceName);
         StopAndRemove(CoreServiceName);
+        // The Helper is a PROCESS spawned into the interactive session by the Broker — NOT a
+        // Windows service — so stopping the services above does not kill it, and it keeps a file
+        // lock on SuavoAgent.Helper.exe in the install dir. Without this, the very next binary
+        // download fails with "the file is being used by another process" on every reinstall/update.
+        // (bootstrap.ps1 has done this since Nadim's 2026-04-25 reinstall; the GUI installer did not,
+        // which is exactly the failure hit on 2026-06-05.)
+        KillOrphanProcesses();
+    }
+
+    /// <summary>
+    /// Kills any lingering SuavoAgent.* process (Helper especially) that survives a service stop,
+    /// so the binaries can be overwritten. Best-effort: a process that already exited or that we
+    /// can't touch is skipped. Waits briefly for the OS to release the file handles afterward.
+    /// </summary>
+    private static void KillOrphanProcesses()
+    {
+        var killedAny = false;
+        Process[] all;
+        try { all = Process.GetProcesses(); }
+        catch { return; }
+
+        foreach (var p in all)
+        {
+            string name;
+            try { name = p.ProcessName; }
+            catch { p.Dispose(); continue; }
+
+            // Process names have no ".exe" suffix; match "SuavoAgent.*" (Helper/Core/Broker/Watchdog).
+            if (name.StartsWith("SuavoAgent.", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    ConsoleUI.WriteInfo($"Killing lingering process {name} (PID {p.Id}) holding a binary lock...");
+                    p.Kill(entireProcessTree: true);
+                    p.WaitForExit(5000);
+                    killedAny = true;
+                }
+                catch
+                {
+                    // Already gone, or insufficient rights — the download retry/verify will surface it.
+                }
+            }
+            p.Dispose();
+        }
+
+        // Give the OS a beat to release the file handles before we overwrite the EXEs.
+        if (killedAny) Thread.Sleep(1500);
     }
 
     private static void StopAndRemove(string serviceName)
