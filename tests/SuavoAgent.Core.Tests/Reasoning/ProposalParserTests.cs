@@ -167,6 +167,50 @@ public class ProposalParserTests
         Assert.Equal(500, result.Rationale!.Length);
     }
 
+    // --- WS2: parser is the load-bearing JSON guarantee ---------------------
+    // The win-x64 llama.cpp GBNF grammar is a no-op (documented 2026-06-05), so
+    // the template + this parser are the real schema defense. Instruct models
+    // (Phi-3.5 / Qwen2.5) sometimes wrap JSON in a markdown code fence — strip it.
+
+    [Fact]
+    public void TryParse_JsonInMarkdownFence_Parses()
+    {
+        const string json = """
+        ```json
+        { "action": { "type": "Click", "parameters": { "name": "Save" } }, "confidence": 0.9, "rationale": "r" }
+        ```
+        """;
+        var result = ProposalParser.TryParse(json, "phi-3.5", 0);
+        Assert.NotNull(result);
+        Assert.Equal(RuleActionType.Click, result.Action.Type);
+    }
+
+    [Fact]
+    public void TryParse_JsonInBareFence_Parses()
+    {
+        const string json = "```\n{ \"action\": { \"type\": \"Log\", \"parameters\": {} }, \"confidence\": 1.0 }\n```";
+        var result = ProposalParser.TryParse(json, "qwen2.5", 0);
+        Assert.NotNull(result);
+        Assert.Equal(RuleActionType.Log, result.Action.Type);
+    }
+
+    [Fact]
+    public void TryParse_ConfidenceAsString_ReturnsNull()
+    {
+        // A model that emits "confidence":"high" must NOT be trusted — fail closed.
+        const string json = """{ "action": { "type": "Log", "parameters": {} }, "confidence": "high" }""";
+        Assert.Null(ProposalParser.TryParse(json, "m", 0));
+    }
+
+    [Fact]
+    public void TryParse_ProseWrappedJson_ReturnsNull()
+    {
+        // Strict contract: free prose around the object is not silently mined for
+        // JSON — it escalates (returns null) rather than guessing the model's intent.
+        const string json = "Sure! Here is my decision: { \"action\": { \"type\": \"Log\", \"parameters\": {} }, \"confidence\": 1.0 } Hope that helps!";
+        Assert.Null(ProposalParser.TryParse(json, "m", 0));
+    }
+
     // --- Parameters with non-string values ----------------------------------
 
     [Fact]

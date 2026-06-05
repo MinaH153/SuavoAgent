@@ -48,23 +48,34 @@ public sealed class ReasoningOptions
     public bool AutoExecuteTier2Destructive { get; set; }
 
     /// <summary>
-    /// Friendly id for audit trails — e.g. "llama-3.2-1b-q4_k_m". Bundled into
-    /// every InferenceProposal.ModelId so the pattern miner can attribute
-    /// decisions to specific model versions.
+    /// Friendly id for audit trails — e.g. "phi-3.5-mini-instruct-q4_k_m". Also
+    /// selects the chat template (InferencePromptBuilder.ResolveFormat keys off
+    /// substrings: phi → Phi, qwen/smollm → ChatML, llama-3 → Llama3, else Zephyr)
+    /// and is bundled into every InferenceProposal.ModelId for the pattern miner.
     /// </summary>
     public string ModelId { get; set; } = "unknown";
 
     /// <summary>
-    /// Default context window. 2048 is the llama.cpp default and plenty for
-    /// structured JSON proposals — we don't need long contexts at Tier 2.
+    /// Default context window. 4096 gives a 3B-class model (Phi-3.5) room for the
+    /// state JSON + the multi-step prior-actions transcript; bump higher only if a
+    /// model + RAM budget warrant it (KV cache scales with this).
     /// </summary>
-    public int ContextSize { get; set; } = 2048;
+    public int ContextSize { get; set; } = 4096;
 
     /// <summary>
-    /// Per-proposal token budget. 400 is generous for our schema; cuts off
-    /// runaway generation before it wastes wall time.
+    /// Per-proposal token budget. 512 fits a well-reasoned action + rationale from
+    /// a 3B model; cuts off runaway generation before it wastes wall time.
     /// </summary>
-    public int MaxOutputTokens { get; set; } = 400;
+    public int MaxOutputTokens { get; set; } = 512;
+
+    /// <summary>
+    /// Wall-clock budget for a single Tier-2 proposal. A 3B-class model (Phi-3.5)
+    /// is ~4–9 s/proposal on a no-GPU pharmacy CPU, so the old 3 s default would
+    /// always time out → null → needless operator escalation. 12 s gives the slow
+    /// tail headroom while still bounding a hung inference. (The startup probe is
+    /// independently walled, so this does not reintroduce the boot hang.)
+    /// </summary>
+    public int InferenceTimeoutSeconds { get; set; } = 12;
 
     /// <summary>
     /// Keep the model resident in memory for this long after the last call

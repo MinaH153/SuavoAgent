@@ -10,6 +10,10 @@ public enum ChatPromptFormat
 {
     Llama3,
     Zephyr,
+    /// <summary>Phi-3 / Phi-3.5 — the 2026-06 primary on-device reasoner.</summary>
+    Phi,
+    /// <summary>ChatML — Qwen2.5 / SmolLM2 (low-RAM fallback).</summary>
+    ChatML,
     Plain,
 }
 
@@ -46,6 +50,11 @@ public static class InferencePromptBuilder
         var id = (modelId ?? string.Empty).ToLowerInvariant();
         if (id.Contains("tinyllama") || id.Contains("zephyr") || id.Contains("stablelm")) return ChatPromptFormat.Zephyr;
         if (id.Contains("llama-3") || id.Contains("llama3") || id.Contains("llama_3")) return ChatPromptFormat.Llama3;
+        // 2026-06 brain upgrade. Phi-3.5 (primary): best strict-JSON-from-prompt-alone reliability
+        // in the small-model class — and that's the deciding axis because GBNF grammar-masking is a
+        // no-op on win-x64, so the TEMPLATE alone must elicit valid JSON. Qwen2.5/SmolLM2 use ChatML.
+        if (id.Contains("phi")) return ChatPromptFormat.Phi;
+        if (id.Contains("qwen") || id.Contains("smollm")) return ChatPromptFormat.ChatML;
         // Default to Zephyr: it's the template used by most small instruct GGUFs we ship, and it
         // degrades gracefully (plain <|role|> markers) on models that don't recognize it.
         return ChatPromptFormat.Zephyr;
@@ -56,6 +65,8 @@ public static class InferencePromptBuilder
     {
         ChatPromptFormat.Llama3 => new[] { "<|eot_id|>", "<|end_of_text|>" },
         ChatPromptFormat.Zephyr => new[] { "</s>", "<|user|>" },
+        ChatPromptFormat.Phi => new[] { "<|end|>", "<|endoftext|>" },
+        ChatPromptFormat.ChatML => new[] { "<|im_end|>", "<|endoftext|>" },
         _ => new[] { "</s>", "\n\n\n" },
     };
 
@@ -81,6 +92,18 @@ public static class InferencePromptBuilder
                 sb.Append("<|user|>\n").Append(user).Append("</s>\n");
                 sb.Append("<|assistant|>\n");
                 break;
+            case ChatPromptFormat.Phi:
+                // Phi-3 / Phi-3.5 template: <|system|>…<|end|>\n<|user|>…<|end|>\n<|assistant|>\n
+                sb.Append("<|system|>\n").Append(SystemPrompt).Append("<|end|>\n");
+                sb.Append("<|user|>\n").Append(user).Append("<|end|>\n");
+                sb.Append("<|assistant|>\n");
+                break;
+            case ChatPromptFormat.ChatML:
+                // ChatML (Qwen2.5 / SmolLM2): <|im_start|>role\n…<|im_end|>\n
+                sb.Append("<|im_start|>system\n").Append(SystemPrompt).Append("<|im_end|>\n");
+                sb.Append("<|im_start|>user\n").Append(user).Append("<|im_end|>\n");
+                sb.Append("<|im_start|>assistant\n");
+                break;
             default: // Plain
                 sb.Append(SystemPrompt).Append("\n\n").Append(user).Append("\n\nRespond with the JSON action now:\n");
                 break;
@@ -94,6 +117,12 @@ public static class InferencePromptBuilder
     // through (Codex M-3).
     private const int MaxFieldLen = 200;
     private const int MaxEscalationLen = 500;
+    // prior_actions is the multi-step working-memory transcript ("tried X → outcome; …",
+    // oldest→newest). It gets a dedicated, larger budget than a generic flag AND keeps the
+    // TAIL (most-recent steps) — the generic head-truncation at 200 was clipping away exactly
+    // the latest steps that matter most for the next decision (2026-06 brain upgrade).
+    internal const string PriorActionsFlag = "prior_actions";
+    private const int PriorActionsMaxLen = 800;
     private const int MaxElementNameLen = 100;
     private const int MaxElements = 24;
     private const int MaxFlags = 16;
@@ -123,7 +152,9 @@ public static class InferencePromptBuilder
             .Take(MaxFlags)
             .ToDictionary(
                 kv => Truncate(kv.Key, MaxFieldLen),
-                kv => Truncate(kv.Value, MaxFieldLen));
+                kv => kv.Key == PriorActionsFlag
+                    ? TruncateTail(kv.Value, PriorActionsMaxLen)
+                    : Truncate(kv.Value, MaxFieldLen));
 
         // General navigate mode: the NL objective. Null in scoped mode ⇒ omitted from the
         // JSON (WhenWritingNull) so the legacy prompt is byte-identical when unset.
@@ -213,5 +244,13 @@ public static class InferencePromptBuilder
     {
         if (string.IsNullOrEmpty(s)) return "";
         return s.Length <= max ? s : s[..max];
+    }
+
+    /// <summary>Keep the LAST <paramref name="max"/> chars — for tail-relevant values like the
+    /// prior-actions transcript where the most-recent entries are the most important.</summary>
+    private static string TruncateTail(string? s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        return s.Length <= max ? s : s[^max..];
     }
 }

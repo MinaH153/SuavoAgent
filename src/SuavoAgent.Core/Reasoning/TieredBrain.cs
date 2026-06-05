@@ -61,6 +61,10 @@ public sealed class TieredBrain
     private readonly ActionVerifier _verifier;
     private readonly ILogger<TieredBrain> _logger;
 
+    /// <summary>Wall-clock budget threaded onto every Tier-2 InferenceRequest. From
+    /// ReasoningOptions.InferenceTimeoutSeconds; defaults to the contract's 3 s when unset.</summary>
+    private readonly TimeSpan _inferenceTimeout;
+
     /// <summary>
     /// Tier-2 proposals below this confidence escalate to Tier-3 instead of
     /// going straight to the verifier. Keeps Tier-2 autonomy for clear cases
@@ -75,13 +79,15 @@ public sealed class TieredBrain
         ILocalInference localInference,
         ActionVerifier verifier,
         ILogger<TieredBrain> logger,
-        ICloudReasoning? cloudReasoning = null)
+        ICloudReasoning? cloudReasoning = null,
+        TimeSpan? inferenceTimeout = null)
     {
         _rules = rules;
         _localInference = localInference;
         _verifier = verifier;
         _logger = logger;
         _cloudReasoning = cloudReasoning ?? new NullCloudReasoning();
+        _inferenceTimeout = inferenceTimeout ?? TimeSpan.FromSeconds(3);
     }
 
     /// <summary>
@@ -134,6 +140,7 @@ public sealed class TieredBrain
             // Callers that want Tier-2 to propose Click/Type/PressKey must pass
             // an explicit allowedTier2Actions (Codex C-3).
             AllowedActions = allowedTier2Actions ?? InferenceRequest.SafeDefault,
+            Timeout = _inferenceTimeout,
         };
 
         InferenceProposal? proposal = null;

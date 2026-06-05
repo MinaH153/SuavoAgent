@@ -23,9 +23,13 @@ public sealed class MockLocalInference : ILocalInference
 
     public int CallCount { get; private set; }
 
+    /// <summary>The most recent request — lets tests assert what TieredBrain passed (e.g. Timeout).</summary>
+    public InferenceRequest? LastRequest { get; private set; }
+
     public async Task<InferenceProposal?> ProposeAsync(InferenceRequest request, CancellationToken ct)
     {
         CallCount++;
+        LastRequest = request;
 
         if (ArtificialLatency > TimeSpan.Zero)
             await Task.Delay(ArtificialLatency, ct);

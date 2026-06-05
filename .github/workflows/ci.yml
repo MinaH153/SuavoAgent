@@ -192,6 +192,32 @@ jobs:
           SUAVOAGENT_TEST_GGUF: ${{ runner.temp }}\tinyllama-q4.gguf
         run: dotnet test tests/SuavoAgent.Helper.Tests/SuavoAgent.Helper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~LocalLlmSmokeTests" -v normal
 
+      # 2026-06 brain upgrade: prove the stronger model (Phi-3.5-mini, MIT, ungated) reasons + grounds
+      # under the new PHI chat template — the real test that "the template alone elicits valid JSON" on
+      # win-x64 (where the GBNF grammar is a no-op). Cached so it only downloads once (~2.4 GB).
+      - name: Cache Phi-3.5 GGUF model
+        id: cache-gguf-phi
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\phi-3.5-q4.gguf
+          key: gguf-phi-3.5-mini-instruct-q4_k_m-v1
+
+      - name: Download Phi-3.5 GGUF model (if not cached)
+        if: steps.cache-gguf-phi.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          # bartowski mirror is ungated (MIT); curl -L follows the HF CDN redirect; --fail surfaces HTTP errors.
+          $url = "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf"
+          curl.exe -L --fail --retry 3 -o "$env:RUNNER_TEMP\phi-3.5-q4.gguf" $url
+          $size = (Get-Item "$env:RUNNER_TEMP\phi-3.5-q4.gguf").Length
+          Write-Host "downloaded $size bytes"
+          if ($size -lt 1000000000) { throw "model download too small ($size bytes) — likely an HTML error page" }
+
+      - name: Real Phi-3.5 reason+ground with multi-step memory (template-only valid JSON, no grammar)
+        env:
+          SUAVOAGENT_TEST_GGUF_PHI: ${{ runner.temp }}\phi-3.5-q4.gguf
+        run: dotnet test tests/SuavoAgent.Helper.Tests/SuavoAgent.Helper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~NavigateLlmReasoningTests.RealPhiLlm_ReasonsAndGrounds_WithMultiStepMemory" -v normal
+
   agent-merge-gate:
     name: Agent Merge Gate
     runs-on: ubuntu-latest

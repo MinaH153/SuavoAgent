@@ -322,17 +322,49 @@ public class TieredBrainTests
         Assert.Equal("mock", decision.Proposal!.ModelId);
     }
 
+    // --- Inference timeout plumbing (2026-06 brain upgrade) -----------------
+    // A 3B-class model (Phi-3.5) takes 4–9 s/proposal on a pharmacy CPU; the
+    // 3 s contract default would always time out, so TieredBrain must thread the
+    // configured timeout onto every InferenceRequest.
+
+    [Fact]
+    public async Task Decide_PassesConfiguredInferenceTimeout_ToLocalInference()
+    {
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.Log, 0.95);
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock,
+            inferenceTimeout: TimeSpan.FromSeconds(11));
+
+        await brain.DecideAsync(Ctx("s1"));
+
+        Assert.Equal(TimeSpan.FromSeconds(11), mock.LastRequest!.Timeout);
+    }
+
+    [Fact]
+    public async Task Decide_DefaultInferenceTimeout_Is3s_WhenUnset()
+    {
+        var mock = new MockLocalInference();
+        mock.EnqueueApproved(RuleActionType.Log, 0.95);
+        var brain = Brain(rules: Array.Empty<Rule>(), mock: mock);
+
+        await brain.DecideAsync(Ctx("s1"));
+
+        Assert.Equal(TimeSpan.FromSeconds(3), mock.LastRequest!.Timeout);
+    }
+
     // --- helpers ------------------------------------------------------------
 
     private static TieredBrain Brain(
         IEnumerable<Rule> rules,
         MockLocalInference mock,
         bool autoExecuteDestructive = false,
-        ICloudReasoning? cloud = null)
+        ICloudReasoning? cloud = null,
+        TimeSpan? inferenceTimeout = null)
     {
         var engine = new RuleEngine(rules, NullLogger<RuleEngine>.Instance);
         var verifier = new ActionVerifier(autoExecuteDestructive);
-        return new TieredBrain(engine, mock, verifier, NullLogger<TieredBrain>.Instance, cloud);
+        return new TieredBrain(engine, mock, verifier, NullLogger<TieredBrain>.Instance, cloud,
+            inferenceTimeout);
     }
 
     private static Rule ClickRule(string id, string skillId, string name) =>

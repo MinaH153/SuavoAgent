@@ -95,4 +95,85 @@ public sealed class NavigateLlmReasoningTests
         // action as OperatorRequired (needs approval) under the default autonomy level. Reasoning +
         // grounding are proven here; execution is the approval/autonomy layer (the "approve" path).
     }
+
+    /// <summary>
+    /// The 2026-06 brain upgrade: the REAL Phi-3.5 GGUF (MIT, ungated) under the PHI chat template
+    /// reasons + grounds a valid action from an NL objective + a populated MULTI-STEP working-memory
+    /// transcript (a prior attempt that didn't complete the goal). Proves (a) the new model + the new
+    /// Phi template path produce valid JSON unassisted — the win-x64 grammar is a no-op, so this is the
+    /// real test of "the template alone elicits valid JSON" — and (b) the loop's prior-actions memory is
+    /// threaded into the reasoning context. Gated on SUAVOAGENT_TEST_GGUF_PHI (the windows-uia-smoke CI
+    /// job / local repro); no-op skip otherwise.
+    /// </summary>
+    [Fact]
+    public async Task RealPhiLlm_ReasonsAndGrounds_WithMultiStepMemory()
+    {
+        var modelPath = Environment.GetEnvironmentVariable("SUAVOAGENT_TEST_GGUF_PHI");
+        if (string.IsNullOrWhiteSpace(modelPath) || !File.Exists(modelPath)) return;
+        var dylib = Environment.GetEnvironmentVariable("SUAVOAGENT_TEST_LLAMA_DYLIB");
+        if (!string.IsNullOrEmpty(dylib) && File.Exists(dylib))
+            NativeLibraryConfig.All.WithLibrary(dylib, null);
+
+        var options = Options.Create(new AgentOptions
+        {
+            Reasoning = new ReasoningOptions
+            {
+                Enabled = true,
+                ModelId = "phi-3.5-mini-instruct", // -> Phi template (ResolveFormat keys off "phi")
+                ModelPath = modelPath,
+                NativeLibraryPath = null,
+                ContextSize = 4096,
+                MaxOutputTokens = 512,
+                IdleUnloadSeconds = 5,
+            },
+        });
+
+        await using var llm = new LLamaLocalInference(options, modelPath, NullLogger<LLamaLocalInference>.Instance);
+
+        var objective = new AgentObjective("Save the document", "task.nav.phi", "pharm-test-001");
+        var screen = new PerceivedScreen(
+            "screenhash", Scrubbed: true,
+            ElementSummary: new[] { "Button|saveBtn" },
+            WindowTitle: "notepad",
+            Signatures: new[] { "Button|saveBtn" });
+
+        // Build REAL multi-step working memory: a prior attempt (ctrl+s) that failed to complete the
+        // goal, recorded through the production accumulator — so prior_actions is populated exactly as
+        // the loop would present it on step 2.
+        var m0 = ContextAccumulator.Start(objective);
+        var m1 = ContextAccumulator.RecordObservation(m0, screen);
+        var priorAttempt = NextAction.Act("press_keys",
+            new Dictionary<string, object?> { ["keys"] = "ctrl+s" }, "tried the save shortcut");
+        var m2 = ContextAccumulator.RecordStep(m1, "screenhash", priorAttempt,
+            ActStatus.Failed, PostconditionVerdict.NotMet, memoryWindow: 8);
+        var memory = ContextAccumulator.RecordObservation(m2, screen);
+
+        var ctx = NavigateReasoning.BuildContext(objective, memory);
+
+        // (1) The loop's multi-step working memory is threaded into the reasoning context.
+        Assert.True(ctx.Flags.ContainsKey("prior_actions"));
+        Assert.Contains("press_keys", ctx.Flags["prior_actions"]);
+
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Click", "Type", "PressKey" };
+        var proposal = await llm.ProposeAsync(new InferenceRequest
+        {
+            Context = ctx,
+            AllowedActions = NavigateReasoning.MapAllowedActions(allowed),
+            EscalationReason = "no rule matched; reason about the objective given prior attempts",
+            Timeout = TimeSpan.FromSeconds(90), // a 3B model on a hosted CPU runner is slower
+        }, CancellationToken.None);
+
+        // (2) Phi-3.5, on the Phi template, emits valid JSON (no grammar backstop) and reasons a Click
+        //     on the visible Save button — purely from the objective + screen + prior-actions history.
+        Assert.NotNull(proposal);
+        Assert.Equal(RuleActionType.Click, proposal!.Action.Type);
+        Assert.Contains(proposal.Action.Parameters.Values,
+            v => v.Contains("save", StringComparison.OrdinalIgnoreCase));
+
+        // (3) Grounding binds the freeform intent to an actuatable click_by_signature on the element.
+        var grounded = ActionGrounding.GroundClick(proposal.Action.Parameters, screen, "notepad");
+        Assert.NotNull(grounded);
+        Assert.Equal("saveBtn", grounded!["automationId"]);
+        Assert.Equal("Button", grounded["controlType"]);
+    }
 }

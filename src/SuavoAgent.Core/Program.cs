@@ -657,7 +657,17 @@ try
         return new ClaudeCloudReasoning(signer, sp.GetRequiredService<ILogger<ClaudeCloudReasoning>>());
     });
 
-    builder.Services.AddSingleton<TieredBrain>();
+    builder.Services.AddSingleton<TieredBrain>(sp =>
+    {
+        var reasoning = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
+        return new TieredBrain(
+            sp.GetRequiredService<RuleEngine>(),
+            sp.GetRequiredService<ILocalInference>(),
+            sp.GetRequiredService<ActionVerifier>(),
+            sp.GetRequiredService<ILogger<TieredBrain>>(),
+            sp.GetService<ICloudReasoning>(),
+            TimeSpan.FromSeconds(Math.Max(1, reasoning.InferenceTimeoutSeconds)));
+    });
 
     builder.Services.AddSingleton<IpcPipeServer>(sp =>
     {
