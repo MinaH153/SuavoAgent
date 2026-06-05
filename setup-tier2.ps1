@@ -1,55 +1,83 @@
 # SuavoAgent — Tier-2 on-device LLM enablement (HIPAA-LOCAL; cloud reasoning stays OFF).
 # Run in an ELEVATED PowerShell on the agent box:
-#   irm <gist-raw-url> | iex
+#   irm <raw-url> -OutFile s.ps1 ; . .\s.ps1
 # Places a local GGUF model + llama.cpp native libs, writes the reasoning config overlay,
 # and restarts Core so the brain loads. Nothing leaves the box.
 $ErrorActionPreference = "Stop"
 Write-Host "=== SuavoAgent Tier-2 (on-device LLM, HIPAA-local) setup ===" -ForegroundColor Cyan
 
+# Force a modern TLS — Windows PowerShell 5.1 can default to TLS 1.0/1.1 which HuggingFace rejects,
+# which silently breaks large downloads. Set it unconditionally (NOT inside a swallowing try/catch).
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 $base   = "C:\ProgramData\SuavoAgent"
 $models = Join-Path $base "models"
 $native = Join-Path $base "native"
 New-Item -ItemType Directory -Force -Path $models, $native | Out-Null
-try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+# Reliable large-file download: WebClient streams to disk + follows redirects (HF resolve -> CDN).
+# Falls back to BITS. Surfaces the REAL error instead of dying silently.
+function Get-RemoteFile([string]$url, [string]$dest) {
+    Write-Host "  -> $dest"
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+    try {
+        $wc.DownloadFile($url, $dest)
+    } catch {
+        Write-Host ("  WebClient failed: " + $_.Exception.Message) -ForegroundColor Yellow
+        if ($_.Exception.InnerException) { Write-Host ("  inner: " + $_.Exception.InnerException.Message) -ForegroundColor Yellow }
+        Write-Host "  retrying via BITS..." -ForegroundColor Yellow
+        Start-BitsTransfer -Source $url -Destination $dest
+    } finally {
+        $wc.Dispose()
+    }
+}
 
 # 1) Model — ungated Llama-3.2-1B-Instruct Q4_K_M (~770MB); matches the agent's prompt format.
 $modelPath = Join-Path $models "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
 $modelUrl  = "https://huggingface.co/unsloth/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
 if ((Test-Path $modelPath) -and ((Get-Item $modelPath).Length -gt 500MB)) {
-  Write-Host "Model already present — skipping download."
+    Write-Host "Model already present — skipping download." -ForegroundColor Green
 } else {
-  Write-Host "Downloading model (~770MB) — slow part, ~2-5 min..."
-  try { Start-BitsTransfer -Source $modelUrl -Destination $modelPath -ErrorAction Stop }
-  catch { Write-Host "BITS unavailable; using Invoke-WebRequest..."; $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest $modelUrl -OutFile $modelPath }
+    Write-Host "Downloading model (~770MB) — slow part, ~2-5 min..."
+    Get-RemoteFile $modelUrl $modelPath
+}
+if (-not (Test-Path $modelPath) -or ((Get-Item $modelPath).Length -lt 100MB)) {
+    throw "Model download did not produce a valid file at $modelPath (check connectivity to huggingface.co)."
 }
 Write-Host ("Model OK: {0:N0} bytes" -f (Get-Item $modelPath).Length) -ForegroundColor Green
 
 # 2) Native llama.cpp DLLs matching LLamaSharp 0.19.0 (from the CPU backend nupkg).
-Write-Host "Downloading llama.cpp native libs (LLamaSharp.Backend.Cpu 0.19.0)..."
-$zip = Join-Path $env:TEMP "llamacpp-cpu-0.19.0.zip"
-$ProgressPreference = 'SilentlyContinue'
-Invoke-WebRequest "https://www.nuget.org/api/v2/package/LLamaSharp.Backend.Cpu/0.19.0" -OutFile $zip
-$ex = Join-Path $env:TEMP "llamacpp-cpu-019"
-if (Test-Path $ex) { Remove-Item $ex -Recurse -Force }
-Expand-Archive $zip $ex -Force
-# Prefer avx2 (any modern CPU); fall back to the base no-AVX folder.
-$src = Join-Path $ex "runtimes\win-x64\native\avx2"
-if (-not (Test-Path (Join-Path $src "llama.dll"))) { $src = Join-Path $ex "runtimes\win-x64\native" }
-Copy-Item (Join-Path $src "*.dll") $native -Force
-# Belt-and-suspenders: also copy the base-folder DLLs (covers ggml living outside the avx subdir).
-Copy-Item (Join-Path $ex "runtimes\win-x64\native\*.dll") $native -Force -ErrorAction SilentlyContinue
+$llamaDll = Join-Path $native "llama.dll"
+if (Test-Path $llamaDll) {
+    Write-Host "Native libs already present — skipping." -ForegroundColor Green
+} else {
+    Write-Host "Downloading llama.cpp native libs (LLamaSharp.Backend.Cpu 0.19.0)..."
+    $zip = Join-Path $env:TEMP "llamacpp-cpu-0.19.0.zip"
+    Get-RemoteFile "https://www.nuget.org/api/v2/package/LLamaSharp.Backend.Cpu/0.19.0" $zip
+    $ex = Join-Path $env:TEMP "llamacpp-cpu-019"
+    if (Test-Path $ex) { Remove-Item $ex -Recurse -Force }
+    Expand-Archive $zip $ex -Force
+    # Prefer avx2 (any modern CPU); fall back to the base no-AVX folder.
+    $src = Join-Path $ex "runtimes\win-x64\native\avx2"
+    if (-not (Test-Path (Join-Path $src "llama.dll"))) { $src = Join-Path $ex "runtimes\win-x64\native" }
+    Copy-Item (Join-Path $src "*.dll") $native -Force
+    # Belt-and-suspenders: also copy the base-folder DLLs (covers ggml living outside the avx subdir).
+    Copy-Item (Join-Path $ex "runtimes\win-x64\native\*.dll") $native -Force -ErrorAction SilentlyContinue
+}
+if (-not (Test-Path $llamaDll)) { throw "Native libs missing — llama.dll not placed at $native." }
 Write-Host "Native libs placed:" -ForegroundColor Green
 Get-ChildItem $native -Filter *.dll | Select-Object Name, Length | Format-Table -AutoSize
 
-# 3) Reasoning config overlay — Tier-2 ON, Tier-3/cloud OFF. Written directly so the restart
-#    picks it up immediately (no sync race); the cloud agent_config_overrides rows keep it on resync.
+# 3) Reasoning config overlay — Tier-2 ON, Tier-3/cloud OFF. Written directly so the restart picks it
+#    up immediately (no sync race); the cloud agent_config_overrides rows keep it across resyncs.
 $cfg = @{ Agent = @{ Reasoning = @{
-  Enabled             = $true
-  ModelPath           = $modelPath
-  NativeLibraryPath   = $native
-  ModelId             = "llama-3.2-1b-q4_k_m"
-  CloudEnabled        = $false
-  PricingBrainEnabled = $false
+    Enabled             = $true
+    ModelPath           = $modelPath
+    NativeLibraryPath   = $native
+    ModelId             = "llama-3.2-1b-q4_k_m"
+    CloudEnabled        = $false
+    PricingBrainEnabled = $false
 } } }
 $cfgPath = Join-Path $base "config-overrides.json"
 [IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 6))
@@ -63,4 +91,3 @@ Get-Service "SuavoAgent.*" | Select-Object Name, Status | Format-Table -AutoSize
 
 Write-Host ("Model SHA256: " + (Get-FileHash -Algorithm SHA256 $modelPath).Hash.ToLower())
 Write-Host "=== Done. Tier-2 LOCAL reasoning enabled. Nothing leaves the box. ===" -ForegroundColor Cyan
-Write-Host "Verify on dashboard: Agent Fleet -> Hillcrest stays Active, then run a navigate dry-run."
