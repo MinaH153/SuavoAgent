@@ -835,6 +835,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "abort_navigation":
                     await HandleAbortNavigationAsync(scEl, cmd, ct);
                     break;
+                case "force_restart":
+                    await HandleForceRestartAsync(scEl, cmd, ct);
+                    break;
                 case "force_learning_phase":
                     await HandleForceLearningPhaseAsync(scEl, cmd, ct);
                     break;
@@ -1552,6 +1555,41 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex) { _logger.LogWarning(ex, "abort_navigation: cancel threw"); }
 
         await AckAsync(true, new { aborted = true, run_id = activeRunId, reason = requestedReason }, null);
+    }
+
+    private async Task HandleForceRestartAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) && cid.ValueKind == JsonValueKind.String
+            ? cid.GetString() : null;
+        var reason = dataEl.TryGetProperty("reason", out var rr) && rr.ValueKind == JsonValueKind.String
+            ? rr.GetString() : null;
+
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: cmd.Nonce,
+            EventType: "force_restart_requested",
+            FromState: "running",
+            ToState: "restarting",
+            Trigger: "signed_command",
+            CommandId: cmd.Nonce,
+            RequesterId: "operator",
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: reason ?? "operator_force_restart"));
+
+        // ACK before exiting so the cloud confirms the restart was accepted (it won't hear from us again
+        // until the new process comes up). ECDSA + persistent-nonce verification already gated this command.
+        if (!string.IsNullOrEmpty(commandId) && _cloudClient != null)
+        {
+            try { await _cloudClient.AckCommandAsync(commandId, true, new { restarting = true, reason }, null, ct); }
+            catch (Exception ex) { _logger.LogDebug(ex, "force_restart ack failed (non-fatal — restarting anyway)"); }
+        }
+
+        _logger.LogWarning("force_restart received (reason={Reason}) — exiting for SCM/Watchdog restart", reason ?? "operator");
+
+        // Brief grace to flush the ACK, then exit non-zero → Core stops → the Watchdog restarts it.
+        try { await Task.Delay(TimeSpan.FromMilliseconds(500), ct); } catch (OperationCanceledException) { }
+        Environment.Exit(1);
     }
 
     private MissionCharter BuildEphemeralCharter() => new(
