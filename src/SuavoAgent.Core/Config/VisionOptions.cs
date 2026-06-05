@@ -64,6 +64,32 @@ public sealed class VisionOptions
     /// <see cref="Enabled"/>. Default off.
     /// </summary>
     public VisionShadowReasoningOptions ShadowReasoning { get; set; } = new();
+
+    /// <summary>
+    /// Pushes each captured (already PHI-scrubbed) <c>ScreenFrame</c> to the
+    /// cloud so the pharmacy dashboard can render a live "what I'm seeing"
+    /// wireframe. Requires <see cref="Enabled"/>. Default off — opt-in per pharmacy.
+    /// </summary>
+    public VisionCloudFrameUploadOptions CloudFrameUpload { get; set; } = new();
+}
+
+/// <summary>
+/// Opt-in: when on, the capture worker POSTs each captured (scrubbed) ScreenFrame
+/// to <c>/api/agent/screen-frame</c> for the live dashboard view. ONLY the scrubbed
+/// structure (UI element bounds + scrubbed labels) leaves the box — never pixels,
+/// never patient data. The cloud re-sanitizes before storing/rendering.
+/// </summary>
+public sealed class VisionCloudFrameUploadOptions
+{
+    /// <summary>Master toggle for cloud frame upload. Default false. Requires Vision.Enabled too.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Only upload every Nth captured frame (1 = every frame). Lets a pharmacy
+    /// run a fast capture cadence for reasoning while throttling cloud uploads.
+    /// Default 1. Values &lt; 1 are treated as 1.
+    /// </summary>
+    public int SamplingInterval { get; set; } = 1;
 }
 
 /// <summary>

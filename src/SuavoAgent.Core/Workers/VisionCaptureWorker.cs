@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Vision;
+using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Reasoning;
@@ -42,6 +43,8 @@ public sealed class VisionCaptureWorker : BackgroundService
     private readonly TimeProvider _clock;
     private readonly VisionCaptureTelemetry _telemetry;
     private readonly IVisionShadowReasoner? _reasoner;
+    private readonly IPostSigner? _cloud;
+    private long _frameUploadCounter;
 
     public VisionCaptureWorker(
         ILogger<VisionCaptureWorker> logger,
@@ -51,7 +54,8 @@ public sealed class VisionCaptureWorker : BackgroundService
         IIpcCommandClient ipc,
         TimeProvider? clock = null,
         VisionCaptureTelemetry? telemetry = null,
-        IVisionShadowReasoner? reasoner = null)
+        IVisionShadowReasoner? reasoner = null,
+        IPostSigner? cloud = null)
     {
         _logger = logger;
         _agentOptions = agentOptions.Value;
@@ -61,6 +65,7 @@ public sealed class VisionCaptureWorker : BackgroundService
         _clock = clock ?? TimeProvider.System;
         _telemetry = telemetry ?? new VisionCaptureTelemetry();
         _reasoner = reasoner;
+        _cloud = cloud;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -220,6 +225,13 @@ public sealed class VisionCaptureWorker : BackgroundService
         if (_reasoner != null && options.ShadowReasoning.Enabled)
             await TryObserveAsync(response, options, ct);
 
+        // Push the scrubbed frame to the cloud so the pharmacy dashboard can show
+        // a live "what I'm seeing" wireframe. Opt-in + best-effort: only the
+        // already-scrubbed structure leaves the box, and an upload error must
+        // never fail the capture/audit path above.
+        if (_cloud != null && options.CloudFrameUpload.Enabled)
+            await TryUploadFrameToCloudAsync(response, options, ct);
+
         _logger.LogInformation(
             "VisionCaptureWorker: capture committed — storageId={StorageId}", storageId);
         return TickResult.Captured(storageId, commandId);
@@ -261,6 +273,38 @@ public sealed class VisionCaptureWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "VisionCaptureWorker: shadow reasoning skipped (non-fatal)");
+        }
+    }
+
+    /// <summary>
+    /// Best-effort: deserialize the already-scrubbed ScreenFrame the Helper returned and POST it
+    /// to <c>/api/agent/screen-frame</c> so the pharmacy dashboard can render a live wireframe.
+    /// Honors <see cref="VisionCloudFrameUploadOptions.SamplingInterval"/>. The HMAC envelope
+    /// identifies the pharmacy + agent server-side, so the payload is just the scrubbed frame —
+    /// no pixels, no patient data. Never throws into the capture/audit path.
+    /// </summary>
+    private async Task TryUploadFrameToCloudAsync(IpcResponse response, VisionOptions options, CancellationToken ct)
+    {
+        try
+        {
+            var n = Math.Max(1, options.CloudFrameUpload.SamplingInterval);
+            if (System.Threading.Interlocked.Increment(ref _frameUploadCounter) % n != 0)
+                return;
+
+            if (response.Data is not { } data ||
+                !data.TryGetProperty("frame", out var frameEl) ||
+                frameEl.ValueKind != JsonValueKind.Object)
+                return;
+
+            var frame = frameEl.Deserialize<ScreenFrame>(ShadowFrameJsonOptions);
+            if (frame == null)
+                return;
+
+            await _cloud!.PostSignedAsync("/api/agent/screen-frame", new { frame }, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "VisionCaptureWorker: cloud frame upload skipped (non-fatal)");
         }
     }
 
