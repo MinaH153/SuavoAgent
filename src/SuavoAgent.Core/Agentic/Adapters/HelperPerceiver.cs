@@ -73,9 +73,15 @@ public static class PerceivedScreenMapper
     public static PerceivedScreen FromFrame(ScreenFrame frame)
     {
         var summary = new List<string>(frame.Elements.Count + frame.TextRegions.Count);
+        var signatures = new List<string>();
 
         foreach (var e in frame.Elements)
+        {
             summary.Add(string.IsNullOrEmpty(e.Name) ? e.Role : $"{e.Role}:{e.Name}");
+            // GREEN-tier structural signature ("controlType|automationId") for template-replay checks.
+            if (!string.IsNullOrEmpty(e.AutomationId))
+                signatures.Add($"{e.Role}|{e.AutomationId}");
+        }
 
         foreach (var t in frame.TextRegions)
             if (!string.IsNullOrWhiteSpace(t.Text))
@@ -83,7 +89,7 @@ public static class PerceivedScreenMapper
 
         // Frames from the Helper are PHI-scrubbed by construction (PhiScrubbingExtractor wraps every
         // extractor at the factory). The Scrubbed flag carries that invariant to ISafetyGate.AssertScrubbed.
-        return new PerceivedScreen(ComputeContentHash(summary), Scrubbed: true, summary, WindowTitle: null);
+        return new PerceivedScreen(ComputeContentHash(summary), Scrubbed: true, summary, WindowTitle: null, Signatures: signatures);
     }
 
     private static string ComputeContentHash(IReadOnlyList<string> lines)

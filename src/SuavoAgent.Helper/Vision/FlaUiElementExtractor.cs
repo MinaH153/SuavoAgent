@@ -116,6 +116,10 @@ internal sealed class FlaUiElementExtractor : IUiaElementExtractor
                             var role = ctrlType.ToString();
                             var name = el.Properties.Name.ValueOrDefault;
                             var bounds = el.Properties.BoundingRectangle.ValueOrDefault;
+                            // GREEN-tier structural id (never PHI) — enables signature-based grounding + replay.
+                            var automationId = el.Properties.AutomationId.IsSupported
+                                ? el.Properties.AutomationId.ValueOrDefault
+                                : null;
 
                             // Skip zero-size or off-screen elements.
                             if (bounds.Width > 0 && bounds.Height > 0)
@@ -124,6 +128,7 @@ internal sealed class FlaUiElementExtractor : IUiaElementExtractor
                                 {
                                     Role = role,
                                     Name = string.IsNullOrWhiteSpace(name) ? null : name,
+                                    AutomationId = string.IsNullOrWhiteSpace(automationId) ? null : automationId,
                                     Bounds = new VisionRect(
                                         (int)bounds.X, (int)bounds.Y,
                                         (int)bounds.Width, (int)bounds.Height),

@@ -20,8 +20,8 @@ public sealed class PerceivedScreenMapperTests
         TextRegions = text ?? Array.Empty<TextRegion>(),
     };
 
-    private static VisualElement El(string role, string? name) =>
-        new() { Role = role, Name = name, Bounds = new Rect(0, 0, 10, 10), Confidence = 1.0 };
+    private static VisualElement El(string role, string? name, string? automationId = null) =>
+        new() { Role = role, Name = name, AutomationId = automationId, Bounds = new Rect(0, 0, 10, 10), Confidence = 1.0 };
 
     private static TextRegion Txt(string s) =>
         new() { Text = s, Bounds = new Rect(0, 0, 10, 10), Confidence = 90 };
@@ -55,6 +55,19 @@ public sealed class PerceivedScreenMapperTests
     public void FromFrame_IsAlwaysScrubbed()
     {
         Assert.True(PerceivedScreenMapper.FromFrame(Frame()).Scrubbed);
+    }
+
+    [Fact]
+    public void FromFrame_SurfacesSignatures_ForElementsWithAutomationId()
+    {
+        var p = PerceivedScreenMapper.FromFrame(Frame(elements: new[]
+        {
+            El("Button", "Save", automationId: "saveBtn"),
+            El("Text", "label", automationId: null), // no AutomationId ⇒ no signature
+        }));
+
+        Assert.Contains("Button|saveBtn", p.Signatures!);
+        Assert.Single(p.Signatures!); // the AutomationId-less element contributes none
     }
 
     [Fact]

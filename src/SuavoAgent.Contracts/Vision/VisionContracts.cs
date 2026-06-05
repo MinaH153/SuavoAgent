@@ -56,6 +56,13 @@ public sealed record VisualElement
     /// <summary>Visible text inside the element, PHI-scrubbed. Null if none.</summary>
     public string? Name { get; init; }
 
+    /// <summary>
+    /// UIA AutomationId — GREEN-tier (structural, never PHI per UiaPropertyScrubber). Surfaced so
+    /// signature-based grounding + learned-template replay can match elements by (Role, AutomationId)
+    /// rather than the scrubbed Name. Null when the element has no AutomationId or for OCR-only elements.
+    /// </summary>
+    public string? AutomationId { get; init; }
+
     public required Rect Bounds { get; init; }
     public double Confidence { get; init; }
 }
