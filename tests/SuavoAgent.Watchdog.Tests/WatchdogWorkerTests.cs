@@ -77,6 +77,97 @@ public class WatchdogWorkerTests
     }
 
     [Fact]
+    public void Tick_RunningButBeaconStale_ForceCyclesHungService()
+    {
+        var beaconDir = Path.Combine(Path.GetTempPath(), "wd-hang-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(beaconDir);
+        try
+        {
+            var t0 = DateTimeOffset.UtcNow;
+            new SuavoAgent.Diagnostics.LivenessBeaconStore(beaconDir).Write("SuavoAgent.Core", t0); // beacon frozen at t0
+
+            var cmd = new FakeCommand();
+            cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running, ServiceState.Running });
+            var worker = new WatchdogWorker(NullLogger<WatchdogWorker>.Instance, cmd, new WatchdogOptions
+            {
+                WatchedServices = new[] { "SuavoAgent.Core" },
+                HangBeaconDirectory = beaconDir,
+                HangStaleThreshold = TimeSpan.FromSeconds(90),
+                RestartRequestPath = Path.Combine(Path.GetTempPath(), $"no-such-{Guid.NewGuid():N}.json"),
+            });
+            SeedLedgers(worker);
+
+            worker.TickOnce(t0);                  // begins beacon tracking; beacon fresh ⇒ Live, no cycle
+            worker.TickOnce(t0.AddSeconds(150));  // beacon now 150s stale (>90s) ⇒ HUNG ⇒ stop+start
+
+            Assert.Contains("SuavoAgent.Core", cmd.StopCalls);
+            Assert.Contains("SuavoAgent.Core", cmd.StartCalls);
+        }
+        finally { try { Directory.Delete(beaconDir, true); } catch { } }
+    }
+
+    [Fact]
+    public void Tick_RunningBeaconFresh_DoesNotCycle()
+    {
+        var beaconDir = Path.Combine(Path.GetTempPath(), "wd-fresh-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(beaconDir);
+        try
+        {
+            var t0 = DateTimeOffset.UtcNow;
+            var store = new SuavoAgent.Diagnostics.LivenessBeaconStore(beaconDir);
+            var cmd = new FakeCommand();
+            cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running, ServiceState.Running });
+            var worker = new WatchdogWorker(NullLogger<WatchdogWorker>.Instance, cmd, new WatchdogOptions
+            {
+                WatchedServices = new[] { "SuavoAgent.Core" },
+                HangBeaconDirectory = beaconDir,
+                HangStaleThreshold = TimeSpan.FromSeconds(90),
+                RestartRequestPath = Path.Combine(Path.GetTempPath(), $"no-such-{Guid.NewGuid():N}.json"),
+            });
+            SeedLedgers(worker);
+
+            store.Write("SuavoAgent.Core", t0);
+            worker.TickOnce(t0);
+            store.Write("SuavoAgent.Core", t0.AddSeconds(150)); // a healthy Core keeps refreshing its beacon
+            worker.TickOnce(t0.AddSeconds(160));                // beacon only 10s old ⇒ Live ⇒ no cycle
+
+            Assert.Empty(cmd.StopCalls);
+        }
+        finally { try { Directory.Delete(beaconDir, true); } catch { } }
+    }
+
+    [Fact]
+    public void Tick_StalePriorRunBeacon_IsIgnoredDuringStartupGrace_NoCycle()
+    {
+        // A leftover .beacon from a PRIOR run (timestamp before we started tracking) must NOT bypass the
+        // startup grace and force-cycle a slow-starting Core before its first fresh write (Codex P2).
+        var beaconDir = Path.Combine(Path.GetTempPath(), "wd-prior-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(beaconDir);
+        try
+        {
+            var t0 = DateTimeOffset.UtcNow;
+            new SuavoAgent.Diagnostics.LivenessBeaconStore(beaconDir).Write("SuavoAgent.Core", t0.AddSeconds(-300)); // very old prior-run beacon
+
+            var cmd = new FakeCommand();
+            cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running, ServiceState.Running });
+            var worker = new WatchdogWorker(NullLogger<WatchdogWorker>.Instance, cmd, new WatchdogOptions
+            {
+                WatchedServices = new[] { "SuavoAgent.Core" },
+                HangBeaconDirectory = beaconDir,
+                HangStaleThreshold = TimeSpan.FromSeconds(90),
+                RestartRequestPath = Path.Combine(Path.GetTempPath(), $"no-such-{Guid.NewGuid():N}.json"),
+            });
+            SeedLedgers(worker);
+
+            worker.TickOnce(t0);                  // first RUNNING ⇒ trackingSince=t0; old beacon (< t0) ignored ⇒ BeaconPending
+            worker.TickOnce(t0.AddSeconds(30));   // still within the 90s grace ⇒ no cycle
+
+            Assert.Empty(cmd.StopCalls);
+        }
+        finally { try { Directory.Delete(beaconDir, true); } catch { } }
+    }
+
+    [Fact]
     public void Tick_StoppedAfterGrace_InvokesStart()
     {
         var cmd = new FakeCommand();

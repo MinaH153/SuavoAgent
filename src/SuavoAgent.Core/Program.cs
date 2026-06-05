@@ -301,6 +301,10 @@ try
     builder.Services.AddSingleton<SuavoAgent.Core.Workers.WorkerHealthRegistry>();
 
     builder.Services.AddHostedService<HeartbeatWorker>();
+    // Liveness beacon — the Watchdog reads it to detect an alive-but-hung Core (SCM can't see deadlock).
+    builder.Services.AddHostedService(sp =>
+        new SuavoAgent.Core.Workers.LivenessBeaconWorker(
+            sp.GetRequiredService<ILogger<SuavoAgent.Core.Workers.LivenessBeaconWorker>>()));
 
     // VisionCaptureWorker — fires periodic capture_screen IPC commands when
     // Vision.Enabled + PeriodicCapture.Enabled + active learning session.

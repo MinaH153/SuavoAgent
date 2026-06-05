@@ -18,6 +18,19 @@ public sealed class WatchdogOptions
     /// written by Core's SelfUpdater after a binary swap). The install dir ACL denies interactive-user
     /// writes (Users = ReadAndExecute), so the signal can't be spoofed by a logged-in pharmacy user.
     public string? RestartRequestPath { get; init; }
+
+    /// A RUNNING service whose liveness beacon is older than this is treated as hung (deadlocked /
+    /// IPC-unresponsive) and force-cycled. Generous enough to never restart a legitimately slow loop.
+    public TimeSpan HangStaleThreshold { get; init; } = TimeSpan.FromSeconds(90);
+
+    /// Directory the supervised processes refresh their liveness beacons in (default: ProgramData liveness dir).
+    public string? HangBeaconDirectory { get; init; }
+
+    /// Services that EMIT a liveness beacon and may therefore be hang-checked. A service NOT in this set
+    /// is never flagged hung for a missing/stale beacon (it simply doesn't emit) — avoids false-positive
+    /// restarts. Defaults to Core only; add Broker once it emits its beacon.
+    public IReadOnlyCollection<string> HangCheckedServices { get; init; } =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "SuavoAgent.Core" };
 }
 
 public sealed class WatchdogWorker : BackgroundService
@@ -29,6 +42,11 @@ public sealed class WatchdogWorker : BackgroundService
     private readonly Dictionary<string, ServiceLedger> _ledgers = new(StringComparer.OrdinalIgnoreCase);
     private WatchdogRemoteRepairTelemetry? _lastRemoteRepair;
     private WatchdogUpdateRestartTelemetry? _lastUpdateRestart;
+
+    // Hang detection: read the supervised processes' liveness beacons, and track when each was first
+    // seen RUNNING (startup grace before a missing beacon counts as hung).
+    private readonly SuavoAgent.Diagnostics.LivenessBeaconStore _beaconStore;
+    private readonly Dictionary<string, DateTimeOffset> _beaconTrackingSince = new(StringComparer.OrdinalIgnoreCase);
 
     // Only the Broker may be cycled by a post-OTA restart request. Core restarts itself via
     // SCM (Environment.Exit after the swap); the Helper is reconciled by the new Broker's #130.
@@ -44,6 +62,8 @@ public sealed class WatchdogWorker : BackgroundService
         _logger = logger;
         _command = command;
         _options = options;
+        _beaconStore = new SuavoAgent.Diagnostics.LivenessBeaconStore(
+            options.HangBeaconDirectory ?? SuavoAgent.Diagnostics.LivenessBeaconStore.DefaultDirectory);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -151,6 +171,49 @@ public sealed class WatchdogWorker : BackgroundService
                 case DecisionAction.Alert:
                     _logger.LogCritical("{Service} unhealthy with no automatic remediation path — human intervention required", svc);
                     break;
+            }
+
+            // Hang detection — for beacon-emitting services only: a process the SCM reports RUNNING but
+            // whose liveness beacon is stale is deadlocked (IPC-unresponsive), invisible to the SCM-state
+            // engine above. Force-cycle it (stop+start); a plain start is a no-op against a RUNNING service.
+            if (observed == ServiceState.Running && _options.HangCheckedServices.Contains(svc))
+            {
+                if (!_beaconTrackingSince.TryGetValue(svc, out var trackingSince))
+                {
+                    trackingSince = now;
+                    _beaconTrackingSince[svc] = now;
+                }
+
+                // A beacon written BEFORE we started tracking this run is from a prior process — ignore it
+                // (treat as no-beacon so the startup grace applies). Else a stale leftover .beacon file would
+                // bypass the grace and force-cycle a slow-starting Core before its first fresh write (Codex P2).
+                var beacon = _beaconStore.Read(svc);
+                if (beacon is { } b && b < trackingSince) beacon = null;
+
+                var verdict = HangEvaluator.Evaluate(new LivenessSnapshot(
+                    observed, beacon, now, _options.HangStaleThreshold, trackingSince));
+                if (verdict == LivenessVerdict.Hung)
+                {
+                    _logger.LogWarning("{Service} RUNNING but liveness beacon stale (>{Stale}s) — HUNG; force-cycling (stop+start)",
+                        svc, (int)_options.HangStaleThreshold.TotalSeconds);
+
+                    // Require a successful Stop before Start — a plain Start is a no-op on a RUNNING service,
+                    // so claiming recovery without confirming the stop would mask a still-hung process (Codex P2).
+                    if (_command.Stop(svc, _options.StartTimeout))
+                    {
+                        var cycled = _command.Start(svc, _options.StartTimeout);
+                        _logger.LogInformation("{Service} hang force-cycle start accepted={Ok}", svc, cycled);
+                        _beaconTrackingSince.Remove(svc); // re-grace after the restart so we don't immediately re-trip
+                    }
+                    else
+                    {
+                        _logger.LogCritical("{Service} is HUNG and did NOT stop within timeout — harder intervention (repair/kill) needed", svc);
+                    }
+                }
+            }
+            else if (observed != ServiceState.Running)
+            {
+                _beaconTrackingSince.Remove(svc); // not running ⇒ reset grace; the SCM engine owns recovery
             }
 
             _ledgers[svc] = next;
