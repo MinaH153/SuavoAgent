@@ -537,6 +537,104 @@ public class WatchdogWorkerTests
         }
     }
 
+    // ── Self-heal on a REAL OS process (not a fake): the hang force-cycle actually kills and relaunches
+    //    a live process when its liveness beacon goes stale. Cross-platform (runs on the ubuntu gate). ──
+    private sealed class ProcessServiceCommand : IServiceCommand
+    {
+        private readonly Dictionary<string, System.Diagnostics.Process> _procs = new(StringComparer.OrdinalIgnoreCase);
+        public List<string> StopCalls { get; } = new();
+
+        public ServiceState Query(string serviceName)
+        {
+            if (!_procs.TryGetValue(serviceName, out var p)) return ServiceState.Stopped;
+            try { return p.HasExited ? ServiceState.Stopped : ServiceState.Running; }
+            catch { return ServiceState.Stopped; }
+        }
+
+        public bool Start(string serviceName, TimeSpan timeout)
+        {
+            // A long-running, killable real process to stand in for the supervised agent process.
+            var psi = OperatingSystem.IsWindows()
+                ? new System.Diagnostics.ProcessStartInfo("ping", "-n 300 127.0.0.1") { UseShellExecute = false, CreateNoWindow = true }
+                : new System.Diagnostics.ProcessStartInfo("sleep", "300") { UseShellExecute = false };
+            var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null) return false;
+            _procs[serviceName] = proc;
+            return true;
+        }
+
+        public bool Stop(string serviceName, TimeSpan timeout)
+        {
+            StopCalls.Add(serviceName);
+            if (_procs.TryGetValue(serviceName, out var p))
+            {
+                try { if (!p.HasExited) p.Kill(entireProcessTree: true); p.WaitForExit(2000); } catch { }
+            }
+            return true;
+        }
+
+        public bool InvokeRepair(string bootstrapPath, TimeSpan timeout) => true;
+
+        public int Pid(string serviceName)
+        {
+            if (!_procs.TryGetValue(serviceName, out var p)) return -1;
+            try { return p.Id; } catch { return -1; }
+        }
+
+        public void KillAll()
+        {
+            foreach (var p in _procs.Values)
+            {
+                try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+                try { p.Dispose(); } catch { }
+            }
+            _procs.Clear();
+        }
+    }
+
+    [Fact]
+    public void Hang_ForceCyclesARealOsProcess()
+    {
+        var beaconDir = Path.Combine(Path.GetTempPath(), "wd-realproc-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(beaconDir);
+        var cmd = new ProcessServiceCommand();
+        try
+        {
+            var t0 = DateTimeOffset.UtcNow;
+            Assert.True(cmd.Start("agent-core", TimeSpan.FromSeconds(5)));
+            var pid1 = cmd.Pid("agent-core");
+            Assert.True(pid1 > 0);
+            Assert.Equal(ServiceState.Running, cmd.Query("agent-core"));
+
+            // The process is alive per the OS, but its liveness beacon is frozen (deadlocked) — write it stale.
+            new SuavoAgent.Diagnostics.LivenessBeaconStore(beaconDir).Write("agent-core", t0);
+
+            var worker = new WatchdogWorker(NullLogger<WatchdogWorker>.Instance, cmd, new WatchdogOptions
+            {
+                WatchedServices = new[] { "agent-core" },
+                HangCheckedServices = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "agent-core" },
+                HangBeaconDirectory = beaconDir,
+                HangStaleThreshold = TimeSpan.FromSeconds(90),
+                RestartRequestPath = Path.Combine(Path.GetTempPath(), $"no-such-{Guid.NewGuid():N}.json"),
+            });
+            SeedLedgers(worker);
+
+            worker.TickOnce(t0);                  // begins tracking; beacon fresh ⇒ Live
+            worker.TickOnce(t0.AddSeconds(150));  // beacon 150s stale ⇒ HUNG ⇒ stop+start the REAL process
+
+            Assert.Contains("agent-core", cmd.StopCalls);  // the hung process was really stopped
+            var pid2 = cmd.Pid("agent-core");
+            Assert.True(pid2 > 0);
+            Assert.NotEqual(pid1, pid2);                   // a genuinely NEW OS process — self-heal force-cycled it
+            Assert.Equal(ServiceState.Running, cmd.Query("agent-core"));
+        }
+        finally
+        {
+            cmd.KillAll();
+            try { Directory.Delete(beaconDir, true); } catch { }
+        }
+    }
+
     private static void SeedLedgers(WatchdogWorker worker)
     {
         // Trigger lazy ledger initialization by reflection into private dict
