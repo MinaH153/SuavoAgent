@@ -34,15 +34,19 @@ public interface IPerceiver
 public interface IReasoner
 {
     // Objective + bounded memory + action whitelist → exactly ONE next action.
-    Task<NextAction> ReasonNextAsync(
+    // allowCloud reflects the per-run cloud sub-budget; the result reports UsedCloud
+    // (consumed a round-trip) and CloudDenied (needed cloud but was over budget).
+    Task<ReasonResult> ReasonNextAsync(
         AgentObjective objective, WorkingMemory memory,
-        IReadOnlySet<RuleActionType> allowedActions, CancellationToken ct);
+        IReadOnlySet<string> allowedActions, bool allowCloud, CancellationToken ct);
 
-    // Did the last action achieve its local postcondition?
-    Task<PostconditionVerdict> VerifyPostconditionAsync(
+    // Did the last action achieve its local postcondition? (after = settled frame)
+    Task<VerifyResult> VerifyPostconditionAsync(
         AgentObjective objective, NextAction lastAction,
-        PerceivedScreen before, PerceivedScreen after, CancellationToken ct);
+        PerceivedScreen before, PerceivedScreen after, bool allowCloud, CancellationToken ct);
 }
+// ReasonResult(NextAction Action, bool UsedCloud, bool CloudDenied=false)
+// VerifyResult(PostconditionVerdict Verdict, bool UsedCloud, bool CloudDenied=false)
 
 public interface IActuator
 {
