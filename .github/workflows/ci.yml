@@ -165,7 +165,7 @@ jobs:
       - name: Real-app on a classic-Win32 app (primitives + full loop + watch-learn-replicate)
         env:
           SUAVOAGENT_UIA_HARNESS: ${{ github.workspace }}\tests\SuavoAgent.UiaHarness\bin\Release\net8.0-windows\SuavoAgent.UiaHarness.exe
-        run: dotnet test tests/SuavoAgent.Helper.Tests/SuavoAgent.Helper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~RealAppPerceptionTests|FullyQualifiedName~RealAppLoopTests|FullyQualifiedName~RealAppLearnReplayTests" -v normal
+        run: dotnet test tests/SuavoAgent.Helper.Tests/SuavoAgent.Helper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~RealAppPerceptionTests|FullyQualifiedName~RealAppLoopTests|FullyQualifiedName~RealAppLearnReplayTests|FullyQualifiedName~RealAppSeedReplayTests" -v normal
 
       # Prove the Tier-2 on-device LLM reasons in CI: download a small real GGUF and run LLamaLocalInference
       # (llama.cpp via LLamaSharp, CPU) under its GBNF grammar. Cached so it only downloads once.
