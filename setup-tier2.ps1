@@ -41,9 +41,12 @@ function Get-RemoteFile([string]$url, [string]$dest) {
     }
 }
 
-# 1) Model - ungated Llama-3.2-1B-Instruct Q4_K_M (~770MB); matches the agent's prompt format.
-$modelPath = Join-Path $models "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
-$modelUrl  = "https://huggingface.co/unsloth/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+# 1) Model - TinyLlama-1.1B-Chat Q4_K_M (~668MB), ungated. CI #175 proved this exact model produces
+#    valid grammar-constrained proposals with this stack. Llama-3.2-1B emitted its <|eot_id|> stop
+#    token immediately (0 output tokens) because the agent's AntiPrompts are Llama-3 stop tokens;
+#    TinyLlama doesn't use those, so it generates under the GBNF grammar instead of halting.
+$modelPath = Join-Path $models "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+$modelUrl  = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 if ((Test-Path $modelPath) -and ((Get-Item $modelPath).Length -gt 500MB)) {
     Write-Host "Model already present - skipping download." -ForegroundColor Green
 } else {
@@ -83,7 +86,7 @@ $cfg = @{ Agent = @{ Reasoning = @{
     Enabled             = $true
     ModelPath           = $modelPath
     NativeLibraryPath   = $native
-    ModelId             = "llama-3.2-1b-q4_k_m"
+    ModelId             = "tinyllama-1.1b-chat"
     CloudEnabled        = $false
     PricingBrainEnabled = $false
 } } }
