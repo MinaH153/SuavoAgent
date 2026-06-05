@@ -1,4 +1,4 @@
-# SuavoAgent — Tier-2 on-device LLM enablement (HIPAA-LOCAL; cloud reasoning stays OFF).
+# SuavoAgent - Tier-2 on-device LLM enablement (HIPAA-LOCAL; cloud reasoning stays OFF).
 # Run in an ELEVATED PowerShell on the agent box:
 #   irm <raw-url> -OutFile s.ps1 ; . .\s.ps1
 # Places a local GGUF model + llama.cpp native libs, writes the reasoning config overlay,
@@ -6,7 +6,7 @@
 $ErrorActionPreference = "Stop"
 Write-Host "=== SuavoAgent Tier-2 (on-device LLM, HIPAA-local) setup ===" -ForegroundColor Cyan
 
-# Force a modern TLS — Windows PowerShell 5.1 can default to TLS 1.0/1.1 which HuggingFace rejects,
+# Force a modern TLS - Windows PowerShell 5.1 can default to TLS 1.0/1.1 which HuggingFace rejects,
 # which silently breaks large downloads. Set it unconditionally (NOT inside a swallowing try/catch).
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
@@ -25,7 +25,7 @@ function Get-RemoteFile([string]$url, [string]$dest) {
     if (Test-Path $curl) {
         & $curl -L --fail --retry 3 --connect-timeout 30 -A "Mozilla/5.0" -o $dest $url
         if (($LASTEXITCODE -eq 0) -and (Test-Path $dest)) { return }
-        Write-Host "  curl exit $LASTEXITCODE — falling back to WebClient..." -ForegroundColor Yellow
+        Write-Host "  curl exit $LASTEXITCODE - falling back to WebClient..." -ForegroundColor Yellow
     }
     $wc = New-Object System.Net.WebClient
     $wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
@@ -41,13 +41,13 @@ function Get-RemoteFile([string]$url, [string]$dest) {
     }
 }
 
-# 1) Model — ungated Llama-3.2-1B-Instruct Q4_K_M (~770MB); matches the agent's prompt format.
+# 1) Model - ungated Llama-3.2-1B-Instruct Q4_K_M (~770MB); matches the agent's prompt format.
 $modelPath = Join-Path $models "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
 $modelUrl  = "https://huggingface.co/unsloth/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
 if ((Test-Path $modelPath) -and ((Get-Item $modelPath).Length -gt 500MB)) {
-    Write-Host "Model already present — skipping download." -ForegroundColor Green
+    Write-Host "Model already present - skipping download." -ForegroundColor Green
 } else {
-    Write-Host "Downloading model (~770MB) — slow part, ~2-5 min..."
+    Write-Host "Downloading model (~770MB) - slow part, ~2-5 min..."
     Get-RemoteFile $modelUrl $modelPath
 }
 if (-not (Test-Path $modelPath) -or ((Get-Item $modelPath).Length -lt 100MB)) {
@@ -58,7 +58,7 @@ Write-Host ("Model OK: {0:N0} bytes" -f (Get-Item $modelPath).Length) -Foregroun
 # 2) Native llama.cpp DLLs matching LLamaSharp 0.19.0 (from the CPU backend nupkg).
 $llamaDll = Join-Path $native "llama.dll"
 if (Test-Path $llamaDll) {
-    Write-Host "Native libs already present — skipping." -ForegroundColor Green
+    Write-Host "Native libs already present - skipping." -ForegroundColor Green
 } else {
     Write-Host "Downloading llama.cpp native libs (LLamaSharp.Backend.Cpu 0.19.0)..."
     $zip = Join-Path $env:TEMP "llamacpp-cpu-0.19.0.zip"
@@ -73,11 +73,11 @@ if (Test-Path $llamaDll) {
     # Belt-and-suspenders: also copy the base-folder DLLs (covers ggml living outside the avx subdir).
     Copy-Item (Join-Path $ex "runtimes\win-x64\native\*.dll") $native -Force -ErrorAction SilentlyContinue
 }
-if (-not (Test-Path $llamaDll)) { throw "Native libs missing — llama.dll not placed at $native." }
+if (-not (Test-Path $llamaDll)) { throw "Native libs missing - llama.dll not placed at $native." }
 Write-Host "Native libs placed:" -ForegroundColor Green
 Get-ChildItem $native -Filter *.dll | Select-Object Name, Length | Format-Table -AutoSize
 
-# 3) Reasoning config overlay — Tier-2 ON, Tier-3/cloud OFF. Written directly so the restart picks it
+# 3) Reasoning config overlay - Tier-2 ON, Tier-3/cloud OFF. Written directly so the restart picks it
 #    up immediately (no sync race); the cloud agent_config_overrides rows keep it across resyncs.
 $cfg = @{ Agent = @{ Reasoning = @{
     Enabled             = $true
