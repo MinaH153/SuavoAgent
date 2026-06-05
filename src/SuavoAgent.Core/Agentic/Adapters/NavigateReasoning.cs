@@ -83,7 +83,8 @@ public static class NavigateReasoning
     /// actuating action → Act; more than one actuating action → Escalate (never silently take
     /// index 0); anything else (Tier-miss, operator-required, only meta actions) → Escalate.
     /// </summary>
-    public static NextAction MapDecision(BrainDecision decision)
+    public static NextAction MapDecision(
+        BrainDecision decision, PerceivedScreen? screen = null, string? processName = null)
     {
         if (decision.Actions.Any(IsCompletionSignal))
             return NextAction.Done;
@@ -93,6 +94,20 @@ public static class NavigateReasoning
         if (actuating.Count == 1)
         {
             var a = actuating[0];
+
+            // GROUNDING LAYER: a freeform LLM click (no exact label) names intent ("click Save") but
+            // the strict click_by_label verb needs an exact label + allowlisted process. Bind the
+            // intent to the CONCRETE perceived element's signature so it can actuate on ANY app. The
+            // rule brain already carries an exact label+process, so it skips grounding and uses
+            // click_by_label unchanged. No perceived match -> fall through (verb fails) rather than
+            // inventing a target.
+            if (a.Type == RuleActionType.Click && !HasUsableLabel(a.Parameters))
+            {
+                var grounded = ActionGrounding.GroundClick(a.Parameters, screen, processName);
+                if (grounded != null)
+                    return NextAction.Act("click_by_signature", grounded, a.Description);
+            }
+
             var parameters = a.Parameters.ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
             return NextAction.Act(VerbByActionType[a.Type], parameters, a.Description);
         }
@@ -102,6 +117,12 @@ public static class NavigateReasoning
 
         return NextAction.Escalate(string.IsNullOrEmpty(decision.Reason) ? "no actionable decision" : decision.Reason);
     }
+
+    /// <summary>True when a click action already carries an exact label + process_name (rule-brain
+    /// output) and so needs no grounding. Freeform LLM clicks lack these and must be grounded.</summary>
+    private static bool HasUsableLabel(IReadOnlyDictionary<string, string> parameters)
+        => parameters.TryGetValue("label", out var l) && !string.IsNullOrWhiteSpace(l)
+           && parameters.TryGetValue("process_name", out var pn) && !string.IsNullOrWhiteSpace(pn);
 
     private static bool IsCompletionSignal(RuleActionSpec a)
         => a.Type == RuleActionType.Log
