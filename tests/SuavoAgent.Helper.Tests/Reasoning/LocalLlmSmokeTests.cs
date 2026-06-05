@@ -41,7 +41,7 @@ public sealed class LocalLlmSmokeTests
                 ModelPath = modelPath,
                 NativeLibraryPath = null, // null → LLamaSharp auto-loads the LLamaSharp.Backend.Cpu natives
                 ContextSize = 2048,
-                MaxOutputTokens = 96,
+                MaxOutputTokens = 256, // enough headroom for the grammar JSON to close (truncation → unparseable)
                 IdleUnloadSeconds = 5,
             },
         });
