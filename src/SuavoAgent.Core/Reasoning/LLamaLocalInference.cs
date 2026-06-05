@@ -130,6 +130,10 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 Temperature = 0.1f,
                 TopK = 40,
                 TopP = 0.95f,
+                // Best-effort backstop only: the GBNF grammar pass is a no-op on win-x64
+                // (2026-06-05), so it cannot be relied on to constrain output. The valid-JSON
+                // guarantee rests on the model-matched template (above) + ProposalParser (below);
+                // grammar tightens output where the platform honors it.
                 Grammar = new Grammar(grammar, "root"),
             },
         };

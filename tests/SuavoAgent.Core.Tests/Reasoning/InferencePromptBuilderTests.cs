@@ -101,6 +101,54 @@ public class InferencePromptBuilderTests
         Assert.DoesNotContain("objective", msg);
     }
 
+    // --- prior_actions multi-step memory (2026-06 brain upgrade) -------------
+
+    [Fact]
+    public void BuildUserMessage_PriorActions_KeepsMostRecentSteps_NotOldest()
+    {
+        // Working memory is bounded to the most-recent steps; the transcript is
+        // oldest→newest. The generic 200-char flag cap kept the HEAD (oldest),
+        // truncating away the most-recent — the steps that matter most for the
+        // next decision. prior_actions must retain the TAIL.
+        var transcript = string.Join("; ", Enumerable.Range(1, 40).Select(i => $"click(elem{i})->Ok"));
+        var msg = InferencePromptBuilder.BuildUserMessage(WithFlags(
+            new Dictionary<string, string> { ["prior_actions"] = transcript }));
+
+        Assert.Contains("elem40", msg); // most-recent step survives
+        Assert.Contains("elem39", msg);
+    }
+
+    [Fact]
+    public void BuildUserMessage_PriorActions_HasLargerBudgetThanGenericFlags()
+    {
+        // A non-prior_actions flag is capped at the generic 200-char field cap;
+        // prior_actions gets a dedicated, larger budget so multi-step history fits.
+        var longValue = new string('x', 600);
+        var msg = InferencePromptBuilder.BuildUserMessage(WithFlags(
+            new Dictionary<string, string>
+            {
+                ["prior_actions"] = longValue,
+                ["other"] = longValue,
+            }));
+
+        // prior_actions keeps > 200 chars; a generic flag does not.
+        Assert.Contains(new string('x', 400), msg); // prior_actions retained well past 200
+    }
+
+    private static InferenceRequest WithFlags(Dictionary<string, string> flags) => new()
+    {
+        Context = new RuleContext
+        {
+            SkillId = "navigate",
+            ProcessName = "pharmacy.exe",
+            WindowTitle = "Main",
+            VisibleElements = new HashSet<string>(),
+            Flags = flags,
+        },
+        EscalationReason = "no rule matched",
+        AllowedActions = new HashSet<RuleActionType> { RuleActionType.Click, RuleActionType.Log },
+    };
+
     // --- helpers -------------------------------------------------------------
 
     private static InferenceRequest Request(
