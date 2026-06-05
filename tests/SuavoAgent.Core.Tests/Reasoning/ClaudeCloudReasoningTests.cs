@@ -144,6 +144,43 @@ public class ClaudeCloudReasoningTests
     }
 
     [Fact]
+    public void BuildScrubbedPayload_IncludesUserObjective_WhenSet_AndScrubsIt()
+    {
+        var req = new InferenceRequest
+        {
+            Context = new RuleContext
+            {
+                SkillId = "navigate",
+                UserObjective = "price these NDCs then file the delivery",
+            },
+            EscalationReason = "navigate step",
+            AllowedActions = InferenceRequest.SafeDefault,
+        };
+
+        var json = JsonSerializer.Serialize(
+            ClaudeCloudReasoning.BuildScrubbedPayload(req, req.EscalationReason));
+
+        Assert.Contains("price these NDCs then file the delivery", json);
+        Assert.Contains("userObjective", json);
+    }
+
+    [Fact]
+    public void BuildScrubbedPayload_OmitsUserObjective_WhenNull()
+    {
+        var req = new InferenceRequest
+        {
+            Context = new RuleContext { SkillId = "pricing-lookup" }, // no objective
+            EscalationReason = "test",
+            AllowedActions = InferenceRequest.SafeDefault,
+        };
+
+        var json = JsonSerializer.Serialize(
+            ClaudeCloudReasoning.BuildScrubbedPayload(req, req.EscalationReason));
+
+        Assert.DoesNotContain("userObjective", json);
+    }
+
+    [Fact]
     public void BuildScrubbedPayload_AllowedActionsSerialized()
     {
         var req = new InferenceRequest

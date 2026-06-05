@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using SuavoAgent.Contracts.Reasoning;
 
 namespace SuavoAgent.Core.Reasoning;
@@ -78,6 +79,12 @@ public static class InferencePromptBuilder
                 kv => Truncate(kv.Key, MaxFieldLen),
                 kv => Truncate(kv.Value, MaxFieldLen));
 
+        // General navigate mode: the NL objective. Null in scoped mode ⇒ omitted from the
+        // JSON (WhenWritingNull) so the legacy prompt is byte-identical when unset.
+        var objective = string.IsNullOrEmpty(ctx.UserObjective)
+            ? null
+            : Truncate(ctx.UserObjective, MaxFieldLen);
+
         // Vision grounding: when a ScreenFrame has been merged into the context (vision on),
         // surface the on-screen text + elements so the LLM reasons over what's literally shown.
         // When vision is off (both empty) we emit the EXACT legacy object — byte-identical output.
@@ -92,6 +99,7 @@ public static class InferencePromptBuilder
                 visible_elements = elements,
                 operator_idle_ms = ctx.OperatorIdleMs,
                 flags = cappedFlags,
+                objective,
             };
         }
         else
@@ -129,6 +137,7 @@ public static class InferencePromptBuilder
                 flags = cappedFlags,
                 screen_text = screenText,
                 screen_elements = screenElements,
+                objective,
             };
         }
         var allowed = request.AllowedActions
@@ -145,7 +154,13 @@ public static class InferencePromptBuilder
 
         return "STATE:\n" +
             JsonSerializer.Serialize(payload,
-                new JsonSerializerOptions { WriteIndented = false });
+                new JsonSerializerOptions
+                {
+                    WriteIndented = false,
+                    // Omit the objective key entirely in scoped mode (null) so the legacy
+                    // prompt is byte-identical when UserObjective is unset.
+                    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                });
     }
 
     private static string Truncate(string? s, int max)

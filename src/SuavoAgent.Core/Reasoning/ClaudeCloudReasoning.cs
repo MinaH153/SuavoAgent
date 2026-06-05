@@ -89,6 +89,11 @@ public sealed class ClaudeCloudReasoning : ICloudReasoning
                 kvp => (object?)(PhiScrubber.ScrubText(kvp.Value) ?? "")),
         };
 
+        // General navigate mode: surface the NL objective so the cloud reasoner grounds
+        // its next action in the user's goal. Omitted entirely in scoped/skill mode.
+        if (!string.IsNullOrEmpty(ctx.UserObjective))
+            scrubbedState["userObjective"] = PhiScrubber.ScrubText(ctx.UserObjective) ?? "";
+
         // AllowedActions is part of the cloud contract — the cloud enforces that
         // the model's output uses one of these exact strings.
         var allowedActions = request.AllowedActions

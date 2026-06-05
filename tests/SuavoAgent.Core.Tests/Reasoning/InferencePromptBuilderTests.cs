@@ -83,12 +83,31 @@ public class InferencePromptBuilderTests
         Assert.DoesNotContain("medication", msg);
     }
 
+    [Fact]
+    public void BuildUserMessage_IncludesObjective_WhenUserObjectiveSet()
+    {
+        var msg = InferencePromptBuilder.BuildUserMessage(Request(objective: "open notepad and type hi"));
+
+        Assert.Contains("objective", msg);
+        Assert.Contains("open notepad and type hi", msg);
+    }
+
+    [Fact]
+    public void BuildUserMessage_OmitsObjectiveKey_WhenUserObjectiveNull()
+    {
+        // Backward-compat: a context with no objective must not emit an objective key.
+        var msg = InferencePromptBuilder.BuildUserMessage(Request());
+
+        Assert.DoesNotContain("objective", msg);
+    }
+
     // --- helpers -------------------------------------------------------------
 
     private static InferenceRequest Request(
         string skill = "test",
         IEnumerable<string>? visible = null,
-        IEnumerable<RuleActionType>? allowed = null) =>
+        IEnumerable<RuleActionType>? allowed = null,
+        string? objective = null) =>
         new()
         {
             Context = new RuleContext
@@ -97,6 +116,7 @@ public class InferencePromptBuilderTests
                 ProcessName = "pharmacy.exe",
                 WindowTitle = "Main",
                 VisibleElements = new HashSet<string>(visible ?? Array.Empty<string>()),
+                UserObjective = objective,
             },
             EscalationReason = "no rule matched",
             AllowedActions = new HashSet<RuleActionType>(
