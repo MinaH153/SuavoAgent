@@ -34,6 +34,7 @@ namespace SuavoAgent.Helper.Tests.Actuation;
 /// windows-uia-smoke CI job); no-op skip otherwise.
 /// </summary>
 [SupportedOSPlatform("windows")]
+[Collection("RealDesktopUia")]
 public sealed class RealAppLoopTests
 {
     [Fact]
