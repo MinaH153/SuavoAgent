@@ -53,6 +53,32 @@ public class BrainStartupProbeTests
         Assert.Equal(1, mock.CallCount);
     }
 
+    [Fact]
+    public async Task RunAsync_BoundedEvenWhenInferenceIgnoresCancellation()
+    {
+        // The live failure (Mina's box 2026-06-05): a grammar-constrained
+        // llama.cpp generation spins in native code without yielding a
+        // cancellable point, so DecideAsync does not return even after the
+        // probe's cooperative timeout. The probe MUST still return on its hard
+        // budget — otherwise an awaited probe blocks host.Run() and Core never
+        // signals SERVICE_RUNNING -> stuck StartPending -> agent never comes up.
+        var brain = new TieredBrain(
+            new RuleEngine(Array.Empty<Rule>(), NullLogger<RuleEngine>.Instance),
+            new BlockingInference(),
+            new ActionVerifier(),
+            NullLogger<TieredBrain>.Instance);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await BrainStartupProbe.RunAsync(brain, NullLogger.Instance);
+        sw.Stop();
+
+        // Hard WhenAny guard is 3s; assert it does NOT block for the full
+        // (60s) stuck inference. Generous headroom for slow CI.
+        Assert.True(
+            sw.Elapsed < TimeSpan.FromSeconds(15),
+            $"Probe blocked {sw.Elapsed.TotalSeconds:F1}s — must return on its budget regardless of a stuck inference.");
+    }
+
     // --- helpers -------------------------------------------------------------
 
     private static TieredBrain Brain() =>
@@ -69,5 +95,19 @@ public class BrainStartupProbeTests
 
         public Task<InferenceProposal?> ProposeAsync(InferenceRequest request, CancellationToken ct) =>
             throw new InvalidOperationException("test throw");
+    }
+
+    // Mimics a native llama.cpp generation that does NOT honor the cancellation
+    // token (blocks regardless of ct) — the exact behavior that bricked startup.
+    private sealed class BlockingInference : ILocalInference
+    {
+        public string ModelId => "blocks";
+        public bool IsReady => true;
+
+        public async Task<InferenceProposal?> ProposeAsync(InferenceRequest request, CancellationToken ct)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(60), CancellationToken.None);
+            return null;
+        }
     }
 }
