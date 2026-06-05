@@ -5,6 +5,14 @@ using SuavoAgent.Contracts.Reasoning;
 
 namespace SuavoAgent.Core.Reasoning;
 
+/// <summary>Chat templates for the on-device models we run. Must match the model's training format.</summary>
+public enum ChatPromptFormat
+{
+    Llama3,
+    Zephyr,
+    Plain,
+}
+
 /// <summary>
 /// Builds prompts for Llama-3.2 instruct format. Output is constrained by
 /// GBNF grammar (see ActionGrammar), so the prompt only needs to explain
@@ -26,19 +34,57 @@ public static class InferencePromptBuilder
         "Only propose actions whose target elements are visible in the state.";
 
     /// <summary>
-    /// Builds a Llama-3.2-instruct formatted prompt from an InferenceRequest.
+    /// Resolves the chat template from the model id. CRITICAL: the template MUST match the model,
+    /// otherwise the model is fed special tokens that aren't in its vocabulary, gets confused, and
+    /// emits its end-of-turn token first — yielding ZERO output. (Live on Mina's box 2026-06-05: a
+    /// Llama-3 template fed to TinyLlama produced "0 chars". A correct grammar would mask the EOS and
+    /// force valid JSON, but we must not RELY on grammar-masking — it was a no-op on the box's win-x64
+    /// llama.cpp build, so the template alone has to make the model emit valid JSON.)
     /// </summary>
-    public static string Build(InferenceRequest request)
+    public static ChatPromptFormat ResolveFormat(string? modelId)
+    {
+        var id = (modelId ?? string.Empty).ToLowerInvariant();
+        if (id.Contains("tinyllama") || id.Contains("zephyr") || id.Contains("stablelm")) return ChatPromptFormat.Zephyr;
+        if (id.Contains("llama-3") || id.Contains("llama3") || id.Contains("llama_3")) return ChatPromptFormat.Llama3;
+        // Default to Zephyr: it's the template used by most small instruct GGUFs we ship, and it
+        // degrades gracefully (plain <|role|> markers) on models that don't recognize it.
+        return ChatPromptFormat.Zephyr;
+    }
+
+    /// <summary>The model-native antiprompts (stop strings) for a given format.</summary>
+    public static string[] AntiPromptsFor(ChatPromptFormat format) => format switch
+    {
+        ChatPromptFormat.Llama3 => new[] { "<|eot_id|>", "<|end_of_text|>" },
+        ChatPromptFormat.Zephyr => new[] { "</s>", "<|user|>" },
+        _ => new[] { "</s>", "\n\n\n" },
+    };
+
+    /// <summary>
+    /// Builds a chat-templated prompt. The template MUST match the model (see <see cref="ResolveFormat"/>).
+    /// </summary>
+    public static string Build(InferenceRequest request, ChatPromptFormat format = ChatPromptFormat.Llama3)
     {
         var user = BuildUserMessage(request);
-
-        // Llama-3.2 instruct chat template — see the model card.
         var sb = new StringBuilder(512);
-        sb.Append("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n");
-        sb.Append(SystemPrompt);
-        sb.Append("<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n");
-        sb.Append(user);
-        sb.Append("<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n");
+        switch (format)
+        {
+            case ChatPromptFormat.Llama3:
+                sb.Append("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n");
+                sb.Append(SystemPrompt);
+                sb.Append("<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n");
+                sb.Append(user);
+                sb.Append("<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n");
+                break;
+            case ChatPromptFormat.Zephyr:
+                // TinyLlama / Zephyr template: <|system|>…</s>\n<|user|>…</s>\n<|assistant|>\n
+                sb.Append("<|system|>\n").Append(SystemPrompt).Append("</s>\n");
+                sb.Append("<|user|>\n").Append(user).Append("</s>\n");
+                sb.Append("<|assistant|>\n");
+                break;
+            default: // Plain
+                sb.Append(SystemPrompt).Append("\n\n").Append(user).Append("\n\nRespond with the JSON action now:\n");
+                break;
+        }
         return sb.ToString();
     }
 
