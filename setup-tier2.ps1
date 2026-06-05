@@ -94,11 +94,37 @@ $cfgPath = Join-Path $base "config-overrides.json"
 [IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 6))
 Write-Host "Wrote reasoning config overlay: $cfgPath" -ForegroundColor Green
 
-# 4) Restart Core so it rebuilds the reasoning singleton with the new config.
-Write-Host "Restarting SuavoAgent.Core..."
-Restart-Service "SuavoAgent.Core" -Force
-Start-Sleep 8
-Get-Service "SuavoAgent.*" | Select-Object Name, Status | Format-Table -AutoSize
+# 4) Regenerate binaries.manifest from the ACTUAL on-disk binaries. The Broker's integrity guard
+#    (SessionWatcher.VerifyHelperIntegrity) refuses to launch the Helper if its hash != the manifest.
+#    A GUI install/OTA swap can leave a STALE manifest -> Helper rejected -> Broker exits -> agent
+#    blind/down with no crash. SelfUpdater regenerates this after OTA; the GUI installer does NOT,
+#    which is the bug that bricked this box. Replicates SelfUpdater.RegenerateBinariesManifest exactly.
+$installDir = "C:\Program Files\Suavo\Agent"
+$manifestPath = Join-Path $base "binaries.manifest"
+$binNames = @("SuavoAgent.Core.exe", "SuavoAgent.Broker.exe", "SuavoAgent.Helper.exe", "SuavoAgent.Watchdog.exe")
+$entries = @()
+foreach ($bin in $binNames) {
+    $p = Join-Path $installDir $bin
+    if (-not (Test-Path $p)) { continue }
+    $h = (Get-FileHash $p -Algorithm SHA256).Hash.ToLower()
+    $entries += ('  "' + $bin + '": "' + $h + '"')
+}
+$json = "{`n" + ($entries -join ",`n") + "`n}`n"
+[IO.File]::WriteAllText($manifestPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "Regenerated binaries.manifest:" -ForegroundColor Green
+Write-Host $json
+
+# 5) Clean ordered restart. Watchdog stopped first so it does not race the Broker/Core start
+#    (a plain Restart-Service on Core drags Broker down and they wedge). Start Broker -> Core -> Watchdog.
+Write-Host "Restarting services (Broker -> Core -> Watchdog)..."
+foreach ($svc in @("SuavoAgent.Watchdog", "SuavoAgent.Core", "SuavoAgent.Broker")) {
+    try { Stop-Service $svc -Force -ErrorAction SilentlyContinue } catch {}
+}
+Start-Sleep 3
+Start-Service "SuavoAgent.Broker"; Start-Sleep 4
+Start-Service "SuavoAgent.Core"; Start-Sleep 5
+Start-Service "SuavoAgent.Watchdog"; Start-Sleep 4
+Get-Service "SuavoAgent.Broker", "SuavoAgent.Core", "SuavoAgent.Watchdog" | Format-Table Name, Status -AutoSize
 
 Write-Host ("Model SHA256: " + (Get-FileHash -Algorithm SHA256 $modelPath).Hash.ToLower())
 Write-Host "=== Done. Tier-2 LOCAL reasoning enabled. Nothing leaves the box. ===" -ForegroundColor Cyan
