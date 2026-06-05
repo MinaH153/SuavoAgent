@@ -20,6 +20,9 @@ public static class ActuationIpcCommands
     /// <summary>Click by accessible-name label (UIA). LOW-tier verb.</summary>
     public const string ClickByLabel = "actuation.click_by_label";
 
+    /// <summary>Click by GREEN-tier structural signature (ControlType + AutomationId). LOW-tier verb — learned-template replay.</summary>
+    public const string ClickBySignature = "actuation.click_by_signature";
+
     /// <summary>Type plain text into the focused field via SendInput Unicode. MED-tier verb.</summary>
     public const string TypeText = "actuation.type_text";
 
@@ -49,6 +52,20 @@ public sealed record ClickByLabelRequest(
     [property: JsonPropertyName("label")] string Label,
     [property: JsonPropertyName("processName")] string ProcessName,
     [property: JsonPropertyName("matchMode")] string MatchMode,
+    [property: JsonPropertyName("timeoutMs")] int TimeoutMs,
+    [property: JsonPropertyName("dryRun")] bool DryRun = false
+);
+
+/// <summary>
+/// Click an element matched by GREEN-tier structural signature (ControlType + AutomationId
+/// [+ ClassName]) rather than accessible name — the resolution learned-template replay needs,
+/// since templates store signatures (never PHI names). ClassName optional.
+/// </summary>
+public sealed record ClickBySignatureRequest(
+    [property: JsonPropertyName("controlType")] string ControlType,
+    [property: JsonPropertyName("automationId")] string AutomationId,
+    [property: JsonPropertyName("className")] string? ClassName,
+    [property: JsonPropertyName("processName")] string ProcessName,
     [property: JsonPropertyName("timeoutMs")] int TimeoutMs,
     [property: JsonPropertyName("dryRun")] bool DryRun = false
 );

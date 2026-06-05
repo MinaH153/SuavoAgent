@@ -73,6 +73,9 @@ public sealed class HelperActuationGateway : IActuationGateway
     public Task<ActuationResult> ClickByLabelAsync(ClickByLabelRequest req, CancellationToken ct) =>
         SendAsync(ActuationIpcCommands.ClickByLabel, req, ct);
 
+    public Task<ActuationResult> ClickBySignatureAsync(ClickBySignatureRequest req, CancellationToken ct) =>
+        SendAsync(ActuationIpcCommands.ClickBySignature, req, ct);
+
     public Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct) =>
         SendAsync(ActuationIpcCommands.TypeText, req, ct);
 
