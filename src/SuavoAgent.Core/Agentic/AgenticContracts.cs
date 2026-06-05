@@ -121,11 +121,18 @@ public sealed record NextAction(
 }
 
 /// <summary>A scrubbed, app-agnostic snapshot of the current screen.</summary>
+/// <param name="ElementSummary">Flat "role:name" / "text:..." lines for the NL reasoner to ground on.</param>
+/// <param name="Signatures">
+/// GREEN-tier structural signatures ("controlType|automationId") for signature-based matching during
+/// template replay. Empty until the perception pipeline surfaces AutomationId (follow-up); the NL loop
+/// doesn't need it, so it defaults empty and is backward-compatible.
+/// </param>
 public sealed record PerceivedScreen(
     string ContentHash,
     bool Scrubbed,
     IReadOnlyList<string> ElementSummary,
-    string? WindowTitle = null);
+    string? WindowTitle = null,
+    IReadOnlyList<string>? Signatures = null);
 
 /// <summary>Result of executing one action through the actuation chain.</summary>
 public enum ActStatus { Success, Rejected, Failed }
