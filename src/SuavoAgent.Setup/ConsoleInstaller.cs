@@ -124,6 +124,13 @@ internal static class ConsoleInstaller
             File.WriteAllText(configPath, configJson);
             ConsoleUI.WriteOk($"appsettings.json written to {InstallDir} (ACL applied first)");
 
+            // Regenerate the Broker's integrity manifest from the just-placed binaries, BEFORE the
+            // services start. Without this, an install/reinstall over an existing agent leaves a stale
+            // binaries.manifest -> the Broker rejects the (new) Helper as tampered and exits -> the
+            // agent comes up "online" but BLIND (no Helper, no vision/UIA), with no crash. The OTA path
+            // already does this; the GUI installer did not. (Live brick on Mina's box 2026-06-05.)
+            BinaryDownloader.WriteBinariesManifest(InstallDir);
+
             ConsoleUI.WriteStep("Phase 5: Installing Windows services");
             var serviceSuccess = ServiceInstaller.InstallAndStart(InstallDir, DataDir);
             if (!serviceSuccess)

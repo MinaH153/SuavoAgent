@@ -1,4 +1,7 @@
 using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text.Json;
 using SuavoAgent.Setup;
 using Xunit;
 
@@ -37,5 +40,40 @@ public sealed class BinaryDownloaderTests
         var signature = Convert.FromBase64String(SignatureB64);
 
         Assert.False(BinaryDownloader.VerifyChecksumSignature(checksums, signature));
+    }
+
+    // Regression for the 2026-06-05 brick: the GUI installer placed binaries but never wrote
+    // binaries.manifest, so the Broker's integrity guard rejected the Helper -> agent blind. The
+    // manifest MUST carry the Helper's on-disk sha256 in the exact shape the Broker reads
+    // (manifest["SuavoAgent.Helper.exe"] == lowercase-hex sha256). A missing Watchdog is omitted, not fatal.
+    [Fact]
+    public void WriteBinariesManifest_carries_helper_hash_the_broker_compares()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "suavo-manifest-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var manifestPath = Path.Combine(dir, "binaries.manifest");
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "SuavoAgent.Core.exe"), "core-bytes");
+            File.WriteAllText(Path.Combine(dir, "SuavoAgent.Broker.exe"), "broker-bytes");
+            var helperPath = Path.Combine(dir, "SuavoAgent.Helper.exe");
+            File.WriteAllText(helperPath, "helper-bytes");
+            // Watchdog intentionally absent — must be omitted, not crash.
+
+            BinaryDownloader.WriteBinariesManifest(dir, manifestPath);
+
+            Assert.True(File.Exists(manifestPath));
+            using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
+
+            Assert.True(doc.RootElement.TryGetProperty("SuavoAgent.Helper.exe", out var helperEl));
+            var expected = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(helperPath))).ToLowerInvariant();
+            Assert.Equal(expected, helperEl.GetString());
+
+            Assert.False(doc.RootElement.TryGetProperty("SuavoAgent.Watchdog.exe", out _));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
     }
 }
