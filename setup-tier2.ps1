@@ -15,10 +15,18 @@ $models = Join-Path $base "models"
 $native = Join-Path $base "native"
 New-Item -ItemType Directory -Force -Path $models, $native | Out-Null
 
-# Reliable large-file download: WebClient streams to disk + follows redirects (HF resolve -> CDN).
-# Falls back to BITS. Surfaces the REAL error instead of dying silently.
+# Reliable large-file download. curl.exe (built into Windows 10/11) follows HF's redirect to the xet
+# CDN and negotiates modern TLS far better than PS 5.1's WebClient (which connects via TCP but fails
+# the TLS/redirect handshake to cas-bridge.xethub.hf.co, producing no file + no visible error).
+# Falls back to WebClient then BITS. Surfaces the REAL error instead of dying silently.
 function Get-RemoteFile([string]$url, [string]$dest) {
-    Write-Host "  -> $dest"
+    Write-Host "  downloading -> $dest" -ForegroundColor Gray
+    $curl = Join-Path $env:SystemRoot "System32\curl.exe"
+    if (Test-Path $curl) {
+        & $curl -L --fail --retry 3 --connect-timeout 30 -A "Mozilla/5.0" -o $dest $url
+        if (($LASTEXITCODE -eq 0) -and (Test-Path $dest)) { return }
+        Write-Host "  curl exit $LASTEXITCODE — falling back to WebClient..." -ForegroundColor Yellow
+    }
     $wc = New-Object System.Net.WebClient
     $wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
     try {
