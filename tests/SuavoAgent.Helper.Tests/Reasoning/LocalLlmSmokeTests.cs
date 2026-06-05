@@ -37,7 +37,7 @@ public sealed class LocalLlmSmokeTests
             Reasoning = new ReasoningOptions
             {
                 Enabled = true,
-                ModelId = "llama-3.2-1b-instruct-q4",
+                ModelId = "tinyllama-1.1b-chat-q4",
                 ModelPath = modelPath,
                 NativeLibraryPath = null, // null → LLamaSharp auto-loads the LLamaSharp.Backend.Cpu natives
                 ContextSize = 2048,
@@ -73,6 +73,6 @@ public sealed class LocalLlmSmokeTests
         Assert.NotNull(proposal);
         Assert.NotNull(proposal!.Action);
         Assert.Contains(proposal.Action.Type, request.AllowedActions);
-        Assert.Equal("llama-3.2-1b-instruct-q4", proposal.ModelId);
+        Assert.Equal("tinyllama-1.1b-chat-q4", proposal.ModelId);
     }
 }
