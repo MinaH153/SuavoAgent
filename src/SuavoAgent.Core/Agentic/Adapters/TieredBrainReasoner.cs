@@ -21,19 +21,25 @@ public sealed class TieredBrainReasoner : IReasoner
     private readonly ActionVerifier _verifier;
     private readonly ICloudReasoning _cloudReasoning;
     private readonly ILogger<TieredBrain> _logger;
+    private readonly string? _targetProcessName;
 
     public TieredBrainReasoner(
         RuleEngine rules,
         ILocalInference localInference,
         ActionVerifier verifier,
         ICloudReasoning cloudReasoning,
-        ILogger<TieredBrain> logger)
+        ILogger<TieredBrain> logger,
+        string? targetProcessName = null)
     {
         _rules = rules;
         _localInference = localInference;
         _verifier = verifier;
         _cloudReasoning = cloudReasoning;
         _logger = logger;
+        // The app being navigated. When set, a freeform LLM click intent is grounded to a concrete
+        // perceived element + this process so it can actuate (see NavigateReasoning.MapDecision /
+        // ActionGrounding). Null preserves the legacy raw-param mapping for non-grounded callers.
+        _targetProcessName = targetProcessName;
     }
 
     public async Task<ReasonResult> ReasonNextAsync(
@@ -53,7 +59,7 @@ public sealed class TieredBrainReasoner : IReasoner
         var decision = await brain.DecideAsync(ctx, allowed, shadowMode: false, ct).ConfigureAwait(false);
 
         var usedCloud = decision.Tier == DecisionTier.CloudInference;
-        var action = NavigateReasoning.MapDecision(decision);
+        var action = NavigateReasoning.MapDecision(decision, memory.LatestScreen, _targetProcessName);
         return new ReasonResult(action, usedCloud);
     }
 
