@@ -42,20 +42,23 @@ public static class TemplatePlanCompiler
     public static IReadOnlyList<CompiledStep> Compile(WorkflowTemplate template)
     {
         if (template is null) throw new ArgumentNullException(nameof(template));
-        return Compile(template.Steps);
+        // The click_by_signature verb needs a target process; templates carry it as a glob at the
+        // template level (e.g. "notepad*"). Derive a concrete process name and thread it into each
+        // click step so the compiled plan is self-contained for replay.
+        return Compile(template.Steps, ProcessFromGlob(template.ProcessNameGlob));
     }
 
-    public static IReadOnlyList<CompiledStep> Compile(IReadOnlyList<TemplateStep> steps)
+    public static IReadOnlyList<CompiledStep> Compile(IReadOnlyList<TemplateStep> steps, string? processName = null)
     {
         if (steps is null) throw new ArgumentNullException(nameof(steps));
-        return steps.OrderBy(s => s.Ordinal).Select(CompileStep).ToList();
+        return steps.OrderBy(s => s.Ordinal).Select(s => CompileStep(s, processName)).ToList();
     }
 
-    public static CompiledStep CompileStep(TemplateStep step)
+    public static CompiledStep CompileStep(TemplateStep step, string? processName = null)
     {
         NextAction? action = step.Kind switch
         {
-            TemplateStepKind.Click => NextAction.Act(ClickBySignatureVerb, SignatureParams(step.Target), "replay:click"),
+            TemplateStepKind.Click => NextAction.Act(ClickBySignatureVerb, SignatureParams(step.Target, processName), "replay:click"),
             TemplateStepKind.Type => NextAction.Act(TypeIntoFieldVerb, TypeParams(step.Hint), "replay:type"),
             TemplateStepKind.PressKey => NextAction.Act(PressKeysVerb, PressParams(step.Hint), "replay:key"),
             _ => null, // WaitForElement / VerifyElement are perceive-and-assert checks, not actuation
@@ -65,13 +68,26 @@ public static class TemplatePlanCompiler
         return new CompiledStep(step.Ordinal, action, isCheck, step.IsWrite, step.ExpectedVisible, step.ExpectedAfter);
     }
 
-    private static IReadOnlyDictionary<string, object?> SignatureParams(ElementSignature target) =>
-        new Dictionary<string, object?>
+    /// <summary>"notepad*" → "notepad"; null/empty → null. Strips a single trailing glob wildcard.</summary>
+    internal static string? ProcessFromGlob(string? glob)
+    {
+        if (string.IsNullOrWhiteSpace(glob)) return null;
+        var trimmed = glob.TrimEnd('*');
+        return string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
+    }
+
+    private static IReadOnlyDictionary<string, object?> SignatureParams(ElementSignature target, string? processName)
+    {
+        var p = new Dictionary<string, object?>
         {
             ["automationId"] = target.AutomationId,
             ["controlType"] = target.ControlType,
             ["className"] = target.ClassName,
         };
+        if (!string.IsNullOrEmpty(processName))
+            p["process_name"] = processName;
+        return p;
+    }
 
     // Type carries only a whitelisted placeholder token (resolved to a non-PHI value at execution),
     // never plaintext — the extractor guarantees this and the compiler must not invent text.

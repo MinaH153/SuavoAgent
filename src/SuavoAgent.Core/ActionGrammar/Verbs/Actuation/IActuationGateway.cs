@@ -16,6 +16,7 @@ public interface IActuationGateway
 {
     Task<ActuationGateState> GetStateAsync(CancellationToken ct);
     Task<ActuationResult> ClickByLabelAsync(ClickByLabelRequest req, CancellationToken ct);
+    Task<ActuationResult> ClickBySignatureAsync(ClickBySignatureRequest req, CancellationToken ct);
     Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct);
     Task<ActuationResult> PressKeysAsync(PressKeysRequest req, CancellationToken ct);
     Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct);

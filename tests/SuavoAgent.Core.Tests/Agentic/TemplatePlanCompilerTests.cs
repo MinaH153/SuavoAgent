@@ -43,6 +43,34 @@ public sealed class TemplatePlanCompilerTests
         Assert.Equal(new[] { 0, 1, 2 }, plan.Select(s => s.Ordinal));
     }
 
+    [Theory]
+    [InlineData("notepad*", "notepad")]
+    [InlineData("PioneerPharmacy*", "PioneerPharmacy")]
+    [InlineData("calc", "calc")]
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    public void ProcessFromGlob_StripsTrailingWildcard(string? glob, string? expected)
+    {
+        Assert.Equal(expected, TemplatePlanCompiler.ProcessFromGlob(glob));
+    }
+
+    [Fact]
+    public void Compile_ThreadsProcessName_IntoClickSteps_SoReplayIsSelfContained()
+    {
+        // The click_by_signature verb requires process_name; the compiler must supply it from the glob.
+        var plan = TemplatePlanCompiler.Compile(new[] { Step(0, TemplateStepKind.Click) }, processName: "notepad");
+
+        Assert.Equal("notepad", plan[0].Action!.Parameters!["process_name"]);
+    }
+
+    [Fact]
+    public void Compile_NoProcess_OmitsProcessNameKey()
+    {
+        var plan = TemplatePlanCompiler.Compile(new[] { Step(0, TemplateStepKind.Click) }); // null process
+
+        Assert.False(plan[0].Action!.Parameters!.ContainsKey("process_name"));
+    }
+
     [Fact]
     public void CompileStep_Click_EmitsClickBySignature_WithStructuralParams_NotName()
     {

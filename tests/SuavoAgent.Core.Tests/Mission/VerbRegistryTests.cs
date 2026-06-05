@@ -17,6 +17,7 @@ public sealed class VerbRegistryTests
 
         Assert.Contains(registry.All, e => e.Name == LookupPatientVerb.VerbName);
         Assert.Contains(registry.All, e => e.Name == ClickByLabelVerb.VerbName);
+        Assert.Contains(registry.All, e => e.Name == ClickBySignatureVerb.VerbName);
         Assert.Contains(registry.All, e => e.Name == TypeIntoFieldVerb.VerbName);
         Assert.Contains(registry.All, e => e.Name == PressKeysVerb.VerbName);
         Assert.Contains(registry.All, e => e.Name == LaunchSandboxAppVerb.VerbName);

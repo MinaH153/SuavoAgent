@@ -217,6 +217,9 @@ public sealed class WorkflowExecutorDryRunPropagationTests
             return Task.FromResult(NextResult ?? ActuationResult.Success(1, req.DryRun, "ok"));
         }
 
+        public Task<ActuationResult> ClickBySignatureAsync(ClickBySignatureRequest req, CancellationToken ct)
+            => Task.FromResult(NextResult ?? ActuationResult.Success(1, req.DryRun, "ok"));
+
         public Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct)
         {
             LastTypeText = req;

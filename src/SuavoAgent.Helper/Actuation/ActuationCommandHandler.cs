@@ -20,6 +20,7 @@ public sealed class ActuationCommandHandler
     private readonly ActuationGate _gate;
     private readonly SendInputDriver _driver;
     private readonly UiaLabelResolver _resolver;
+    private readonly UiaSignatureResolver _signatureResolver;
     private readonly ActuationConfig _config;
     private readonly ILogger _logger;
 
@@ -28,13 +29,15 @@ public sealed class ActuationCommandHandler
         SendInputDriver driver,
         UiaLabelResolver resolver,
         ActuationConfig config,
-        ILogger logger)
+        ILogger logger,
+        UiaSignatureResolver? signatureResolver = null)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
         _driver = driver ?? throw new ArgumentNullException(nameof(driver));
         _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<ActuationCommandHandler>();
+        _signatureResolver = signatureResolver ?? new UiaSignatureResolver(logger);
     }
 
     public ActuationGateState GetState() => _gate.Snapshot();
@@ -46,6 +49,7 @@ public sealed class ActuationCommandHandler
             return command switch
             {
                 ActuationIpcCommands.ClickByLabel => await HandleClickByLabelAsync(data, ct).ConfigureAwait(false),
+                ActuationIpcCommands.ClickBySignature => await HandleClickBySignatureAsync(data, ct).ConfigureAwait(false),
                 ActuationIpcCommands.TypeText => await HandleTypeTextAsync(data, ct).ConfigureAwait(false),
                 ActuationIpcCommands.PressKeys => await HandlePressKeysAsync(data, ct).ConfigureAwait(false),
                 ActuationIpcCommands.LaunchSandboxApp => await HandleLaunchSandboxAppAsync(data, ct).ConfigureAwait(false),
@@ -106,6 +110,44 @@ public sealed class ActuationCommandHandler
             return ActuationResult.Reject(
                 ActuationRejectionCodes.LabelNotFound,
                 $"label '{req.Label}' not found in '{req.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
+                effectiveDryRun);
+        }
+
+        return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct).ConfigureAwait(false);
+    }
+
+    private async Task<ActuationResult> HandleClickBySignatureAsync(JsonElement? data, CancellationToken ct)
+    {
+        if (data is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "missing data", _gate.IsDryRun);
+        var req = data.Value.Deserialize<ClickBySignatureRequest>();
+        if (req is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun);
+
+        var effectiveDryRun = req.DryRun || _gate.IsDryRun;
+
+        if (string.IsNullOrWhiteSpace(req.AutomationId) || string.IsNullOrWhiteSpace(req.ControlType) || string.IsNullOrWhiteSpace(req.ProcessName))
+            return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "controlType/automationId/processName required", effectiveDryRun);
+
+        var allowedProcesses = ActuationAllowlistedSandboxApps.ProcessNames.Values
+            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys);
+        if (!allowedProcesses.Contains(req.ProcessName, StringComparer.OrdinalIgnoreCase))
+        {
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessNotAllowed,
+                $"processName '{req.ProcessName}' not allowed for sandbox actuation",
+                effectiveDryRun);
+        }
+
+        var rejection = _gate.CheckOrReject();
+        if (rejection is not null) return rejection with { DryRun = effectiveDryRun };
+
+        var timeout = req.TimeoutMs > 0 ? TimeSpan.FromMilliseconds(req.TimeoutMs) : _config.DefaultUiaTimeout;
+
+        var resolved = _signatureResolver.Resolve(req.ControlType, req.AutomationId, req.ClassName, req.ProcessName, timeout);
+        if (resolved is null)
+        {
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.LabelNotFound,
+                $"signature ({req.ControlType}|{req.AutomationId}) not found in '{req.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
                 effectiveDryRun);
         }
 
