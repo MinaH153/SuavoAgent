@@ -42,12 +42,37 @@ public static class BrainStartupProbe
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(2));
 
-            var decision = await brain.DecideAsync(
+            var decideTask = brain.DecideAsync(
                 ctx,
                 allowedTier2Actions: new HashSet<RuleActionType> { RuleActionType.Log },
                 shadowMode: true, // extra guard — any Tier-2 approval returns NoMatch
                 ct: cts.Token);
 
+            // Hard wall-clock guard. The 2 s cts above is cooperative, but a
+            // grammar-constrained llama.cpp generation can spin in native code
+            // without yielding a cancellable point, so DecideAsync may not
+            // return even after cancellation fires. WhenAny lets the probe
+            // RETURN on the deadline regardless (the orphaned inference finishes
+            // on its own and the model idle-unloads). Critical so any caller —
+            // even one that accidentally awaits the probe — can never be blocked
+            // past the budget. (Live failure on Mina's box 2026-06-05: an
+            // awaited probe blocked host.Run() and Core never reached Running.)
+            // Observe the task even if the guard wins below, so a late fault on
+            // the orphaned inference can never surface as an unobserved task
+            // exception (Codex P2). OnlyOnFaulted is a no-op on normal completion.
+            _ = decideTask.ContinueWith(
+                t => logger.LogWarning(t.Exception, "BrainStartupProbe: orphaned inference faulted after budget"),
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+
+            var guard = Task.Delay(TimeSpan.FromSeconds(3), ct);
+            if (await Task.WhenAny(decideTask, guard) != decideTask)
+            {
+                logger.LogWarning(
+                    "BrainStartupProbe: exceeded 3s budget — Tier-2 inference did not honor cancellation (model slow or grammar/model mismatch). Wiring resolved; not blocking startup.");
+                return;
+            }
+
+            var decision = await decideTask;
             logger.LogInformation(
                 "BrainStartupProbe: tier={Tier} outcome={Outcome} reason=\"{Reason}\"",
                 decision.Tier, decision.Outcome, decision.Reason);

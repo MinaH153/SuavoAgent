@@ -812,9 +812,22 @@ try
 
     // Startup smoke probe — shadow-mode decision to prove the full brain
     // wiring is invocable. Logs one line so operators can confirm at a glance.
-    await BrainStartupProbe.RunAsync(
-        brain,
-        host.Services.GetRequiredService<ILogger<Program>>());
+    //
+    // Runs in the BACKGROUND (fire-and-forget), NOT awaited before host.Run().
+    // The probe escalates the no-rule probe skill to Tier-2, which lazy-loads
+    // the model and runs a grammar-constrained inference. That native llama.cpp
+    // generation does NOT honor the probe's 2 s cancellation promptly (the
+    // sampler can spin without yielding a cancellable point), so an *awaited*
+    // probe blocked host.Run() for the full inference. A slow model (or a
+    // grammar/model mismatch that produces no valid token) then exceeded the
+    // SCM ~30 s start timeout -> Core never signalled SERVICE_RUNNING -> stuck
+    // StartPending -> the agent could never come up with Tier-2 enabled.
+    // (Live failure on Mina's box 2026-06-05.) Backgrounding it means the host
+    // reaches Running immediately; the probe still logs its health line when it
+    // completes. DI construction errors are already caught by the eager
+    // GetRequiredService<TieredBrain>() above (which DOES crash startup).
+    var probeLogger = host.Services.GetRequiredService<ILogger<Program>>();
+    _ = Task.Run(() => BrainStartupProbe.RunAsync(brain, probeLogger));
 
     var pipeServer = host.Services.GetRequiredService<IpcPipeServer>();
     pipeServer.Start(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
