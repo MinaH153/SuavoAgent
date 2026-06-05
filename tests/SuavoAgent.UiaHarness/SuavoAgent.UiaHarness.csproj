@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Standalone classic-Win32 (WinForms) harness app the production FlaUiElementExtractor CAN read
+       (its controls are classic UIA control types — exactly the agent's real target shape, like
+       PioneerRx). Deliberately NOT in SuavoAgent.sln: net8.0-windows won't build on the ubuntu
+       build-and-test runner. The windows-uia-smoke CI job builds it on Windows; the real-app loop/replay
+       tests launch the produced .exe (path via the SUAVOAGENT_UIA_HARNESS env var). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SuavoAgent.UiaHarness</AssemblyName>
+  </PropertyGroup>
+
+</Project>
