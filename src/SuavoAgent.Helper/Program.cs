@@ -123,26 +123,35 @@ try
         actuationRuntime = new ActuationRuntime(actuationGate, observer, hotkey, Log.Logger);
         actuationRuntime.Start();
 
-        // Honeytoken immune reflex — a decoy-file watcher that, on a corroborated touch by a non-allowlisted
-        // process, trips the SAME actuation gate (Degrade→reversible, Apoptosis→latched) and stamps the
-        // compromise for the heartbeat signal. GATED OFF by default: v1's NullFileAccessAttributor can't name
-        // the toucher (FSW limitation), so every touch → Degrade and a repeat → Apoptosis, which a routine
-        // AV/backup scan would false-trip. Stays dormant until ETW/handle PID resolution lands + is validated
-        // (ActuationConfig.HoneytokenReflexEnabled). The full ladder is built + unit-tested either way.
+        // Honeytoken immune reflex — a decoy-file watcher that, on a corroborated touch, trips the SAME
+        // actuation gate (Degrade→reversible, Apoptosis→latched-ONLY-for-a-resolved-shell) and stamps the
+        // compromise for the heartbeat signal. Never-brick is STRUCTURAL (HoneytokenCorroborator: only a
+        // resolved SensitiveDenylist shell latches; all else → reversible Degrade). The attributor is selected
+        // by HoneytokenAttributorMode: Null (no attribution — every touch unknown→Degrade) or EtwBroker (reads
+        // the Broker ETW oracle's signed handoff to NAME the toucher). Stays dormant until
+        // HoneytokenReflexEnabled is flipped per-pharmacy after a shadow day; both default off → dark.
         if (actuationConfig.HoneytokenReflexEnabled)
         {
             var honeytokenDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 "SuavoAgent", HoneytokenConstants.DirName);
+            // The Broker stamps the RAW pipe nonce into the handoff doc; the Helper holds the prefixed pipe
+            // NAME (SuavoAgent-{nonce}). Strip the prefix so the nonce binding is symmetric.
+            const string pipePrefix = "SuavoAgent-";
+            var rawNonce = pipeName is { Length: > 0 } && pipeName.StartsWith(pipePrefix, StringComparison.Ordinal)
+                ? pipeName[pipePrefix.Length..]
+                : pipeName ?? string.Empty;
             var honeytokenReflex = new HoneytokenReflex(
                 new HoneytokenCorroborator(AppContext.BaseDirectory),
                 new ApoptosisOrchestrator(actuationGate),
-                new NullFileAccessAttributor(),
+                FileAccessAttributorFactory.Create(actuationConfig.HoneytokenAttributorMode, rawNonce, Log.Logger),
                 onSignal: r => Log.Logger.Warning(
                     "Honeytoken touch corroborated level={Level} reason={Reason}", r.Level, r.ReasonLabel));
             honeytokenWatcher = new HoneytokenWatcher(honeytokenDir, honeytokenReflex, Log.Logger);
             honeytokenWatcher.Start();
-            Log.Logger.Warning("Honeytoken immune reflex ARMED (HoneytokenReflexEnabled=true)");
+            Log.Logger.Warning(
+                "Honeytoken immune reflex ARMED (HoneytokenReflexEnabled=true, attributor={Mode})",
+                actuationConfig.HoneytokenAttributorMode);
         }
     }
 

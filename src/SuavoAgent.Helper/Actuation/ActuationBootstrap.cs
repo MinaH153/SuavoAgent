@@ -17,7 +17,9 @@ namespace SuavoAgent.Helper.Actuation;
 ///   "UserInputPauseSeconds": 300,
 ///   "DefaultUiaTimeoutMs": 8000,
 ///   "DefaultPerKeyDelayMs": 25,
-///   "DefaultInterChordDelayMs": 80
+///   "DefaultInterChordDelayMs": 80,
+///   "HoneytokenReflexEnabled": false,
+///   "HoneytokenAttributorMode": "Null"   // or "EtwBroker" once the Broker oracle is armed + shadow-day clean
 /// }
 /// </summary>
 public static class ActuationBootstrap
@@ -32,7 +34,10 @@ public static class ActuationBootstrap
         int? DefaultPerKeyDelayMs,
         int? DefaultInterChordDelayMs,
         bool? RequireKillSwitchHotkey,
-        bool? RelaxIpcClientPathValidation);
+        bool? RelaxIpcClientPathValidation,
+        // Honeytoken immune reflex (staged arming). Both default off/Null → current dark behavior.
+        bool? HoneytokenReflexEnabled,
+        string? HoneytokenAttributorMode);
 
     public static ActuationConfig LoadConfig(ILogger logger)
     {
@@ -79,6 +84,14 @@ public static class ActuationBootstrap
                     : safe.DefaultInterChordDelayMs,
                 RequireKillSwitchHotkey = parsed.RequireKillSwitchHotkey ?? safe.RequireKillSwitchHotkey,
                 RelaxIpcClientPathValidation = parsed.RelaxIpcClientPathValidation ?? safe.RelaxIpcClientPathValidation,
+                HoneytokenReflexEnabled = parsed.HoneytokenReflexEnabled ?? safe.HoneytokenReflexEnabled,
+                // Fail-safe parse: null/garbage → Null (no attribution). Only an exact (case-insensitive)
+                // enum name flips it; an unknown string can never silently enable a different mode.
+                HoneytokenAttributorMode =
+                    Enum.TryParse<Security.HoneytokenAttributorMode>(
+                        parsed.HoneytokenAttributorMode, ignoreCase: true, out var mode)
+                        ? mode
+                        : safe.HoneytokenAttributorMode,
             };
         }
         catch (Exception ex)

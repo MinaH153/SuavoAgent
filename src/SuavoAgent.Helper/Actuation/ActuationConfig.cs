@@ -62,6 +62,15 @@ public sealed record ActuationConfig
     /// </summary>
     public bool HoneytokenReflexEnabled { get; init; }
 
+    /// <summary>
+    /// Which honeytoken attributor the reflex uses to NAME the toucher (only takes effect once
+    /// <see cref="HoneytokenReflexEnabled"/> is true). Enum-zero <c>Null</c> is the floor (no attribution —
+    /// every touch is unknown→Degrade) and the safe default; <c>EtwBroker</c> reads the Broker ETW oracle's
+    /// signed handoff and requires the oracle armed + a clean shadow day. Defaulting to enum-zero (omitted from
+    /// <see cref="SafeDefault"/>, like <see cref="HoneytokenReflexEnabled"/>) is the correct safe default.
+    /// </summary>
+    public Security.HoneytokenAttributorMode HoneytokenAttributorMode { get; init; }
+
     public static ActuationConfig SafeDefault() => new()
     {
         Enabled = false,
