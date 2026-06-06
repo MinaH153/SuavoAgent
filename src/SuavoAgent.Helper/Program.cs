@@ -6,8 +6,10 @@ using SuavoAgent.Diagnostics;
 using SuavoAgent.Helper;
 using SuavoAgent.Helper.Actuation;
 using SuavoAgent.Helper.Behavioral;
+using SuavoAgent.Helper.Security;
 using SuavoAgent.Helper.SystemObservers;
 using SuavoAgent.Helper.Workflows;
+using SuavoAgent.Contracts.Models;
 
 // Diagnostic Mesh: Wire.AttachUnhandledHooks MUST be the literal first
 // executable statement (spec §7 PR 4 wire-ordering invariant; verified
@@ -109,6 +111,7 @@ try
     ActuationCommandHandler? actuationHandler = null;
     PioneerRxCommandHandler? pioneerRxHandler = null;
     ActuationRuntime? actuationRuntime = null;
+    HoneytokenWatcher? honeytokenWatcher = null;
     if (OperatingSystem.IsWindows())
     {
         sendInputDriver = new SendInputDriver(actuationGate, actuationConfig, Log.Logger);
@@ -119,6 +122,23 @@ try
         var hotkey = new HotkeyKillSwitch(actuationGate, Log.Logger, requireRegistration: actuationConfig.RequireKillSwitchHotkey);
         actuationRuntime = new ActuationRuntime(actuationGate, observer, hotkey, Log.Logger);
         actuationRuntime.Start();
+
+        // Honeytoken immune reflex — a decoy-file watcher that, on a corroborated touch by a non-allowlisted
+        // process, trips the SAME actuation gate (Degrade→reversible, Apoptosis→latched) and stamps the
+        // compromise for the heartbeat signal. Best-effort + fail-open (HoneytokenWatcher swallows start
+        // errors). v1 uses NullFileAccessAttributor (FSW can't name the toucher on Windows; ETW/handle
+        // resolution is a follow-up — unknown toucher → reversible Degrade, never bricks).
+        var honeytokenDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", HoneytokenConstants.DirName);
+        var honeytokenReflex = new HoneytokenReflex(
+            new HoneytokenCorroborator(AppContext.BaseDirectory),
+            new ApoptosisOrchestrator(actuationGate),
+            new NullFileAccessAttributor(),
+            onSignal: r => Log.Logger.Warning(
+                "Honeytoken touch corroborated level={Level} reason={Reason}", r.Level, r.ReasonLabel));
+        honeytokenWatcher = new HoneytokenWatcher(honeytokenDir, honeytokenReflex, Log.Logger);
+        honeytokenWatcher.Start();
     }
 
     // Pass a foreground-PID check that always re-reads pioneer.ProcessId so
@@ -441,6 +461,7 @@ try
     printObserver?.Dispose();
     systemBuffer?.Dispose();
     actuationRuntime?.Dispose();
+    honeytokenWatcher?.Dispose();
     uiaResolver?.Dispose();
 
     // Final cleanup
