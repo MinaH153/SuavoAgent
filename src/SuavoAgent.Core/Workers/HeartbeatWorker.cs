@@ -50,6 +50,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
     private readonly HealthCompositeCalculator? _healthCompositeCalculator;
     private readonly CloudAuthRecoveryCoordinator? _cloudAuthRecovery;
     private readonly WorkflowExecutor? _workflowExecutor;
+    // Honeytoken immune reflex — read the Helper's gate-state compromise to emit the self-compromise
+    // heartbeat signal. Optional (null if not wired); the read is best-effort and never blocks the heartbeat.
+    private readonly SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.IActuationGateway? _actuationGateway;
     private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
     private readonly SemaphoreSlim _workflowSemaphore = new(1, 1);
     private readonly object _activeWorkflowLock = new();
@@ -103,6 +106,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
         _healthCompositeCalculator = serviceProvider.GetService<HealthCompositeCalculator>();
         _cloudAuthRecovery = serviceProvider.GetService<CloudAuthRecoveryCoordinator>();
         _workflowExecutor = serviceProvider.GetService<WorkflowExecutor>();
+        _actuationGateway = serviceProvider.GetService<SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.IActuationGateway>();
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -318,6 +322,10 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 // retries on the next tick.
                 var healthComposite = EmitHealthComposite();
 
+                // Honeytoken immune reflex — best-effort read of the Helper's compromise state. Null on any
+                // failure/timeout (never blocks the heartbeat); apoptosis-level drives the cloud fleet-revoke.
+                var compromiseSignal = await ReadCompromiseSignalAsync(stoppingToken);
+
                 var pendingWbCount = _stateDb.GetPendingWritebacks().Count;
                 var failedWbCount = _stateDb.GetFailedWritebackCount();
                 var memoryMb = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
@@ -470,6 +478,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     // status from "heartbeating" to either "healthy" or
                     // "heartbeating-but-unhealthy" cloud-side.
                     healthComposite = healthComposite,
+                    // Honeytoken immune reflex — PHI-free self-compromise signal (null unless tripped).
+                    // apoptosis-level drives the cloud fleet-revoke; lower rungs are alarm + audit only.
+                    compromise = compromiseSignal,
                     // v3.12.1.1 auto-rule approval mirror. Empty array when
                     // Learning:Template:Enabled is off or no templates have
                     // been extracted yet — safe to emit either way.
@@ -589,6 +600,38 @@ public sealed class HeartbeatWorker : ResilientHostedService
     /// the same tick. Local audit is the forensic copy; cloud heartbeat
     /// is the live signal.
     /// </remarks>
+    /// <summary>
+    /// Best-effort read of the Helper's honeytoken compromise state (via the existing actuation gate-state
+    /// IPC) for the self-compromise heartbeat signal. Returns null on a missing gateway or any failure/
+    /// timeout — the heartbeat must NEVER block on this. PHI-free by construction: only the opaque token id,
+    /// the corroboration level, and the already-sanitized reason label cross the boundary.
+    /// </summary>
+    private async Task<SuavoAgent.Contracts.Models.CompromiseSignalPayload?> ReadCompromiseSignalAsync(
+        CancellationToken ct)
+    {
+        if (_actuationGateway is null) return null;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(2));
+            var state = await _actuationGateway.GetStateAsync(timeout.Token).ConfigureAwait(false);
+            if (!state.CompromiseDetected) return null;
+
+            return new SuavoAgent.Contracts.Models.CompromiseSignalPayload(
+                Detected: true,
+                HoneytokenTripped: true,
+                HoneytokenId: SuavoAgent.Contracts.Models.HoneytokenConstants.ComputeId(),
+                CorroborationLevel: state.CompromiseLevel ?? "degrade",
+                ReasonLabel: state.CompromiseReasonLabel ?? "_unknown",
+                OccurredAtUtc: state.CompromiseAtUtc ?? DateTimeOffset.UtcNow);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Honeytoken compromise signal read failed (non-blocking)");
+            return null;
+        }
+    }
+
     internal HealthCompositePayload? EmitHealthComposite()
     {
         if (_healthSignals is null || _healthCompositeCalculator is null)
