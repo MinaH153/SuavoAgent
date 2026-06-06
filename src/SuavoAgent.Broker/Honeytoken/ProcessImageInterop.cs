@@ -31,15 +31,16 @@ internal static class ProcessImageInterop
     private static extern bool GetProcessTimes(IntPtr hProcess, out long lpCreationTime, out long lpExitTime, out long lpKernelTime, out long lpUserTime);
 
     /// <summary>
-    /// Resolve the image path for <paramref name="processId"/>, but ONLY if the process's creation time is a
-    /// plausible issuer of an event at <paramref name="eventUtc"/> — i.e. it started at-or-before the event
-    /// (+ a small clock tolerance). This defeats the PID-REUSE race: if the original (benign) toucher exited
-    /// and Windows recycled its PID for a shell before the ETW callback ran, the recycled process started
-    /// AFTER the event and is rejected (→ null → unknown toucher → reversible Degrade, never apoptosis on an
-    /// innocent process). Returns null on exited/access-denied/unresolvable too.
+    /// Resolve the image path for <paramref name="processId"/>, but ONLY if the process is a plausible issuer
+    /// of the event at <paramref name="eventUtc"/> — i.e. it was created AT-OR-BEFORE the event. This defeats
+    /// the PID-REUSE race: a benign toucher (PID X) opens the decoy at the event then exits; Windows can only
+    /// recycle PID X for a new process created STRICTLY AFTER that exit (hence after the event), so a recycled
+    /// shell fails the predate check and is rejected (→ null → unknown toucher → reversible Degrade, never
+    /// apoptosis on an innocent process). There is deliberately NO forward tolerance — a forward window is
+    /// exactly the exploitable gap (Codex). Returns null on exited/access-denied/unresolvable too.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    public static string? Get(uint processId, DateTimeOffset eventUtc, TimeSpan tolerance)
+    public static string? Get(uint processId, DateTimeOffset eventUtc)
     {
         var hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
         if (hProcess == IntPtr.Zero) return null;
@@ -48,7 +49,7 @@ internal static class ProcessImageInterop
             // Validate start time FIRST — a reused PID must not even have its image read into an attribution.
             if (!GetProcessTimes(hProcess, out var creationFt, out _, out _, out _)) return null;
             var creationUtc = new DateTimeOffset(DateTime.FromFileTimeUtc(creationFt));
-            if (!IsPlausibleIssuer(creationUtc, eventUtc, tolerance)) return null;
+            if (!IsPlausibleIssuer(creationUtc, eventUtc)) return null;
 
             var sb = new StringBuilder(1024);
             uint size = (uint)sb.Capacity;
@@ -64,9 +65,9 @@ internal static class ProcessImageInterop
         }
     }
 
-    /// <summary>Pure, headless-testable: a legit issuer started at-or-before the event (+ tolerance for the
-    /// ETW-timestamp vs FILETIME clock-source granularity). A recycled PID's new process starts strictly after
-    /// the original exits (after the event), so it fails this.</summary>
-    internal static bool IsPlausibleIssuer(DateTimeOffset creationUtc, DateTimeOffset eventUtc, TimeSpan tolerance)
-        => creationUtc <= eventUtc + tolerance;
+    /// <summary>Pure, headless-testable: a legit issuer was created at-or-before the event it issued (you must
+    /// exist before you open a file). A recycled PID's new process starts strictly after the original exits —
+    /// after the event — so it fails this. No forward window (that window is the exploit).</summary>
+    internal static bool IsPlausibleIssuer(DateTimeOffset creationUtc, DateTimeOffset eventUtc)
+        => creationUtc <= eventUtc;
 }

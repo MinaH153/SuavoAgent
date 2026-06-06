@@ -89,13 +89,19 @@ public static class HoneytokenAttributionStore
         }
 
         var tmpPath = $"{path}.{Guid.NewGuid():N}.tmp";
-        File.WriteAllText(tmpPath, JsonSerializer.Serialize(doc, JsonOptions));
+        var json = JsonSerializer.Serialize(doc, JsonOptions);
 
         if (hardenBeforePublish is not null)
         {
             try
             {
+                // Create the temp EMPTY, lock its ACL BEFORE any payload lands, THEN write the content into the
+                // already-locked temp. (Hardening AFTER writing left a window where the temp held the payload
+                // under an inherited, user-writable ACL — Codex.) The temp name is an unguessable GUID, and a
+                // racer can at worst make a step fail → fail-closed (nothing published), never a forged publish.
+                using (File.Create(tmpPath)) { }
                 hardenBeforePublish(tmpPath);
+                File.WriteAllText(tmpPath, json);
             }
             catch
             {
@@ -103,6 +109,10 @@ public static class HoneytokenAttributionStore
                 try { File.Delete(tmpPath); } catch { /* best-effort */ }
                 throw;
             }
+        }
+        else
+        {
+            File.WriteAllText(tmpPath, json);
         }
 
         File.Move(tmpPath, path, overwrite: true);

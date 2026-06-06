@@ -41,9 +41,6 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
     private const ulong KeywordCreate = 0x80;   // CREATE — handle-open of an existing file (the decoy)
     private const ulong KeywordFileName = 0x10; // FILENAME — carries the path inline
     private const ulong Keywords = KeywordCreate | KeywordFileName; // 0x90
-    // Clock-source slop between the ETW event timestamp and the process FILETIME; a legit issuer started
-    // at-or-before the event, so any reuse that recycled the PID >1s later is rejected.
-    private static readonly TimeSpan PidReuseTolerance = TimeSpan.FromSeconds(1);
 
     private readonly ILogger<EtwHoneytokenFileTracer> _logger;
     private readonly string _win32DecoyDir;
@@ -149,7 +146,7 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
             // Resolve the TRUE IRP issuer, validated against PID reuse (a recycled PID's process started after
             // this event → rejected → null → unknown toucher → Degrade, never apoptosis on an innocent process).
             var eventUtc = new DateTimeOffset(data.TimeStamp.ToUniversalTime());
-            var exePath = ProcessImageInterop.Get((uint)data.ProcessID, eventUtc, PidReuseTolerance);
+            var exePath = ProcessImageInterop.Get((uint)data.ProcessID, eventUtc);
             var name = DeriveProcessName(exePath);
 
             var entry = new HoneytokenAttributionEntry(

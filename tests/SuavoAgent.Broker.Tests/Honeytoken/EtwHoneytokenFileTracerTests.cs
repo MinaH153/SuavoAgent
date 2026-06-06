@@ -82,23 +82,25 @@ public sealed class EtwHoneytokenFileTracerTests
     public void IsPlausibleIssuer_StartedBeforeEvent_True()
     {
         var ev = DateTimeOffset.UnixEpoch.AddHours(1);
-        Assert.True(ProcessImageInterop.IsPlausibleIssuer(ev.AddSeconds(-30), ev, System.TimeSpan.FromSeconds(1)));
+        Assert.True(ProcessImageInterop.IsPlausibleIssuer(ev.AddSeconds(-30), ev));
     }
 
     [Fact]
-    public void IsPlausibleIssuer_StartedWellAfterEvent_False_ReusedPid()
+    public void IsPlausibleIssuer_CreatedAtEvent_True()
     {
-        // A recycled PID: the new process started 5s after the decoy-open event → not the issuer → reject.
         var ev = DateTimeOffset.UnixEpoch.AddHours(1);
-        Assert.False(ProcessImageInterop.IsPlausibleIssuer(ev.AddSeconds(5), ev, System.TimeSpan.FromSeconds(1)));
+        Assert.True(ProcessImageInterop.IsPlausibleIssuer(ev, ev)); // created at-or-before is the issuer bound
     }
 
-    [Fact]
-    public void IsPlausibleIssuer_StartedWithinTolerance_True()
+    [Theory]
+    [InlineData(1)]      // 1ms after — NO forward window: a recycled PID created after the event is rejected
+    [InlineData(500)]
+    [InlineData(5000)]
+    public void IsPlausibleIssuer_CreatedAfterEvent_False_ReusedPid(int msAfter)
     {
-        // Same access, clock-source granularity: a process started ~0.5s "after" the event (ETW vs FILETIME
-        // slop) within the 1s tolerance is still accepted.
+        // The exploit Codex flagged: a benign PID exits, a powershell is recreated on the same PID. Its
+        // creation is strictly AFTER the decoy-open event → must be rejected, with ZERO forward tolerance.
         var ev = DateTimeOffset.UnixEpoch.AddHours(1);
-        Assert.True(ProcessImageInterop.IsPlausibleIssuer(ev.AddMilliseconds(500), ev, System.TimeSpan.FromSeconds(1)));
+        Assert.False(ProcessImageInterop.IsPlausibleIssuer(ev.AddMilliseconds(msAfter), ev));
     }
 }
