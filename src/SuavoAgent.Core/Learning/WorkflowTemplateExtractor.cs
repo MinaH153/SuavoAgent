@@ -130,7 +130,16 @@ public sealed class WorkflowTemplateExtractor
         {
             path = JsonSerializer.Deserialize<List<PathStepDto>>(routine.PathJson, JsonOpts);
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            // A corrupt routine row is dropped on EVERY run until repaired — log it
+            // so the silent data loss is observable (was: bare `catch { return null; }`).
+            _logger.LogWarning(ex,
+                "Failed to deserialize PathJson for routine {RoutineHash}; skipping it. " +
+                "This row will be skipped on every extraction until repaired.",
+                routine.RoutineHash);
+            return null;
+        }
 
         if (path is null || path.Count < _thresholds.MinStepCount) return null;
 
@@ -250,7 +259,16 @@ public sealed class WorkflowTemplateExtractor
         else
         {
             _db.RetireWorkflowTemplate(existing.TemplateId, Now(), "superseded");
-            version = BumpMajor(existing.TemplateVersion);
+            if (!TryBumpMajor(existing.TemplateVersion, out version))
+            {
+                // An unparseable existing version is a corruption smell. Resetting
+                // to 2.0.0 can MASK it (and may rank a learned template below a real
+                // v3+). Surface it instead of bumping silently (was: silent fallback).
+                _logger.LogWarning(
+                    "WorkflowTemplate {TemplateId} had an unparseable version '{Version}'; " +
+                    "reset to {Bumped}. Investigate possible version corruption.",
+                    existing.TemplateId, existing.TemplateVersion, version);
+            }
         }
 
         var pmsFp = _fingerprint();
@@ -307,12 +325,19 @@ public sealed class WorkflowTemplateExtractor
 
     private static string Now() => DateTimeOffset.UtcNow.ToString("o");
 
-    private static string BumpMajor(string semver)
+    // Bump the major version (resets minor/patch). Returns false when the existing
+    // version can't be parsed — the caller logs it. (A silent reset to 2.0.0 can
+    // mask version corruption and rank a learned template below a real v3+.)
+    internal static bool TryBumpMajor(string? semver, out string bumped)
     {
-        var parts = semver.Split('.');
+        var parts = (semver ?? string.Empty).Split('.');
         if (parts.Length == 0 || !int.TryParse(parts[0], out var major))
-            return "2.0.0";
-        return $"{major + 1}.0.0";
+        {
+            bumped = "2.0.0";
+            return false;
+        }
+        bumped = $"{major + 1}.0.0";
+        return true;
     }
 
     private sealed record PathStepDto(string TreeHash, string ElementId,
