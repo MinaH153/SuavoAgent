@@ -28,16 +28,18 @@ Confirm post-deploy: `agent_version` bumped + `last_heartbeat_at` fresh; Helper 
 
 The runtime was bumped **0.19.0 → 0.24.0** (first Qwen3-capable llama.cpp `ceda28ef`). The native-lib set
 the operator drops at `ReasoningOptions.NativeLibraryPath` (e.g. `C:\ProgramData\SuavoAgent\native\`) grew
-from **3 DLLs** to **5** — `llama.dll`'s load-time deps were split. The folder MUST now contain ALL of:
+from **3 DLLs** to **4** for text-only — `llama.dll`'s load-time deps were split (ggml → ggml + ggml-base +
+ggml-cpu). The folder MUST contain ALL of:
 
 ```
-ggml.dll   ggml-base.dll   ggml-cpu.dll   llama.dll   llava_shared.dll
+ggml.dll   ggml-base.dll   ggml-cpu.dll   llama.dll
 ```
 
-Source them from the `LLamaSharp.Backend.Cpu` **0.24.0** nupkg (`runtimes/win-x64/native/avx2/` — or the
-`noavx/` folder for an old CPU without AVX2), or hand-compile llama.cpp at exactly commit `ceda28ef`. If any
-are missing, model load fails — `LLamaLocalInference` now logs `missing required native libs [ggml-cpu.dll]`
-(it names the missing file). Model file: **Qwen3-1.7B Q4_K_M** (`qwen3-1.7b` ModelId → thinking-off template)
+(`llava_shared.dll` is **optional** — only needed for the future multimodal/vision path; text-only Qwen3
+loads without it.) Source them from the `LLamaSharp.Backend.Cpu` **0.24.0** nupkg (`runtimes/win-x64/native/avx2/`
+— or the `noavx/` folder for an old CPU without AVX2), or hand-compile llama.cpp at exactly commit `ceda28ef`.
+If any required one is missing, model load fails — `LLamaLocalInference` now logs `missing required native
+libs [ggml-cpu.dll]` (it names the missing file). Model file: **Qwen3-1.7B Q4_K_M** (`qwen3-1.7b` ModelId → thinking-off template)
 for the RAM-light efficiency path, or **Qwen3-4B-Instruct-2507** (`qwen3-4b-instruct-2507`) for the quality
 path. Set `Agent.Reasoning.ModelId` / `ModelPath` via `agent_config_overrides`. **Grammar is still assumed a
 no-op on win-x64** — verify with a forbidden-token spike before trusting it; the template + `ProposalParser`

@@ -223,15 +223,16 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                     var llavaPath = Path.Combine(_options.NativeLibraryPath, "llava_shared.dll");
 
                     // LLamaSharp 0.24.0's llama.dll has hard load-time deps on ggml.dll + ggml-base.dll +
-                    // ggml-cpu.dll in the SAME folder (llama.cpp split the ggml backend 3->5 DLLs). Name
-                    // any missing one up-front so a model-load failure reads as "ggml-cpu.dll missing"
-                    // rather than an opaque LoadLibrary dependency error.
+                    // ggml-cpu.dll in the SAME folder (llama.cpp split the ggml backend). Name any missing
+                    // one up-front so a model-load failure reads as "ggml-cpu.dll missing" rather than an
+                    // opaque LoadLibrary dependency error. (llava_shared.dll is NOT checked — it is OPTIONAL,
+                    // only needed for the future multimodal/vision path; text-only inference loads without it.)
                     var missingNatives = new[] { "ggml.dll", "ggml-base.dll", "ggml-cpu.dll", "llama.dll" }
                         .Where(n => !File.Exists(Path.Combine(_options.NativeLibraryPath, n)))
                         .ToArray();
                     if (missingNatives.Length > 0)
                         _logger.LogWarning(
-                            "LLamaLocalInference: NativeLibraryPath {Path} is missing required native libs [{Missing}] — model load will fail (0.24.0 needs the full 5-DLL set: ggml.dll, ggml-base.dll, ggml-cpu.dll, llama.dll, llava_shared.dll)",
+                            "LLamaLocalInference: NativeLibraryPath {Path} is missing required native libs [{Missing}] — model load will fail (0.24.0 text-only needs ggml.dll, ggml-base.dll, ggml-cpu.dll, llama.dll; llava_shared.dll is optional, multimodal-only)",
                             _options.NativeLibraryPath, string.Join(", ", missingNatives));
 
                     NativeLibraryConfig.All.WithLibrary(
