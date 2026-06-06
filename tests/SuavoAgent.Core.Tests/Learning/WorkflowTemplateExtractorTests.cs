@@ -357,4 +357,51 @@ public class WorkflowTemplateExtractorTests : IDisposable
         Assert.NotNull(row!.RetiredAt);
         Assert.Equal("confidence_drop", row.RetirementReason);
     }
+
+    // ──────────────────── silent-failure observability ────────────────────
+
+    [Theory]
+    [InlineData("1.2.3", true, "2.0.0")]
+    [InlineData("3.0.0", true, "4.0.0")]
+    [InlineData("9.5.1", true, "10.0.0")]
+    [InlineData("", false, "2.0.0")]
+    [InlineData("alpha", false, "2.0.0")]
+    [InlineData("v1.0", false, "2.0.0")]
+    public void TryBumpMajor_ParsesValidAndFlagsUnparseableFallback(
+        string input, bool expectedOk, string expectedVersion)
+    {
+        var ok = WorkflowTemplateExtractor.TryBumpMajor(input, out var bumped);
+        Assert.Equal(expectedOk, ok);
+        Assert.Equal(expectedVersion, bumped);
+    }
+
+    [Fact]
+    public void TryBumpMajor_NullVersion_FlagsFallback()
+    {
+        var ok = WorkflowTemplateExtractor.TryBumpMajor(null, out var bumped);
+        Assert.False(ok);
+        Assert.Equal("2.0.0", bumped);
+    }
+
+    [Fact]
+    public void Extract_SkipsRoutineWithCorruptPathJson_WithoutThrowing()
+    {
+        // A routine row whose PathJson is malformed must be skipped (not crash the
+        // whole extraction). Previously a bare `catch { return null; }` swallowed it
+        // silently; the row is now skipped AND logged so the data loss is observable.
+        _db.UpsertLearnedRoutine(_sessionId,
+            routineHash: "corrupt-routine-hash",
+            pathJson: "{ this is not valid json",
+            pathLength: 3, frequency: 10, confidence: 0.9,
+            startElementId: "a", endElementId: "b",
+            correlatedWriteQueries: null, hasWritebackCandidate: false);
+
+        var xtor = new WorkflowTemplateExtractor(
+            _db, _sessionId, "learned", "PioneerPharmacy*", Provider,
+            WorkflowTemplateThresholds.Default);
+
+        var templates = xtor.ExtractAndPersist();
+
+        Assert.Empty(templates);
+    }
 }
