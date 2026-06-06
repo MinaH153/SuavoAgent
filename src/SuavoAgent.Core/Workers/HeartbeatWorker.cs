@@ -38,6 +38,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
     private readonly Intelligence.FleetDataChannels? _fleetChannels;
     private readonly IPricingJobExecutor? _pricingJobExecutor;
     private readonly PricingJobCloudUploader? _pricingJobCloudUploader;
+    // Live sub-step of the running task, written by executors; shipped as the
+    // heartbeat's currentStep so the cockpit shows a sub-step under the working run.
+    private readonly SuavoAgent.Core.State.AgentActivity? _activity;
     private readonly SuavoAgent.Core.Autonomy.TaskAutonomyLedger? _taskAutonomy;
     private readonly IpcCommandClient? _ipcCommandClient;
     private readonly IIntentCursorClient? _intentCursorClient;
@@ -98,6 +101,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
         _fleetChannels = new Intelligence.FleetDataChannels(stateDb);
         _pricingJobExecutor = serviceProvider.GetService<IPricingJobExecutor>();
         _pricingJobCloudUploader = serviceProvider.GetService<PricingJobCloudUploader>();
+        _activity = serviceProvider.GetService<SuavoAgent.Core.State.AgentActivity>();
         _taskAutonomy = serviceProvider.GetService<SuavoAgent.Core.Autonomy.TaskAutonomyLedger>();
         _ipcCommandClient = serviceProvider.GetService<IpcCommandClient>();
         _intentCursorClient = serviceProvider.GetService<IIntentCursorClient>();
@@ -126,6 +130,14 @@ public sealed class HeartbeatWorker : ResilientHostedService
         // The cloud silent-agent alarm already catches a dead heartbeat; log loudly and stop.
         _logger.LogCritical("HeartbeatWorker exhausted supervised restarts — heartbeat halted");
         return Task.CompletedTask;
+    }
+
+    // Live sub-step of the running task for the cockpit. Operational label + counts
+    // only (PHI-safe; the cloud re-strips defensively). null when idle.
+    private object? BuildCurrentStep()
+    {
+        var s = _activity?.Current;
+        return s is null ? null : new { label = s.Label, done = s.Done, total = s.Total };
     }
 
     protected override async Task RunAsync(CancellationToken stoppingToken)
@@ -382,6 +394,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     version = _options.Version,
                     pharmacyId = _options.PharmacyId,
                     updateChannel = _lastUpdateChannel ?? "stable",
+                    currentStep = BuildCurrentStep(),
                     machineFingerprint = _options.MachineFingerprint,
                     uptimeSeconds = (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
                     memoryMb = memoryMb,

@@ -276,6 +276,37 @@ public class SqlPricingJobRunnerTests : IDisposable
     private static PricingSavingsOptions Savings(string? baselineHint, string? quantityHint) =>
         new(baselineHint, quantityHint, MaxUnitCost: 1_000_000m, MaxQuantity: 100_000_000m, SuspiciousSavingsFraction: 0.9m);
 
+    [Fact]
+    public async Task RunAsync_PublishesLiveSubSteps_ToAgentActivity()
+    {
+        var xlsx = CreateExcel(new[] { "55111-0645-01", "00093-5124-01" });
+        var lookup = new FakeLookup(new Dictionary<string, (string, decimal)>
+        {
+            ["55111064501"] = ("McKesson", 0.01m),
+            ["00093512401"] = ("Anda", 0.02m),
+        });
+
+        var activity = new AgentActivity();
+        var runner = new SqlPricingJobRunner(
+            new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
+            new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
+            _db, lookup, NullLogger<SqlPricingJobRunner>.Instance,
+            baselineVolume: null, savings: null, activity: activity);
+        var spec = new PricingJobSpec(
+            Guid.NewGuid().ToString("N"), xlsx, "NDC", "Supplier", "Cost (per unit)");
+
+        await runner.RunAsync(spec, CancellationToken.None);
+
+        // The runner publishes steps as it works (the executor clears on completion,
+        // which isn't under test here), so the final "Saving results" step with a
+        // fully-counted progress is observable. Labels are operational, never PHI.
+        var step = activity.Current;
+        Assert.NotNull(step);
+        Assert.Equal("Saving results", step!.Label);
+        Assert.Equal(2, step.Total);
+        Assert.Equal(2, step.Done);
+    }
+
     private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup) =>
         new(
             new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
