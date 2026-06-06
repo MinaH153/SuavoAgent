@@ -80,6 +80,28 @@ public sealed class EtwBrokerFileAccessAttributorTests
     }
 
     [Fact]
+    public void FutureRecordBeyondForwardSkew_NotMatched_NoCrossAttribution()
+    {
+        // A shell record observed 2s AFTER this (benign) touch must NOT be pulled backward to attribute it —
+        // attribution is backward-looking with only a tight forward skew. Prevents a later, unrelated access's
+        // shell record from being credited to an earlier benign touch.
+        var now = DateTimeOffset.UnixEpoch.AddSeconds(100);
+        var attr = Build([Toucher("powershell", "x", now.AddSeconds(2))], () => now, recency: TimeSpan.FromSeconds(3));
+        var t = attr.Attribute("decoy");
+        Assert.Null(t.ProcessName);
+    }
+
+    [Fact]
+    public void SameAccessSeenSlightlyEarlyByEtw_StillMatched_WithinForwardSkew()
+    {
+        // The SAME access: ETW Create can be stamped a few hundred ms ahead of the FSW coalescing. A record
+        // ~0.5s in the future is the same touch and must still match.
+        var now = DateTimeOffset.UnixEpoch.AddSeconds(100);
+        var attr = Build([Toucher("powershell", "x", now.AddMilliseconds(500))], () => now, recency: TimeSpan.FromSeconds(3));
+        Assert.Equal("powershell", attr.Attribute("decoy").ProcessName);
+    }
+
+    [Fact]
     public void EmptyHandoff_ReturnsNull_FailOpen()
     {
         var now = DateTimeOffset.UnixEpoch;

@@ -33,6 +33,7 @@ public sealed class EtwBrokerFileAccessAttributor : IFileAccessAttributor
     private readonly string _docPath;
     private readonly string _pipeNonce;
     private readonly TimeSpan _recencyWindow;
+    private readonly TimeSpan _forwardSkew;
     private readonly TimeSpan _maxDocAge;
     private readonly TimeSpan _cacheTtl;
     private readonly Func<DateTimeOffset> _now;
@@ -49,11 +50,17 @@ public sealed class EtwBrokerFileAccessAttributor : IFileAccessAttributor
         TimeSpan? recencyWindow = null,
         TimeSpan? maxDocAge = null,
         TimeSpan? cacheTtl = null,
-        Func<string, string, DateTimeOffset, TimeSpan, IReadOnlyList<HoneytokenAttributionEntry>>? reader = null)
+        Func<string, string, DateTimeOffset, TimeSpan, IReadOnlyList<HoneytokenAttributionEntry>>? reader = null,
+        TimeSpan? forwardSkew = null)
     {
         _docPath = docPath ?? throw new ArgumentNullException(nameof(docPath));
         _pipeNonce = pipeNonce ?? string.Empty;
         _recencyWindow = recencyWindow ?? TimeSpan.FromSeconds(3);
+        // Attribution is BACKWARD-looking: a toucher must have been observed at-or-before this touch (up to
+        // _recencyWindow ago, for FSW coalescing latency), with only a SMALL forward tolerance for the same
+        // access being seen by ETW slightly ahead of the FSW + clock skew. A wide symmetric window would let a
+        // LATER, unrelated access's record attribute THIS touch — so the future side is bounded tight.
+        _forwardSkew = forwardSkew ?? TimeSpan.FromSeconds(1);
         _maxDocAge = maxDocAge ?? TimeSpan.FromSeconds(10);
         _cacheTtl = cacheTtl ?? TimeSpan.FromMilliseconds(500);
         _now = now ?? (() => DateTimeOffset.UtcNow);
@@ -69,13 +76,14 @@ public sealed class EtwBrokerFileAccessAttributor : IFileAccessAttributor
                 var now = _now();
                 RefreshIfStale(now);
 
-                // Newest entry whose observation brackets the touch within the tight recency window.
+                // Newest entry observed at-or-before this touch (backward window _recencyWindow) with only a
+                // small forward tolerance _forwardSkew (same access seen slightly early by ETW + clock skew).
                 HoneytokenAttributionEntry? best = null;
                 foreach (var e in _cache)
                 {
-                    var delta = now - e.ObservedAt;
-                    if (delta < TimeSpan.Zero) delta = delta.Negate();
-                    if (delta > _recencyWindow) continue;
+                    var delta = now - e.ObservedAt;          // >0 = observed in the past
+                    if (delta > _recencyWindow) continue;     // too old
+                    if (delta < -_forwardSkew) continue;      // too far in the future → a different/later access
                     if (best is null || e.ObservedAt > best.ObservedAt) best = e;
                 }
 
