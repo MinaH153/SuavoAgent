@@ -80,3 +80,44 @@ ordinal. **Success = a real learned template replays on the real app by signatur
 Both ways-in drive the real app to completion on the box (NL with the live LLM; replay by signature),
 and all three self-heal cycles recover autonomously. At that point the agent is production-grade and
 operationally validated on real apps — the moat (same brain, every install) is live.
+
+## 4. Arming the honeytoken immune reflex (precedence-1 — staged, never blind)
+
+The reflex (decoy file → corroborate → graduated ladder → local apoptosis + cloud compromise heartbeat
+→ fleet revoke) ships **dark** (`ActuationConfig.HoneytokenReflexEnabled = false`). Never-brick is now
+**structural**: the corroborator latches the kill switch ONLY for a resolved interactive shell
+(powershell/cmd/wscript/…); every other toucher — unknown, unresolvable, or resolved-but-not-shell —
+can only ever reach **reversible Degrade**, no matter how often it repeats. So the worst case of a
+mis-armed reflex is "actuation goes read-only until the next Helper restart + a cloud alarm," never a
+brick. Arming is still staged because, until a real attributor lands, every touch is `unknown` → Degrade
+→ a NOISY (but safe) stream of alarms.
+
+**DO NOT flip `HoneytokenReflexEnabled=true` until every step below passes. Kill-criterion at every
+stage: a benign process resolving to a `SensitiveDenylist` shell name → halt and investigate (that is
+the only path to a latched kill).**
+
+1. **Shadow / observe-only** (flag still FALSE): deploy with the attributor wired but the orchestrator
+   in log-only mode; for a FULL business day across a scheduled backup + a manual full AV scan + a
+   search-index pass + cloud sync, log every decoy touch as `(resolvedProcessName, exePath,
+   would-be-level)`. The gate never mutates.
+2. **Triage the shadow log:** every benign system toucher must resolve to a `SystemAllowlist` name
+   (→Observe) OR to `unknown`/a non-shell name (→Degrade). Any site-specific EDR/backup image that
+   resolves to a *named non-shell* is fine (Degrade is reversible) but should be ADDED to
+   `SystemAllowlist` (HoneytokenCorroborator.cs) to cut noise. **No benign process may resolve to a
+   `SensitiveDenylist` shell name** — if one does, stop and investigate (that is the only apoptosis path).
+3. **Adversarial check:** from an interactive `powershell`, read+hold the decoy → expect a resolved
+   `powershell` → Apoptosis (the genuine signal). A fast read-close → `unknown` → Degrade (safe). Copy a
+   benign script into the install dir and touch the decoy → Observe (install-dir trust).
+4. **Dry-run arm:** flip `HoneytokenReflexEnabled=true` while actuation is still in the locked
+   first-2-weeks `DryRun` default — a false Degrade is invisible to actuation but the self-compromise
+   heartbeat surfaces it in the cloud. Watch for any Degrade not tied to a deliberate test touch.
+5. **Live arm:** only after a clean shadow day (1) + a clean dry-run week (4) with zero unattributed
+   Degrades. **Rollback = a single config flip `HoneytokenReflexEnabled=false`** via the OTA config path
+   (no redeploy); and because every gap is Degrade-only, even a bad flip self-heals on Helper restart.
+
+**Known Layer-1 limitations to validate against, not surprises:** (a) `NtfsDisableLastAccessUpdate` is
+on by default since Win8, so a pure READ of the decoy may fire NO FSW event — Layer 1 reliably catches
+write/rename/delete/attribute changes, not silent reads (reliable read detection is the Broker-ETW /
+SACL follow-up). (b) The `SystemAllowlist` is name-only (spoofable: malware named `MsMpEng` is Observed
+— a detection miss, never a privilege gain); a future attributor that reads the holder's signed exe path
+should tighten Observe to system-path + Microsoft-publisher.

@@ -45,14 +45,20 @@ public sealed record ActuationConfig
     public bool RelaxIpcClientPathValidation { get; init; } = false;
 
     /// <summary>
-    /// Arms the honeytoken immune reflex (the decoy-file watcher → corroborate → apoptosis). DEFAULT FALSE
-    /// and intentionally so: v1 ships with <c>NullFileAccessAttributor</c> (Windows FileSystemWatcher can't
-    /// name the accessing process), so EVERY touch resolves to "unknown" → reversible Degrade, and a second
-    /// distinct touch → Apoptosis. Without process attribution the system allowlist (SearchIndexer / Defender
-    /// / Backup / OneDrive → Observe) can't fire, so a routine AV scan or backup WOULD trip a live pharmacy.
-    /// The full ladder is built + unit-tested; keep this OFF until real PID resolution (ETW kernel-file-IO /
-    /// handle enumeration) lands AND is validated on a box. Flipping this true before then risks a
-    /// false-positive degrade/quarantine — precedence-1 never-brick.
+    /// Arms the honeytoken immune reflex (the decoy-file watcher → corroborate → apoptosis). DEFAULT FALSE.
+    ///
+    /// NEVER-BRICK is now STRUCTURAL: the corroborator latches the kill switch ONLY for a resolved interactive
+    /// shell (powershell/cmd/…); every other toucher — unknown, unresolvable, or a resolved-but-not-shell name
+    /// — can only ever reach reversible Degrade, no matter how often it repeats (see
+    /// <c>HoneytokenCorroborator</c>'s structural invariant). So arming this can, at worst, take actuation
+    /// read-only until the next Helper restart + raise a cloud compromise alarm — it can NOT brick a pharmacy.
+    ///
+    /// It nonetheless stays DEFAULT FALSE because v1 still ships with <c>NullFileAccessAttributor</c> (no PID
+    /// resolution yet), so every touch is "unknown" → Degrade → cloud alarm: arming now would be NOISY (a
+    /// routine AV scan/backup would repeatedly degrade actuation) even though it is SAFE. Flip to true per
+    /// pharmacy only after: (1) a real attributor lands so benign system touchers resolve to Observe, and
+    /// (2) the box shadow-day proves the site's toucher set maps to Observe-or-Degrade (zero shell
+    /// mis-resolutions). See docs/runbooks/live-box-validation.md (honeytoken arming).
     /// </summary>
     public bool HoneytokenReflexEnabled { get; init; }
 

@@ -13,14 +13,14 @@ public sealed class HoneytokenReflexTests
 
     private sealed class FakeAttributor : IFileAccessAttributor
     {
-        private readonly FileToucher _t;
         public bool Throw;
-        public FakeAttributor(string? name, string? exe) => _t = new FileToucher(name, exe);
-        public FileToucher Attribute(string path) => Throw ? throw new InvalidOperationException("boom") : _t;
+        public FileToucher Current;                       // mutable so a test can change the toucher mid-run
+        public FakeAttributor(string? name, string? exe) => Current = new FileToucher(name, exe);
+        public FileToucher Attribute(string path) => Throw ? throw new InvalidOperationException("boom") : Current;
     }
 
     private static (ActuationGate gate, HoneytokenReflex reflex, Action<TimeSpan> advance) Build(
-        FakeAttributor attributor)
+        FakeAttributor attributor, TimeSpan? retention = null)
     {
         var logger = new LoggerConfiguration().CreateLogger();
         var gate = new ActuationGate(new ActuationConfig { Enabled = true, DryRun = false }, logger);
@@ -30,7 +30,8 @@ public sealed class HoneytokenReflexTests
             new ApoptosisOrchestrator(gate),
             attributor,
             now: () => clock,
-            dedupWindow: TimeSpan.FromSeconds(1));
+            dedupWindow: TimeSpan.FromSeconds(1),
+            retention: retention);
         return (gate, reflex, ts => clock = clock.Add(ts));
     }
 
@@ -57,15 +58,34 @@ public sealed class HoneytokenReflexTests
     }
 
     [Fact]
-    public void TwoDistinctTouches_Escalate_ToApoptosis()
+    public void TwoDistinctNonShellTouches_StayDegrade_NeverLatch()
     {
+        // CHANGED (was TwoDistinctTouches_Escalate_ToApoptosis): a resolved-but-not-shell process repeating
+        // must NEVER reach the latched kill switch — that escalation bricked live pharmacies. Both touches
+        // land on reversible Degrade; the gate is disabled (recoverable) but the kill switch never trips.
         var (gate, reflex, advance) = Build(new FakeAttributor("explorer", @"C:\Windows\explorer.exe"));
         reflex.OnTouch("p");                 // distinct touch #1 → degrade
         Assert.Equal(ActuationRejectionCodes.GateDisabled, Code(gate));
         advance(TimeSpan.FromSeconds(2));    // past the dedup window → a genuinely new access
-        reflex.OnTouch("p");                 // distinct touch #2 → apoptosis
-        Assert.Equal(ActuationRejectionCodes.KillSwitchTripped, Code(gate));
-        Assert.Equal("apoptosis", gate.Snapshot().CompromiseLevel);
+        reflex.OnTouch("p");                 // distinct touch #2 → STILL degrade (no escalation)
+        Assert.Equal(ActuationRejectionCodes.GateDisabled, Code(gate));
+        Assert.Equal("degrade", gate.Snapshot().CompromiseLevel);
+        Assert.NotEqual(ActuationRejectionCodes.KillSwitchTripped, Code(gate));
+    }
+
+    [Fact]
+    public void StaleTouchers_AreEvicted_AfterRetentionWindow()
+    {
+        // M2 hygiene: a toucher's count must not accrue forever. After the retention window, a prior toucher
+        // is evicted so the map can't grow unbounded and a count can never sum across hours/days.
+        var attr = new FakeAttributor("procA", @"C:\x\procA.exe");
+        var (_, reflex, advance) = Build(attr, retention: TimeSpan.FromMinutes(10));
+        reflex.OnTouch("p");                          // tracks procA
+        Assert.Equal(1, reflex.TrackedToucherCount);
+        advance(TimeSpan.FromMinutes(11));            // procA now older than retention
+        attr.Current = new FileToucher("procB", @"C:\x\procB.exe");
+        reflex.OnTouch("p");                          // eviction runs first → procA dropped, procB tracked
+        Assert.Equal(1, reflex.TrackedToucherCount);  // would be 2 without eviction
     }
 
     [Fact]

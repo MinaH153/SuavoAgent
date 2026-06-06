@@ -24,6 +24,7 @@ public sealed class HoneytokenReflex
     private readonly IFileAccessAttributor _attributor;
     private readonly Func<DateTimeOffset> _now;
     private readonly TimeSpan _dedupWindow;
+    private readonly TimeSpan _retention;
     private readonly Action<CorroborationResult>? _onSignal;
 
     private readonly object _sync = new();
@@ -36,13 +37,19 @@ public sealed class HoneytokenReflex
         IFileAccessAttributor attributor,
         Func<DateTimeOffset>? now = null,
         TimeSpan? dedupWindow = null,
-        Action<CorroborationResult>? onSignal = null)
+        Action<CorroborationResult>? onSignal = null,
+        TimeSpan? retention = null)
     {
         _corroborator = corroborator ?? throw new ArgumentNullException(nameof(corroborator));
         _orchestrator = orchestrator ?? throw new ArgumentNullException(nameof(orchestrator));
         _attributor = attributor ?? throw new ArgumentNullException(nameof(attributor));
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _dedupWindow = dedupWindow ?? TimeSpan.FromSeconds(1);
+        // Bounded decay: per-toucher counts older than this are evicted, so the map can't grow unbounded over
+        // a long Helper uptime AND a count can never accrue across hours/days. The corroborator currently
+        // ignores the count for escalation (apoptosis is denylist-only), but this keeps the count honest for a
+        // future confirmed-attribution repeat path and is pure hygiene regardless.
+        _retention = retention ?? TimeSpan.FromMinutes(10);
         _onSignal = onSignal;
     }
 
@@ -52,12 +59,17 @@ public sealed class HoneytokenReflex
         try
         {
             var toucher = _attributor.Attribute(path);
+            // The "__unknown__" bucket (unattributed touches) accrues a count, but the corroborator maps any
+            // non-shell name — incl. unknown — to reversible Degrade regardless of count; the kill switch is
+            // denylist-only. HoneytokenCorroborator is the SINGLE source of truth for never-latch; do NOT add
+            // a second escalation rule here.
             var key = string.IsNullOrWhiteSpace(toucher.ProcessName) ? "__unknown__" : toucher.ProcessName!;
             var now = _now();
 
             int priorTouchCount;
             lock (_sync)
             {
+                EvictStale(now);
                 if (_touches.TryGetValue(key, out var e))
                 {
                     if (now - e.Last < _dedupWindow)
@@ -84,5 +96,24 @@ public sealed class HoneytokenReflex
         {
             // FAIL-OPEN: never let a reflex bug brick a live pharmacy. Leave the gate untouched.
         }
+    }
+
+    /// <summary>Test seam: number of distinct touchers currently tracked (post-eviction). Internal-only.</summary>
+    internal int TrackedToucherCount
+    {
+        get { lock (_sync) return _touches.Count; }
+    }
+
+    /// <summary>Evict per-toucher counts older than the retention window. Caller holds <see cref="_sync"/>.</summary>
+    private void EvictStale(DateTimeOffset now)
+    {
+        if (_touches.Count == 0) return;
+        List<string>? stale = null;
+        foreach (var kv in _touches)
+            if (now - kv.Value.Last >= _retention)
+                (stale ??= new List<string>()).Add(kv.Key);
+        if (stale != null)
+            foreach (var k in stale)
+                _touches.Remove(k);
     }
 }
