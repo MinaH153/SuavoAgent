@@ -255,7 +255,10 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
             .GetAccessRules(true, true, typeof(SecurityIdentifier));
         const FileSystemRights writeish = FileSystemRights.WriteData | FileSystemRights.AppendData
             | FileSystemRights.CreateFiles | FileSystemRights.CreateDirectories | FileSystemRights.ChangePermissions
-            | FileSystemRights.TakeOwnership | FileSystemRights.Write;
+            | FileSystemRights.TakeOwnership | FileSystemRights.Write
+            // Delete rights are tamper rights too: a non-admin who can Delete the hardened temp/dir could
+            // remove + substitute a forged one (Codex). Reject them as write-ish.
+            | FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles;
         foreach (FileSystemAccessRule r in verify)
         {
             if (r.AccessControlType != AccessControlType.Allow) continue;
