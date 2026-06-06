@@ -222,33 +222,49 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
     /// Create + lock the SYSTEM-only scratch dir where handoff temps are written, so a temp inherits a
     /// non-user-writable ACL AT CREATION (closing the pre-harden inherited-ACL window). Protected (no
     /// inheritance from ProgramData\SuavoAgent, which grants INTERACTIVE Modify), LocalSystem + Admins
-    /// FullControl with Container|Object inherit → children are born SYSTEM-only. Best-effort: on failure the
-    /// dir may fall back to inherited ACLs, but the per-file harden + fail-closed publish still gate forgery.
+    /// FullControl with Container|Object inherit → children are born SYSTEM-only.
+    ///
+    /// FAIL-CLOSED (Codex): THROWS if the dir cannot be locked AND verified — a swallowed failure would let
+    /// Store.Write create temps in a user-writable scratch dir (forgeable handoff → false-apoptosis brick).
+    /// The caller (ArmWindows ← ExecuteAsync) fail-opens the ORACLE on throw: the session never starts, no
+    /// handoff is ever written, the Broker stays online. The oracle ships inert anyway, so refusing to arm on
+    /// an un-lockable scratch dir is the safe trade.
     /// </summary>
     [SupportedOSPlatform("windows")]
     private void EnsureHardenedTempDir()
     {
-        try
+        var di = Directory.CreateDirectory(_hardenedTempDir);
+        var sec = di.GetAccessControl();
+        sec.SetAccessRuleProtection(true, false); // strip ProgramData's inherited INTERACTIVE Modify
+        foreach (FileSystemAccessRule rule in sec.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+            sec.RemoveAccessRuleSpecific(rule);
+        foreach (var sid in new[] { WellKnownSidType.LocalSystemSid, WellKnownSidType.BuiltinAdministratorsSid })
         {
-            var di = Directory.CreateDirectory(_hardenedTempDir);
-            var sec = di.GetAccessControl();
-            sec.SetAccessRuleProtection(true, false); // strip ProgramData's inherited INTERACTIVE Modify
-            foreach (FileSystemAccessRule rule in sec.GetAccessRules(true, false, typeof(SecurityIdentifier)))
-                sec.RemoveAccessRuleSpecific(rule);
-            foreach (var sid in new[] { WellKnownSidType.LocalSystemSid, WellKnownSidType.BuiltinAdministratorsSid })
-            {
-                sec.AddAccessRule(new FileSystemAccessRule(
-                    new SecurityIdentifier(sid, null),
-                    FileSystemRights.FullControl,
-                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                    PropagationFlags.None,
-                    AccessControlType.Allow));
-            }
-            di.SetAccessControl(sec);
+            sec.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(sid, null),
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
         }
-        catch (Exception ex)
+        di.SetAccessControl(sec);
+
+        // VERIFY (don't assume the set took): re-read the DACL and assert NO non-System/Admin principal holds a
+        // write-ish Allow ACE. Throw → arm aborts → oracle dark → no writes → fail-closed.
+        var verify = new DirectoryInfo(_hardenedTempDir).GetAccessControl()
+            .GetAccessRules(true, true, typeof(SecurityIdentifier));
+        const FileSystemRights writeish = FileSystemRights.WriteData | FileSystemRights.AppendData
+            | FileSystemRights.CreateFiles | FileSystemRights.CreateDirectories | FileSystemRights.ChangePermissions
+            | FileSystemRights.TakeOwnership | FileSystemRights.Write;
+        foreach (FileSystemAccessRule r in verify)
         {
-            _logger.LogWarning(ex, "ETW honeytoken temp dir lockdown failed (non-fatal; per-file harden still gates)");
+            if (r.AccessControlType != AccessControlType.Allow) continue;
+            if (r.IdentityReference is not SecurityIdentifier sid) continue;
+            var isSystemOrAdmin = sid.IsWellKnown(WellKnownSidType.LocalSystemSid)
+                || sid.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid);
+            if (!isSystemOrAdmin && (r.FileSystemRights & writeish) != 0)
+                throw new InvalidOperationException(
+                    "honeytoken temp dir still grants non-admin write after lockdown — refusing to arm (fail-closed)");
         }
     }
 
