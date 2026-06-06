@@ -34,6 +34,14 @@ public sealed class ActuationGate
     private string? _pauseReason;
     private DateTimeOffset? _killSwitchTrippedUtc;
 
+    // Honeytoken immune-reflex state — stamped by the ApoptosisOrchestrator, read out via Snapshot() so
+    // Core can emit the self-compromise heartbeat signal. Recording is separate from the gate change
+    // (SetDryRun/TripKillSwitch) so each stays single-purpose; latches "up" (never downgrades the level).
+    private bool _compromiseDetected;
+    private string? _compromiseLevel;
+    private string? _compromiseReasonLabel;
+    private DateTimeOffset? _compromiseAtUtc;
+
     public ActuationGate(ActuationConfig config, ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -61,7 +69,11 @@ public sealed class ActuationGate
                 DryRun: _dryRun,
                 PausedUntilUtc: _pausedUntilUtc,
                 PauseReason: _pauseReason,
-                KillSwitchTrippedUtc: _killSwitchTrippedUtc);
+                KillSwitchTrippedUtc: _killSwitchTrippedUtc,
+                CompromiseDetected: _compromiseDetected,
+                CompromiseLevel: _compromiseLevel,
+                CompromiseReasonLabel: _compromiseReasonLabel,
+                CompromiseAtUtc: _compromiseAtUtc);
         }
         finally
         {
@@ -171,6 +183,39 @@ public sealed class ActuationGate
             _lock.ExitWriteLock();
         }
     }
+
+    /// <summary>
+    /// Stamp a honeytoken-corroborated compromise for the heartbeat self-compromise signal. This does NOT
+    /// change the gate (the ApoptosisOrchestrator applies SetDryRun/SetEnabled/TripKillSwitch separately) —
+    /// it only records the level + PHI-safe reason label that Core reads via Snapshot()/IPC. Latches "up":
+    /// never overwrites a higher recorded level (a late degrade can't mask an apoptosis); the trip time is
+    /// stamped once. <paramref name="reasonLabel"/> MUST already be PHI-safe (HoneytokenCorroborator output).
+    /// </summary>
+    public void RecordHoneytokenCompromise(string level, string reasonLabel)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            if (Rank(level) >= Rank(_compromiseLevel))
+            {
+                _compromiseLevel = level;
+                _compromiseReasonLabel = reasonLabel;
+            }
+            _compromiseDetected = true;
+            _compromiseAtUtc ??= DateTimeOffset.UtcNow;
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    private static int Rank(string? level) => level switch
+    {
+        "apoptosis" => 2,
+        "degrade" => 1,
+        _ => 0,
+    };
 
     public void NotifyUserInputDetected(string source)
     {

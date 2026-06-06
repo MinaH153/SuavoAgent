@@ -38,7 +38,15 @@ public sealed record ActuationGateState(
     [property: JsonPropertyName("dryRun")] bool DryRun,
     [property: JsonPropertyName("pausedUntilUtc")] DateTimeOffset? PausedUntilUtc,
     [property: JsonPropertyName("pauseReason")] string? PauseReason,
-    [property: JsonPropertyName("killSwitchTrippedUtc")] DateTimeOffset? KillSwitchTrippedUtc
+    [property: JsonPropertyName("killSwitchTrippedUtc")] DateTimeOffset? KillSwitchTrippedUtc,
+    // Honeytoken immune reflex — the Helper stamps a corroborated compromise here; Core reads it via the
+    // existing actuation.get_state IPC and emits the PHI-free self-compromise heartbeat signal (and, on
+    // apoptosis, flushes its own Tier-2 LLM). Nullable defaults keep this backward-compatible on the wire.
+    // CompromiseReasonLabel is already PHI-safe (≤32-char safe charset from HoneytokenCorroborator).
+    [property: JsonPropertyName("compromiseDetected")] bool CompromiseDetected = false,
+    [property: JsonPropertyName("compromiseLevel")] string? CompromiseLevel = null,
+    [property: JsonPropertyName("compromiseReasonLabel")] string? CompromiseReasonLabel = null,
+    [property: JsonPropertyName("compromiseAtUtc")] DateTimeOffset? CompromiseAtUtc = null
 );
 
 // Bug 21 (MinaH153/SuavoAgent#63): every actuation request DTO carries an
