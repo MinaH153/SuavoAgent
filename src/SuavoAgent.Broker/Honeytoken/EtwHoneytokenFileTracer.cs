@@ -47,6 +47,7 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
     private readonly string _handoffPath;
     private readonly string _decoyTokenId;
     private readonly string _pipeNonce;
+    private readonly string _hardenedTempDir;
 
     private DevicePathNormalizer? _normalizer;
     private volatile string _ntDecoyPrefix = string.Empty;
@@ -61,6 +62,7 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
         _handoffPath = HoneytokenAttributionStore.GetDefaultPath();
         _decoyTokenId = HoneytokenConstants.ComputeId();
         _pipeNonce = ReadPipeNonce() ?? string.Empty;
+        _hardenedTempDir = Path.Combine(Path.GetDirectoryName(_handoffPath)!, ".hnytmp");
     }
 
     /// <summary>Test-only ctor: inject isolated paths so the live windows smoke runs against a temp decoy dir.</summary>
@@ -72,6 +74,7 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
         _handoffPath = handoffPath;
         _decoyTokenId = HoneytokenConstants.ComputeId();
         _pipeNonce = pipeNonce;
+        _hardenedTempDir = Path.Combine(Path.GetDirectoryName(_handoffPath)!, ".hnytmp");
     }
 
     /// <summary>Test seam: arm the live ETW session synchronously (windows smoke only).</summary>
@@ -102,6 +105,8 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
         _normalizer.Refresh(); // build the NT-device map from the live OS before the self-test
         if (!SelfTestOrLogBlind())
             return; // refused to arm (e.g. empty NT prefix) — logged at ERROR, run blind
+
+        EnsureHardenedTempDir(); // SYSTEM-only scratch dir so handoff temps are born non-user-writable
 
         // Reclaim a same-named session orphaned by a prior Broker crash/OTA (a real-time ETW session is a
         // named kernel object that outlives the process).
@@ -159,7 +164,7 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
             // Harden the TEMP file BEFORE publish so the destination never exists user-writable; if hardening
             // throws, Write deletes the temp and publishes NOTHING (fail-closed — no forgeable handoff).
             HoneytokenAttributionStore.Write(
-                _handoffPath, _pipeNonce, new[] { entry }, DateTimeOffset.UtcNow, HardenHandoffTmp);
+                _handoffPath, _pipeNonce, new[] { entry }, DateTimeOffset.UtcNow, HardenHandoffTmp, _hardenedTempDir);
             // NOTE: deliberately NO log of ntPath/exePath here — names can be benign-but-sensitive and the
             // log sink is not PHI-guarded. The handoff doc + heartbeat carry the (clamped) signal.
         }
@@ -211,6 +216,40 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
             new SecurityIdentifier(WellKnownSidType.InteractiveSid, null),
             FileSystemRights.ReadAndExecute, AccessControlType.Allow));
         fi.SetAccessControl(sec);
+    }
+
+    /// <summary>
+    /// Create + lock the SYSTEM-only scratch dir where handoff temps are written, so a temp inherits a
+    /// non-user-writable ACL AT CREATION (closing the pre-harden inherited-ACL window). Protected (no
+    /// inheritance from ProgramData\SuavoAgent, which grants INTERACTIVE Modify), LocalSystem + Admins
+    /// FullControl with Container|Object inherit → children are born SYSTEM-only. Best-effort: on failure the
+    /// dir may fall back to inherited ACLs, but the per-file harden + fail-closed publish still gate forgery.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private void EnsureHardenedTempDir()
+    {
+        try
+        {
+            var di = Directory.CreateDirectory(_hardenedTempDir);
+            var sec = di.GetAccessControl();
+            sec.SetAccessRuleProtection(true, false); // strip ProgramData's inherited INTERACTIVE Modify
+            foreach (FileSystemAccessRule rule in sec.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                sec.RemoveAccessRuleSpecific(rule);
+            foreach (var sid in new[] { WellKnownSidType.LocalSystemSid, WellKnownSidType.BuiltinAdministratorsSid })
+            {
+                sec.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(sid, null),
+                    FileSystemRights.FullControl,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+            }
+            di.SetAccessControl(sec);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "ETW honeytoken temp dir lockdown failed (non-fatal; per-file harden still gates)");
+        }
     }
 
     public override void Dispose()

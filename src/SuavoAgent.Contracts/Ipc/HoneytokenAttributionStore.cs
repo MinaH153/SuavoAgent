@@ -64,12 +64,18 @@ public static class HoneytokenAttributionStore
     /// if it throws, the temp is deleted and NOTHING is published (the prior handoff, if any, stays), and the
     /// exception propagates so the caller treats this write as failed.
     /// </param>
+    /// <param name="hardenedTempDir">
+    /// Optional directory (the Broker locks it LocalSystem/Admins-only at startup) to create the temp in, so
+    /// the temp file inherits a non-user-writable ACL AT CREATION — closing the pre-harden inherited-ACL window
+    /// (Codex). When null, the temp is created beside <paramref name="path"/> (current behavior).
+    /// </param>
     public static void Write(
         string path,
         string pipeNonce,
         IReadOnlyList<HoneytokenAttributionEntry> touchers,
         DateTimeOffset now,
-        Action<string>? hardenBeforePublish = null)
+        Action<string>? hardenBeforePublish = null,
+        string? hardenedTempDir = null)
     {
         var canonicalId = HoneytokenConstants.ComputeId();
         var safe = touchers
@@ -88,34 +94,36 @@ public static class HoneytokenAttributionStore
             Directory.CreateDirectory(dir);
         }
 
-        var tmpPath = $"{path}.{Guid.NewGuid():N}.tmp";
         var json = JsonSerializer.Serialize(doc, JsonOptions);
 
         if (hardenBeforePublish is not null)
         {
+            // Create the temp inside the Broker's LocalSystem/Admins-only dir, so it inherits a
+            // NON-user-writable ACL the instant it exists — there is no pre-harden window where the temp is
+            // user-writable (Codex). harden() then sets the FINAL ACL (adds interactive READ) before the move,
+            // so the published file is correct atomically. Any failure → fail-closed (nothing published).
+            var tmpDir = !string.IsNullOrWhiteSpace(hardenedTempDir) ? hardenedTempDir! : (dir ?? ".");
+            Directory.CreateDirectory(tmpDir);
+            var tmpPath = Path.Combine(tmpDir, $"{Guid.NewGuid():N}.tmp");
             try
             {
-                // Create the temp EMPTY, lock its ACL BEFORE any payload lands, THEN write the content into the
-                // already-locked temp. (Hardening AFTER writing left a window where the temp held the payload
-                // under an inherited, user-writable ACL — Codex.) The temp name is an unguessable GUID, and a
-                // racer can at worst make a step fail → fail-closed (nothing published), never a forged publish.
-                using (File.Create(tmpPath)) { }
-                hardenBeforePublish(tmpPath);
+                using (File.Create(tmpPath)) { } // born under the locked dir's ACL (not user-writable)
+                hardenBeforePublish(tmpPath);    // set the final protected ACL (LocalSystem/Admins + INTERACTIVE read)
                 File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, path, overwrite: true);
             }
             catch
             {
-                // Fail-closed: an un-hardened (forgeable) doc must NEVER be published.
                 try { File.Delete(tmpPath); } catch { /* best-effort */ }
-                throw;
+                throw; // never publish an un-hardened/forgeable doc
             }
         }
         else
         {
+            var tmpPath = $"{path}.{Guid.NewGuid():N}.tmp";
             File.WriteAllText(tmpPath, json);
+            File.Move(tmpPath, path, overwrite: true);
         }
-
-        File.Move(tmpPath, path, overwrite: true);
     }
 
     /// <summary>
