@@ -48,10 +48,13 @@ public sealed class ReasoningOptions
     public bool AutoExecuteTier2Destructive { get; set; }
 
     /// <summary>
-    /// Friendly id for audit trails — e.g. "phi-3.5-mini-instruct-q4_k_m". Also
-    /// selects the chat template (InferencePromptBuilder.ResolveFormat keys off
-    /// substrings: phi → Phi, qwen/smollm → ChatML, llama-3 → Llama3, else Zephyr)
+    /// Friendly id for audit trails — e.g. "qwen3-1.7b" (committed family) or
+    /// "qwen3-4b-instruct-2507". Also selects the chat template
+    /// (InferencePromptBuilder.ResolveFormat keys off substrings: phi → Phi;
+    /// qwen3 (non-instruct) → Qwen3Thinkless [ChatML + empty-&lt;think&gt; prefill = non-thinking];
+    /// qwen3-instruct-2507 / qwen2.5 / smollm → ChatML; llama-3 → Llama3; else Zephyr)
     /// and is bundled into every InferenceProposal.ModelId for the pattern miner.
+    /// NOTE: a Qwen3 GGUF requires LLamaSharp >= 0.24.0 (Core's pin).
     /// </summary>
     public string ModelId { get; set; } = "unknown";
 

@@ -130,11 +130,14 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 Temperature = 0.1f,
                 TopK = 40,
                 TopP = 0.95f,
-                // Best-effort backstop only: the GBNF grammar pass is a no-op on win-x64
-                // (2026-06-05), so it cannot be relied on to constrain output. The valid-JSON
-                // guarantee rests on the model-matched template (above) + ProposalParser (below);
-                // grammar tightens output where the platform honors it.
+                // Best-effort backstop only: the GBNF grammar pass was a no-op on win-x64 (0.19.0,
+                // 2026-06-05) and 0.24.0 ships NO documented win-x64 GBNF correctness fix, so it still
+                // cannot be relied on to constrain output. The valid-JSON guarantee rests on the
+                // model-matched template (above) + ProposalParser (below); grammar tightens output only
+                // where the platform honors it. Basic = single-pass (0.19.0 semantics) — avoids 0.24.0's
+                // default Extended grammar-resampling path (~5x slower, issue #1099) eating the timeout.
                 Grammar = new Grammar(grammar, "root"),
+                GrammarOptimization = DefaultSamplingPipeline.GrammarOptimizationMode.Basic,
             },
         };
 
@@ -218,6 +221,20 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 {
                     var llamaPath = Path.Combine(_options.NativeLibraryPath, "llama.dll");
                     var llavaPath = Path.Combine(_options.NativeLibraryPath, "llava_shared.dll");
+
+                    // LLamaSharp 0.24.0's llama.dll has hard load-time deps on ggml.dll + ggml-base.dll +
+                    // ggml-cpu.dll in the SAME folder (llama.cpp split the ggml backend). Name any missing
+                    // one up-front so a model-load failure reads as "ggml-cpu.dll missing" rather than an
+                    // opaque LoadLibrary dependency error. (llava_shared.dll is NOT checked — it is OPTIONAL,
+                    // only needed for the future multimodal/vision path; text-only inference loads without it.)
+                    var missingNatives = new[] { "ggml.dll", "ggml-base.dll", "ggml-cpu.dll", "llama.dll" }
+                        .Where(n => !File.Exists(Path.Combine(_options.NativeLibraryPath, n)))
+                        .ToArray();
+                    if (missingNatives.Length > 0)
+                        _logger.LogWarning(
+                            "LLamaLocalInference: NativeLibraryPath {Path} is missing required native libs [{Missing}] — model load will fail (0.24.0 text-only needs ggml.dll, ggml-base.dll, ggml-cpu.dll, llama.dll; llava_shared.dll is optional, multimodal-only)",
+                            _options.NativeLibraryPath, string.Join(", ", missingNatives));
+
                     NativeLibraryConfig.All.WithLibrary(
                         File.Exists(llamaPath) ? llamaPath : null,
                         File.Exists(llavaPath) ? llavaPath : null);

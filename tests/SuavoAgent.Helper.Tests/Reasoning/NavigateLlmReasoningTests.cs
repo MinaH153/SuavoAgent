@@ -176,4 +176,79 @@ public sealed class NavigateLlmReasoningTests
         Assert.Equal("saveBtn", grounded!["automationId"]);
         Assert.Equal("Button", grounded["controlType"]);
     }
+
+    /// <summary>
+    /// The 2026-06 runtime bump: the REAL Qwen3-1.7B GGUF (Apache-2.0) on the bumped LLamaSharp 0.24.0
+    /// (first Qwen3-capable llama.cpp) reasons + grounds a valid action under the **Qwen3Thinkless**
+    /// template — ChatML + the empty-&lt;think&gt; prefill that forces non-thinking, so the model emits the
+    /// JSON directly instead of a chain-of-thought. Proves end-to-end: (a) Qwen3 architecture LOADS on the
+    /// new runtime (it could not on 0.19.0 → "Architecture qwen3 not supported"), (b) the thinking-off
+    /// template path yields clean JSON with no grammar backstop, (c) reason→ground works with multi-step
+    /// memory. Gated on SUAVOAGENT_TEST_GGUF_QWEN3 (the windows-uia-smoke CI job); no-op skip otherwise.
+    /// </summary>
+    [Fact]
+    public async Task RealQwen3Llm_ThinkingOff_ReasonsAndGrounds_WithMultiStepMemory()
+    {
+        var modelPath = Environment.GetEnvironmentVariable("SUAVOAGENT_TEST_GGUF_QWEN3");
+        if (string.IsNullOrWhiteSpace(modelPath) || !File.Exists(modelPath)) return;
+        var dylib = Environment.GetEnvironmentVariable("SUAVOAGENT_TEST_LLAMA_DYLIB");
+        if (!string.IsNullOrEmpty(dylib) && File.Exists(dylib))
+            NativeLibraryConfig.All.WithLibrary(dylib, null);
+
+        var options = Options.Create(new AgentOptions
+        {
+            Reasoning = new ReasoningOptions
+            {
+                Enabled = true,
+                ModelId = "qwen3-1.7b", // -> Qwen3Thinkless template (ChatML + empty-<think> prefill)
+                ModelPath = modelPath,
+                NativeLibraryPath = null,
+                ContextSize = 4096,
+                MaxOutputTokens = 512,
+                IdleUnloadSeconds = 5,
+            },
+        });
+
+        await using var llm = new LLamaLocalInference(options, modelPath, NullLogger<LLamaLocalInference>.Instance);
+
+        var objective = new AgentObjective("Save the document", "task.nav.qwen3", "pharm-test-001");
+        var screen = new PerceivedScreen(
+            "screenhash", Scrubbed: true,
+            ElementSummary: new[] { "Button|saveBtn" },
+            WindowTitle: "notepad",
+            Signatures: new[] { "Button|saveBtn" });
+
+        var m0 = ContextAccumulator.Start(objective);
+        var m1 = ContextAccumulator.RecordObservation(m0, screen);
+        var priorAttempt = NextAction.Act("press_keys",
+            new Dictionary<string, object?> { ["keys"] = "ctrl+s" }, "tried the save shortcut");
+        var m2 = ContextAccumulator.RecordStep(m1, "screenhash", priorAttempt,
+            ActStatus.Failed, PostconditionVerdict.NotMet, memoryWindow: 8);
+        var memory = ContextAccumulator.RecordObservation(m2, screen);
+
+        var ctx = NavigateReasoning.BuildContext(objective, memory);
+        Assert.True(ctx.Flags.ContainsKey("prior_actions"));
+        Assert.Contains("press_keys", ctx.Flags["prior_actions"]);
+
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Click", "Type", "PressKey" };
+        var proposal = await llm.ProposeAsync(new InferenceRequest
+        {
+            Context = ctx,
+            AllowedActions = NavigateReasoning.MapAllowedActions(allowed),
+            EscalationReason = "no rule matched; reason about the objective given prior attempts",
+            Timeout = TimeSpan.FromSeconds(90),
+        }, CancellationToken.None);
+
+        // Qwen3-1.7B, thinking forced OFF, emits valid JSON (no <think> pollution) and reasons a Click
+        // on the visible Save button — on a runtime that literally could not load Qwen3 before this bump.
+        Assert.NotNull(proposal);
+        Assert.Equal(RuleActionType.Click, proposal!.Action.Type);
+        Assert.Contains(proposal.Action.Parameters.Values,
+            v => v.Contains("save", StringComparison.OrdinalIgnoreCase));
+
+        var grounded = ActionGrounding.GroundClick(proposal.Action.Parameters, screen, "notepad");
+        Assert.NotNull(grounded);
+        Assert.Equal("saveBtn", grounded!["automationId"]);
+        Assert.Equal("Button", grounded["controlType"]);
+    }
 }

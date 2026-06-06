@@ -36,8 +36,13 @@
          ggml.dll) is NOT shipped by default — its presence would be a vendor
          fingerprint. When Reasoning.Enabled=true the operator provides these
          binaries at ReasoningOptions.NativeLibraryPath. Default installs
-         contain zero Tier-2 native code. See Codex C-1. -->
-    <PackageReference Include="LLamaSharp" Version="0.19.0" />
+         contain zero Tier-2 native code. See Codex C-1.
+         0.24.0 = first LLamaSharp whose bundled llama.cpp (ceda28ef) supports Qwen3 (needs >= b5092).
+         All APIs we use are byte-identical to 0.19.0 (zero call-site edits). The native DLL set grows
+         3->5 per AVX folder (ggml.dll + ggml-base.dll + ggml-cpu.dll + llama.dll + llava_shared.dll) —
+         the operator-provided NativeLibraryPath on the box MUST carry all 5 (see live-box-validation runbook).
+         Backend pin (LLamaSharp.Backend.Cpu, in Helper.Tests) MUST equal this version exactly. -->
+    <PackageReference Include="LLamaSharp" Version="0.24.0" />
   </ItemGroup>
 
   <ItemGroup>

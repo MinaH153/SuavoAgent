@@ -23,10 +23,11 @@
        the Linux build-and-test gate is unaffected (condition false → cross-platform build stays clean). -->
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
-    <!-- Native llama.cpp CPU backend so the real-LLM smoke (LocalLlmSmokeTests) can load a GGUF on the
-         windows-uia-smoke runner. Windows-only + the test no-ops without a model, so the ubuntu gate is
-         unaffected. Pinned to LLamaSharp 0.19.0 (Core's managed binding). -->
-    <PackageReference Include="LLamaSharp.Backend.Cpu" Version="0.19.0" />
+    <!-- Native llama.cpp CPU backend so the real-LLM smoke (LocalLlmSmokeTests / NavigateLlmReasoningTests)
+         can load a GGUF on the windows-uia-smoke runner. Windows-only + the tests no-op without a model, so
+         the ubuntu gate is unaffected. MUST equal Core's LLamaSharp managed binding exactly (0.24.0 = first
+         Qwen3-capable; this backend nupkg provides the 5-DLL native set automatically in CI). -->
+    <PackageReference Include="LLamaSharp.Backend.Cpu" Version="0.24.0" />
   </ItemGroup>
 
 </Project>
