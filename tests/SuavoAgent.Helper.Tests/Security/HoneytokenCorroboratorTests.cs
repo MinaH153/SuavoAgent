@@ -100,6 +100,8 @@ public sealed class HoneytokenCorroboratorTests
         var r = Corroborator.Corroborate(name, exe, prior);
         Assert.NotNull(r.ReasonLabel);
         Assert.True(r.ReasonLabel.Length <= 32, $"label too long: {r.ReasonLabel}");
-        Assert.Matches("^[A-Za-z0-9._-]+$", r.ReasonLabel); // safe charset only — no spaces/contents/PHI
+        // Locked to lowercase: SafeName always lowercases, so the test charset must be lowercase-only —
+        // a permissive [A-Za-z] would silently accept an uppercase regression (HIPAA §164.312(b) audit).
+        Assert.Matches("^[a-z0-9._-]+$", r.ReasonLabel); // safe charset only — no spaces/contents/PHI
     }
 }
