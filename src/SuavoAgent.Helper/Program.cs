@@ -125,20 +125,25 @@ try
 
         // Honeytoken immune reflex — a decoy-file watcher that, on a corroborated touch by a non-allowlisted
         // process, trips the SAME actuation gate (Degrade→reversible, Apoptosis→latched) and stamps the
-        // compromise for the heartbeat signal. Best-effort + fail-open (HoneytokenWatcher swallows start
-        // errors). v1 uses NullFileAccessAttributor (FSW can't name the toucher on Windows; ETW/handle
-        // resolution is a follow-up — unknown toucher → reversible Degrade, never bricks).
-        var honeytokenDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "SuavoAgent", HoneytokenConstants.DirName);
-        var honeytokenReflex = new HoneytokenReflex(
-            new HoneytokenCorroborator(AppContext.BaseDirectory),
-            new ApoptosisOrchestrator(actuationGate),
-            new NullFileAccessAttributor(),
-            onSignal: r => Log.Logger.Warning(
-                "Honeytoken touch corroborated level={Level} reason={Reason}", r.Level, r.ReasonLabel));
-        honeytokenWatcher = new HoneytokenWatcher(honeytokenDir, honeytokenReflex, Log.Logger);
-        honeytokenWatcher.Start();
+        // compromise for the heartbeat signal. GATED OFF by default: v1's NullFileAccessAttributor can't name
+        // the toucher (FSW limitation), so every touch → Degrade and a repeat → Apoptosis, which a routine
+        // AV/backup scan would false-trip. Stays dormant until ETW/handle PID resolution lands + is validated
+        // (ActuationConfig.HoneytokenReflexEnabled). The full ladder is built + unit-tested either way.
+        if (actuationConfig.HoneytokenReflexEnabled)
+        {
+            var honeytokenDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent", HoneytokenConstants.DirName);
+            var honeytokenReflex = new HoneytokenReflex(
+                new HoneytokenCorroborator(AppContext.BaseDirectory),
+                new ApoptosisOrchestrator(actuationGate),
+                new NullFileAccessAttributor(),
+                onSignal: r => Log.Logger.Warning(
+                    "Honeytoken touch corroborated level={Level} reason={Reason}", r.Level, r.ReasonLabel));
+            honeytokenWatcher = new HoneytokenWatcher(honeytokenDir, honeytokenReflex, Log.Logger);
+            honeytokenWatcher.Start();
+            Log.Logger.Warning("Honeytoken immune reflex ARMED (HoneytokenReflexEnabled=true)");
+        }
     }
 
     // Pass a foreground-PID check that always re-reads pioneer.ProcessId so

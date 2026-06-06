@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using Serilog;
+using SuavoAgent.Contracts.Models;
 
 namespace SuavoAgent.Helper.Security;
 
@@ -28,7 +29,13 @@ public sealed class HoneytokenWatcher : IDisposable
     {
         try
         {
-            Directory.CreateDirectory(_dir); // ensure the watch dir exists (Broker seeds the decoy file into it)
+            Directory.CreateDirectory(_dir);
+            // Seed the decoy BEFORE arming the FSW so our own write never self-triggers the reflex. Fixed
+            // innocuous bytes; agent code never reads it again, so any later access is genuinely suspicious.
+            var tokenPath = Path.Combine(_dir, HoneytokenConstants.TokenFileName);
+            if (!File.Exists(tokenPath))
+                File.WriteAllBytes(tokenPath, HoneytokenConstants.TokenContent);
+
             var fsw = new FileSystemWatcher(_dir)
             {
                 NotifyFilter = NotifyFilters.LastAccess | NotifyFilters.LastWrite | NotifyFilters.FileName

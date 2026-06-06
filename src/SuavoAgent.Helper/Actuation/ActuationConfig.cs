@@ -44,6 +44,18 @@ public sealed record ActuationConfig
     /// </summary>
     public bool RelaxIpcClientPathValidation { get; init; } = false;
 
+    /// <summary>
+    /// Arms the honeytoken immune reflex (the decoy-file watcher → corroborate → apoptosis). DEFAULT FALSE
+    /// and intentionally so: v1 ships with <c>NullFileAccessAttributor</c> (Windows FileSystemWatcher can't
+    /// name the accessing process), so EVERY touch resolves to "unknown" → reversible Degrade, and a second
+    /// distinct touch → Apoptosis. Without process attribution the system allowlist (SearchIndexer / Defender
+    /// / Backup / OneDrive → Observe) can't fire, so a routine AV scan or backup WOULD trip a live pharmacy.
+    /// The full ladder is built + unit-tested; keep this OFF until real PID resolution (ETW kernel-file-IO /
+    /// handle enumeration) lands AND is validated on a box. Flipping this true before then risks a
+    /// false-positive degrade/quarantine — precedence-1 never-brick.
+    /// </summary>
+    public bool HoneytokenReflexEnabled { get; init; }
+
     public static ActuationConfig SafeDefault() => new()
     {
         Enabled = false,
