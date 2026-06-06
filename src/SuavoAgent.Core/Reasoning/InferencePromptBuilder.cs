@@ -10,10 +10,12 @@ public enum ChatPromptFormat
 {
     Llama3,
     Zephyr,
-    /// <summary>Phi-3 / Phi-3.5 — the 2026-06 primary on-device reasoner.</summary>
+    /// <summary>Phi-3 / Phi-3.5.</summary>
     Phi,
-    /// <summary>ChatML — Qwen2.5 / SmolLM2 (low-RAM fallback).</summary>
+    /// <summary>ChatML — Qwen2.5 / SmolLM2 / Qwen3-*-Instruct-2507 (non-thinking by design).</summary>
     ChatML,
+    /// <summary>Qwen3 HYBRID (e.g. 1.7B) forced NON-thinking: ChatML + an empty prefilled think block.</summary>
+    Qwen3Thinkless,
     Plain,
 }
 
@@ -30,12 +32,17 @@ public enum ChatPromptFormat
 /// </summary>
 public static class InferencePromptBuilder
 {
+    // The schema is SPELLED OUT here because the GBNF grammar is a no-op on win-x64 — the template alone
+    // must elicit the EXACT nested shape ProposalParser expects ({"action":{"type",...,"parameters"},...}).
+    // A capable model left to guess (real Qwen3-1.7B, 2026-06-05) emits a plausible-but-wrong
+    // {"action":"Click","target":"..."} that fails to parse; spelling out the shape fixes it grammar-free.
     private const string SystemPrompt =
-        "You are a pharmacy automation reasoner. Given the current UI state, " +
-        "propose ONE next action as a JSON object. You may only propose actions " +
-        "from the allowed list. Set confidence to your certainty: 1.0 if sure, " +
-        "lower if uncertain. Explain your reasoning in the rationale field. " +
-        "Only propose actions whose target elements are visible in the state.";
+        "You are a pharmacy automation reasoner. Given the current UI state, propose ONE next action.\n" +
+        "Respond with ONLY a JSON object of EXACTLY this shape — no prose, no markdown, no extra keys:\n" +
+        "{\"action\":{\"type\":\"<one value from allowed_actions>\",\"parameters\":{\"name\":\"<a visible element>\"}}," +
+        "\"confidence\":0.0,\"rationale\":\"<short reason>\"}\n" +
+        "Only propose actions whose target elements are visible in the state. " +
+        "Set confidence to your certainty: 1.0 if sure, lower if uncertain.";
 
     /// <summary>
     /// Resolves the chat template from the model id. CRITICAL: the template MUST match the model,
@@ -50,10 +57,17 @@ public static class InferencePromptBuilder
         var id = (modelId ?? string.Empty).ToLowerInvariant();
         if (id.Contains("tinyllama") || id.Contains("zephyr") || id.Contains("stablelm")) return ChatPromptFormat.Zephyr;
         if (id.Contains("llama-3") || id.Contains("llama3") || id.Contains("llama_3")) return ChatPromptFormat.Llama3;
-        // 2026-06 brain upgrade. Phi-3.5 (primary): best strict-JSON-from-prompt-alone reliability
-        // in the small-model class — and that's the deciding axis because GBNF grammar-masking is a
-        // no-op on win-x64, so the TEMPLATE alone must elicit valid JSON. Qwen2.5/SmolLM2 use ChatML.
+        // 2026-06 brain upgrade. The TEMPLATE alone must elicit valid JSON (GBNF grammar-masking is a
+        // no-op on win-x64). Phi-3.5 = Phi. Qwen3 is the committed family:
+        //  - Qwen3 HYBRID (e.g. 1.7B) is thinking-ON by default → Qwen3Thinkless = ChatML + an empty
+        //    prefilled <think></think> block to force non-thinking, else <think> pollutes the JSON.
+        //  - Qwen3-*-Instruct-2507 is non-thinking BY DESIGN → plain ChatML (the prefill is OOD for it).
+        //  - Qwen2.5 / SmolLM2 → plain ChatML.
         if (id.Contains("phi")) return ChatPromptFormat.Phi;
+        if (id.Contains("qwen3"))
+            return (id.Contains("instruct") || id.Contains("2507"))
+                ? ChatPromptFormat.ChatML
+                : ChatPromptFormat.Qwen3Thinkless;
         if (id.Contains("qwen") || id.Contains("smollm")) return ChatPromptFormat.ChatML;
         // Default to Zephyr: it's the template used by most small instruct GGUFs we ship, and it
         // degrades gracefully (plain <|role|> markers) on models that don't recognize it.
@@ -66,7 +80,7 @@ public static class InferencePromptBuilder
         ChatPromptFormat.Llama3 => new[] { "<|eot_id|>", "<|end_of_text|>" },
         ChatPromptFormat.Zephyr => new[] { "</s>", "<|user|>" },
         ChatPromptFormat.Phi => new[] { "<|end|>", "<|endoftext|>" },
-        ChatPromptFormat.ChatML => new[] { "<|im_end|>", "<|endoftext|>" },
+        ChatPromptFormat.ChatML or ChatPromptFormat.Qwen3Thinkless => new[] { "<|im_end|>", "<|endoftext|>" },
         _ => new[] { "</s>", "\n\n\n" },
     };
 
@@ -99,10 +113,18 @@ public static class InferencePromptBuilder
                 sb.Append("<|assistant|>\n");
                 break;
             case ChatPromptFormat.ChatML:
-                // ChatML (Qwen2.5 / SmolLM2): <|im_start|>role\n…<|im_end|>\n
+                // ChatML (Qwen2.5 / SmolLM2 / Qwen3-Instruct-2507): <|im_start|>role\n…<|im_end|>\n
                 sb.Append("<|im_start|>system\n").Append(SystemPrompt).Append("<|im_end|>\n");
                 sb.Append("<|im_start|>user\n").Append(user).Append("<|im_end|>\n");
                 sb.Append("<|im_start|>assistant\n");
+                break;
+            case ChatPromptFormat.Qwen3Thinkless:
+                // Qwen3 hybrid forced non-thinking: ChatML + an empty PREFILLED think block right after the
+                // assistant header (exactly "<think>\n\n</think>\n\n", the Qwen3 enable_thinking=false
+                // convention). The model decodes the JSON immediately after and never opens its own <think>.
+                sb.Append("<|im_start|>system\n").Append(SystemPrompt).Append("<|im_end|>\n");
+                sb.Append("<|im_start|>user\n").Append(user).Append("<|im_end|>\n");
+                sb.Append("<|im_start|>assistant\n<think>\n\n</think>\n\n");
                 break;
             default: // Plain
                 sb.Append(SystemPrompt).Append("\n\n").Append(user).Append("\n\nRespond with the JSON action now:\n");

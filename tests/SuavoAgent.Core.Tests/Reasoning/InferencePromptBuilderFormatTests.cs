@@ -21,6 +21,13 @@ public sealed class InferencePromptBuilderFormatTests
     [InlineData("qwen2.5-1.5b-instruct-q4_k_m", ChatPromptFormat.ChatML)]
     [InlineData("Qwen2.5-3B-Instruct", ChatPromptFormat.ChatML)]
     [InlineData("smollm2-1.7b-instruct", ChatPromptFormat.ChatML)]
+    // Qwen3 HYBRID (e.g. 1.7B) is thinking-ON by default → must force NON-thinking via the empty-<think>
+    // prefill, else <think> tokens pollute the JSON (no grammar backstop on win-x64).
+    [InlineData("qwen3-1.7b", ChatPromptFormat.Qwen3Thinkless)]
+    [InlineData("Qwen3-1.7B-Q4_K_M", ChatPromptFormat.Qwen3Thinkless)]
+    // Qwen3-*-Instruct-2507 is non-thinking BY DESIGN → plain ChatML (the think prefill is out-of-distribution for it).
+    [InlineData("qwen3-4b-instruct-2507", ChatPromptFormat.ChatML)]
+    [InlineData("Qwen3-4B-Instruct-2507", ChatPromptFormat.ChatML)]
     [InlineData("some-unknown-gguf", ChatPromptFormat.Zephyr)] // safe default for small instruct GGUFs
     public void ResolveFormat_maps_model_id_to_template(string modelId, ChatPromptFormat expected)
         => Assert.Equal(expected, InferencePromptBuilder.ResolveFormat(modelId));
@@ -65,6 +72,19 @@ public sealed class InferencePromptBuilderFormatTests
         Assert.Contains("<|im_end|>", prompt);
         Assert.DoesNotContain("</s>", prompt);
         Assert.DoesNotContain("<|eot_id|>", prompt);
+        Assert.DoesNotContain("<think>", prompt); // plain ChatML must NOT prefill a think block
+    }
+
+    [Fact]
+    public void Build_Qwen3Thinkless_isChatML_with_empty_think_prefill()
+    {
+        // Qwen3 non-thinking via manual template = ChatML + an empty prefilled think block right after
+        // the assistant header, so the model decodes the JSON immediately and never opens its own <think>.
+        var prompt = InferencePromptBuilder.Build(Req(), ChatPromptFormat.Qwen3Thinkless);
+        Assert.Contains("<|im_start|>assistant\n<think>\n\n</think>\n\n", prompt);
+        Assert.Contains("<|im_start|>user", prompt);
+        Assert.Contains("<|im_end|>", prompt);
+        Assert.DoesNotContain("<|eot_id|>", prompt);
     }
 
     [Fact]
@@ -74,6 +94,7 @@ public sealed class InferencePromptBuilderFormatTests
         Assert.Contains("<|eot_id|>", InferencePromptBuilder.AntiPromptsFor(ChatPromptFormat.Llama3));
         Assert.Contains("<|end|>", InferencePromptBuilder.AntiPromptsFor(ChatPromptFormat.Phi));
         Assert.Contains("<|im_end|>", InferencePromptBuilder.AntiPromptsFor(ChatPromptFormat.ChatML));
+        Assert.Contains("<|im_end|>", InferencePromptBuilder.AntiPromptsFor(ChatPromptFormat.Qwen3Thinkless));
     }
 
     private static InferenceRequest Req() => new()
