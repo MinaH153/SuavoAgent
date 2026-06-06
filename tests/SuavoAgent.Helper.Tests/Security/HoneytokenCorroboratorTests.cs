@@ -66,13 +66,16 @@ public sealed class HoneytokenCorroboratorTests
         Assert.Equal(CorroborationLevel.Degrade, r.Level);
     }
 
-    // --- Escalation → APOPTOSIS ---------------------------------------------
+    // --- Escalation → APOPTOSIS (denylist shells ONLY — see HoneytokenCorroboratorNeverLatchTests) -----
 
     [Fact]
-    public void UnknownProcess_Repeat_Apoptosis()
+    public void UnknownProcess_Repeat_StillDegrade_NeverLatches()
     {
+        // CHANGED (was UnknownProcess_Repeat_Apoptosis): a resolved-but-not-shell name no longer escalates on
+        // repeat — that rule bricked live pharmacies (mis-attributed nightly backup → apoptosis on day 2).
+        // priorTouchCount is now inert for non-shell names; the comprehensive proof lives in the never-latch suite.
         var r = Corroborator.Corroborate("explorer", @"C:\Windows\explorer.exe", priorTouchCount: 1);
-        Assert.Equal(CorroborationLevel.Apoptosis, r.Level);
+        Assert.Equal(CorroborationLevel.Degrade, r.Level);
     }
 
     [Theory]
