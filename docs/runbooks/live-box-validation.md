@@ -121,3 +121,30 @@ write/rename/delete/attribute changes, not silent reads (reliable read detection
 SACL follow-up). (b) The `SystemAllowlist` is name-only (spoofable: malware named `MsMpEng` is Observed
 — a detection miss, never a privilege gain); a future attributor that reads the holder's signed exe path
 should tighten Observe to system-path + Microsoft-publisher.
+
+### 4a. The Broker-ETW attribution oracle (`HoneytokenAttributorMode=EtwBroker`)
+
+The oracle that NAMES the toucher is a LocalSystem ETW Kernel-File session in the Broker
+(`EtwHoneytokenFileTracer`) — the Helper runs as the non-admin user and cannot start a kernel session. On a
+decoy open the Broker resolves the TRUE IRP-issuing process (not a held-handle guess) and writes a signed,
+ACL-locked handoff (`%ProgramData%\SuavoAgent\honeytoken-attribution.json`); the Helper's
+`EtwBrokerFileAccessAttributor` reads it. Two flags, both default off → dark: set
+`"HoneytokenAttributorMode": "EtwBroker"` AND `"HoneytokenReflexEnabled": true` in `actuation.json`.
+
+**Before flipping `EtwBroker` on any box:**
+1. Confirm the Broker log shows `ETW honeytoken oracle ARMED` (NOT `BLIND: …`). A BLIND line means the decoy
+   dir didn't resolve to an NT-device path — the oracle refuses to arm rather than match-all (PHI-safe), so
+   attribution is off until fixed; never arm `EtwBroker` against a blind oracle.
+2. The CI `windows-uia-smoke` "Live honeytoken ETW oracle smoke" step must be green on the build (proves the
+   session keyword/wiring actually emits a decoy-open event end-to-end — a mis-keyword passes every headless
+   test but is silent).
+3. **Pure-read detection requires the next change** (the Helper driving the reflex off the handoff-doc change,
+   not just the decoy FSW): until that lands, an `EtwBroker`-armed box still only reacts to write/attr touches
+   of the decoy via the FSW, even though the Broker oracle correctly attributes reads in the handoff. Do not
+   treat read-exfil as covered until that ships.
+4. Forgery is blocked by the handoff's per-file ACL (LocalSystem/Admins write, INTERACTIVE read-only,
+   inheritance stripped, fail-closed delete-on-throw). A local Administrator can still overwrite it — accepted
+   (an admin can trip the box many ways).
+
+Then run the §4 shadow → dry-run → live-arm staging with the oracle ON in shadow first (the handoff log shows
+the resolved names without the gate mutating).

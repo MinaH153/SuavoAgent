@@ -162,6 +162,15 @@ jobs:
       - name: Live-UIA real-Notepad smoke (perceive → resolve → type → read back)
         run: dotnet test tests/SuavoAgent.Helper.Tests/SuavoAgent.Helper.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~RealNotepadUiaTests" -v normal
 
+      # Honeytoken ETW oracle live round-trip: arm the real Kernel-File session, open the decoy, assert the
+      # handoff materialized with the toucher named + NO raw path (PHI). The ONLY check of keyword/wiring
+      # correctness (a mis-keyword passes every headless test but emits no events). No-ops if the runner can't
+      # start a kernel session; informational (this whole job is continue-on-error).
+      - name: Build Broker.Tests
+        run: dotnet build tests/SuavoAgent.Broker.Tests/SuavoAgent.Broker.Tests.csproj -c Release
+      - name: Live honeytoken ETW oracle smoke (real decoy open)
+        run: dotnet test tests/SuavoAgent.Broker.Tests/SuavoAgent.Broker.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~EtwHoneytokenLiveSmokeTests" -v normal
+
       - name: Real-app on a classic-Win32 app (primitives + full loop + watch-learn-replicate)
         env:
           SUAVOAGENT_UIA_HARNESS: ${{ github.workspace }}\tests\SuavoAgent.UiaHarness\bin\Release\net8.0-windows\SuavoAgent.UiaHarness.exe

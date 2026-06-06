@@ -58,11 +58,18 @@ public static class HoneytokenAttributionStore
     /// canonical decoy id is dropped before serialization (defense-in-depth — the entry has no path field to
     /// begin with). Single writer (the Broker), last-writer-wins, no locking.
     /// </summary>
+    /// <param name="hardenBeforePublish">
+    /// Optional: invoked on the TEMP file BEFORE the atomic move so the published file is locked down (ACL'd)
+    /// the instant it appears — there is never a window where the destination exists user-writable. FAIL-CLOSED:
+    /// if it throws, the temp is deleted and NOTHING is published (the prior handoff, if any, stays), and the
+    /// exception propagates so the caller treats this write as failed.
+    /// </param>
     public static void Write(
         string path,
         string pipeNonce,
         IReadOnlyList<HoneytokenAttributionEntry> touchers,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        Action<string>? hardenBeforePublish = null)
     {
         var canonicalId = HoneytokenConstants.ComputeId();
         var safe = touchers
@@ -83,6 +90,21 @@ public static class HoneytokenAttributionStore
 
         var tmpPath = $"{path}.{Guid.NewGuid():N}.tmp";
         File.WriteAllText(tmpPath, JsonSerializer.Serialize(doc, JsonOptions));
+
+        if (hardenBeforePublish is not null)
+        {
+            try
+            {
+                hardenBeforePublish(tmpPath);
+            }
+            catch
+            {
+                // Fail-closed: an un-hardened (forgeable) doc must NEVER be published.
+                try { File.Delete(tmpPath); } catch { /* best-effort */ }
+                throw;
+            }
+        }
+
         File.Move(tmpPath, path, overwrite: true);
     }
 
