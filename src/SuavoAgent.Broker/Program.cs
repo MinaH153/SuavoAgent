@@ -79,6 +79,10 @@ try
     builder.Services.AddWindowsService(options => options.ServiceName = "SuavoAgent.Broker");
     builder.Services.AddSerilog();
     builder.Services.AddHostedService<SessionWatcher>();
+    // Honeytoken attribution oracle (LocalSystem-only ETW). Self-gates on OperatingSystem.IsWindows() and
+    // fail-opens on any ETW error, so unconditional registration is safe on non-Windows CI/dev. Inert until
+    // the Helper is flipped to HoneytokenAttributorMode=EtwBroker (the doc is just written + ignored otherwise).
+    builder.Services.AddHostedService<SuavoAgent.Broker.Honeytoken.EtwHoneytokenFileTracer>();
     var host = builder.Build();
     Log.Information("Broker host built — running");
     host.Run();

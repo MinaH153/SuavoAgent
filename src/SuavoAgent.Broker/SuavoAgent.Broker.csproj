@@ -16,6 +16,10 @@
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
     <!-- Direct pin overrides transitive 8.0.0 (GHSA-hh2w-p6rv-4g7w + GHSA-8g4q-xg66-9fp4, both HIGH DoS). -->
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!-- Honeytoken ETW attribution oracle (Windows-only at runtime; managed lib builds cross-platform, all
+         ETW calls guarded by OperatingSystem.IsWindows()). Native KernelTraceControl bits ride the win-x64
+         self-contained publish (IncludeNativeLibrariesForSelfExtract above). -->
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.16" />
   </ItemGroup>
 
   <ItemGroup>
