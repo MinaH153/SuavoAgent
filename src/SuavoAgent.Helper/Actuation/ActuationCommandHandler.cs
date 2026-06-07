@@ -54,6 +54,7 @@ public sealed class ActuationCommandHandler
                 ActuationIpcCommands.PressKeys => await HandlePressKeysAsync(data, ct).ConfigureAwait(false),
                 ActuationIpcCommands.LaunchSandboxApp => await HandleLaunchSandboxAppAsync(data, ct).ConfigureAwait(false),
                 ActuationIpcCommands.ReloadAllowlist => HandleReloadAllowlist(),
+                ActuationIpcCommands.AssertElement => await HandleAssertElementAsync(data, ct).ConfigureAwait(false),
                 _ => ActuationResult.Reject(
                     ActuationRejectionCodes.MalformedRequest,
                     $"unknown actuation command '{command}'",
@@ -245,6 +246,76 @@ public sealed class ActuationCommandHandler
         foreach (var ch in s)
             if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Read a UIA element's value and assert it matches <c>expected</c> — the verification keystone.
+    /// READ-ONLY: injects no input, so it does not consult the actuation gate's pause/kill (a read can
+    /// never fight the user). It DOES honour dry-run: a dry-run workflow's prior actuation never
+    /// happened, so asserting live state is meaningless → short-circuit to a pass. PHI-safe: the raw
+    /// read value is NEVER logged or returned — a mismatch reports only normalised lengths + the mode.
+    /// </summary>
+    private Task<ActuationResult> HandleAssertElementAsync(JsonElement? data, CancellationToken ct)
+    {
+        if (data is null) return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "missing data", _gate.IsDryRun));
+        var req = data.Value.Deserialize<AssertElementRequest>();
+        if (req is null) return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun));
+
+        var effectiveDryRun = req.DryRun || _gate.IsDryRun;
+
+        if (string.IsNullOrWhiteSpace(req.ProcessName) || string.IsNullOrEmpty(req.Expected))
+            return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "processName/expected required", effectiveDryRun));
+
+        var hasLocator = !string.IsNullOrWhiteSpace(req.AutomationId)
+            || !string.IsNullOrWhiteSpace(req.Name)
+            || !string.IsNullOrWhiteSpace(req.ControlType);
+        if (!hasLocator)
+            return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "one of automationId/name/controlType required", effectiveDryRun));
+
+        var allowedProcesses = ActuationAllowlistedSandboxApps.ProcessNames.Values
+            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys);
+        if (!allowedProcesses.Contains(req.ProcessName, StringComparer.OrdinalIgnoreCase))
+            return Task.FromResult(ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessNotAllowed,
+                $"processName '{req.ProcessName}' not allowed for sandbox actuation",
+                effectiveDryRun));
+
+        // Dry-run: the actuation that would have produced the asserted state never fired — pass (no-op).
+        if (effectiveDryRun)
+            return Task.FromResult(ActuationResult.Success(0, dryRun: true, evidenceHash: "assert_element_dryrun"));
+
+        var timeout = req.TimeoutMs > 0 ? TimeSpan.FromMilliseconds(req.TimeoutMs) : _config.DefaultUiaTimeout;
+        var read = _resolver.ReadElementValue(req.ProcessName, req.AutomationId, req.Name, req.ControlType, timeout);
+        if (read is null)
+        {
+            var locator = req.AutomationId ?? req.Name ?? req.ControlType ?? "?";
+            return Task.FromResult(ActuationResult.Reject(
+                ActuationRejectionCodes.ElementNotFound,
+                $"element (locator '{locator}') not found or no readable value in '{req.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
+                effectiveDryRun));
+        }
+
+        var matched = req.MatchMode switch
+        {
+            "exact" => string.Equals(read, req.Expected, StringComparison.Ordinal),
+            "contains_ci" => read.Contains(req.Expected, StringComparison.OrdinalIgnoreCase),
+            _ => NormalizeForVerification(read).Contains(NormalizeForVerification(req.Expected), StringComparison.Ordinal), // normalized (default)
+        };
+
+        if (matched)
+        {
+            _logger.Information("AssertElement PASS: element value matches expected (mode={Mode}, expectedLen={Len})", req.MatchMode, req.Expected.Length);
+            return Task.FromResult(ActuationResult.Success(0, dryRun: false, evidenceHash: "assert_element_pass"));
+        }
+
+        // Mismatch — lengths + mode ONLY; never the raw read value or expected text (PHI on a PMS box).
+        _logger.Warning(
+            "AssertElement MISMATCH: mode={Mode} expectedLen={Exp} actualLen={Act}",
+            req.MatchMode, req.Expected.Length, read.Length);
+        return Task.FromResult(ActuationResult.Reject(
+            ActuationRejectionCodes.AssertMismatch,
+            $"element value did not match expected (mode={req.MatchMode}, expectedLen={req.Expected.Length}, actualLen={read.Length})",
+            effectiveDryRun));
     }
 
     private Task<ActuationResult> HandlePressKeysAsync(JsonElement? data, CancellationToken ct)

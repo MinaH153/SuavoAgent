@@ -36,6 +36,12 @@ public static class ActuationIpcCommands
     /// allowlist in THIS process (no restart). Operator-pushed; Core persists the file first, then
     /// sends this so the Helper's authoritative static agrees with Core's.</summary>
     public const string ReloadAllowlist = "actuation.reload_allowlist";
+
+    /// <summary>Read a UIA element's value and assert it matches an expected string. READ-ONLY,
+    /// non-mutating — the verification keystone: lets a workflow PROVE it reached the intended end
+    /// state (Calc reads "12", the note typed). PHI-safe: the raw read value never leaves the box;
+    /// only pass/fail + scrubbed length hints are returned.</summary>
+    public const string AssertElement = "actuation.assert_element";
 }
 
 public sealed record ActuationGateState(
@@ -104,6 +110,26 @@ public sealed record LaunchSandboxAppRequest(
 /// <summary>No-arg reload — actuation.json on disk is the source of truth (Core writes it first).</summary>
 public sealed record ReloadAllowlistRequest();
 
+/// <summary>
+/// Read a UIA element's value and assert it equals/contains <see cref="Expected"/>. Locate the
+/// element by AutomationId (preferred), accessible Name, or ControlType — at least one is required.
+/// Read order Helper-side: ValuePattern → TextPattern → Name (display-only controls like the
+/// Calculator result expose their value via Name, e.g. "Display is 12"). The match is forgiving by
+/// default (<c>normalized</c>: alphanumeric-lowercase) so "Display is 12" satisfies expected "12".
+/// READ-ONLY; <see cref="DryRun"/> short-circuits to a pass (asserting real state after a dry-run
+/// actuation is meaningless). The raw read value is NEVER returned to the cloud — only pass/fail.
+/// </summary>
+public sealed record AssertElementRequest(
+    [property: JsonPropertyName("processName")] string ProcessName,
+    [property: JsonPropertyName("expected")] string Expected,
+    [property: JsonPropertyName("matchMode")] string MatchMode,
+    [property: JsonPropertyName("timeoutMs")] int TimeoutMs,
+    [property: JsonPropertyName("automationId")] string? AutomationId = null,
+    [property: JsonPropertyName("name")] string? Name = null,
+    [property: JsonPropertyName("controlType")] string? ControlType = null,
+    [property: JsonPropertyName("dryRun")] bool DryRun = false
+);
+
 public sealed record ActuationResult(
     [property: JsonPropertyName("ok")] bool Ok,
     [property: JsonPropertyName("dryRun")] bool DryRun,
@@ -138,6 +164,11 @@ public static class ActuationRejectionCodes
     public const string MalformedRequest = "malformed_request";
     public const string ChordParseFailure = "chord_parse_failure";
     public const string ExecutionException = "execution_exception";
+    // assert_element: the located UIA element could not be found within the timeout.
+    public const string ElementNotFound = "element_not_found";
+    // assert_element: the element was read but its value did NOT match expected (carries a
+    // PHI-safe length/mode hint, never the raw value).
+    public const string AssertMismatch = "assert_mismatch";
 }
 
 public static class ActuationAllowlistedSandboxApps

@@ -34,6 +34,11 @@ public sealed class SendInputDriver
     private readonly ActuationGate _gate;
     private readonly ActuationConfig _config;
     private readonly ILogger _logger;
+    // Visual-only "agent is acting here" glow. Fired (fire-and-forget) at every real cursor move so the
+    // operator can WATCH the agent work — the click point AND the type focus-click both flow through
+    // MoveAndClick, so one call covers both. Null when the intent-cursor overlay isn't available; a
+    // glow can never block, slow, or fail actuation (it only paints).
+    private readonly SuavoAgent.Helper.IntentCursor.IntentCursorController? _intentCursor;
 
     // The window a preceding launch_sandbox_app established as the actuation target. type/press
     // re-assert + VERIFY this is foreground immediately before injecting input (they arrive as
@@ -53,11 +58,39 @@ public sealed class SendInputDriver
     private long _lastClickUtcTicks;
     private static readonly TimeSpan ClickFocusFreshWindow = TimeSpan.FromSeconds(15);
 
-    public SendInputDriver(ActuationGate gate, ActuationConfig config, ILogger logger)
+    public SendInputDriver(
+        ActuationGate gate,
+        ActuationConfig config,
+        ILogger logger,
+        SuavoAgent.Helper.IntentCursor.IntentCursorController? intentCursor = null)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<SendInputDriver>();
+        _intentCursor = intentCursor;
+    }
+
+    /// <summary>
+    /// Paint the "agent is acting here" glow at a screen point — fire-and-forget so it never blocks,
+    /// slows, or can fail the actuation it accompanies (the overlay is purely visual). This is what
+    /// makes the agent's work watchable: a brief accent-toned halo lands where the agent is about to
+    /// click or set focus. No-op when the overlay isn't wired.
+    /// </summary>
+    private void TryGlow(int x, int y)
+    {
+        var ic = _intentCursor;
+        if (ic is null) return;
+        try
+        {
+            _ = ic.ShowAsync(
+                new IntentCursorRequest(
+                    X: x, Y: y,
+                    CoordinateSpace: IntentCursorCoordinateSpaces.Screen,
+                    DurationMs: 1500, DiameterPx: 48, Opacity: 0.85,
+                    Tone: IntentCursorTones.Agent),
+                CancellationToken.None);
+        }
+        catch { /* visual-only — a glow must never break actuation */ }
     }
 
     public async Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct)
@@ -215,6 +248,7 @@ public sealed class SendInputDriver
 
         try
         {
+            TryGlow(x, y); // paint the "acting here" glow at the click point so the operator sees it
             MoveAndClick(x, y);
             // Record the click so a TYPE arriving shortly after (the click_by_label → type field-entry
             // flow) does NOT re-focus the window centre and undo the focus this click just set.
@@ -298,6 +332,8 @@ public sealed class SendInputDriver
             {
                 WindowFocusManager.ForceForeground(rw.Hwnd, _logger);
                 _activeTarget = new TargetWindow(rw.Pid, rw.Hwnd, processName);
+                if (WindowFocusManager.GetClientCenterScreen(rw.Hwnd) is { } c)
+                    TryGlow(c.X, c.Y); // glow on the freshly-launched window so the operator sees the open
                 _logger.Information(
                     "LaunchSandboxApp: {Process} resolved + foregrounded (pid={Pid} hwnd=0x{Hwnd:X})",
                     processName, rw.Pid, rw.Hwnd.ToInt64());
@@ -419,6 +455,7 @@ public sealed class SendInputDriver
                     dryRun: false);
             }
 
+            TryGlow(pt.X, pt.Y); // glow at the focus-click point (TYPE flow) so typing is watchable too
             try { MoveAndClick(pt.X, pt.Y); }
             catch (Exception ex) { _logger.Warning(ex, "{Verb}: focus-click failed for '{Label}'", verb, target.Label); }
             await DelayWithCancel(FocusSettleMs, ct).ConfigureAwait(false);

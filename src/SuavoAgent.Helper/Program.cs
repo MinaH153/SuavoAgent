@@ -118,7 +118,7 @@ try
     HoneytokenWatcher? honeytokenWatcher = null;
     if (OperatingSystem.IsWindows())
     {
-        sendInputDriver = new SendInputDriver(actuationGate, actuationConfig, Log.Logger);
+        sendInputDriver = new SendInputDriver(actuationGate, actuationConfig, Log.Logger, intentCursor);
         uiaResolver = new UiaLabelResolver(Log.Logger);
         actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger);
         pioneerRxHandler = new PioneerRxCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, pioneerRxConfig, Log.Logger);

@@ -224,6 +224,99 @@ public sealed class UiaLabelResolver : IDisposable
     }
 
     /// <summary>
+    /// Read the value of a SPECIFIC element (located by AutomationId, accessible Name, or ControlType)
+    /// inside an allowlisted process — the read behind the <c>assert_element</c> verification verb.
+    /// Retries until the value is readable or the timeout elapses (UIA values lag a frame or two after
+    /// the action that set them). Unlike <see cref="ReadFocusedElementValue"/>, this DOES fall back to
+    /// the accessible Name: display-only controls (the Calculator result, AutomationId
+    /// "CalculatorResults") expose their value ONLY via Name ("Display is 12"), and the caller compares
+    /// against a workflow-supplied <c>expected</c> (not the locator), so reading Name is correct here.
+    /// Returns null when the element or a value cannot be read within the timeout.
+    /// </summary>
+    public string? ReadElementValue(string processName, string? automationId, string? name, string? controlType, TimeSpan timeout)
+    {
+        if (string.IsNullOrWhiteSpace(processName)) return null;
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        _automation ??= new UIA2Automation();
+        var candidates = PackagedAppAliases.CandidateProcessNames(processName);
+        var ctFilter = ParseControlType(controlType);
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            foreach (var candidate in candidates)
+            {
+                var procs = Process.GetProcessesByName(candidate);
+                try
+                {
+                    foreach (var proc in procs)
+                    {
+                        try
+                        {
+                            var window = ResolveWindow(proc);
+                            if (window is null) continue;
+                            var (element, matchedByName) = FindElement(window, automationId, name, ctFilter);
+                            if (element is null) continue;
+                            // Suppress the Name fallback when we located the element BY name: reading its
+                            // Name back would just echo the locator, a circular PASS that verifies nothing
+                            // (Codex). Only a real Value/Text counts in that case.
+                            var val = ReadValueOf(element, allowNameFallback: !matchedByName);
+                            if (val is not null) return val;
+                        }
+                        catch { /* UIA tree churned mid-walk — retry until the deadline */ }
+                    }
+                }
+                finally { foreach (var p in procs) p.Dispose(); }
+            }
+            Thread.Sleep(150);
+        }
+        return null;
+    }
+
+    /// <summary>Locate the element by AutomationId (preferred) → Name → ControlType. Returns whether
+    /// the match was BY NAME, so the caller can suppress the circular Name-as-value read-back.</summary>
+    private static (AutomationElement? element, bool matchedByName) FindElement(
+        AutomationElement root, string? automationId, string? name, ControlType? ct)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(automationId))
+            {
+                var e = root.FindFirstDescendant(cf => cf.ByAutomationId(automationId));
+                if (e is not null) return (e, false);
+            }
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                var e = root.FindFirstDescendant(cf => cf.ByName(name));
+                if (e is not null) return (e, true);
+            }
+            if (ct is { } c)
+            {
+                return (root.FindFirstDescendant(cf => cf.ByControlType(c)), false);
+            }
+            return (null, false);
+        }
+        catch { return (null, false); }
+    }
+
+    /// <summary>Read an element's value: ValuePattern (edit boxes) → TextPattern (documents) → Name
+    /// (display-only controls, e.g. the Calculator result). <paramref name="allowNameFallback"/> is
+    /// false when the element was located BY name — reading its Name back would be circular, a PASS
+    /// that confirms nothing, so only a real Value/Text counts there.</summary>
+    private static string? ReadValueOf(AutomationElement e, bool allowNameFallback)
+    {
+        try { var v = e.Patterns.Value.PatternOrDefault?.Value?.Value; if (!string.IsNullOrEmpty(v)) return v; } catch { /* unsupported */ }
+        try { if (e.Patterns.Text.IsSupported) { var t = e.Patterns.Text.Pattern.DocumentRange.GetText(8000); if (!string.IsNullOrEmpty(t)) return t; } } catch { /* unsupported */ }
+        if (allowNameFallback)
+        {
+            try { var n = e.Name; if (!string.IsNullOrEmpty(n)) return n; } catch { /* unavailable */ }
+        }
+        return null;
+    }
+
+    private static ControlType? ParseControlType(string? s) =>
+        !string.IsNullOrWhiteSpace(s) && Enum.TryParse<ControlType>(s, ignoreCase: true, out var ct) ? ct : null;
+
+    /// <summary>
     /// Discovery aid: when a label can't be resolved, log the accessible names ACTUALLY present so the
     /// real control names are visible instead of guessed. Names are PHI-scrubbed (PhiPatternGuard) and
     /// this writes to the LOCAL log only — never cloud telemetry — so it is safe on a PMS box. Capped

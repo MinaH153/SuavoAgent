@@ -60,6 +60,8 @@ public sealed class ClickBySignatureVerbTests
             Task.FromResult(ActuationResult.Success(1, true, "x"));
         public Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct) =>
             Task.FromResult(ActuationResult.Success(0, true, "reload"));
+        public Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct) =>
+            Task.FromResult(ActuationResult.Success(0, req.DryRun, "assert"));
     }
 
     [Fact]

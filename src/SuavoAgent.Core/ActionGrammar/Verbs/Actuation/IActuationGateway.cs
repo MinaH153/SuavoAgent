@@ -24,4 +24,9 @@ public interface IActuationGateway
     /// <summary>Tell the Helper to re-read actuation.json and re-apply its app allowlist (no restart).
     /// Core persists the file + applies its own static BEFORE calling this, so both processes agree.</summary>
     Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct);
+
+    /// <summary>Read a UIA element's value and assert it matches expected (read-only verification).
+    /// Success = matched; Reject(element_not_found|assert_mismatch) otherwise. No raw value crosses
+    /// the boundary — only pass/fail + a PHI-safe hint.</summary>
+    Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct);
 }

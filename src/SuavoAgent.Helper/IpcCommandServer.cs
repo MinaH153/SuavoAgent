@@ -199,6 +199,7 @@ public sealed class IpcCommandServer : IDisposable
                 or ActuationIpcCommands.PressKeys
                 or ActuationIpcCommands.LaunchSandboxApp
                 or ActuationIpcCommands.ReloadAllowlist
+                or ActuationIpcCommands.AssertElement
                 => HandleActuationAsync(request, ct),
             PioneerRxActuationIpcCommands.Click
                 or PioneerRxActuationIpcCommands.TypeText

@@ -240,6 +240,8 @@ public sealed class WorkflowExecutorDryRunPropagationTests
 
         public Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct) =>
             Task.FromResult(ActuationResult.Success(0, true, "reload"));
+        public Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct) =>
+            Task.FromResult(NextResult ?? ActuationResult.Success(0, req.DryRun, "assert"));
     }
 
     private sealed class RecordingAuditClient : IWorkflowAuditClient

@@ -88,6 +88,9 @@ public sealed class HelperActuationGateway : IActuationGateway
     public Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct) =>
         SendAsync(ActuationIpcCommands.ReloadAllowlist, new ReloadAllowlistRequest(), ct);
 
+    public Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct) =>
+        SendAsync(ActuationIpcCommands.AssertElement, req, ct);
+
     private async Task<ActuationResult> SendAsync<TReq>(string command, TReq req, CancellationToken ct)
     {
         var client = _clientFactory();
