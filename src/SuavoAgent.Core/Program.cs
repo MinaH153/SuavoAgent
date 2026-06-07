@@ -486,6 +486,18 @@ try
         return executor;
     });
 
+    // Autonomous daily pricing schedule — the "bot does it on its own" overnight batch (Nadim's
+    // documented top-500 run). OFF by default (Agent.PricingSchedule.Enabled=false). SqlFirst-ONLY by
+    // construction: it is handed the read-only SqlFirstPricingJobExecutor and additionally self-gates on
+    // PricingExecutor==SqlFirst, so a timer can never drive the live PMS UI (Precedence-1).
+    builder.Services.AddHostedService(sp => new SuavoAgent.Core.Workers.PricingScheduleWorker(
+        sp.GetRequiredService<ILogger<SuavoAgent.Core.Workers.PricingScheduleWorker>>(),
+        sp.GetRequiredService<IOptionsMonitor<AgentOptions>>(),
+        sp.GetRequiredService<SqlFirstPricingJobExecutor>(),
+        // Optional: present only when an API key is configured (registered in the cloud block above).
+        // When present, an autonomous run surfaces in the cockpit just like a cockpit-triggered one.
+        sp.GetService<SuavoAgent.Core.Cloud.PricingJobCloudUploader>()));
+
     // File discovery — Core side. Helper runs the actual locator; this client
     // wraps the find_file IPC call so HeartbeatWorker can dispatch
     // find_and_run_pricing_job without knowing IPC details.
