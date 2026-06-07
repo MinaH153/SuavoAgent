@@ -86,7 +86,8 @@ public sealed class SendInputDriver
         {
             // Fail-closed focus guard: confirm the launch-established target owns the foreground
             // BEFORE any keystroke (including ClearFirst's Ctrl+A/Delete), else refuse — never leak.
-            var fgReject = await EnsureTargetForegroundOrRejectAsync("type", ct).ConfigureAwait(false);
+            // focusClick: type needs a focused edit control, so click the client area to set it.
+            var fgReject = await EnsureTargetForegroundOrRejectAsync("type", focusClick: true, ct).ConfigureAwait(false);
             if (fgReject is not null) return fgReject;
 
             if (req.ClearFirst)
@@ -160,7 +161,9 @@ public sealed class SendInputDriver
         {
             // Fail-closed focus guard: same reasoning as TypeText — verify the target owns foreground
             // before sending any chord, else refuse so keystrokes can't land in the wrong window.
-            var fgReject = await EnsureTargetForegroundOrRejectAsync("press_keys", ct).ConfigureAwait(false);
+            // No focus-click: chords route to the foreground window, and a content click could trip a
+            // control (e.g. a Calculator button).
+            var fgReject = await EnsureTargetForegroundOrRejectAsync("press_keys", focusClick: false, ct).ConfigureAwait(false);
             if (fgReject is not null) return fgReject;
 
             var interDelay = req.InterChordDelayMs > 0 ? req.InterChordDelayMs : _config.DefaultInterChordDelayMs;
@@ -310,7 +313,7 @@ public sealed class SendInputDriver
     /// session: legacy behaviour (type into the current foreground) is preserved with a warning,
     /// since the sandbox workflow always launches first and that is the only live actuation path.
     /// </summary>
-    private async Task<ActuationResult?> EnsureTargetForegroundOrRejectAsync(string verb, CancellationToken ct)
+    private async Task<ActuationResult?> EnsureTargetForegroundOrRejectAsync(string verb, bool focusClick, CancellationToken ct)
     {
         var target = _activeTarget;
         if (target is null)
@@ -328,42 +331,85 @@ public sealed class SendInputDriver
                 dryRun: false);
         }
 
-        // Bring the target foreground, then prove it's INPUT-READY before returning OK. A
-        // freshly-foregrounded window owns the foreground (IsPidForeground == true) for a few hundred
-        // ms BEFORE its edit control actually accepts keystrokes — so early chars are silently dropped
-        // (observed live: "v326 fail-closed verify OK" → only the tail "ify OK" landed). We therefore
-        // require foreground to hold across a settle window and re-confirm afterward; only then do we
-        // let the keystrokes flow. Still fail-closed: if it can't be brought + held foreground, refuse.
+        // STEP 1 — bring the target to the top and confirm it owns the foreground. Fail closed if it
+        // can't be acquired, so keystrokes never land in the wrong window.
         var sw = Stopwatch.StartNew();
+        var acquired = false;
         while (sw.ElapsedMilliseconds < ForegroundAcquireTimeoutMs && !ct.IsCancellationRequested)
         {
-            if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid))
-            {
-                // Input-ready settle, then re-confirm the window is STILL foreground (nothing stole it
-                // back during the settle). Both must hold or we keep trying / eventually fail closed.
-                await DelayWithCancel(ForegroundSettleMs, ct).ConfigureAwait(false);
-                if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid))
-                    return null;
-                continue;
-            }
+            if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) { acquired = true; break; }
             WindowFocusManager.ForceForeground(target.Hwnd, _logger);
             await DelayWithCancel(150, ct).ConfigureAwait(false);
         }
 
+        if (!acquired)
+        {
+            _logger.Warning(
+                "{Verb} refused: target '{Label}' (pid={Pid}) not brought to foreground within {Timeout}ms — failing closed",
+                verb, target.Label, target.Pid, ForegroundAcquireTimeoutMs);
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ForegroundNotTarget,
+                $"target '{target.Label}' (pid={target.Pid}) could not be brought to the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
+                dryRun: false);
+        }
+
+        // STEP 2 — give the target's editable control REAL keyboard focus (TYPE only). A window
+        // force-foregrounded via AttachThreadInput is visually on top, but its child edit control's
+        // keyboard focus is TRANSIENT — observed live: typing immediately landed a few chars, but after
+        // a settle every keystroke dropped (focus had decayed) and the text went nowhere. A
+        // physical-style click in the client area sets genuine, stable focus exactly the way a human
+        // clicks before typing. Gated to TYPE: press_keys sends chords that route to the foreground
+        // window (and a content click could trigger a control, e.g. a Calculator button), so it skips
+        // the click and relies on the foreground + SetFocus established above.
+        if (focusClick)
+        {
+            // Re-confirm the target STILL owns the foreground FIRST, then read its client-area coords and
+            // click adjacently — so the coordinates are the freshest possible read right before the
+            // physical click and a window that moved/closed since STEP 1 can't catch a stray click.
+            if (!SystemObservers.ForegroundGuard.IsPidForeground(target.Pid))
+            {
+                _logger.Warning("{Verb} refused: '{Label}' lost foreground before focus-click — failing closed", verb, target.Label);
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ForegroundNotTarget,
+                    $"target '{target.Label}' lost the foreground before focus-click; refusing to {verb} to avoid a stray click",
+                    dryRun: false);
+            }
+
+            var center = WindowFocusManager.GetClientCenterScreen(target.Hwnd);
+            if (center is not { } pt)
+            {
+                // A focusClick verb (type) NEEDS a focused edit control. If we can't locate the target's
+                // client area we can't guarantee that, so fail closed rather than type blind — a dropped
+                // or partial value is worse than none ("one line of truth must be real").
+                _logger.Warning("{Verb} refused: could not locate client area of '{Label}' to set input focus — failing closed", verb, target.Label);
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ForegroundNotTarget,
+                    $"could not locate target '{target.Label}' client area to set input focus; refusing to {verb}",
+                    dryRun: false);
+            }
+
+            try { MoveAndClick(pt.X, pt.Y); }
+            catch (Exception ex) { _logger.Warning(ex, "{Verb}: focus-click failed for '{Label}'", verb, target.Label); }
+            await DelayWithCancel(FocusSettleMs, ct).ConfigureAwait(false);
+        }
+
+        // STEP 3 — final re-confirm the target is still foreground after the focus-click (a click can't
+        // change which window is foreground here, but verify rather than assume). Fail closed otherwise.
+        if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) return null;
+
         _logger.Warning(
-            "{Verb} refused: target '{Label}' (pid={Pid}) not held in foreground within {Timeout}ms — failing closed",
-            verb, target.Label, target.Pid, ForegroundAcquireTimeoutMs);
+            "{Verb} refused: target '{Label}' (pid={Pid}) lost foreground after focus-click — failing closed",
+            verb, target.Label, target.Pid);
         return ActuationResult.Reject(
             ActuationRejectionCodes.ForegroundNotTarget,
-            $"target '{target.Label}' (pid={target.Pid}) could not be held in the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
+            $"target '{target.Label}' (pid={target.Pid}) did not hold the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
             dryRun: false);
     }
 
-    // Foreground acquisition tuning. The settle is generous on purpose: a remote/loaded desktop can
-    // take 500ms+ after a window goes foreground before its edit control reliably accepts SendInput;
-    // a 750ms settle trades a little latency for not dropping leading characters (a wrong typed value
-    // is worse than a slow one). The acquire timeout bounds the fail-closed wait.
-    private const int ForegroundSettleMs = 750;
+    // Focus settle after the focus-click: a short pause so the click's WM_SETFOCUS is processed and the
+    // edit control is genuinely input-ready before the first keystroke. The acquire timeout bounds the
+    // fail-closed wait while we try to bring the target to the foreground.
+    private const int FocusSettleMs = 250;
     private const int ForegroundAcquireTimeoutMs = 6000;
 
     /// <summary>
