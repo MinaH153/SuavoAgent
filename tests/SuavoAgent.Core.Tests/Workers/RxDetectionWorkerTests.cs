@@ -39,6 +39,95 @@ public class RxDetectionWorkerTests : IDisposable
         Assert.Null(worker.LastDetectionTime);
     }
 
+    private RxDetectionWorker CreateWorker()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+        return new RxDetectionWorker(
+            NullLogger<RxDetectionWorker>.Instance,
+            NullLoggerFactory.Instance,
+            Options.Create(new AgentOptions()), _stateDb, sp);
+    }
+
+    // ── B2: sustained SQL-outage visibility ──────────────────────────────────────────────
+    // A down PMS makes the detection cycle skip GRACEFULLY (no throw), so the worker supervisor
+    // never escalates. The heartbeat must instead surface an explicit `degraded` signal once SQL
+    // has been dark past the threshold, so a pharmacy can't go quietly dark on delivery detection.
+
+    [Fact]
+    public void Degraded_InitiallyFalse_NoOutage()
+    {
+        var worker = CreateWorker();
+        var now = DateTimeOffset.UtcNow;
+        Assert.False(worker.IsDetectionDegraded(now));
+        Assert.Equal(0, worker.ConsecutiveSqlFailures);
+        Assert.Equal(0, worker.SqlDarkSeconds(now));
+        Assert.Null(worker.SqlDownSince);
+    }
+
+    [Fact]
+    public void Degraded_TrueOnlyAfterThreshold()
+    {
+        var worker = CreateWorker();
+        var t0 = DateTimeOffset.UnixEpoch; // deterministic clock
+        worker.MarkSqlConnectFailed(t0);
+
+        Assert.Equal(1, worker.ConsecutiveSqlFailures);
+        Assert.Equal(t0, worker.SqlDownSince);
+        Assert.False(worker.IsDetectionDegraded(t0));                             // 0s dark
+        Assert.False(worker.IsDetectionDegraded(t0 + TimeSpan.FromSeconds(179))); // just under
+        Assert.True(worker.IsDetectionDegraded(t0 + TimeSpan.FromSeconds(180)));  // at threshold
+        Assert.True(worker.IsDetectionDegraded(t0 + TimeSpan.FromSeconds(600)));  // well past
+        Assert.Equal(600, worker.SqlDarkSeconds(t0 + TimeSpan.FromSeconds(600)));
+    }
+
+    [Fact]
+    public void Degraded_DarkSince_PinnedToFirstFailure()
+    {
+        var worker = CreateWorker();
+        var t0 = DateTimeOffset.UnixEpoch;
+        worker.MarkSqlConnectFailed(t0);
+        worker.MarkSqlConnectFailed(t0 + TimeSpan.FromSeconds(60));
+        worker.MarkSqlConnectFailed(t0 + TimeSpan.FromSeconds(120));
+
+        Assert.Equal(3, worker.ConsecutiveSqlFailures);
+        Assert.Equal(t0, worker.SqlDownSince); // later failures must NOT reset the outage clock
+        Assert.True(worker.IsDetectionDegraded(t0 + TimeSpan.FromSeconds(180)));
+    }
+
+    [Fact]
+    public void Degraded_ClearsOnReconnect()
+    {
+        var worker = CreateWorker();
+        var t0 = DateTimeOffset.UnixEpoch;
+        worker.MarkSqlConnectFailed(t0);
+        Assert.True(worker.IsDetectionDegraded(t0 + TimeSpan.FromSeconds(300)));
+
+        worker.MarkSqlConnected();
+
+        Assert.True(worker.IsSqlConnected);
+        Assert.Equal(0, worker.ConsecutiveSqlFailures);
+        Assert.Null(worker.SqlDownSince);
+        Assert.False(worker.IsDetectionDegraded(t0 + TimeSpan.FromSeconds(300)));
+        Assert.Equal(0, worker.SqlDarkSeconds(t0 + TimeSpan.FromSeconds(300)));
+    }
+
+    [Fact]
+    public void Degraded_NewOutageAfterRecovery_StampsFreshDarkSince()
+    {
+        var worker = CreateWorker();
+        var t0 = DateTimeOffset.UnixEpoch;
+        worker.MarkSqlConnectFailed(t0);
+        worker.MarkSqlConnected();
+
+        var t1 = t0 + TimeSpan.FromSeconds(1000);
+        worker.MarkSqlConnectFailed(t1);
+
+        Assert.Equal(1, worker.ConsecutiveSqlFailures);
+        Assert.Equal(t1, worker.SqlDownSince); // fresh outage, not the stale t0
+        Assert.False(worker.IsDetectionDegraded(t1 + TimeSpan.FromSeconds(179)));
+        Assert.True(worker.IsDetectionDegraded(t1 + TimeSpan.FromSeconds(180)));
+    }
+
     [Fact]
     public void SerializeRxBatch_LegacyQueue_NeverShipsPhiFields()
     {
