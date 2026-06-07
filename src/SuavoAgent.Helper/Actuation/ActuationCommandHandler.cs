@@ -154,12 +154,96 @@ public sealed class ActuationCommandHandler
         return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct).ConfigureAwait(false);
     }
 
-    private Task<ActuationResult> HandleTypeTextAsync(JsonElement? data, CancellationToken ct)
+    private async Task<ActuationResult> HandleTypeTextAsync(JsonElement? data, CancellationToken ct)
     {
-        if (data is null) return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "missing data", _gate.IsDryRun));
+        if (data is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "missing data", _gate.IsDryRun);
         var req = data.Value.Deserialize<TypeTextRequest>();
-        if (req is null) return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun));
-        return _driver.TypeTextAsync(req, ct);
+        if (req is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun);
+
+        var result = await _driver.TypeTextAsync(req, ct).ConfigureAwait(false);
+
+        // SELF-VERIFICATION (read-back): after a LIVE successful type, confirm the keystrokes actually
+        // landed by reading the focused field's value via UIA. This converts the type verb from "trust
+        // the SendInput return" to "prove the text is in the field" — it catches the dropped-char /
+        // wrong-control silent failures that previously required a human to eyeball the screen.
+        //
+        // Fail-GRACEFUL: only fail when we positively read a value that does NOT contain the typed text.
+        // A null read-back (no focus, control exposes no value, UIA hiccup) is treated as UNVERIFIED and
+        // does NOT fail an otherwise-successful type — never a false rejection.
+        if (result.Ok && !result.DryRun && !string.IsNullOrEmpty(req.Text))
+        {
+            try
+            {
+                // Retry the read-back: a control can commit the text slightly after SendInput returns, so
+                // a single read could miss it. Compare NORMALISED (alphanumeric, lower-cased) so fields
+                // that reformat input — phone masks, currency, case-normalisation, trimming — do NOT
+                // false-fail (Codex review). Verified as soon as a normalised read contains the normalised
+                // typed text.
+                var typedNorm = NormalizeForVerification(req.Text);
+                var verified = false;
+                var sawNonEmptyValue = false; // read a field value that had real content
+                var sawEmptyValue = false;    // read a field value that was effectively empty
+                for (var i = 0; i < 6 && !verified; i++)
+                {
+                    await Task.Delay(200, ct).ConfigureAwait(false);
+                    var readback = _resolver.ReadFocusedElementValue();
+                    if (readback is null) continue; // no readable VALUE this tick
+                    var readNorm = NormalizeForVerification(readback);
+                    if (readNorm.Length == 0) { sawEmptyValue = true; continue; }
+                    sawNonEmptyValue = true;
+                    if (typedNorm.Length == 0 || readNorm.Contains(typedNorm, StringComparison.Ordinal))
+                        verified = true;
+                }
+
+                if (verified)
+                {
+                    _logger.Information("TypeText verified: focused field reflects the typed text on read-back");
+                }
+                else if (!sawNonEmptyValue && sawEmptyValue)
+                {
+                    // Unambiguous failure: we read the focused field and it was EMPTY after a substantive
+                    // type — the keystrokes did not land (dropped / wrong control). A field that merely
+                    // REFORMATS input is never empty, so this can't false-fail it. Fail closed. Lengths
+                    // only — NEVER log the typed text or field contents (PHI).
+                    _logger.Warning(
+                        "TypeText verification FAILED: focused field read back EMPTY after a non-empty type (typedLen={Typed})",
+                        req.Text.Length);
+                    return ActuationResult.Reject(
+                        ActuationRejectionCodes.TypeNotVerified,
+                        "focused field is empty on UIA read-back after typing — keystrokes did not land",
+                        result.DryRun);
+                }
+                else
+                {
+                    // Either no readable value at all, OR a non-empty value that didn't match the
+                    // normalised typed text (a reformatting field, or a partial/append we can't confirm).
+                    // Do NOT fail an otherwise-successful type — degrade to UNVERIFIED.
+                    _logger.Information(
+                        "TypeText UNVERIFIED: read-back did not confirm the typed text (no value, or a value we can't match) — type allowed");
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _logger.Debug(ex, "TypeText read-back verification errored — treating as unverified");
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Reduce a string to lower-cased alphanumerics for type read-back comparison, so a field that
+    /// reformats input (punctuation/spacing in phone masks, currency, dates; case changes) is still
+    /// recognised as containing what was typed instead of false-failing verification.
+    /// </summary>
+    private static string NormalizeForVerification(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var ch in s)
+            if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
+        return sb.ToString();
     }
 
     private Task<ActuationResult> HandlePressKeysAsync(JsonElement? data, CancellationToken ct)

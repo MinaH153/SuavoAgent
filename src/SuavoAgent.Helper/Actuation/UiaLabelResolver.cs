@@ -180,6 +180,50 @@ public sealed class UiaLabelResolver : IDisposable
     }
 
     /// <summary>
+    /// Read the VALUE of the currently FOCUSED UIA element — the read-back used to VERIFY a type
+    /// actually landed. Reads ONLY the field value via ValuePattern (classic edits) or TextPattern
+    /// (rich-edit / document controls like the Win11 Notepad). Deliberately does NOT fall back to the
+    /// accessible Name: Name is a LABEL ("Text editor"), not the typed value, and trusting it would
+    /// cause a FALSE verification mismatch. Returns null when no value is readable — the caller treats
+    /// null as "unverified" (type allowed), never as a mismatch, so verification never false-fails.
+    /// </summary>
+    public string? ReadFocusedElementValue()
+    {
+        try
+        {
+            _automation ??= new UIA2Automation();
+            var focused = _automation.FocusedElement();
+            if (focused is null) return null;
+
+            // ValuePattern — classic edit / text-box controls (Win32, WinForms, WPF TextBox).
+            try
+            {
+                var v = focused.Patterns.Value.PatternOrDefault?.Value?.Value;
+                if (!string.IsNullOrEmpty(v)) return v;
+            }
+            catch { /* pattern unsupported */ }
+
+            // TextPattern — rich-edit / document controls (e.g. the Windows 11 WinUI Notepad), which do
+            // NOT expose ValuePattern.
+            try
+            {
+                if (focused.Patterns.Text.IsSupported)
+                {
+                    var t = focused.Patterns.Text.Pattern.DocumentRange.GetText(8000);
+                    if (!string.IsNullOrEmpty(t)) return t;
+                }
+            }
+            catch { /* pattern unsupported */ }
+
+            return null; // no field VALUE readable → unverified (never the Name label)
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Discovery aid: when a label can't be resolved, log the accessible names ACTUALLY present so the
     /// real control names are visible instead of guessed. Names are PHI-scrubbed (PhiPatternGuard) and
     /// this writes to the LOCAL log only — never cloud telemetry — so it is safe on a PMS box. Capped
