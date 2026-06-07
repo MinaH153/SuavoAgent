@@ -379,7 +379,10 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 var pms = PmsSituationClassifier.Classify(new PmsSignals(
                     PmsInstalled: PioneerRxInstallDetector.IsInstalled(_logger),
                     SqlConnected: sqlConnected,
-                    HelperAttached: helperAttached));
+                    HelperAttached: helperAttached,
+                    // Explicitly configured = the operator pointed us at a SQL server (vs the implicit
+                    // localhost fallback). Distinguishes "finish setup" from "configured DB is down".
+                    SqlConfigured: !string.IsNullOrWhiteSpace(_options.SqlServer)));
                 var visionCapture = _serviceProvider
                     .GetService<VisionCaptureTelemetry>()?
                     .Snapshot();

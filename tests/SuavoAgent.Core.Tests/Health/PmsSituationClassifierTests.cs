@@ -24,8 +24,44 @@ public class PmsSituationClassifierTests
     }
 
     [Fact]
-    public void Installed_DatabaseDown_IsDatabaseUnreachable()
+    public void Installed_NeverConfigured_NotConnected_IsNotConfigured_NotAFault()
     {
+        // Fresh install: PioneerRx present, but the operator hasn't pointed the agent at a SQL server
+        // yet. This must read as "finish setup", NOT the alarming "database unreachable".
+        var r = PmsSituationClassifier.Classify(new PmsSignals(
+            PmsInstalled: true, SqlConnected: false, HelperAttached: true, SqlConfigured: false));
+        Assert.Equal(PmsSituation.NotConfigured, r.Situation);
+        Assert.Equal("pms_not_configured", r.Code);
+        Assert.Contains("setup", r.Explanation);
+    }
+
+    [Fact]
+    public void Installed_Configured_DatabaseDown_IsDatabaseUnreachable()
+    {
+        // Operator DID configure a server, but it's unreachable — a real fault to investigate,
+        // distinct from a fresh install that never finished setup.
+        var r = PmsSituationClassifier.Classify(new PmsSignals(
+            PmsInstalled: true, SqlConnected: false, HelperAttached: true, SqlConfigured: true));
+        Assert.Equal(PmsSituation.DatabaseUnreachable, r.Situation);
+        Assert.Equal("pms_db_unreachable", r.Code);
+        Assert.Contains("database", r.Explanation);
+    }
+
+    [Fact]
+    public void Installed_NoExplicitConfig_ButConnected_DoesNotNagAboutSetup()
+    {
+        // The implicit localhost fallback connected — the agent IS working, so never surface
+        // NotConfigured. A connected agent with the helper attached is simply Operational.
+        var r = PmsSituationClassifier.Classify(new PmsSignals(
+            PmsInstalled: true, SqlConnected: true, HelperAttached: true, SqlConfigured: false));
+        Assert.NotEqual(PmsSituation.NotConfigured, r.Situation);
+        Assert.Equal(PmsSituation.Operational, r.Situation);
+    }
+
+    [Fact]
+    public void Installed_DatabaseDown_DefaultsToConfigured_IsDatabaseUnreachable()
+    {
+        // 3-signal call sites default SqlConfigured=true, preserving the original meaning.
         var r = PmsSituationClassifier.Classify(
             new PmsSignals(PmsInstalled: true, SqlConnected: false, HelperAttached: true));
         Assert.Equal(PmsSituation.DatabaseUnreachable, r.Situation);
@@ -58,7 +94,8 @@ public class PmsSituationClassifierTests
         var signals = new[]
         {
             new PmsSignals(false, false, false),
-            new PmsSignals(true, false, false),
+            new PmsSignals(true, false, false, SqlConfigured: false), // NotConfigured
+            new PmsSignals(true, false, false),                        // DatabaseUnreachable (configured)
             new PmsSignals(true, true, false),
             new PmsSignals(true, true, true),
         };

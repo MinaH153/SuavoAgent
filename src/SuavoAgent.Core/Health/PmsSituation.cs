@@ -17,13 +17,22 @@ public enum PmsSituation
 {
     Unknown,
     NotInstalled,
+    NotConfigured,
     DatabaseUnreachable,
     HelperDetached,
     Operational,
 }
 
-/// <summary>The raw per-heartbeat signals the agent already has.</summary>
-public readonly record struct PmsSignals(bool PmsInstalled, bool SqlConnected, bool HelperAttached);
+/// <summary>
+/// The raw per-heartbeat signals the agent already has. <paramref name="SqlConfigured"/> = the
+/// operator has explicitly pointed the agent at a PioneerRx SQL server (vs the implicit "localhost"
+/// fallback). It defaults to true so existing 3-signal call sites keep their meaning (configured);
+/// the real heartbeat path passes it explicitly. It lets the agent tell apart a fresh install that
+/// hasn't finished setup (NotConfigured → "complete setup") from a configured DB that's down
+/// (DatabaseUnreachable → a fault to investigate).
+/// </summary>
+public readonly record struct PmsSignals(
+    bool PmsInstalled, bool SqlConnected, bool HelperAttached, bool SqlConfigured = true);
 
 /// <summary>The classified situation: a stable machine code + an operator-facing explanation.</summary>
 public readonly record struct PmsSituationReport(PmsSituation Situation, string Code, string Explanation);
@@ -37,10 +46,19 @@ public static class PmsSituationClassifier
             return new(PmsSituation.NotInstalled, "pms_not_installed",
                 "PioneerRx is not installed on this machine — there is nothing for the agent to observe here.");
 
+        // Fresh-install ergonomics: installed, never pointed at a database, and indeed not connected.
+        // This is "setup isn't finished", NOT a fault — say so, instead of the alarming "database
+        // unreachable". (If the implicit localhost fallback DID connect, SqlConnected is true and we
+        // skip straight past this — never nag an install that's actually working.)
+        if (!s.SqlConnected && !s.SqlConfigured)
+            return new(PmsSituation.NotConfigured, "pms_not_configured",
+                "PioneerRx is installed, but the agent hasn't been pointed at its database yet — finish setup by " +
+                "entering the PioneerRx SQL server in the agent's configuration. Detection begins the moment it connects.");
+
         if (!s.SqlConnected)
             return new(PmsSituation.DatabaseUnreachable, "pms_db_unreachable",
-                "PioneerRx is installed, but its database is unreachable — the PMS database service may be stopped, " +
-                "or the agent's SQL connection needs attention. No prescriptions can be detected until it reconnects.");
+                "PioneerRx is installed and configured, but its database is unreachable — the PMS database service may " +
+                "be stopped, or the agent's SQL connection needs attention. No prescriptions can be detected until it reconnects.");
 
         if (!s.HelperAttached)
             return new(PmsSituation.HelperDetached, "pms_helper_detached",
