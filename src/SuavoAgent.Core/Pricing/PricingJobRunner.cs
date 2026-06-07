@@ -131,8 +131,7 @@ public sealed class PricingJobRunner
                 if (consecutiveIpcFailures >= MaxConsecutiveIpcFailuresBeforeAbort)
                 {
                     halted = true;
-                    haltReason =
-                        $"helper_unreachable: {consecutiveIpcFailures} consecutive IPC lookups returned no response";
+                    haltReason = "helper_unreachable"; // stable code for the cockpit; the count detail is in the CRITICAL log below
                     _logger.LogCritical(
                         "PricingJobRunner: job {JobId} ABORTED — Helper unreachable for {N} consecutive lookups. " +
                         "Stopped early ({Remaining} NDCs left unpriced + resumable) instead of marking the workbook failed.",
@@ -195,7 +194,7 @@ public sealed class PricingJobRunner
             _logger.LogInformation(
                 "PricingJobRunner: job {JobId} Halted — {Completed}/{Total} found, {Failed} failed, reason=\"{Reason}\"",
                 spec.JobId, completed, totalItems, failed, haltReason);
-            return new PricingJobProgress(spec.JobId, totalItems, completed, failed, PricingJobStatus.Halted);
+            return new PricingJobProgress(spec.JobId, totalItems, completed, failed, PricingJobStatus.Halted, HaltReason: haltReason);
         }
 
         // Write all results (including previously completed rows) to a SIBLING file by default.

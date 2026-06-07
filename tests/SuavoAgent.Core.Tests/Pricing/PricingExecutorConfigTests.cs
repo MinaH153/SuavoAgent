@@ -164,6 +164,7 @@ public class PricingExecutorConfigTests : IDisposable
         var progress = await runner.RunAsync(spec, deadHelper, CancellationToken.None);
 
         Assert.Equal(PricingJobStatus.Halted, progress.Status);                       // distinct, resumable status
+        Assert.Equal("helper_unreachable", progress.HaltReason);                      // stable code threaded to the cockpit badge
         Assert.Equal(10, progress.TotalItems);                                        // the workbook really had 10 rows
         Assert.Equal(PricingJobRunner.MaxConsecutiveIpcFailuresBeforeAbort,
             deadHelper.SendCount);                                                    // aborted at 3 — did NOT grind all 10

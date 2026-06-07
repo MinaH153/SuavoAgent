@@ -3003,6 +3003,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 completedItems = progress.CompletedItems,
                 failedItems = progress.FailedItems,
                 status = progress.Status.ToString(),
+                reason = progress.HaltReason, // e.g. "helper_unreachable" on a halt → exact cockpit badge
             }, execution.Ok ? null : execution.Error ?? "pricing job failed — see agent logs");
         }
         finally
@@ -3160,6 +3161,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     completedItems = progress.CompletedItems,
                     failedItems = progress.FailedItems,
                     pricingStatus = progress.Status.ToString(),
+                    reason = progress.HaltReason, // e.g. "helper_unreachable" on a halt → exact cockpit badge
                 }, execution.Ok ? null : execution.Error ?? "pricing job failed — see agent logs");
             }
             finally
