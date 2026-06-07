@@ -34,21 +34,27 @@ public sealed class UiaSignatureResolver : IDisposable
         var deadline = DateTimeOffset.UtcNow + timeout;
         _automation ??= new UIA2Automation();
 
+        // Packaged-app aware (same root cause as UiaLabelResolver / WindowFocusManager): "calc.exe" ->
+        // [calc, Calculator, CalculatorApp] so a launcher-stub process name still resolves the real window.
+        var candidates = PackagedAppAliases.CandidateProcessNames(processName);
         while (DateTimeOffset.UtcNow < deadline)
         {
-            var procs = Process.GetProcessesByName(StripExe(processName));
-            try
+            foreach (var candidate in candidates)
             {
-                foreach (var proc in procs)
+                var procs = Process.GetProcessesByName(candidate);
+                try
                 {
-                    var resolved = TryResolveInProcess(proc, controlType, automationId, className);
-                    if (resolved is not null)
-                        return resolved with { ProcessName = processName };
+                    foreach (var proc in procs)
+                    {
+                        var resolved = TryResolveInProcess(proc, controlType, automationId, className);
+                        if (resolved is not null)
+                            return resolved with { ProcessName = processName };
+                    }
                 }
-            }
-            finally
-            {
-                foreach (var p in procs) p.Dispose();
+                finally
+                {
+                    foreach (var p in procs) p.Dispose();
+                }
             }
 
             Thread.Sleep(150);
@@ -133,9 +139,6 @@ public sealed class UiaSignatureResolver : IDisposable
             return false; // element gone mid-walk
         }
     }
-
-    private static string StripExe(string processName) =>
-        processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? processName[..^4] : processName;
 
     public void Dispose()
     {
