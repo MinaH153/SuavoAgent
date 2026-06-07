@@ -257,6 +257,35 @@ public sealed class YamlRuleLoader
             minRequired = k;
         }
 
+        var textNear = Array.Empty<SpatialTextPredicate>();
+        if (yml.TextNearElement is { Count: > 0 })
+        {
+            var list = new List<SpatialTextPredicate>(yml.TextNearElement.Count);
+            foreach (var n in yml.TextNearElement)
+            {
+                // Fail-closed at load so an authoring typo can't ship a predicate that the engine
+                // would silently treat as "never matches" (RuleEngine fails these closed too).
+                if (string.IsNullOrWhiteSpace(n.Text))
+                    throw new InvalidOperationException(
+                        $"Rule '{ruleId}' has textNearElement with empty text");
+                if (string.IsNullOrWhiteSpace(n.ElementRole))
+                    throw new InvalidOperationException(
+                        $"Rule '{ruleId}' has textNearElement with empty elementRole");
+                list.Add(new SpatialTextPredicate(n.Text!, n.ElementRole!, n.MaxDistancePx ?? 100));
+            }
+            textNear = list.ToArray();
+        }
+
+        var textPresent = Array.Empty<string>();
+        if (yml.TextPresent is { Count: > 0 })
+        {
+            foreach (var t in yml.TextPresent)
+                if (string.IsNullOrWhiteSpace(t))
+                    throw new InvalidOperationException(
+                        $"Rule '{ruleId}' has an empty textPresent entry");
+            textPresent = yml.TextPresent.ToArray();
+        }
+
         return new()
         {
             ProcessName = yml.ProcessName,
@@ -266,6 +295,8 @@ public sealed class YamlRuleLoader
             StateFlags = yml.StateFlags ?? new Dictionary<string, string>(),
             ElementFingerprints = fingerprints,
             MinRequiredCount = minRequired,
+            TextPresent = textPresent,
+            TextNearElement = textNear,
         };
     }
 
@@ -327,6 +358,11 @@ public sealed class YamlRuleLoader
         public Dictionary<string, string>? StateFlags { get; set; }
         public List<YamlElementFingerprint>? ElementFingerprints { get; set; }
         public int? MinRequiredCount { get; set; }
+        // W4b vision predicates — reason over the CAPTURED screen (OCR text + spatial layout),
+        // not just the static UIA visibleElements snapshot. The RuleEngine already evaluates these;
+        // until now there was no way to AUTHOR a production rule that uses them.
+        public List<string>? TextPresent { get; set; }
+        public List<YamlSpatialText>? TextNearElement { get; set; }
     }
 
     private sealed class YamlElementFingerprint
@@ -334,6 +370,13 @@ public sealed class YamlRuleLoader
         public string? ControlType { get; set; }
         public string? AutomationId { get; set; }
         public string? ClassName { get; set; }
+    }
+
+    private sealed class YamlSpatialText
+    {
+        public string? Text { get; set; }
+        public string? ElementRole { get; set; }
+        public int? MaxDistancePx { get; set; }
     }
 
     private sealed class YamlAction

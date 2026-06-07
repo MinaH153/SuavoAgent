@@ -79,6 +79,27 @@ rules:
         verifyAfter:
           visibleElements: ["Supplier", "Cost Per Unit"]
 
+  # First production rule to reason over the CAPTURED screen (OCR text + spatial layout) rather
+  # than the static UIA visibleElements snapshot. Confirms we actually landed on the Pricing tab —
+  # 'Pricing' + 'Supplier' text is on screen AND 'Cost' sits next to a supplier grid cell — which is
+  # robust to PioneerRx renaming a control across versions/pharmacies (the UIA name can drift, the
+  # rendered screen can't lie). Read-only (Log), so autonomousOk; requires vision to be enabled.
+  - id: pricing-lookup.confirm-pricing-screen
+    skillId: pricing-lookup
+    priority: 165
+    description: "Vision-grounded confirmation the Pricing tab rendered (OCR sees Pricing+Supplier, Cost near a grid cell)"
+    autonomousOk: true
+    when:
+      processName: "PioneerPharmacy*"
+      textPresent: ["Pricing", "Supplier"]
+      textNearElement:
+        - text: "Cost"
+          elementRole: "DataItem"
+          maxDistancePx: 300
+    then:
+      - type: Log
+        description: "Vision-confirmed: on the Pricing tab with a supplier cost grid"
+
   - id: pricing-lookup.close-edit-window
     skillId: pricing-lookup
     priority: 10
