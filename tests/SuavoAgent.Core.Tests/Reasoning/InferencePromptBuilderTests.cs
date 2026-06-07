@@ -1,4 +1,5 @@
 using SuavoAgent.Contracts.Reasoning;
+using SuavoAgent.Contracts.Vision;
 using SuavoAgent.Core.Reasoning;
 using Xunit;
 
@@ -81,6 +82,61 @@ public class InferencePromptBuilderTests
         Assert.DoesNotContain("patient", msg);
         Assert.DoesNotContain("rx_number", msg);
         Assert.DoesNotContain("medication", msg);
+    }
+
+    // --- vision grounding: the Tier-2 LLM reasons about what it SEES ---------
+    // Rung 1 proved the Tier-1 rule path reasons over the captured screen. This proves the other
+    // half: when vision is on, the on-device LLM's prompt is grounded in the PHI-scrubbed screen
+    // (OCR text + UI elements) — and never carries raw patient data.
+
+    [Fact]
+    public void BuildUserMessage_VisionGrounded_IncludesScrubbedScreen_SoTheLlmSeesWhatItSees()
+    {
+        var msg = InferencePromptBuilder.BuildUserMessage(new InferenceRequest
+        {
+            Context = new RuleContext
+            {
+                SkillId = "pricing-lookup",
+                ProcessName = "PioneerPharmacy",
+                ScreenText = new[]
+                {
+                    new TextRegion { Text = "Pricing", Bounds = new Rect(120, 80, 60, 14), Confidence = 0.97 },
+                    new TextRegion { Text = "Supplier", Bounds = new Rect(400, 160, 70, 14), Confidence = 0.96 },
+                    new TextRegion { Text = "Cost Per Unit", Bounds = new Rect(560, 160, 90, 14), Confidence = 0.95 },
+                    new TextRegion { Text = "[PATIENT]", Bounds = new Rect(40, 60, 80, 14), Confidence = 0.9 }, // already scrubbed
+                },
+                ScreenElements = new[]
+                {
+                    new VisualElement { Role = "DataItem", Name = "McKesson", Bounds = new Rect(400, 188, 150, 18), Confidence = 1.0 },
+                },
+            },
+            EscalationReason = "no rule matched",
+        });
+
+        // The LLM's prompt is grounded in what's on screen.
+        Assert.Contains("screen_text", msg);
+        Assert.Contains("Pricing", msg);
+        Assert.Contains("Supplier", msg);
+        Assert.Contains("screen_elements", msg);
+        Assert.Contains("DataItem", msg);
+        // PHI safety: only the scrubbed sentinel reaches the model, never raw patient data.
+        Assert.Contains("[PATIENT]", msg);
+        Assert.DoesNotContain("John", msg);
+    }
+
+    [Fact]
+    public void BuildUserMessage_NoVision_OmitsScreenKeys()
+    {
+        // When vision is off (no ScreenText/ScreenElements), the prompt must not carry the vision
+        // keys at all — no overhead, no surface, byte-compatible with the legacy non-vision prompt.
+        var msg = InferencePromptBuilder.BuildUserMessage(new InferenceRequest
+        {
+            Context = new RuleContext { SkillId = "pricing-lookup" },
+            EscalationReason = "no rule matched",
+        });
+
+        Assert.DoesNotContain("screen_text", msg);
+        Assert.DoesNotContain("screen_elements", msg);
     }
 
     [Fact]
