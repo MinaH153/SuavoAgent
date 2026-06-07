@@ -186,6 +186,7 @@ public sealed class WorkflowExecutorTests
         public Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct) => Task.FromResult(NextResult ?? ActuationResult.Success(1, true, "x"));
         public Task<ActuationResult> PressKeysAsync(PressKeysRequest req, CancellationToken ct) => Task.FromResult(NextResult ?? ActuationResult.Success(1, true, "x"));
         public Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct) => Task.FromResult(NextResult ?? ActuationResult.Success(1, true, "x"));
+        public Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct) => Task.FromResult(ActuationResult.Success(0, true, "reload"));
     }
 
     private sealed class StubAuditClient : IWorkflowAuditClient

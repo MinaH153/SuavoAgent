@@ -20,4 +20,8 @@ public interface IActuationGateway
     Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct);
     Task<ActuationResult> PressKeysAsync(PressKeysRequest req, CancellationToken ct);
     Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct);
+
+    /// <summary>Tell the Helper to re-read actuation.json and re-apply its app allowlist (no restart).
+    /// Core persists the file + applies its own static BEFORE calling this, so both processes agree.</summary>
+    Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct);
 }

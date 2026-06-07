@@ -938,6 +938,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "force_learning_phase":
                     await HandleForceLearningPhaseAsync(scEl, cmd, ct);
                     break;
+                case "extend_app_allowlist":
+                    await HandleExtendAppAllowlistAsync(scEl, cmd, ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -946,6 +949,103 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Signed command processing failed");
+        }
+    }
+
+    /// <summary>
+    /// extend_app_allowlist — operator-pushed RUNTIME widening of the actuation sandbox app allowlist
+    /// (canary / non-PHI boxes only; the cloud must never emit this to a PHI box). Merges
+    /// { app_key: "process.exe" } into %PROGRAMDATA%\SuavoAgent\actuation.json "AllowedApps" (the
+    /// complete set, atomic temp+rename), then re-applies in BOTH processes with NO restart: Core via
+    /// LoadAndExtendFromConfig() (reads the file we just wrote — single merge path), Helper via the
+    /// actuation.reload_allowlist IPC. Survives restart because both processes re-load the same file at
+    /// startup. Each addition is pre-validated with the SAME rules ExtendAllowlist enforces so the ack
+    /// can NAME each rejection instead of silently dropping it. Rides the signed ECDSA command pipeline.
+    /// </summary>
+    private async Task HandleExtendAppAllowlistAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        try
+        {
+            if (!dataEl.TryGetProperty("apps", out var appsEl) || appsEl.ValueKind != JsonValueKind.Object)
+            {
+                await AckAsync(false, null, "apps object required: { \"app_key\": \"process.exe\" }");
+                return;
+            }
+
+            var dir = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            var path = System.IO.Path.Combine(dir, "SuavoAgent", "actuation.json");
+
+            // Preserve existing config (Enabled / DryRun / prior AllowedApps) and merge the new apps.
+            var root = System.IO.File.Exists(path)
+                ? System.Text.Json.Nodes.JsonNode.Parse(System.IO.File.ReadAllText(path))?.AsObject()
+                    ?? new System.Text.Json.Nodes.JsonObject()
+                : new System.Text.Json.Nodes.JsonObject();
+            var allowed = root["AllowedApps"] as System.Text.Json.Nodes.JsonObject
+                ?? new System.Text.Json.Nodes.JsonObject();
+
+            // Pre-validate each addition with the SAME rules ActuationAllowlistedSandboxApps.ExtendAllowlist
+            // enforces, so the ack names what was rejected (the config loader silently drops bad entries).
+            var rejected = new List<string>();
+            foreach (var p in appsEl.EnumerateObject())
+            {
+                var key = p.Name?.Trim() ?? "";
+                var proc = p.Value.ValueKind == JsonValueKind.String ? (p.Value.GetString() ?? "").Trim() : "";
+                if (!System.Text.RegularExpressions.Regex.IsMatch(key, "^[a-zA-Z0-9_-]{1,64}$")) { rejected.Add($"{p.Name}:bad_key"); continue; }
+                if (!proc.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) { rejected.Add($"{key}:not_exe"); continue; }
+                if (proc.IndexOfAny(new[] { '\\', '/', ':', '*', '?', '"', '<', '>', '|' }) >= 0) { rejected.Add($"{key}:path_chars"); continue; }
+                if (string.Equals(key, "notepad", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(key, "calculator", StringComparison.OrdinalIgnoreCase)) { rejected.Add($"{key}:reserved_default"); continue; }
+                allowed[key] = proc;
+            }
+            root["AllowedApps"] = allowed;
+
+            // Atomic write: temp + replace so a mid-write Watchdog restart never sees a torn file.
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            var tmp = path + ".tmp";
+            System.IO.File.WriteAllText(tmp,
+                root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            System.IO.File.Move(tmp, path, overwrite: true);
+
+            // Apply in Core in-process (reads the file we just wrote — single merge path, no drift).
+            ActuationAllowlistedSandboxApps.LoadAndExtendFromConfig();
+
+            // Apply in the Helper (separate process, separate static) — no restart.
+            var helperOk = false;
+            string? helperErr = null;
+            if (_actuationGateway is not null)
+            {
+                var r = await _actuationGateway.ReloadAllowlistAsync(ct).ConfigureAwait(false);
+                helperOk = r.Ok;
+                helperErr = r.RejectionReason;
+            }
+            else helperErr = "actuation_gateway_unavailable";
+
+            var effective = ActuationAllowlistedSandboxApps.ProcessNames.Keys.OrderBy(k => k).ToArray();
+            _logger.LogInformation(
+                "extend_app_allowlist: core_applied=true helper_applied={Helper} effective={Count} rejected={Rejected}",
+                helperOk, effective.Length, rejected.Count);
+            await AckAsync(helperOk, new
+            {
+                core_applied = true,
+                helper_applied = helperOk,
+                helper_error = helperErr,
+                effective_app_keys = effective,
+                rejected,
+            }, helperOk ? null : $"helper_reload_failed: {helperErr}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "extend_app_allowlist failed");
+            await AckAsync(false, null, ex.Message);
         }
     }
 

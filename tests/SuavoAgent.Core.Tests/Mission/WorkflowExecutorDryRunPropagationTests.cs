@@ -237,6 +237,9 @@ public sealed class WorkflowExecutorDryRunPropagationTests
             LastLaunchSandboxApp = req;
             return Task.FromResult(NextResult ?? ActuationResult.Success(1, req.DryRun, "ok"));
         }
+
+        public Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct) =>
+            Task.FromResult(ActuationResult.Success(0, true, "reload"));
     }
 
     private sealed class RecordingAuditClient : IWorkflowAuditClient

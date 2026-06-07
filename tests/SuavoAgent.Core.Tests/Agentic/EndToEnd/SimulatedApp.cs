@@ -75,6 +75,9 @@ internal sealed class SimulatedAppGateway : IActuationGateway
 
     public Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct) =>
         Task.FromResult(ActuationResult.Success(1, req.DryRun, "evidence"));
+
+    public Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct) =>
+        Task.FromResult(ActuationResult.Success(0, true, "reload"));
 }
 
 /// <summary>IPerceiver that reports the SimulatedApp's current screen (signatures the replayer/loop ground on).</summary>

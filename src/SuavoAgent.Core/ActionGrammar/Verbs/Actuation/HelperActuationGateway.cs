@@ -85,6 +85,9 @@ public sealed class HelperActuationGateway : IActuationGateway
     public Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct) =>
         SendAsync(ActuationIpcCommands.LaunchSandboxApp, req, ct);
 
+    public Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct) =>
+        SendAsync(ActuationIpcCommands.ReloadAllowlist, new ReloadAllowlistRequest(), ct);
+
     private async Task<ActuationResult> SendAsync<TReq>(string command, TReq req, CancellationToken ct)
     {
         var client = _clientFactory();
