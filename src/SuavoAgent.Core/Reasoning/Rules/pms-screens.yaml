@@ -1,0 +1,34 @@
+# PMS screen-recognition skill — "what am I looking at right now?"
+#
+# These rules let the agent name the PioneerRx screen it is ON from the
+# CAPTURED screen (OCR text + spatial layout), independent of the pricing
+# workflow. They are the agent's situational grounding: before it does
+# anything, it can confirm it is on the logged-in main Rx workspace vs. an
+# unknown / not-yet-ready screen.
+#
+# Grounded in REAL PioneerRx screens (Nadim's Better Life Pharmacy capture,
+# 2026-06): the logged-in main Rx workspace renders the signature labels
+# "Rx Profile", "Quick Search", and "Workflow" together. We only encode
+# STRUCTURE (control labels / layout), never patient data — same boundary the
+# agent's own scrubber enforces.
+#
+# Read-only (Log) and autonomousOk — recognition never actuates. If PioneerRx
+# renames a label across versions, update the single rule here; no recompile.
+
+rules:
+  # Recognize the logged-in, ready main Rx workspace. "Rx Profile" + "Quick
+  # Search" only co-occur on the live workspace — not on the login screen, the
+  # Edit Rx Item dialog, or the Windows desktop — so their co-presence is a
+  # reliable "I'm logged in and ready" signal. Two signature labels (not three)
+  # keeps it robust to a single OCR miss while staying unambiguous.
+  - id: pms-screen.rx-workspace-ready
+    skillId: pms-screen
+    priority: 100
+    description: "Vision-grounded: on the PioneerRx main Rx workspace, logged in and ready (sees 'Rx Profile' + 'Quick Search')"
+    autonomousOk: true
+    when:
+      processName: "PioneerPharmacy*"
+      textPresent: ["Rx Profile", "Quick Search"]
+    then:
+      - type: Log
+        description: "Recognized the PioneerRx Rx workspace — logged in and ready to work"
