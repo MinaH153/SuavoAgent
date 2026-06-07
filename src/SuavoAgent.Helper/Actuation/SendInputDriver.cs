@@ -34,6 +34,16 @@ public sealed class SendInputDriver
     private readonly ActuationConfig _config;
     private readonly ILogger _logger;
 
+    // The window a preceding launch_sandbox_app established as the actuation target. type/press
+    // re-assert + VERIFY this is foreground immediately before injecting input (they arrive as
+    // separate IPC commands, seconds later — focus can drift in between). Set ONCE per launch on
+    // this process-lifetime singleton; an unresolved launch stores the sentinel (Pid<=0 / Hwnd=0)
+    // so the next type/press fails closed instead of leaking keystrokes. volatile: written on a
+    // launch command thread, read on a later type/press command thread.
+    private volatile TargetWindow? _activeTarget;
+
+    private sealed record TargetWindow(int Pid, IntPtr Hwnd, string Label);
+
     public SendInputDriver(ActuationGate gate, ActuationConfig config, ILogger logger)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
@@ -74,6 +84,11 @@ public sealed class SendInputDriver
 
         try
         {
+            // Fail-closed focus guard: confirm the launch-established target owns the foreground
+            // BEFORE any keystroke (including ClearFirst's Ctrl+A/Delete), else refuse — never leak.
+            var fgReject = await EnsureTargetForegroundOrRejectAsync("type", ct).ConfigureAwait(false);
+            if (fgReject is not null) return fgReject;
+
             if (req.ClearFirst)
             {
                 SendChord(new[] { VirtualKey.Control }, VirtualKey.A);
@@ -143,6 +158,11 @@ public sealed class SendInputDriver
 
         try
         {
+            // Fail-closed focus guard: same reasoning as TypeText — verify the target owns foreground
+            // before sending any chord, else refuse so keystrokes can't land in the wrong window.
+            var fgReject = await EnsureTargetForegroundOrRejectAsync("press_keys", ct).ConfigureAwait(false);
+            if (fgReject is not null) return fgReject;
+
             var interDelay = req.InterChordDelayMs > 0 ? req.InterChordDelayMs : _config.DefaultInterChordDelayMs;
             for (var i = 0; i < parsed.Count; i++)
             {
@@ -224,6 +244,10 @@ public sealed class SendInputDriver
 
         try
         {
+            // Snapshot visible windows BEFORE launch so a window that appears afterward can be told
+            // apart from pre-existing ones (resolution fallback #3).
+            var preLaunch = WindowFocusManager.CaptureVisibleTopLevelWindows();
+
             // Resolve to an absolute path under a trusted system location (System32, then Windows)
             // before launching. A bare process name is resolved by Win32 against the app dir + CWD
             // FIRST, so a planted "notepad.exe" could hijack the launch; pinning the real system path
@@ -236,28 +260,37 @@ public sealed class SendInputDriver
                 WorkingDirectory = Environment.SystemDirectory,
             });
 
-            // WINDOW-FOCUS: Process.Start returns before the app's window exists, so without waiting +
-            // foregrounding it the NEXT workflow step (type/click) lands in whatever window was already
-            // focused — observed live: a "type" leaked into a PowerShell prompt instead of the launched
-            // Notepad. Wait for the GUI to be input-ready, then bring its main window to the foreground
-            // so the launched app reliably owns subsequent keystrokes. Best-effort: a flaky foreground
-            // call must never fail an otherwise-successful launch.
-            if (p is not null)
+            // WINDOW-FOCUS: Process.Start returns before the app's window exists, and for Windows 11
+            // packaged apps (Notepad/Calculator) the started exe is a launcher STUB whose own
+            // MainWindowHandle never populates — so the old "foreground p.MainWindowHandle" approach
+            // silently did nothing and a later type/press leaked into whatever window was focused
+            // (observed live: keystrokes into a PowerShell prompt). Resolve the REAL window by process
+            // name / new-window heuristics, then force it foreground. We still record the target either
+            // way: type/press re-verify foreground before injecting and FAIL CLOSED if it isn't the
+            // target, so an imperfect launch can never leak keystrokes.
+            // Offload the blocking wait + poll-for-window to a worker thread so the IPC dispatcher
+            // isn't held for up to ~8s. `p` outlives the awaited task (disposed at method end).
+            var resolved = await Task.Run(() =>
             {
-                try { p.WaitForInputIdle(5000); } catch { /* console / non-GUI apps don't support this */ }
-                var hwnd = await WaitForMainWindowAsync(p, 5000, ct).ConfigureAwait(false);
-                if (hwnd != IntPtr.Zero)
-                {
-                    ShowWindow(hwnd, SW_RESTORE);
-                    SetForegroundWindow(hwnd);
-                    _logger.Information("LaunchSandboxApp: {Process} foregrounded (hwnd=0x{Hwnd:X})", processName, hwnd.ToInt64());
-                }
-                else
-                {
-                    _logger.Warning(
-                        "LaunchSandboxApp: {Process} started but no main window appeared within 5s — focus not guaranteed",
-                        processName);
-                }
+                try { p?.WaitForInputIdle(3000); } catch { /* console / non-GUI apps don't support this */ }
+                return WindowFocusManager.ResolveAppWindow(p, processName, preLaunch, 8000, ct, _logger);
+            }, ct).ConfigureAwait(false);
+            if (resolved is { } rw && rw.Hwnd != IntPtr.Zero)
+            {
+                WindowFocusManager.ForceForeground(rw.Hwnd, _logger);
+                _activeTarget = new TargetWindow(rw.Pid, rw.Hwnd, processName);
+                _logger.Information(
+                    "LaunchSandboxApp: {Process} resolved + foregrounded (pid={Pid} hwnd=0x{Hwnd:X})",
+                    processName, rw.Pid, rw.Hwnd.ToInt64());
+            }
+            else
+            {
+                // Unresolved target sentinel: the launch may have succeeded, but we cannot prove which
+                // window is the app's. The next type/press will fail closed rather than risk a leak.
+                _activeTarget = new TargetWindow(0, IntPtr.Zero, processName);
+                _logger.Warning(
+                    "LaunchSandboxApp: {Process} started but its window could not be resolved — subsequent type/press will fail closed to avoid keystroke leak",
+                    processName);
             }
 
             return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: false, evidence);
@@ -270,28 +303,48 @@ public sealed class SendInputDriver
     }
 
     /// <summary>
-    /// Poll a freshly-started process until its main window handle exists (it is not available
-    /// synchronously from <see cref="Process.Start(ProcessStartInfo)"/>), or the timeout elapses /
-    /// the process exits. Returns <see cref="IntPtr.Zero"/> if no window ever appears.
+    /// Re-assert and VERIFY that the launch-established target window owns the foreground right
+    /// before injecting input. Returns a rejection envelope (caller returns it unchanged) when the
+    /// target cannot be confirmed foreground — fail-closed so keystrokes never land in the wrong
+    /// window. Returns <c>null</c> to proceed. No active target means no preceding launch this
+    /// session: legacy behaviour (type into the current foreground) is preserved with a warning,
+    /// since the sandbox workflow always launches first and that is the only live actuation path.
     /// </summary>
-    private static async Task<IntPtr> WaitForMainWindowAsync(Process p, int timeoutMs, CancellationToken ct)
+    private async Task<ActuationResult?> EnsureTargetForegroundOrRejectAsync(string verb, CancellationToken ct)
     {
-        var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < timeoutMs && !ct.IsCancellationRequested)
+        var target = _activeTarget;
+        if (target is null)
         {
-            try
-            {
-                p.Refresh();
-                if (p.HasExited) return IntPtr.Zero;
-                if (p.MainWindowHandle != IntPtr.Zero) return p.MainWindowHandle;
-            }
-            catch
-            {
-                return IntPtr.Zero; // process handle gone
-            }
-            await Task.Delay(100, ct).ConfigureAwait(false);
+            _logger.Warning("{Verb}: no actuation target established (no preceding launch) — using current foreground window", verb);
+            return null;
         }
-        try { p.Refresh(); return p.MainWindowHandle; } catch { return IntPtr.Zero; }
+
+        if (target.Pid <= 0 || target.Hwnd == IntPtr.Zero)
+        {
+            _logger.Warning("{Verb} refused: launch could not resolve a target window for '{Label}'", verb, target.Label);
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ForegroundNotTarget,
+                $"launch could not resolve a target window for '{target.Label}'; refusing to {verb} to avoid keystroke leak",
+                dryRun: false);
+        }
+
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 2500 && !ct.IsCancellationRequested)
+        {
+            if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) return null;
+            WindowFocusManager.ForceForeground(target.Hwnd, _logger);
+            await DelayWithCancel(150, ct).ConfigureAwait(false);
+        }
+
+        if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) return null;
+
+        _logger.Warning(
+            "{Verb} refused: target '{Label}' (pid={Pid}) not in foreground after retry — failing closed",
+            verb, target.Label, target.Pid);
+        return ActuationResult.Reject(
+            ActuationRejectionCodes.ForegroundNotTarget,
+            $"target '{target.Label}' (pid={target.Pid}) could not be brought to the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
+            dryRun: false);
     }
 
     /// <summary>
@@ -391,15 +444,6 @@ public sealed class SendInputDriver
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    private const int SW_RESTORE = 9;
 
     private static int InputSize => Marshal.SizeOf<INPUT>();
 
