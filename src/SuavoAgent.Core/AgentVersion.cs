@@ -28,7 +28,14 @@ public static class AgentVersion
     {
         if (string.IsNullOrWhiteSpace(informational)) return null;
         var plus = informational.IndexOf('+'); // SourceLink appends "+<git-sha>" build metadata
-        return plus >= 0 ? informational[..plus] : informational;
+        var version = plus >= 0 ? informational[..plus] : informational;
+        // Strip a leading "v"/"V" tag prefix (e.g. a manual `-p:Version=v3.23.0` build, or a tag
+        // that wasn't de-prefixed) so the agent always reports bare semver. The cloud rollout /
+        // 7-day readiness gate compares version strings exactly, and "v3.23.0" never equals
+        // "3.23.0" → rollout silently stuck reporting 0 updated (MKM#1181 class).
+        if (version.Length >= 2 && (version[0] == 'v' || version[0] == 'V') && char.IsDigit(version[1]))
+            version = version[1..];
+        return version;
     }
 
     /// <summary>
