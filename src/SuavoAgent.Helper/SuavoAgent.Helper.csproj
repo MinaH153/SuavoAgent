@@ -9,6 +9,8 @@
     <AssemblyTitle>SuavoAgent.Helper</AssemblyTitle>
     <Description>Suavo pharmacy agent helper — desktop UI automation and vision capture.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Required to cross-build the Microsoft.WindowsDesktop.App framework reference (UIAutomationClient for FlaUI.UIA2) when publishing win-x64 from a Linux CI host. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,6 +19,7 @@
 
   <ItemGroup>
     <PackageReference Include="FlaUI.UIA2" Version="5.0.0" />
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
     <PackageReference Include="Microsoft.Win32.SystemEvents" Version="10.0.6" />
     <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
