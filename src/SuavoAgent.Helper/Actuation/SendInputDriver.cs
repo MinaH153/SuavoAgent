@@ -44,6 +44,14 @@ public sealed class SendInputDriver
 
     private sealed record TargetWindow(int Pid, IntPtr Hwnd, string Label);
 
+    // Ticks (UtcNow) of the last successful live click (click_by_label / click_by_signature →
+    // ClickAtAsync). A real click establishes keyboard focus on the clicked control, so a type that
+    // arrives shortly after must NOT re-focus the window centre (which would undo the click_by_label
+    // and type into the wrong control — the PMS "click Quick Search then type the NDC" flow). volatile
+    // long: written on a click command thread, read on a later type command thread. 0 = no click yet.
+    private long _lastClickUtcTicks;
+    private static readonly TimeSpan ClickFocusFreshWindow = TimeSpan.FromSeconds(15);
+
     public SendInputDriver(ActuationGate gate, ActuationConfig config, ILogger logger)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
@@ -207,6 +215,9 @@ public sealed class SendInputDriver
         try
         {
             MoveAndClick(x, y);
+            // Record the click so a TYPE arriving shortly after (the click_by_label → type field-entry
+            // flow) does NOT re-focus the window centre and undo the focus this click just set.
+            System.Threading.Interlocked.Exchange(ref _lastClickUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
             return Task.FromResult(ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: false, evidence));
         }
         catch (Exception ex)
@@ -278,6 +289,10 @@ public sealed class SendInputDriver
                 try { p?.WaitForInputIdle(3000); } catch { /* console / non-GUI apps don't support this */ }
                 return WindowFocusManager.ResolveAppWindow(p, processName, preLaunch, 8000, ct, _logger);
             }, ct).ConfigureAwait(false);
+            // A launch starts a fresh interaction: clear any prior click recency so a following type
+            // takes the centre focus-click path (a stale click from an earlier workflow must not make
+            // launch→type skip it, which would type into an unfocused control).
+            System.Threading.Interlocked.Exchange(ref _lastClickUtcTicks, 0);
             if (resolved is { } rw && rw.Hwnd != IntPtr.Zero)
             {
                 WindowFocusManager.ForceForeground(rw.Hwnd, _logger);
@@ -364,7 +379,18 @@ public sealed class SendInputDriver
         // clicks before typing. Gated to TYPE: press_keys sends chords that route to the foreground
         // window (and a content click could trigger a control, e.g. a Calculator button), so it skips
         // the click and relies on the foreground + SetFocus established above.
-        if (focusClick)
+        //
+        // BUT skip the centre focus-click when a real click just landed (click_by_label → type): that
+        // click already focused the SPECIFIC control the workflow targeted, and re-clicking the window
+        // centre would move focus to the wrong control (wrong-field data entry). The foreground is still
+        // verified above + below; we only skip the extra centre click.
+        if (focusClick && ClickRecentlyEstablishedFocus())
+        {
+            _logger.Information(
+                "{Verb}: a click established field focus <{Window}s ago — skipping centre focus-click to preserve the targeted control",
+                verb, (int)ClickFocusFreshWindow.TotalSeconds);
+        }
+        else if (focusClick)
         {
             // Re-confirm the target STILL owns the foreground FIRST, then read its client-area coords and
             // click adjacently — so the coordinates are the freshest possible read right before the
@@ -416,6 +442,19 @@ public sealed class SendInputDriver
     // fail-closed wait while we try to bring the target to the foreground.
     private const int FocusSettleMs = 250;
     private const int ForegroundAcquireTimeoutMs = 6000;
+
+    /// <summary>
+    /// True if a real click (click_by_label/click_by_signature → ClickAtAsync) landed within the last
+    /// <see cref="ClickFocusFreshWindow"/>. When so, a TYPE skips its centre focus-click so it doesn't
+    /// move focus off the control the click just targeted (the click→type field-entry flow).
+    /// </summary>
+    private bool ClickRecentlyEstablishedFocus()
+    {
+        var ticks = System.Threading.Interlocked.Read(ref _lastClickUtcTicks);
+        if (ticks == 0) return false;
+        var since = DateTimeOffset.UtcNow - new DateTimeOffset(ticks, TimeSpan.Zero);
+        return since >= TimeSpan.Zero && since <= ClickFocusFreshWindow;
+    }
 
     /// <summary>
     /// Resolve a bare process file name (e.g. "notepad.exe") to its absolute path under a trusted

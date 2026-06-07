@@ -116,6 +116,7 @@ public sealed class UiaLabelResolver : IDisposable
     private AutomationElement? ResolveWindow(Process proc)
     {
         var auto = _automation!;
+        // 1) Win32 MainWindowHandle — classic Win32/WPF apps, and sometimes packaged ones.
         try
         {
             if (proc.MainWindowHandle != IntPtr.Zero)
@@ -126,7 +127,25 @@ public sealed class UiaLabelResolver : IDisposable
         }
         catch { /* fall through to the desktop-root search */ }
 
-        try { return auto.GetDesktop().FindFirstChild(cf => cf.ByProcessId(proc.Id)); }
+        try
+        {
+            var desktop = auto.GetDesktop();
+            // 2) A top-level window owned DIRECTLY by the process (self-hosted WinUI/Win32) — covers the
+            //    intermittent MainWindowHandle==0 case.
+            var direct = desktop.FindFirstChild(cf => cf.ByProcessId(proc.Id));
+            if (direct is not null) return direct;
+
+            // 3) ApplicationFrameHost-hosted UWP (e.g. the Windows 11 Calculator): the FRAME window is
+            //    owned by ApplicationFrameHost.exe, NOT the app, so (1)/(2) miss it entirely — the root
+            //    cause of the intermittent "label not found". Find the desktop window whose hosted child
+            //    (the app's CoreWindow) belongs to the app process; its UIA subtree spans the app content.
+            return desktop.FindAllChildren()
+                .FirstOrDefault(w =>
+                {
+                    try { return w.FindFirstChild(cf => cf.ByProcessId(proc.Id)) is not null; }
+                    catch { return false; }
+                });
+        }
         catch { return null; }
     }
 
