@@ -41,7 +41,10 @@ public class SqlPricingQueryBuilderTests
         Assert.DoesNotContain("JOIN", sql); // no item join, no supplier join
         Assert.Contains("WHERE p.[NDC] = @ndc", sql);
         Assert.Contains("p.[Status] IN ('Available', 'Active')", sql);
-        Assert.Contains("ORDER BY p.[Cost] ASC", sql);
+        // CostPerUnitColumn is declared → rank by per-unit (the savings-ledger quantity), not pack cost.
+        Assert.Contains("p.[CostPerUnit] > 0", sql);
+        Assert.Contains("ORDER BY p.[CostPerUnit] ASC", sql);
+        Assert.DoesNotContain("ORDER BY p.[Cost] ASC", sql);
     }
 
     [Fact]
@@ -83,6 +86,35 @@ public class SqlPricingQueryBuilderTests
         Assert.Contains("p.[Cost] > 0", sql);
         Assert.Contains("ORDER BY p.[Cost] ASC", sql);
         // CostPerUnit falls back to Cost when not declared.
+        Assert.Contains("p.[Cost] AS CostPerUnit", sql);
+    }
+
+    [Fact]
+    public void Build_RanksByPerUnitCost_WhenPerUnitColumnExists_NotPackCost()
+    {
+        // Regression: the savings ledger consumes CostPerUnit, so the cheapest supplier MUST be chosen
+        // by per-unit cost when a per-unit column exists. Ranking by pack Cost picks the wrong supplier
+        // (and reports a wrong savings figure) whenever pack sizes differ across suppliers.
+        var schema = MakeSimpleSchema() with { CostPerUnitColumn = "UnitCost" };
+
+        var sql = SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema);
+
+        Assert.Contains("ORDER BY p.[UnitCost] ASC", sql);
+        Assert.DoesNotContain("ORDER BY p.[Cost] ASC", sql);
+        Assert.Contains("p.[Cost] > 0", sql); // pack-cost sanity guard retained
+        Assert.Contains("p.[UnitCost] > 0", sql); // per-unit guard added
+    }
+
+    [Fact]
+    public void Build_RanksByPackCost_WhenNoPerUnitColumn()
+    {
+        // No per-unit column → savings enrichment is suppressed upstream, so the cheapest-pack row is
+        // the correct cheapest-available pick and per-unit falls back to pack cost.
+        var schema = MakeSimpleSchema(); // CostPerUnitColumn: null
+
+        var sql = SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema);
+
+        Assert.Contains("ORDER BY p.[Cost] ASC", sql);
         Assert.Contains("p.[Cost] AS CostPerUnit", sql);
     }
 
