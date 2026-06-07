@@ -87,6 +87,50 @@ public sealed class RealNotepadUiaTests
         }
     }
 
+    /// <summary>
+    /// Proves the TYPE SELF-VERIFICATION read-back on a real app: after the production SendInput driver
+    /// types into the focused edit, <see cref="UiaLabelResolver.ReadFocusedElementValue"/> surfaces the
+    /// typed text from the FOCUSED control (ValuePattern or TextPattern) — the read-back the
+    /// ActuationCommandHandler uses to fail closed when keystrokes silently don't land.
+    /// </summary>
+    [Fact]
+    public async Task LiveUia_TypeReadBack_SurfacesFocusedFieldValue()
+    {
+        if (!OperatingSystem.IsWindows()) return; // windows-uia-smoke runs it for real
+
+        var logger = new LoggerConfiguration().CreateLogger();
+        Process? notepad = null;
+        try
+        {
+            notepad = Process.Start(new ProcessStartInfo("notepad.exe") { UseShellExecute = true });
+            Assert.NotNull(notepad);
+            var hwnd = await WaitForMainWindowAsync(TimeSpan.FromSeconds(25));
+            Assert.NotEqual(IntPtr.Zero, hwnd);
+            await Task.Delay(1200); // let UIA + focus settle
+
+            var config = new ActuationConfig { Enabled = true, DryRun = false };
+            var driver = new SendInputDriver(new ActuationGate(config, logger), config, logger);
+            const string typed = "readback verification probe";
+            var result = await driver.TypeTextAsync(
+                new TypeTextRequest(typed, ClearFirst: false, PerKeyDelayMs: 8, DryRun: false), CancellationToken.None);
+            Assert.True(result.Ok, $"type failed: {result.RejectionCode}");
+
+            using var resolver = new UiaLabelResolver(logger);
+            string? readBack = null;
+            for (var i = 0; i < 12 && (readBack is null || !readBack.Contains("readback", StringComparison.OrdinalIgnoreCase)); i++)
+            {
+                await Task.Delay(300);
+                readBack = resolver.ReadFocusedElementValue();
+            }
+            Assert.NotNull(readBack); // the focused control's value WAS readable on a real app
+            Assert.Contains("readback", readBack!, StringComparison.OrdinalIgnoreCase); // and it contains what we typed
+        }
+        finally
+        {
+            try { if (notepad is { HasExited: false }) notepad.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+        }
+    }
+
     private static string SafeAutomationId(AutomationElement el)
     {
         try { return el.Properties.AutomationId.IsSupported ? (el.Properties.AutomationId.ValueOrDefault ?? "") : ""; }
