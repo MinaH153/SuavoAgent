@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Adapters.PioneerRx;
 using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Models;
@@ -378,6 +379,16 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 _helperConsecutiveFailures = helperAttached ? 0 : _helperConsecutiveFailures + 1;
                 var helperPayload = BuildHelperPayload(ipcServer);
                 var pioneerRxObservationStatus = helperAttached ? "observing" : "not_observing";
+                // Situation understanding: turn the raw signals (installed? db reachable? helper attached?)
+                // into ONE state the agent can EXPLAIN, so a fresh install reports "PioneerRx is closed" or
+                // "database unreachable" instead of failing silently by the absence of expected elements.
+                var pms = PmsSituationClassifier.Classify(new PmsSignals(
+                    PmsInstalled: PioneerRxInstallDetector.IsInstalled(_logger),
+                    SqlConnected: sqlConnected,
+                    HelperAttached: helperAttached,
+                    // Explicitly configured = the operator pointed us at a SQL server (vs the implicit
+                    // localhost fallback). Distinguishes "finish setup" from "configured DB is down".
+                    SqlConfigured: !string.IsNullOrWhiteSpace(_options.SqlServer)));
                 var visionCapture = _serviceProvider
                     .GetService<VisionCaptureTelemetry>()?
                     .Snapshot();
@@ -403,6 +414,14 @@ public sealed class HeartbeatWorker : ResilientHostedService
                         detectionDegraded = rxDetectionDegraded,
                         sqlDarkSeconds,
                         consecutiveSqlFailures,
+                    },
+                    // The agent's own understanding of the PMS situation + a plain-language explanation
+                    // the operator can act on (surfaced in the cockpit so a fresh install is never silent).
+                    pmsSituation = new
+                    {
+                        situation = pms.Situation.ToString(),
+                        code = pms.Code,
+                        explanation = pms.Explanation,
                     },
                     // Top-level fields for cloud stats extraction
                     learningMode = _options.LearningMode,
