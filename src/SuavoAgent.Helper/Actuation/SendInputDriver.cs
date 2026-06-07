@@ -344,12 +344,15 @@ public sealed class SendInputDriver
 
         if (!acquired)
         {
+            // PID stays in the LOCAL log for diagnosis but NOT in the cloud-facing reason: a 5-digit
+            // PID trips the cloud's ZIP-code PHI filter, which would null the result and mask this
+            // legitimate operational failure as an opaque "result_rejected_phi_validation".
             _logger.Warning(
                 "{Verb} refused: target '{Label}' (pid={Pid}) not brought to foreground within {Timeout}ms — failing closed",
                 verb, target.Label, target.Pid, ForegroundAcquireTimeoutMs);
             return ActuationResult.Reject(
                 ActuationRejectionCodes.ForegroundNotTarget,
-                $"target '{target.Label}' (pid={target.Pid}) could not be brought to the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
+                $"target '{target.Label}' could not be brought to the foreground within {ForegroundAcquireTimeoutMs}ms; refusing to {verb} to avoid keystroke leak into the wrong window",
                 dryRun: false);
         }
 
@@ -397,12 +400,14 @@ public sealed class SendInputDriver
         // change which window is foreground here, but verify rather than assume). Fail closed otherwise.
         if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) return null;
 
+        // PID stays in the LOCAL log only (see note above) — the cloud-facing reason omits it so it
+        // doesn't trip the ZIP-code PHI filter and mask this operational failure.
         _logger.Warning(
             "{Verb} refused: target '{Label}' (pid={Pid}) lost foreground after focus-click — failing closed",
             verb, target.Label, target.Pid);
         return ActuationResult.Reject(
             ActuationRejectionCodes.ForegroundNotTarget,
-            $"target '{target.Label}' (pid={target.Pid}) did not hold the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
+            $"target '{target.Label}' did not hold the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
             dryRun: false);
     }
 
