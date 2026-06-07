@@ -1,3 +1,4 @@
+using ClosedXML.Excel;
 using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Pricing;
@@ -145,5 +146,98 @@ public class PricingExecutorConfigTests : IDisposable
             interLookupDelay: null);
 
         Assert.NotNull(runner);
+    }
+
+    // ── B1: hung-Helper early abort + resumability ───────────────────────────────────────────────
+    // A hung/disconnected Helper returns NO response for every NDC lookup. Without the abort the loop
+    // grinds the whole workbook (each row eats a reconnect + up-to-30s timeout), marks everything
+    // "failed", and reports a finished job — masking "Helper IPC is down" as "nothing was priced".
+
+    [Fact]
+    public async Task RunAsync_HelperUnreachable_AbortsEarly_Halted_AndLeavesRowsUnpersisted()
+    {
+        var xlsx = CreateNdcWorkbook(rowCount: 10);
+        var spec = NewSpec(xlsx, "job-helper-unreachable");
+        var runner = NewIpcRunner();
+        var deadHelper = new CountingNullIpcClient();
+
+        var progress = await runner.RunAsync(spec, deadHelper, CancellationToken.None);
+
+        Assert.Equal(PricingJobStatus.Halted, progress.Status);                       // distinct, resumable status
+        Assert.Equal(10, progress.TotalItems);                                        // the workbook really had 10 rows
+        Assert.Equal(PricingJobRunner.MaxConsecutiveIpcFailuresBeforeAbort,
+            deadHelper.SendCount);                                                    // aborted at 3 — did NOT grind all 10
+        Assert.Empty(_db.GetPricingResults(spec.JobId));                              // nothing persisted → fully resumable
+    }
+
+    [Fact]
+    public async Task RunAsync_TransientIpcGaps_DoNotAbort_WhenHelperKeepsResponding()
+    {
+        // Only CONSECUTIVE no-responses abort. A Helper that keeps answering (even with errors)
+        // between gaps is alive — the counter must reset on every response, so the job completes.
+        var xlsx = CreateNdcWorkbook(rowCount: 9);
+        var spec = NewSpec(xlsx, "job-intermittent-ipc");
+        var runner = NewIpcRunner();
+        var flakyHelper = new TwoNullThenReachableIpcClient(); // null, null, reachable, repeating
+
+        var progress = await runner.RunAsync(spec, flakyHelper, CancellationToken.None);
+
+        Assert.Equal(PricingJobStatus.Completed, progress.Status); // never 3 consecutive nulls → never aborts
+        Assert.Equal(9, flakyHelper.SendCount);                    // every row attempted exactly once
+    }
+
+    private PricingJobRunner NewIpcRunner() => new(
+        new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
+        new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
+        _db, NullLogger<PricingJobRunner>.Instance,
+        brainEvaluator: null, interLookupDelay: TimeSpan.Zero);
+
+    private static PricingJobSpec NewSpec(string xlsx, string jobId) => new(
+        JobId: jobId, ExcelPath: xlsx,
+        NdcColumn: PricingJobDefaults.NdcColumn,
+        SupplierColumn: PricingJobDefaults.SupplierColumn,
+        CostColumn: PricingJobDefaults.CostColumn);
+
+    private string CreateNdcWorkbook(int rowCount)
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        ws.Cell(1, 1).Value = PricingJobDefaults.NdcColumn;
+        for (int i = 0; i < rowCount; i++)
+            ws.Cell(i + 2, 1).Value = $"{50000 + i:D5}-{1000 + i:D4}-01"; // valid 5-4-2 NDC format
+        wb.SaveAs(path);
+        return path;
+    }
+
+    /// <summary>Helper that hangs: every lookup returns no response at all.</summary>
+    private sealed class CountingNullIpcClient : IIpcCommandClient
+    {
+        public int SendCount;
+        public bool IsConnected => true;
+        public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+        public Task<IpcResponse?> SendAsync(IpcRequest request, TimeSpan timeout, CancellationToken ct)
+        {
+            SendCount++;
+            return Task.FromResult<IpcResponse?>(null);
+        }
+    }
+
+    /// <summary>Helper that drops 2 of every 3 lookups but keeps responding in between (max 2
+    /// consecutive nulls) — proves the abort is on CONSECUTIVE failures, reset by any response.</summary>
+    private sealed class TwoNullThenReachableIpcClient : IIpcCommandClient
+    {
+        public int SendCount;
+        public bool IsConnected => true;
+        public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+        public Task<IpcResponse?> SendAsync(IpcRequest request, TimeSpan timeout, CancellationToken ct)
+        {
+            SendCount++;
+            if (SendCount % 3 == 0) // every 3rd call the Helper answers (an error response is still "reachable")
+                return Task.FromResult<IpcResponse?>(new IpcResponse(
+                    request.Id, IpcStatus.InternalError, request.Command, null,
+                    new IpcError("E_BUSY", "supplier grid busy", Retryable: true, AttemptCount: 0)));
+            return Task.FromResult<IpcResponse?>(null);
+        }
     }
 }

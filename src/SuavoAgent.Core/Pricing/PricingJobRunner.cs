@@ -30,6 +30,17 @@ public sealed class PricingJobRunner
     // Hard upper bound — anything above this is almost certainly a misconfiguration that would stall jobs.
     private static readonly TimeSpan MaxInterLookupDelay = TimeSpan.FromMilliseconds(30000);
 
+    // B1: after this many CONSECUTIVE IPC lookups that return no response at all (Helper hung /
+    // disconnected), abort the job early. Without this a dead Helper makes every NDC fail silently —
+    // the loop grinds the whole workbook (each row eats a ~2s reconnect + up-to-30s timeout), marks
+    // everything "failed", and reports a finished job, masking "Helper IPC is down" as "nothing priced".
+    internal const int MaxConsecutiveIpcFailuresBeforeAbort = 3;
+
+    // Result of one NDC lookup. HelperUnreachable = the Helper returned NO response at all (timeout /
+    // reconnect failure / pipe error) — an infrastructure failure, distinct from a Helper that
+    // responded with "not found". Drives the early-abort + keeps the row unpersisted (resumable).
+    private readonly record struct LookupOutcome(SupplierPriceResult Result, bool HelperUnreachable);
+
     public PricingJobRunner(
         ExcelPricingReader reader,
         ExcelPricingWriter writer,
@@ -89,7 +100,8 @@ public sealed class PricingJobRunner
                 activePatches.Count, spec.JobId);
 
         int consecutiveFailures = 0;
-        bool haltedByBrain = false;
+        int consecutiveIpcFailures = 0; // B1: only no-response-at-all lookups (Helper hung/disconnected)
+        bool halted = false;
         string? haltReason = null;
 
         if (readResult.Invalid.Count > 0)
@@ -107,7 +119,32 @@ public sealed class PricingJobRunner
         {
             ct.ThrowIfCancellationRequested();
 
-            var result = await LookupNdcAsync(spec.JobId, row, commandClient, activePatches, ct);
+            var lookup = await LookupNdcAsync(spec.JobId, row, commandClient, activePatches, ct);
+
+            if (lookup.HelperUnreachable)
+            {
+                // B1: no response at all → Helper hung/disconnected. Do NOT persist this as a pricing
+                // result — a saved Fail would exclude the row from `pending` on resume, so it would
+                // never get priced after the Helper recovers. Leave it pending, and abort the whole
+                // job early once we're confident the Helper is gone instead of grinding the workbook.
+                consecutiveIpcFailures++;
+                if (consecutiveIpcFailures >= MaxConsecutiveIpcFailuresBeforeAbort)
+                {
+                    halted = true;
+                    haltReason =
+                        $"helper_unreachable: {consecutiveIpcFailures} consecutive IPC lookups returned no response";
+                    _logger.LogCritical(
+                        "PricingJobRunner: job {JobId} ABORTED — Helper unreachable for {N} consecutive lookups. " +
+                        "Stopped early ({Remaining} NDCs left unpriced + resumable) instead of marking the workbook failed.",
+                        spec.JobId, consecutiveIpcFailures, totalItems - completed - failed);
+                    break;
+                }
+                await Task.Delay(_interLookupDelay, ct); // brief pause — the Helper may be mid-restart
+                continue;
+            }
+
+            consecutiveIpcFailures = 0; // the Helper responded → it's alive
+            var result = lookup.Result;
             _db.SavePricingResult(result);
 
             if (result.Found)
@@ -138,7 +175,7 @@ public sealed class PricingJobRunner
                 var brainDecision = await _brainEvaluator.EvaluateAsync(row, result, stats, ct);
                 if (brainDecision.ShouldHalt)
                 {
-                    haltedByBrain = true;
+                    halted = true;
                     haltReason = brainDecision.Reason;
                     _logger.LogWarning(
                         "PricingJobRunner: brain halted job {JobId} after row {Row} — tier={Tier} reason=\"{Reason}\"",
@@ -150,7 +187,7 @@ public sealed class PricingJobRunner
             await Task.Delay(_interLookupDelay, ct);
         }
 
-        if (haltedByBrain)
+        if (halted)
         {
             // Skip the Excel writeback — the job stopped mid-stream, and a
             // partial writeback would misrepresent a resumable halt as final.
@@ -177,7 +214,7 @@ public sealed class PricingJobRunner
         return new PricingJobProgress(spec.JobId, totalItems, completed, failed, finalStatus);
     }
 
-    private async Task<SupplierPriceResult> LookupNdcAsync(
+    private async Task<LookupOutcome> LookupNdcAsync(
         string jobId, NdcRow row, IIpcCommandClient commandClient,
         IReadOnlyList<SelectorPatch> patches, CancellationToken ct)
     {
@@ -192,21 +229,26 @@ public sealed class PricingJobRunner
 
             var response = await commandClient.SendAsync(request, LookupTimeout, ct);
 
+            // No response at all = Helper hung/disconnected (infrastructure failure), NOT a price miss.
             if (response == null)
-                return Fail(jobId, row, "No response from Helper");
+                return new LookupOutcome(Fail(jobId, row, "No response from Helper"), HelperUnreachable: true);
+
+            // From here the Helper responded — it's alive. Any failure below is a per-row/data problem,
+            // so HelperUnreachable stays false and the run continues normally.
 
             // [C-2] Reject mismatched response IDs to prevent pipe desync data corruption
             if (response.Id != request.Id)
-                return Fail(jobId, row, $"Response ID mismatch: expected {request.Id}, got {response.Id}");
+                return new LookupOutcome(Fail(jobId, row, $"Response ID mismatch: expected {request.Id}, got {response.Id}"), false);
 
             if (response.Status != IpcStatus.Ok)
-                return Fail(jobId, row, response.Error?.Message ?? $"Status {response.Status}");
+                return new LookupOutcome(Fail(jobId, row, response.Error?.Message ?? $"Status {response.Status}"), false);
 
             if (response.Data == null)
-                return Fail(jobId, row, "Empty response data");
+                return new LookupOutcome(Fail(jobId, row, "Empty response data"), false);
 
-            return JsonSerializer.Deserialize<SupplierPriceResult>(response.Data.Value) ??
-                   Fail(jobId, row, "Failed to deserialize result");
+            var parsed = JsonSerializer.Deserialize<SupplierPriceResult>(response.Data.Value)
+                         ?? Fail(jobId, row, "Failed to deserialize result");
+            return new LookupOutcome(parsed, false);
         }
         catch (OperationCanceledException)
         {
@@ -215,7 +257,7 @@ public sealed class PricingJobRunner
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "PricingJobRunner: lookup error for NDC {Ndc}", row.NdcNormalized);
-            return Fail(jobId, row, ex.Message);
+            return new LookupOutcome(Fail(jobId, row, ex.Message), false);
         }
     }
 
