@@ -53,6 +53,7 @@ public sealed class ActuationCommandHandler
                 ActuationIpcCommands.TypeText => await HandleTypeTextAsync(data, ct).ConfigureAwait(false),
                 ActuationIpcCommands.PressKeys => await HandlePressKeysAsync(data, ct).ConfigureAwait(false),
                 ActuationIpcCommands.LaunchSandboxApp => await HandleLaunchSandboxAppAsync(data, ct).ConfigureAwait(false),
+                ActuationIpcCommands.ReloadAllowlist => HandleReloadAllowlist(),
                 _ => ActuationResult.Reject(
                     ActuationRejectionCodes.MalformedRequest,
                     $"unknown actuation command '{command}'",
@@ -260,5 +261,19 @@ public sealed class ActuationCommandHandler
         var req = data.Value.Deserialize<LaunchSandboxAppRequest>();
         if (req is null) return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun));
         return _driver.LaunchSandboxAppAsync(req, ct);
+    }
+
+    /// <summary>
+    /// Re-apply the actuation app allowlist in THIS (Helper) process from actuation.json on disk — Core
+    /// has already persisted the merged AllowedApps and applied it in its own static; this makes the
+    /// Helper's AUTHORITATIVE allowlist agree, with no restart. The file is the single source of truth;
+    /// LoadAndExtendFromConfig re-reads it (defaults always retained, malformed entries dropped).
+    /// </summary>
+    private ActuationResult HandleReloadAllowlist()
+    {
+        ActuationAllowlistedSandboxApps.LoadAndExtendFromConfig();
+        var count = ActuationAllowlistedSandboxApps.ProcessNames.Count;
+        _logger.Information("Actuation allowlist reloaded from config — {Count} app(s) now allowed", count);
+        return ActuationResult.Success(0, _gate.IsDryRun, evidenceHash: "reload_allowlist");
     }
 }

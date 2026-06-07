@@ -31,6 +31,11 @@ public static class ActuationIpcCommands
 
     /// <summary>Launch an allowlisted sandbox app (Notepad / Calc only). LOW-tier verb.</summary>
     public const string LaunchSandboxApp = "actuation.launch_sandbox_app";
+
+    /// <summary>Re-read %PROGRAMDATA%\SuavoAgent\actuation.json AllowedApps and re-apply the app
+    /// allowlist in THIS process (no restart). Operator-pushed; Core persists the file first, then
+    /// sends this so the Helper's authoritative static agrees with Core's.</summary>
+    public const string ReloadAllowlist = "actuation.reload_allowlist";
 }
 
 public sealed record ActuationGateState(
@@ -95,6 +100,9 @@ public sealed record LaunchSandboxAppRequest(
     [property: JsonPropertyName("appKey")] string AppKey,
     [property: JsonPropertyName("dryRun")] bool DryRun = false
 );
+
+/// <summary>No-arg reload — actuation.json on disk is the source of truth (Core writes it first).</summary>
+public sealed record ReloadAllowlistRequest();
 
 public sealed record ActuationResult(
     [property: JsonPropertyName("ok")] bool Ok,
