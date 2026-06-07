@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.Versioning;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Conditions;
@@ -107,41 +108,35 @@ public sealed class UiaLabelResolver : IDisposable
         }
     }
 
-    private AutomationElement? FindByName(AutomationElement root, string label, MatchMode mode)
+    /// <summary>
+    /// Resolve a label via UIA's OWN descendant search rather than a hand-rolled BFS. The previous
+    /// bounded BFS (MaxVisited=2000) silently missed elements in deep WinUI trees (the Windows 11
+    /// Calculator): it found some buttons but not others depending on traversal order, so resolution
+    /// was FLAKY — observed live: "Seven" resolved one run, "Five" failed the next. UIA's native
+    /// FindFirstDescendant walks the full tree efficiently with no arbitrary node cap.
+    /// </summary>
+    private static AutomationElement? FindByName(AutomationElement root, string label, MatchMode mode)
     {
-        var queue = new Queue<AutomationElement>();
-        queue.Enqueue(root);
-        var visited = 0;
-        const int MaxVisited = 2000; // budget — keep traversal bounded.
-
-        while (queue.Count > 0 && visited < MaxVisited)
+        try
         {
-            visited++;
-            var node = queue.Dequeue();
-            string? name = null;
-            try { name = node.Name; } catch { /* element gone */ }
+            if (mode == MatchMode.Exact)
+                return root.FindFirstDescendant(cf => cf.ByName(label));
 
-            if (name is not null && Matches(name, label, mode))
-            {
-                return node;
-            }
-
-            AutomationElement[] children;
-            try { children = node.FindAllChildren(); }
-            catch { continue; }
-
-            foreach (var c in children) queue.Enqueue(c);
+            // contains_ci: UIA has no native substring match, so enumerate descendants (native, no
+            // 2000-node cap) and filter. Bounded only by the app's real element count.
+            return root.FindAllDescendants()
+                .FirstOrDefault(e => SafeName(e) is { } n && n.Contains(label, StringComparison.OrdinalIgnoreCase));
         }
-        return null;
+        catch
+        {
+            return null; // UIA tree churned mid-walk — caller retries until the timeout.
+        }
     }
 
-    private static bool Matches(string actual, string expected, MatchMode mode) =>
-        mode switch
-        {
-            MatchMode.Exact => string.Equals(actual, expected, StringComparison.Ordinal),
-            MatchMode.ContainsCaseInsensitive => actual.Contains(expected, StringComparison.OrdinalIgnoreCase),
-            _ => false,
-        };
+    private static string? SafeName(AutomationElement e)
+    {
+        try { return e.Name; } catch { return null; }
+    }
 
     public void Dispose()
     {

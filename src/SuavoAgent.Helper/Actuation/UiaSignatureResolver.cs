@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.Versioning;
 using FlaUI.Core.AutomationElements;
 using FlaUI.UIA2;
@@ -92,25 +93,19 @@ public sealed class UiaSignatureResolver : IDisposable
 
     private static AutomationElement? FindBySignature(AutomationElement root, string controlType, string automationId, string? className)
     {
-        var queue = new Queue<AutomationElement>();
-        queue.Enqueue(root);
-        var visited = 0;
-        const int MaxVisited = 2000; // bounded traversal, matching UiaLabelResolver
-
-        while (queue.Count > 0 && visited < MaxVisited)
+        try
         {
-            visited++;
-            var node = queue.Dequeue();
-
-            if (MatchesSignature(node, controlType, automationId, className))
-                return node;
-
-            AutomationElement[] children;
-            try { children = node.FindAllChildren(); }
-            catch { continue; }
-            foreach (var c in children) queue.Enqueue(c);
+            // Native UIA search by AutomationId (efficient, no node cap), then apply the strict
+            // ControlType/ClassName equality guard below. The previous bounded BFS (MaxVisited=2000)
+            // silently missed elements in deep WinUI trees, making resolution flaky — UIA's own
+            // descendant walk has no arbitrary cap.
+            return root.FindAllDescendants(cf => cf.ByAutomationId(automationId))
+                .FirstOrDefault(node => MatchesSignature(node, controlType, automationId, className));
         }
-        return null;
+        catch
+        {
+            return null; // UIA tree churned mid-walk — caller retries until the timeout.
+        }
     }
 
     private static bool MatchesSignature(AutomationElement node, string controlType, string automationId, string? className)
