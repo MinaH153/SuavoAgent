@@ -120,6 +120,9 @@ public static class ActuationRejectionCodes
     public const string PhiPatternDetected = "phi_pattern_detected";
     public const string LabelNotFound = "label_not_found";
     public const string ProcessNotAllowed = "process_not_allowed";
+    // type/press refused because the launched target window could not be confirmed in the foreground —
+    // fail-closed so keystrokes never leak into an unintended window (e.g. a shell or another app).
+    public const string ForegroundNotTarget = "foreground_not_target";
     public const string AppNotInAllowlist = "app_not_in_allowlist";
     public const string MalformedRequest = "malformed_request";
     public const string ChordParseFailure = "chord_parse_failure";
