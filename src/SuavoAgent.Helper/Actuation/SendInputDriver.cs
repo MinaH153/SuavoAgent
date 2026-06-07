@@ -224,11 +224,16 @@ public sealed class SendInputDriver
 
         try
         {
+            // Resolve to an absolute path under a trusted system location (System32, then Windows)
+            // before launching. A bare process name is resolved by Win32 against the app dir + CWD
+            // FIRST, so a planted "notepad.exe" could hijack the launch; pinning the real system path
+            // closes that. Falls back to the bare name (PATH resolution) only if not found there.
             using var p = Process.Start(new ProcessStartInfo
             {
-                FileName = processName,
+                FileName = ResolveTrustedSystemPath(processName),
                 UseShellExecute = false,
                 CreateNoWindow = false,
+                WorkingDirectory = Environment.SystemDirectory,
             });
 
             // WINDOW-FOCUS: Process.Start returns before the app's window exists, so without waiting +
@@ -287,6 +292,26 @@ public sealed class SendInputDriver
             await Task.Delay(100, ct).ConfigureAwait(false);
         }
         try { p.Refresh(); return p.MainWindowHandle; } catch { return IntPtr.Zero; }
+    }
+
+    /// <summary>
+    /// Resolve a bare process file name (e.g. "notepad.exe") to its absolute path under a trusted
+    /// system directory (System32, then the Windows dir), defeating the app-dir/CWD launch-hijack a
+    /// bare name is subject to. Returns the bare name unchanged if found in neither (best-effort PATH
+    /// resolution for operator-added apps that live elsewhere).
+    /// </summary>
+    private static string ResolveTrustedSystemPath(string processName)
+    {
+        try
+        {
+            var sys32 = System.IO.Path.Combine(Environment.SystemDirectory, processName);
+            if (System.IO.File.Exists(sys32)) return sys32;
+            var win = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows), processName);
+            if (System.IO.File.Exists(win)) return win;
+        }
+        catch { /* fall through to bare name → PATH resolution */ }
+        return processName;
     }
 
     public static string ComputeEvidenceHash(string verb, string payload)

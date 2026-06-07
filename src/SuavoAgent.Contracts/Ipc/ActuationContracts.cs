@@ -165,12 +165,17 @@ public static class ActuationAllowlistedSandboxApps
             foreach (var kv in additions)
             {
                 if (string.IsNullOrWhiteSpace(kv.Key) || string.IsNullOrWhiteSpace(kv.Value)) continue;
+                var appKey = kv.Key.Trim();
+                // The app_key is ALSO used by the click verbs as a process-name match token, so restrict
+                // it to a plain identifier — a config key can't introduce a surprising process target or
+                // smuggle path/format chars.
+                if (!System.Text.RegularExpressions.Regex.IsMatch(appKey, "^[a-zA-Z0-9_-]{1,64}$")) continue;
                 var proc = kv.Value.Trim();
                 // Bare process file name only — reject paths/separators/wildcards.
                 if (!proc.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
                 if (proc.IndexOfAny(new[] { '\\', '/', ':', '*', '?', '"', '<', '>', '|' }) >= 0) continue;
-                if (Defaults.ContainsKey(kv.Key.Trim())) continue; // never override a default
-                next[kv.Key.Trim()] = proc;
+                if (Defaults.ContainsKey(appKey)) continue; // never override a default
+                next[appKey] = proc;
             }
         }
         _current = next;
