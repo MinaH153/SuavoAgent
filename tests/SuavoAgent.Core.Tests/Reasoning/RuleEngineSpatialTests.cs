@@ -88,4 +88,30 @@ public class RuleEngineSpatialTests
         Assert.False(RuleEngine.PredicateMatches(emptyText, ctx));
         Assert.False(RuleEngine.PredicateMatches(emptyRole, ctx));
     }
+
+    [Fact]
+    public void TextNearElement_WildcardRole_MatchesElementOfAnyRole()
+    {
+        // "*" = deliberate role-agnostic liveness: text near SOME rendered control, role unknown.
+        // Used when the real control's UIA role can't be confirmed yet (pending a live-box dump).
+        var p = new RulePredicate { TextNearElement = new[] { new SpatialTextPredicate("Price", "*", 100) } };
+        var nearCustom = Ctx(new[] { T("Price label", 0, 0) }, new[] { E("Custom", 10, 0) });
+        var nearPane = Ctx(new[] { T("Price label", 0, 0) }, new[] { E("Pane", 10, 0) });
+        Assert.True(RuleEngine.PredicateMatches(p, nearCustom));
+        Assert.True(RuleEngine.PredicateMatches(p, nearPane));
+    }
+
+    [Fact]
+    public void TextNearElement_WildcardRole_StillRequiresProximity()
+    {
+        // Role-agnostic does NOT mean constraint-free — the control must still be NEAR the text, and
+        // the text must still be present, or a wrong/half-rendered screen would falsely confirm.
+        var p = new RulePredicate { TextNearElement = new[] { new SpatialTextPredicate("Price", "*", 100) } };
+        var tooFar = Ctx(new[] { T("Price label", 0, 0) }, new[] { E("Custom", 500, 500) });
+        var noText = Ctx(new[] { T("Quantity", 0, 0) }, new[] { E("Custom", 10, 0) });
+        var noElement = Ctx(new[] { T("Price label", 0, 0) }, Array.Empty<VisualElement>());
+        Assert.False(RuleEngine.PredicateMatches(p, tooFar));
+        Assert.False(RuleEngine.PredicateMatches(p, noText));
+        Assert.False(RuleEngine.PredicateMatches(p, noElement));
+    }
 }

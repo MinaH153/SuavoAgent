@@ -122,7 +122,10 @@ public sealed record RulePredicate
 /// One "text near a control" spatial constraint: <paramref name="Text"/> must appear
 /// (case-insensitive) in some <see cref="RuleContext.ScreenText"/> region whose bounding-box
 /// center is within <paramref name="MaxDistancePx"/> pixels of some <see cref="RuleContext.ScreenElements"/>
-/// element of role <paramref name="ElementRole"/> (case-insensitive).
+/// element of role <paramref name="ElementRole"/> (case-insensitive). The sentinel
+/// <c>"*"</c> matches an element of ANY role — a deliberate liveness signal ("text sits next to some
+/// rendered control") for when the exact UIA role isn't confirmed yet. An EMPTY role still fails
+/// closed (authoring-typo protection); <c>"*"</c> is an explicit, authored opt-in.
 /// </summary>
 public sealed record SpatialTextPredicate(string Text, string ElementRole, int MaxDistancePx = 100);
 
