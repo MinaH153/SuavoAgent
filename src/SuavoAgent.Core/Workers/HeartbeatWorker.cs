@@ -535,6 +535,30 @@ public sealed class HeartbeatWorker : ResilientHostedService
                         try { SuavoAgent.Core.Cloud.SelfUpdater.ConfirmHealthyAndReap(otaInstallDir, _logger); }
                         catch (Exception ex) { _logger.LogDebug(ex, "OTA confirm-healthy non-fatal"); }
                     }
+
+                    // Close the OTA telemetry loop: a clean self-update writes "applying" then EXITS,
+                    // and on restart nothing flips it to success — so update-health.json (and the cloud
+                    // rollout reading it) stays "applying" forever even though the new version is running
+                    // and just heartbeated successfully (observed live on 3.24.0). Now that the first
+                    // heartbeat on the new binary succeeded, finalize a stuck "applying" record that
+                    // targets the version we are actually running.
+                    try
+                    {
+                        var uh = RuntimeHealthEvidence.ReadUpdateHealth(RuntimeHealthEvidence.UpdateHealthPath());
+                        if (RuntimeHealthEvidence.IsCompletedApplyingUpdate(uh, _options.Version))
+                        {
+                            WriteUpdateHealthEvidence(
+                                "current",
+                                _options.Version,
+                                lastErrorKind: null,
+                                consecutiveFailures: 0,
+                                channel: _lastUpdateChannel ?? _options.UpdateChannel);
+                            _logger.LogInformation(
+                                "OTA telemetry finalized: update to v{Version} confirmed succeeded on first healthy heartbeat",
+                                _options.Version);
+                        }
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "OTA telemetry finalize non-fatal"); }
                 }
 
                 // Echo updateChannel from server for canary rollout tracking
