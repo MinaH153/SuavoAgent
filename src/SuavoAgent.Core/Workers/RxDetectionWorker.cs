@@ -41,15 +41,38 @@ public sealed class RxDetectionWorker : ResilientHostedService
     private bool _loggedNoPmsOnce;
     internal bool LoggedNoPmsOnce => _loggedNoPmsOnce; // test hook
 
-    // SQL reconnect backoff: replaces the old fixed 60s retry so a down PMS isn't probed
-    // every minute. Grows 60s→600s cap; reset on a successful connect (TryConnectSqlAsync).
+    // SQL reconnect backoff: replaces the old fixed 60s retry so a down PMS isn't probed every
+    // minute. Grows 60s→180s cap (was 600s); reset on a successful connect (TryConnectSqlAsync).
+    // Capped at 180s so detection recovers within ~3min of a real outage clearing, and so it lines
+    // up with the dark-window escalation threshold below.
     private readonly ExponentialBackoff _sqlBackoff =
-        new(TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(600));
+        new(TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(180));
+
+    // B2 — sustained-outage visibility. A down PMS makes RunCycleAsync skip GRACEFULLY (no throw),
+    // so the worker supervisor's OnEscalateAsync never fires; without this the heartbeat shows only
+    // a quiet sqlConnected=false and a pharmacy can go dark on delivery-ready detection with no
+    // operator alarm. Track when SQL first went down + consecutive real connect failures, expose an
+    // explicit `degraded` signal for the heartbeat, and log CRITICAL exactly once past the threshold.
+    internal static readonly TimeSpan SqlDarkEscalationThreshold = TimeSpan.FromSeconds(180);
+    private int _consecutiveSqlFailures;
+    private DateTimeOffset? _sqlDownSince;
+    private bool _degradedLogged;
 
     public int DetectionIntervalSeconds { get; set; } = 300;
     public int LastDetectedCount { get; private set; }
     public DateTimeOffset? LastDetectionTime { get; private set; }
     public bool IsSqlConnected => _sqlConnected;
+    public int ConsecutiveSqlFailures => _consecutiveSqlFailures;
+    public DateTimeOffset? SqlDownSince => _sqlDownSince;
+
+    /// <summary>True when SQL has been down past the escalation threshold — a real detection outage,
+    /// not a transient blip or a no-PMS dev box. Surfaced to the heartbeat as `rxDetectionDegraded`.</summary>
+    public bool IsDetectionDegraded(DateTimeOffset now) =>
+        _sqlDownSince is { } since && now - since >= SqlDarkEscalationThreshold;
+
+    /// <summary>Seconds SQL has been continuously down (0 when connected), for heartbeat telemetry.</summary>
+    public int SqlDarkSeconds(DateTimeOffset now) =>
+        _sqlDownSince is { } since ? (int)Math.Max(0, (now - since).TotalSeconds) : 0;
     public PioneerRxSqlEngine? SqlEngine => _sqlEngine;
     public PioneerRxWritebackEngine? WritebackEngine => _writebackEngine;
     internal SchemaCanaryExportGate SnapshotSchemaCanaryExportGate() =>
@@ -127,6 +150,15 @@ public sealed class RxDetectionWorker : ResilientHostedService
             await TryConnectSqlAsync(ct);
             if (!_sqlConnected)
             {
+                var now = DateTimeOffset.UtcNow;
+                if (IsDetectionDegraded(now) && !_degradedLogged)
+                {
+                    _degradedLogged = true;
+                    _logger.LogCritical(
+                        "Rx detection DARK for {Seconds}s ({Failures} consecutive SQL failures) — pharmacy " +
+                        "not receiving delivery-ready detection; heartbeat now reports rxDetectionDegraded=true",
+                        SqlDarkSeconds(now), _consecutiveSqlFailures);
+                }
                 var backoff = _sqlBackoff.NextDelay();
                 _logger.LogDebug("SQL not connected, skipping detection cycle (retry in {Delay}s)", backoff.TotalSeconds);
                 await Task.Delay(backoff, ct);
@@ -380,6 +412,33 @@ public sealed class RxDetectionWorker : ResilientHostedService
         return patientMap;
     }
 
+    // B2 state transitions — internal so tests can drive the degraded state machine without a live PMS.
+    internal void MarkSqlConnected()
+    {
+        _sqlConnected = true;
+        _consecutiveSqlFailures = 0;
+        _sqlDownSince = null;
+        _degradedLogged = false;
+        _sqlBackoff.Reset();
+    }
+
+    internal void MarkSqlConnectFailed(DateTimeOffset now)
+    {
+        _sqlConnected = false;
+        _consecutiveSqlFailures++;
+        _sqlDownSince ??= now; // first failure of this outage stamps when it went dark
+    }
+
+    // No PMS on this host (dev box / sandbox): not connected, but NOT an outage — clear any dark state
+    // so a machine without PioneerRx never reports `degraded`.
+    private void MarkSqlNotApplicable()
+    {
+        _sqlConnected = false;
+        _consecutiveSqlFailures = 0;
+        _sqlDownSince = null;
+        _degradedLogged = false;
+    }
+
     private async Task TryConnectSqlAsync(CancellationToken ct)
     {
         // No-PMS short-circuit: skip the 30s SqlConnection.OpenAsync timeout
@@ -390,7 +449,7 @@ public sealed class RxDetectionWorker : ResilientHostedService
         // stays bounded.
         if (!PioneerRxInstallDetector.IsInstalled(_logger))
         {
-            _sqlConnected = false;
+            MarkSqlNotApplicable();
             if (!_loggedNoPmsOnce)
             {
                 _logger.LogInformation(
@@ -414,11 +473,11 @@ public sealed class RxDetectionWorker : ResilientHostedService
             _loggerFactory.CreateLogger<PioneerRxSqlEngine>(),
             _options.SqlUser, _options.SqlPassword, _options.SqlTrustServerCertificate);
 
-        _sqlConnected = await _sqlEngine.TryConnectAsync(ct);
+        var connected = await _sqlEngine.TryConnectAsync(ct);
 
-        if (_sqlConnected)
+        if (connected)
         {
-            _sqlBackoff.Reset();
+            MarkSqlConnected();
             _logger.LogInformation("SQL connected to {Server}/{Db}", server, database);
             await SyncSchemaDiscoveryAsync(ct);
 
@@ -474,6 +533,7 @@ public sealed class RxDetectionWorker : ResilientHostedService
         }
         else
         {
+            MarkSqlConnectFailed(DateTimeOffset.UtcNow);
             _logger.LogWarning("SQL connection failed for {Server}/{Db}", server, database);
             _canarySource = null;
         }

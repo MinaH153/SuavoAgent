@@ -233,6 +233,12 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 var sqlConnected = rxWorker?.IsSqlConnected ?? false;
                 var rxReadyCount = rxWorker?.LastDetectedCount ?? 0;
                 _lastRxCount = rxReadyCount;
+                // B2: distinguish a transient SQL blip from a sustained detection outage so the cockpit
+                // can alarm even while the agent is otherwise online and heartbeating.
+                var nowForRx = DateTimeOffset.UtcNow;
+                var rxDetectionDegraded = rxWorker?.IsDetectionDegraded(nowForRx) ?? false;
+                var sqlDarkSeconds = rxWorker?.SqlDarkSeconds(nowForRx) ?? 0;
+                var consecutiveSqlFailures = rxWorker?.ConsecutiveSqlFailures ?? 0;
 
                 // Read Helper IPC state
                 var ipcServer = _serviceProvider.GetService<IpcPipeServer>();
@@ -394,10 +400,15 @@ public sealed class HeartbeatWorker : ResilientHostedService
                         status = pioneerRxObservationStatus,
                         helperAttached,
                         sqlConnected,
+                        detectionDegraded = rxDetectionDegraded,
+                        sqlDarkSeconds,
+                        consecutiveSqlFailures,
                     },
                     // Top-level fields for cloud stats extraction
                     learningMode = _options.LearningMode,
                     sqlConnected = sqlConnected,
+                    rxDetectionDegraded = rxDetectionDegraded,
+                    sqlDarkSeconds = sqlDarkSeconds,
                     pendingWritebackCount = pendingWbCount,
                     failedWritebackCount = failedWbCount,
                     rxReadyCount = _lastRxCount,
