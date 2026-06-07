@@ -107,7 +107,20 @@ public sealed class UiaSignatureResolver : IDisposable
         }
         catch { /* fall through */ }
 
-        try { return auto.GetDesktop().FindFirstChild(cf => cf.ByProcessId(proc.Id)); }
+        try
+        {
+            var desktop = auto.GetDesktop();
+            var direct = desktop.FindFirstChild(cf => cf.ByProcessId(proc.Id));
+            if (direct is not null) return direct;
+            // ApplicationFrameHost-hosted UWP: frame window owned by ApplicationFrameHost, hosted child
+            // owned by the app — find the desktop window whose child belongs to the app process.
+            return desktop.FindAllChildren()
+                .FirstOrDefault(w =>
+                {
+                    try { return w.FindFirstChild(cf => cf.ByProcessId(proc.Id)) is not null; }
+                    catch { return false; }
+                });
+        }
         catch { return null; }
     }
 
