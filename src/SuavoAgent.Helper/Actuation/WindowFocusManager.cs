@@ -141,6 +141,16 @@ internal static class WindowFocusManager
                 AttachThreadInput(ourThread, targetThread, true);
 
             BringWindowToTop(hwnd);
+            // VISUAL Z-ORDER RAISE: SetForegroundWindow + AttachThreadInput set the *logical* foreground
+            // (GetForegroundWindow returns hwnd) but from a background process they do NOT reliably raise
+            // the window above others in the visible Z-order. Observed live: Notepad reported foreground
+            // yet stayed BEHIND a PowerShell window, so the focus-click at its client centre landed on
+            // PowerShell — which then stole the foreground (type refused, failed closed). The TOPMOST →
+            // NOTOPMOST toggle forces the window to the very top of the Z-order and then drops the
+            // always-on-top flag, leaving it genuinely on top of the normal stack so a client-area click
+            // lands on it.
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
             var ok = SetForegroundWindow(hwnd);
             // While input queues are attached, also set keyboard focus to the window so apps that route
             // focus to a default child control (text editors) become input-ready. No side effect — unlike
@@ -239,4 +249,16 @@ internal static class WindowFocusManager
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    // Z-order raise: HWND_TOPMOST(-1) then HWND_NOTOPMOST(-2) forces the window to the front of the
+    // visible stack without leaving it permanently always-on-top.
+    private static readonly IntPtr HWND_TOPMOST = new(-1);
+    private static readonly IntPtr HWND_NOTOPMOST = new(-2);
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_SHOWWINDOW = 0x0040;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 }
