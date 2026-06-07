@@ -483,6 +483,28 @@ public static class RuntimeHealthEvidence
         File.Move(tmp, path, overwrite: true);
     }
 
+    /// <summary>
+    /// True when a stuck <c>"applying"</c> update record should be finalized as succeeded — i.e. the
+    /// agent is now running the very version the update targeted. A clean self-update writes
+    /// <c>"applying"</c> then exits the process; on restart nothing flips it to success, so
+    /// <c>update-health.json</c> (and the cloud rollout that reads it) stays <c>"applying"</c> forever
+    /// even though the new binary is live and healthy. The first healthy heartbeat on the new binary is
+    /// the milestone that closes the loop. Version comparison is prefix-normalized because the agent
+    /// reports <c>"3.24.0"</c> while manifests/tags may carry <c>"v3.24.0"</c>.
+    /// </summary>
+    public static bool IsCompletedApplyingUpdate(UpdateHealthPayload payload, string? runningVersion)
+    {
+        if (payload is null ||
+            !string.Equals(payload.Status, "applying", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var target = AgentVersion.Normalize(payload.TargetVersion);
+        var running = AgentVersion.Normalize(runningVersion);
+        return !string.IsNullOrWhiteSpace(target)
+            && !string.IsNullOrWhiteSpace(running)
+            && string.Equals(target, running, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string Sha256Hex(string path)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
