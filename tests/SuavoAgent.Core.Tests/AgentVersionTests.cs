@@ -24,10 +24,15 @@ public class AgentVersionTests
     [InlineData("3.19.0", "3.19.0")]
     [InlineData("3.19.0+abc1234", "3.19.0")] // strip SourceLink "+<git-sha>" build metadata
     [InlineData("3.19.0-rc1", "3.19.0-rc1")] // keep a pre-release suffix (only "+metadata" is stripped)
+    [InlineData("v3.23.0", "3.23.0")]        // strip a leading "v" tag prefix (MKM#1181 rollout-stuck class)
+    [InlineData("V3.23.0", "3.23.0")]        // case-insensitive prefix strip
+    [InlineData("v3.23.0+abc1234", "3.23.0")] // strip BOTH "v" prefix and "+<git-sha>" metadata
+    [InlineData("v3.23.0-rc1", "3.23.0-rc1")] // strip "v", keep pre-release suffix
+    [InlineData("version", "version")]        // do NOT strip 'v' unless followed by a digit
     [InlineData("", null)]
     [InlineData("   ", null)]
     [InlineData(null, null)]
-    public void Normalize_StripsOnlyBuildMetadata(string? input, string? expected)
+    public void Normalize_StripsBuildMetadataAndLeadingV(string? input, string? expected)
         => Assert.Equal(expected, AgentVersion.Normalize(input));
 
     [Fact]
