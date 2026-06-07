@@ -72,7 +72,18 @@ public static class SqlPricingQueryBuilder
             sb.Append(')');
         }
 
-        sb.Append(" AND ").Append(costExpr).Append(" > 0 ORDER BY ").Append(costExpr).Append(" ASC");
+        // Rank by the SAME quantity the savings ledger consumes. When the catalog has a dedicated
+        // per-unit cost column, the cheapest-PER-UNIT supplier — not the cheapest-PACK supplier — is
+        // the correct pick: ranking by pack cost while reporting that row's per-unit cost selects the
+        // wrong supplier (and a wrong savings dollar figure) whenever pack sizes differ across
+        // suppliers. With no per-unit column, savings enrichment is suppressed upstream
+        // (SqlFirstPricingJobExecutor savingsUnitSafe gate), so ranking by pack cost stays correct for
+        // the cheapest-available display.
+        var rankExpr = s.CostPerUnitColumn != null ? costPerUnitExpr : costExpr;
+        sb.Append(" AND ").Append(costExpr).Append(" > 0");
+        if (s.CostPerUnitColumn != null)
+            sb.Append(" AND ").Append(costPerUnitExpr).Append(" > 0");
+        sb.Append(" ORDER BY ").Append(rankExpr).Append(" ASC");
 
         return sb.ToString();
     }
