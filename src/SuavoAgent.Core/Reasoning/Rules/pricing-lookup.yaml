@@ -79,6 +79,32 @@ rules:
         verifyAfter:
           visibleElements: ["Supplier", "Cost Per Unit"]
 
+  # First production rule to reason over the CAPTURED screen (OCR text + spatial layout) rather
+  # than the static UIA visibleElements snapshot. Confirms we actually landed on the Pricing tab.
+  # Text signature grounded in the REAL PioneerRx Edit-Rx-Item Pricing screen (Nadim 2026-06-06,
+  # image 31): the Pricing tab + the Supplier-Catalog grid's column headers "Supplier", "Cost",
+  # "NDC" — all single OCR tokens (low word-split risk), together specific to this screen. Plus a
+  # spatial liveness check: the "Cost" column header sits next to SOME rendered control (the grid is
+  # live, not a static image). The element ROLE is "*" (any) on purpose — the real grid cells' UIA
+  # role can't be confirmed from a screenshot and needs a live-box UIA-tree dump; a hard-coded role
+  # guess would silently never match on the real screen. Robust to PioneerRx renaming a control (the
+  # UIA name can drift, the rendered screen can't lie). Read-only (Log), so autonomousOk; needs vision.
+  - id: pricing-lookup.confirm-pricing-screen
+    skillId: pricing-lookup
+    priority: 165
+    description: "Vision-grounded confirmation the Pricing tab rendered (OCR sees Pricing+Supplier+Cost+NDC, Cost next to a live control)"
+    autonomousOk: true
+    when:
+      processName: "PioneerPharmacy*"
+      textPresent: ["Pricing", "Supplier", "Cost", "NDC"]
+      textNearElement:
+        - text: "Cost"
+          elementRole: "*"   # any rendered control — exact supplier-grid UIA role pending a live-box UIA dump
+          maxDistancePx: 400
+    then:
+      - type: Log
+        description: "Vision-confirmed: on the Pricing tab with a live supplier cost grid"
+
   - id: pricing-lookup.close-edit-window
     skillId: pricing-lookup
     priority: 10

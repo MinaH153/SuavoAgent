@@ -234,6 +234,12 @@ public sealed class RuleEngine
         if (p.MaxDistancePx < 0 || string.IsNullOrEmpty(p.Text) || string.IsNullOrEmpty(p.ElementRole))
             return false;
 
+        // "*" is the deliberate role-agnostic sentinel: the rule asserts the text sits near SOME
+        // rendered control (a liveness signal — the screen isn't a static image), without pinning the
+        // exact UIA role. Used when the real control's role can't be confirmed yet (e.g. a PioneerRx
+        // grid cell whose role needs a live-box UIA dump). Empty role still fails closed above (typo
+        // protection); "*" is an explicit, authored choice.
+        var anyRole = p.ElementRole == "*";
         long maxSq = (long)p.MaxDistancePx * p.MaxDistancePx;
         foreach (var t in ctx.ScreenText)
         {
@@ -242,7 +248,7 @@ public sealed class RuleEngine
             var (tx, ty) = Center(t.Bounds);
             foreach (var e in ctx.ScreenElements)
             {
-                if (!string.Equals(e.Role, p.ElementRole, StringComparison.OrdinalIgnoreCase))
+                if (!anyRole && !string.Equals(e.Role, p.ElementRole, StringComparison.OrdinalIgnoreCase))
                     continue;
                 var (ex, ey) = Center(e.Bounds);
                 long dx = tx - ex, dy = ty - ey;
