@@ -142,6 +142,11 @@ internal static class WindowFocusManager
 
             BringWindowToTop(hwnd);
             var ok = SetForegroundWindow(hwnd);
+            // While input queues are attached, also set keyboard focus to the window so apps that route
+            // focus to a default child control (text editors) become input-ready. No side effect — unlike
+            // a content click, SetFocus can't trigger a control. The TYPE path additionally clicks the
+            // client area for a stable edit-control focus; this helps the no-click (press_keys) path.
+            SetFocus(hwnd);
             return ok;
         }
         catch (Exception ex)
@@ -161,9 +166,40 @@ internal static class WindowFocusManager
         }
     }
 
+    /// <summary>
+    /// Screen-coordinate centre of <paramref name="hwnd"/>'s client area, used to place a focus-click
+    /// inside the window's content (e.g. a text editor's edit surface) rather than on its chrome.
+    /// Returns null if the client rect can't be read or is degenerate.
+    /// </summary>
+    public static (int X, int Y)? GetClientCenterScreen(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return null;
+        try
+        {
+            if (!GetClientRect(hwnd, out var rc)) return null;
+            if (rc.Right <= rc.Left || rc.Bottom <= rc.Top) return null;
+            var pt = new POINT { X = (rc.Right - rc.Left) / 2, Y = (rc.Bottom - rc.Top) / 2 };
+            if (!ClientToScreen(hwnd, ref pt)) return null;
+            return (pt.X, pt.Y);
+        }
+        catch { return null; }
+    }
+
     // ── Win32 surface ───────────────────────────────────────────────────────
     private const int SW_RESTORE = 9;
     private const int SW_SHOW = 5;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int X, Y; }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -197,6 +233,9 @@ internal static class WindowFocusManager
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetFocus(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
