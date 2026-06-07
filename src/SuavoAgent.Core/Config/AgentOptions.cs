@@ -1,3 +1,5 @@
+using SuavoAgent.Contracts.Pricing;
+
 namespace SuavoAgent.Core.Config;
 
 public sealed class AgentOptions
@@ -259,6 +261,15 @@ public sealed class AgentOptions
     public int PricingThrottleMs { get; set; } = 1500;
 
     /// <summary>
+    /// Autonomous pricing schedule — the "the bot does it on its own" loop Nadim asked for (the
+    /// documented overnight 500-row batch). When enabled, the agent runs the configured workbook
+    /// through the pricing pipeline on a daily schedule WITHOUT a cockpit command. OFF by default.
+    /// Deliberately SqlFirst-only at the worker (read-only SQL + Excel writeback, no PMS UI
+    /// actuation) — autonomous keystroke-driving of a live PMS stays operator-triggered (Precedence-1).
+    /// </summary>
+    public PricingScheduleOptions PricingSchedule { get; set; } = new();
+
+    /// <summary>
     /// Returns the effective pharmacy list — either the explicit Pharmacies array
     /// or a single entry synthesized from top-level fields.
     /// </summary>
@@ -286,6 +297,37 @@ public enum PricingExecutorMode
     SqlFirst,
     /// <summary>UIA-first via Helper. No SQL fallback. See <c>AgentOptions.PricingExecutor</c>.</summary>
     UiaFirst,
+}
+
+/// <summary>
+/// Autonomous pricing schedule (<see cref="AgentOptions.PricingSchedule"/>). When <see cref="Enabled"/>
+/// and a <see cref="WorkbookPath"/> is set, <c>PricingScheduleWorker</c> runs the pricing pipeline on
+/// the configured workbook once per day at <see cref="RunAtLocalTime"/>, with no cockpit command. OFF
+/// by default. The worker only runs when <c>PricingExecutor == SqlFirst</c> (read-only); it refuses to
+/// autonomously drive the PMS UI.
+/// </summary>
+public sealed class PricingScheduleOptions
+{
+    /// <summary>Master toggle for the autonomous daily pricing run. Default false (operator opt-in).</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// Absolute local path to the workbook to price (e.g. the top-500-dispensed sheet). Required to
+    /// run. The pipeline reads NDCs from it and writes a sibling priced workbook next to it.
+    /// </summary>
+    public string? WorkbookPath { get; set; }
+
+    /// <summary>Local time of day to run, "HH:mm" (24h). Default "02:00" — overnight, off-hours.</summary>
+    public string RunAtLocalTime { get; set; } = "02:00";
+
+    /// <summary>NDC column header in the workbook. Default matches the cockpit pricing command.</summary>
+    public string NdcColumn { get; set; } = PricingJobDefaults.NdcColumn;
+
+    /// <summary>Header for the supplier column written back. Default matches the cockpit command.</summary>
+    public string SupplierColumn { get; set; } = PricingJobDefaults.SupplierColumn;
+
+    /// <summary>Header for the cost column written back. Default matches the cockpit command.</summary>
+    public string CostColumn { get; set; } = PricingJobDefaults.CostColumn;
 }
 
 public sealed class SelfHealOptions
