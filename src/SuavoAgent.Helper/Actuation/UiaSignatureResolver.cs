@@ -70,8 +70,7 @@ public sealed class UiaSignatureResolver : IDisposable
     {
         try
         {
-            if (proc.MainWindowHandle == IntPtr.Zero) return null;
-            var window = _automation!.FromHandle(proc.MainWindowHandle);
+            var window = ResolveWindow(proc);
             if (window is null) return null;
 
             var element = FindBySignature(window, controlType, automationId, className);
@@ -89,6 +88,27 @@ public sealed class UiaSignatureResolver : IDisposable
             _logger.Debug(ex, "UiaSignatureResolver: resolve failed for pid={Pid}", proc.Id);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Resolve the app's top-level window — Win32 MainWindowHandle, falling back to the UIA desktop
+    /// root by process id when it's 0 (packaged apps intermittently report 0). Mirrors UiaLabelResolver.
+    /// </summary>
+    private AutomationElement? ResolveWindow(Process proc)
+    {
+        var auto = _automation!;
+        try
+        {
+            if (proc.MainWindowHandle != IntPtr.Zero)
+            {
+                var w = auto.FromHandle(proc.MainWindowHandle);
+                if (w is not null) return w;
+            }
+        }
+        catch { /* fall through */ }
+
+        try { return auto.GetDesktop().FindFirstChild(cf => cf.ByProcessId(proc.Id)); }
+        catch { return null; }
     }
 
     private static AutomationElement? FindBySignature(AutomationElement root, string controlType, string automationId, string? className)
