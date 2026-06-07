@@ -328,24 +328,43 @@ public sealed class SendInputDriver
                 dryRun: false);
         }
 
+        // Bring the target foreground, then prove it's INPUT-READY before returning OK. A
+        // freshly-foregrounded window owns the foreground (IsPidForeground == true) for a few hundred
+        // ms BEFORE its edit control actually accepts keystrokes — so early chars are silently dropped
+        // (observed live: "v326 fail-closed verify OK" → only the tail "ify OK" landed). We therefore
+        // require foreground to hold across a settle window and re-confirm afterward; only then do we
+        // let the keystrokes flow. Still fail-closed: if it can't be brought + held foreground, refuse.
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < 2500 && !ct.IsCancellationRequested)
+        while (sw.ElapsedMilliseconds < ForegroundAcquireTimeoutMs && !ct.IsCancellationRequested)
         {
-            if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) return null;
+            if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid))
+            {
+                // Input-ready settle, then re-confirm the window is STILL foreground (nothing stole it
+                // back during the settle). Both must hold or we keep trying / eventually fail closed.
+                await DelayWithCancel(ForegroundSettleMs, ct).ConfigureAwait(false);
+                if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid))
+                    return null;
+                continue;
+            }
             WindowFocusManager.ForceForeground(target.Hwnd, _logger);
             await DelayWithCancel(150, ct).ConfigureAwait(false);
         }
 
-        if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) return null;
-
         _logger.Warning(
-            "{Verb} refused: target '{Label}' (pid={Pid}) not in foreground after retry — failing closed",
-            verb, target.Label, target.Pid);
+            "{Verb} refused: target '{Label}' (pid={Pid}) not held in foreground within {Timeout}ms — failing closed",
+            verb, target.Label, target.Pid, ForegroundAcquireTimeoutMs);
         return ActuationResult.Reject(
             ActuationRejectionCodes.ForegroundNotTarget,
-            $"target '{target.Label}' (pid={target.Pid}) could not be brought to the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
+            $"target '{target.Label}' (pid={target.Pid}) could not be held in the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
             dryRun: false);
     }
+
+    // Foreground acquisition tuning. The settle is generous on purpose: a remote/loaded desktop can
+    // take 500ms+ after a window goes foreground before its edit control reliably accepts SendInput;
+    // a 750ms settle trades a little latency for not dropping leading characters (a wrong typed value
+    // is worse than a slow one). The acquire timeout bounds the fail-closed wait.
+    private const int ForegroundSettleMs = 750;
+    private const int ForegroundAcquireTimeoutMs = 6000;
 
     /// <summary>
     /// Resolve a bare process file name (e.g. "notepad.exe") to its absolute path under a trusted
