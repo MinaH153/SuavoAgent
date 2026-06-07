@@ -65,7 +65,10 @@ public record PricingJobProgress(
     int TotalItems,
     int CompletedItems,
     int FailedItems,
-    string Status);
+    string Status,
+    // Stable machine reason-code when Status is "halted" (e.g. "helper_unreachable") so the cloud
+    // cockpit shows an exact badge instead of inferring from free-text. Null for non-halted runs.
+    string? HaltReason = null);
 
 public static class PricingJobStatus
 {
