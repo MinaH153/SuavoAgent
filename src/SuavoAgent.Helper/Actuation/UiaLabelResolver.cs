@@ -86,10 +86,7 @@ public sealed class UiaLabelResolver : IDisposable
     {
         try
         {
-            if (proc.MainWindowHandle == IntPtr.Zero) return null;
-
-            var auto = _automation!;
-            var window = auto.FromHandle(proc.MainWindowHandle);
+            var window = ResolveWindow(proc);
             if (window is null) return null;
 
             var element = FindByName(window, label, mode);
@@ -107,6 +104,30 @@ public sealed class UiaLabelResolver : IDisposable
             _logger.Debug(ex, "UiaLabelResolver: resolve failed for pid={Pid}", proc.Id);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Resolve the app's top-level window. Prefer the Win32 MainWindowHandle, but fall back to the UIA
+    /// desktop root filtered by process id when it's 0 — packaged apps (the Windows 11 Calculator)
+    /// intermittently report MainWindowHandle==0 even with the window up, which made resolution FLAKY
+    /// (same label succeeded one run, failed the next). The desktop-root path doesn't depend on the
+    /// Win32 handle.
+    /// </summary>
+    private AutomationElement? ResolveWindow(Process proc)
+    {
+        var auto = _automation!;
+        try
+        {
+            if (proc.MainWindowHandle != IntPtr.Zero)
+            {
+                var w = auto.FromHandle(proc.MainWindowHandle);
+                if (w is not null) return w;
+            }
+        }
+        catch { /* fall through to the desktop-root search */ }
+
+        try { return auto.GetDesktop().FindFirstChild(cf => cf.ByProcessId(proc.Id)); }
+        catch { return null; }
     }
 
     /// <summary>
@@ -156,8 +177,7 @@ public sealed class UiaLabelResolver : IDisposable
                 {
                     foreach (var proc in procs)
                     {
-                        if (proc.MainWindowHandle == IntPtr.Zero) continue;
-                        var window = _automation!.FromHandle(proc.MainWindowHandle);
+                        var window = ResolveWindow(proc);
                         if (window is null) continue;
                         var names = window.FindAllDescendants()
                             .Select(SafeName)
