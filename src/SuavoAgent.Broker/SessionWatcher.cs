@@ -8,14 +8,79 @@ namespace SuavoAgent.Broker;
 public sealed class SessionWatcher : BackgroundService
 {
     private readonly ILogger<SessionWatcher> _logger;
+    private readonly IWatchdogServiceProbe _watchdogProbe;
+    private readonly Func<string, bool> _fileExists;
     private readonly Dictionary<uint, HelperInfo> _helpers = new();
     private DateTimeOffset _lastAttestationWrite = DateTimeOffset.MinValue;
+
+    // B5 — privileged-launch failure tracking. When CreateProcessAsUser keeps returning null (Broker
+    // lacks SeTcbPrivilege, e.g. mis-registered as NetworkService), the old code logged CRITICAL and
+    // returned — but CheckActiveSessions re-runs every 5s, so it retried FOREVER, spammed CRITICAL,
+    // and never triggered repair. Now: count consecutive launch failures and, past the threshold,
+    // escalate a bootstrap repair (the real fix — re-register the Broker as LocalSystem) exactly once.
+    // The counter moves ONLY on a launch failure, never on a Helper crash, so a persistent privilege
+    // problem ("never launched") is distinguished from a Helper that launched then exited ("crashed").
+    private int _consecutiveLaunchFailures;
+    private bool _launchFailureEscalated;
+    internal const int MaxConsecutiveLaunchFailuresBeforeEscalation = 3;
 
     private record HelperInfo(int ProcessId, uint SessionId, DateTimeOffset LaunchedAt, string HelperSha256);
 
     public SessionWatcher(ILogger<SessionWatcher> logger)
+        : this(logger, new ScWatchdogServiceProbe(), File.Exists) { }
+
+    // Test seam: inject a fake Watchdog probe + file-existence check so the launch-failure escalation
+    // is unit-testable without a live Windows session or a real bootstrap.ps1.
+    internal SessionWatcher(
+        ILogger<SessionWatcher> logger, IWatchdogServiceProbe watchdogProbe, Func<string, bool> fileExists)
     {
         _logger = logger;
+        _watchdogProbe = watchdogProbe;
+        _fileExists = fileExists;
+    }
+
+    internal int ConsecutiveLaunchFailures => _consecutiveLaunchFailures;
+    internal bool LaunchFailureEscalated => _launchFailureEscalated;
+
+    /// <summary>Past this many consecutive privileged-launch failures, stop silently retrying and
+    /// escalate a bootstrap repair once. Pure so the threshold decision is unit-testable.</summary>
+    internal static bool ShouldEscalateLaunchFailure(int consecutiveFailures, bool alreadyEscalated) =>
+        !alreadyEscalated && consecutiveFailures >= MaxConsecutiveLaunchFailuresBeforeEscalation;
+
+    internal void RegisterLaunchSuccess()
+    {
+        _consecutiveLaunchFailures = 0;
+        _launchFailureEscalated = false;
+    }
+
+    /// <summary>Record a privileged-launch failure. Returns true exactly once — on the failure that
+    /// first crosses the escalation threshold — so the caller invokes the bootstrap repair a single time.</summary>
+    internal bool RegisterLaunchFailure()
+    {
+        _consecutiveLaunchFailures++;
+        if (ShouldEscalateLaunchFailure(_consecutiveLaunchFailures, _launchFailureEscalated))
+        {
+            _launchFailureEscalated = true;
+            return true;
+        }
+        return false;
+    }
+
+    // Escalation: re-run bootstrap.ps1 --repair (the installer logic that re-registers the Broker as
+    // LocalSystem). Internal + probe/fileExists-injected so the invocation is unit-testable.
+    internal bool TryInvokeBootstrapRepair()
+    {
+        var bootstrap = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent", "bootstrap.ps1");
+        if (!_fileExists(bootstrap))
+        {
+            _logger.LogError(
+                "Cannot escalate repeated Helper-launch failure: bootstrap.ps1 not found at {Path} (dev box or broken install)",
+                bootstrap);
+            return false;
+        }
+        return _watchdogProbe.InvokeBootstrapRepair(bootstrap, TimeSpan.FromMinutes(2));
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -71,7 +136,7 @@ public sealed class SessionWatcher : BackgroundService
                 "SuavoAgent", "bootstrap.ps1");
 
             new WatchdogServiceGuard(
-                new ScWatchdogServiceProbe(), _logger, enabled, watchdogBinary, bootstrap)
+                _watchdogProbe, _logger, enabled, watchdogBinary, bootstrap)
                 .EnsureWatchdogRegistered();
         }
         catch (Exception ex)
@@ -320,12 +385,28 @@ public sealed class SessionWatcher : BackgroundService
             // helper-down watch reports degraded — never ship a blind Helper.
             if (pid == null && !MayUseProcessStartFallback(OperatingSystem.IsWindows()))
             {
-                _logger.LogCritical(
-                    "Helper launch into interactive session {Session} FAILED: CreateProcessAsUser returned null " +
-                    "(Broker almost certainly lacks SeTcbPrivilege — it must run as LocalSystem, not NetworkService/LocalService). " +
-                    "Refusing the Session-0 fallback because a Helper there is BLIND (no visible cursor, screen capture, or UIA) " +
-                    "yet looks alive. Leaving Helper DOWN so the cloud reports degraded. FIX: register SuavoAgent.Broker as LocalSystem.",
-                    sessionId);
+                var escalateNow = RegisterLaunchFailure();
+                // CRITICAL on the first failure and on the escalation crossing; downgrade the in-between
+                // 5s retries to Warning so a down box doesn't flood the log with identical CRITICALs.
+                if (_consecutiveLaunchFailures == 1 || escalateNow)
+                    _logger.LogCritical(
+                        "Helper launch into interactive session {Session} FAILED (attempt {Attempt}): CreateProcessAsUser " +
+                        "returned null (Broker almost certainly lacks SeTcbPrivilege — it must run as LocalSystem, not " +
+                        "NetworkService/LocalService). Refusing the Session-0 fallback because a Helper there is BLIND " +
+                        "(no visible cursor, screen capture, or UIA) yet looks alive. Leaving Helper DOWN so the cloud reports degraded.",
+                        sessionId, _consecutiveLaunchFailures);
+                else
+                    _logger.LogWarning(
+                        "Helper launch still failing for session {Session} (attempt {Attempt})", sessionId, _consecutiveLaunchFailures);
+
+                if (escalateNow)
+                {
+                    _logger.LogCritical(
+                        "Helper launch has failed {Attempt} consecutive times — escalating a bootstrap repair to re-register " +
+                        "the Broker as LocalSystem (root cause: missing SeTcbPrivilege).", _consecutiveLaunchFailures);
+                    var repaired = TryInvokeBootstrapRepair();
+                    _logger.LogWarning("Bootstrap repair escalation invoked (launched={Launched})", repaired);
+                }
                 return;
             }
 
@@ -349,6 +430,7 @@ public sealed class SessionWatcher : BackgroundService
 
             if (pid != null)
             {
+                RegisterLaunchSuccess(); // a real launch clears the privileged-launch failure counter
                 _helpers[sessionId] = new HelperInfo(
                     pid.Value,
                     sessionId,
