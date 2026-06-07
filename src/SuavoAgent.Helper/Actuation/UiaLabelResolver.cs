@@ -44,23 +44,32 @@ public sealed class UiaLabelResolver : IDisposable
         var deadline = DateTimeOffset.UtcNow + timeout;
         _automation ??= new UIA2Automation();
 
+        // Search every candidate process name, not just the bare launcher name: Windows 11 packaged
+        // apps (Calculator, etc.) are launched via a stub (calc.exe) but the window-owning process has
+        // a different name (Calculator / CalculatorApp), so GetProcessesByName("calc") finds nothing.
+        // PackagedAppAliases expands "calc.exe" -> [calc, Calculator, CalculatorApp]. (Same root cause
+        // the SendInputDriver launch path hit — see WindowFocusManager.)
+        var candidates = PackagedAppAliases.CandidateProcessNames(processName);
         while (DateTimeOffset.UtcNow < deadline)
         {
-            var procs = Process.GetProcessesByName(StripExe(processName));
-            try
+            foreach (var candidate in candidates)
             {
-                foreach (var proc in procs)
+                var procs = Process.GetProcessesByName(candidate);
+                try
                 {
-                    var resolved = TryResolveInProcess(proc, label, mode);
-                    if (resolved is not null)
+                    foreach (var proc in procs)
                     {
-                        return resolved with { ProcessName = processName };
+                        var resolved = TryResolveInProcess(proc, label, mode);
+                        if (resolved is not null)
+                        {
+                            return resolved with { ProcessName = processName };
+                        }
                     }
                 }
-            }
-            finally
-            {
-                foreach (var p in procs) p.Dispose();
+                finally
+                {
+                    foreach (var p in procs) p.Dispose();
+                }
             }
 
             Thread.Sleep(150);
@@ -133,11 +142,6 @@ public sealed class UiaLabelResolver : IDisposable
             MatchMode.ContainsCaseInsensitive => actual.Contains(expected, StringComparison.OrdinalIgnoreCase),
             _ => false,
         };
-
-    private static string StripExe(string processName) =>
-        processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-            ? processName[..^4]
-            : processName;
 
     public void Dispose()
     {
