@@ -78,6 +78,7 @@ public sealed class UiaLabelResolver : IDisposable
 
         _logger.Warning("UiaLabelResolver: '{Label}' not found in '{Process}' within {TimeoutMs}ms",
             label, processName, (int)timeout.TotalMilliseconds);
+        LogAvailableNames(candidates, processName, label);
         return null;
     }
 
@@ -136,6 +137,48 @@ public sealed class UiaLabelResolver : IDisposable
     private static string? SafeName(AutomationElement e)
     {
         try { return e.Name; } catch { return null; }
+    }
+
+    /// <summary>
+    /// Discovery aid: when a label can't be resolved, log the accessible names ACTUALLY present so the
+    /// real control names are visible instead of guessed. Names are PHI-scrubbed (PhiPatternGuard) and
+    /// this writes to the LOCAL log only — never cloud telemetry — so it is safe on a PMS box. Capped
+    /// to keep the line bounded. This is the "name the field you blocked" principle applied to UIA.
+    /// </summary>
+    private void LogAvailableNames(IReadOnlyList<string> candidates, string processName, string label)
+    {
+        try
+        {
+            foreach (var candidate in candidates)
+            {
+                var procs = Process.GetProcessesByName(candidate);
+                try
+                {
+                    foreach (var proc in procs)
+                    {
+                        if (proc.MainWindowHandle == IntPtr.Zero) continue;
+                        var window = _automation!.FromHandle(proc.MainWindowHandle);
+                        if (window is null) continue;
+                        var names = window.FindAllDescendants()
+                            .Select(SafeName)
+                            .Where(n => !string.IsNullOrWhiteSpace(n)
+                                && !PhiPatternGuard.ContainsPotentialPhi(n!, out _))
+                            .Distinct()
+                            .Take(80)
+                            .ToArray();
+                        _logger.Warning(
+                            "UiaLabelResolver discovery: '{Label}' absent; {Count} PHI-safe named elements in '{Process}': [{Names}]",
+                            label, names.Length, processName, string.Join(" | ", names));
+                        return; // one window is enough
+                    }
+                }
+                finally { foreach (var p in procs) p.Dispose(); }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug(ex, "UiaLabelResolver: discovery dump failed");
+        }
     }
 
     public void Dispose()
