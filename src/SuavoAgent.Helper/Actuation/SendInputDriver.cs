@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32;
 using Serilog;
 using SuavoAgent.Contracts.Ipc;
 
@@ -363,8 +364,9 @@ public sealed class SendInputDriver
             // PID trips the cloud's ZIP-code PHI filter, which would null the result and mask this
             // legitimate operational failure as an opaque "result_rejected_phi_validation".
             _logger.Warning(
-                "{Verb} refused: target '{Label}' (pid={Pid}) not brought to foreground within {Timeout}ms — failing closed",
-                verb, target.Label, target.Pid, ForegroundAcquireTimeoutMs);
+                "{Verb} refused: target '{Label}' (pid={Pid}) not brought to foreground within {Timeout}ms — failing closed; {ForegroundOwner}",
+                verb, target.Label, target.Pid, ForegroundAcquireTimeoutMs,
+                WindowFocusManager.DescribeForegroundWindow());
             return ActuationResult.Reject(
                 ActuationRejectionCodes.ForegroundNotTarget,
                 $"target '{target.Label}' could not be brought to the foreground within {ForegroundAcquireTimeoutMs}ms; refusing to {verb} to avoid keystroke leak into the wrong window",
@@ -429,8 +431,8 @@ public sealed class SendInputDriver
         // PID stays in the LOCAL log only (see note above) — the cloud-facing reason omits it so it
         // doesn't trip the ZIP-code PHI filter and mask this operational failure.
         _logger.Warning(
-            "{Verb} refused: target '{Label}' (pid={Pid}) lost foreground after focus-click — failing closed",
-            verb, target.Label, target.Pid);
+            "{Verb} refused: target '{Label}' (pid={Pid}) lost foreground after focus-click — failing closed; {ForegroundOwner}",
+            verb, target.Label, target.Pid, WindowFocusManager.DescribeForegroundWindow());
         return ActuationResult.Reject(
             ActuationRejectionCodes.ForegroundNotTarget,
             $"target '{target.Label}' did not hold the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
@@ -457,12 +459,17 @@ public sealed class SendInputDriver
     }
 
     /// <summary>
-    /// Resolve a bare process file name (e.g. "notepad.exe") to its absolute path under a trusted
-    /// system directory (System32, then the Windows dir), defeating the app-dir/CWD launch-hijack a
-    /// bare name is subject to. Returns the bare name unchanged if found in neither (best-effort PATH
-    /// resolution for operator-added apps that live elsewhere).
+    /// Resolve a bare process file name (e.g. "notepad.exe", "msedge.exe") to its absolute path,
+    /// defeating the app-dir/CWD launch-hijack a bare name is subject to. Resolution order, each
+    /// step trusted (admin-write-only) so none reopens the hijack hole a CWD/PATH lookup would:
+    ///   1. System32, then the Windows dir — where in-box system apps (notepad, calc, explorer) live.
+    ///   2. HKLM <c>App Paths\&lt;exe&gt;</c> (64- then 32-bit view) — the canonical Windows registry for
+    ///      "where is this exe" that per-machine installers (Edge, Chrome) write. HKLM is
+    ///      admin-write-only, so resolving from it preserves the anti-hijack guarantee while letting
+    ///      non-System32 apps launch. The path is File.Exists-verified before it is trusted.
+    /// Returns the bare name unchanged if none resolve (best-effort PATH resolution).
     /// </summary>
-    private static string ResolveTrustedSystemPath(string processName)
+    private string ResolveTrustedSystemPath(string processName)
     {
         try
         {
@@ -471,9 +478,45 @@ public sealed class SendInputDriver
             var win = System.IO.Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.Windows), processName);
             if (System.IO.File.Exists(win)) return win;
+
+            var appPaths = ResolveViaAppPaths(processName);
+            if (appPaths is not null)
+            {
+                _logger.Information(
+                    "ResolveTrustedSystemPath: {Process} resolved via HKLM App Paths -> {Path}",
+                    processName, appPaths);
+                return appPaths;
+            }
         }
         catch { /* fall through to bare name → PATH resolution */ }
         return processName;
+    }
+
+    /// <summary>
+    /// Look up an exe's absolute path from HKLM <c>SOFTWARE\Microsoft\Windows\CurrentVersion\App
+    /// Paths\&lt;exe&gt;</c> (default value), checking both the 64-bit and 32-bit registry views (Edge
+    /// is a 32-bit-view per-machine install). Only HKLM is consulted — never HKCU — because HKCU is
+    /// user-writable and would reopen the launch-hijack vector this whole method exists to close.
+    /// Returns null if the key is absent or the recorded path no longer exists on disk.
+    /// </summary>
+    private static string? ResolveViaAppPaths(string processName)
+    {
+        const string subKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\";
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            try
+            {
+                using var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+                using var key = hklm.OpenSubKey(subKey + processName);
+                if (key?.GetValue(null) is string path)
+                {
+                    var trimmed = path.Trim().Trim('"');
+                    if (trimmed.Length > 0 && System.IO.File.Exists(trimmed)) return trimmed;
+                }
+            }
+            catch { /* try the other view */ }
+        }
+        return null;
     }
 
     public static string ComputeEvidenceHash(string verb, string payload)

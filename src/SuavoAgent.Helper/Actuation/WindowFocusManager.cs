@@ -195,6 +195,29 @@ internal static class WindowFocusManager
         catch { return null; }
     }
 
+    /// <summary>
+    /// Describe the window that currently owns the foreground, for fail-closed diagnostics: when an
+    /// actuation verb cannot bring its target to the foreground we want to know WHO won it (the user's
+    /// browser? a stale PowerShell? a modal?) — "name the field that blocked you". PHI-safe: returns
+    /// the foreground PROCESS NAME + hwnd + title LENGTH only, never the title text (a PMS window title
+    /// can carry patient identifiers). Local-log use only; never put this in a cloud-facing reason.
+    /// </summary>
+    public static string DescribeForegroundWindow()
+    {
+        try
+        {
+            var fg = GetForegroundWindow();
+            if (fg == IntPtr.Zero) return "foreground=<none>";
+            GetWindowThreadProcessId(fg, out var pid);
+            var titleLen = GetWindowTextLength(fg);
+            var proc = "?";
+            try { using var p = System.Diagnostics.Process.GetProcessById((int)pid); proc = p.ProcessName; }
+            catch { /* process exited / access denied — leave as "?" */ }
+            return $"foreground=proc:{proc} pid:{pid} hwnd:0x{fg.ToInt64():X} titleLen:{titleLen}";
+        }
+        catch { return "foreground=<unavailable>"; }
+    }
+
     // ── Win32 surface ───────────────────────────────────────────────────────
     private const int SW_RESTORE = 9;
     private const int SW_SHOW = 5;
