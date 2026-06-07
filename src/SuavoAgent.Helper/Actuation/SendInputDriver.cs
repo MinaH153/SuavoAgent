@@ -193,23 +193,23 @@ public sealed class SendInputDriver
         }
     }
 
-    public Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct)
+    public async Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(req);
         var effectiveDryRun = req.DryRun || _gate.IsDryRun;
         if (string.IsNullOrWhiteSpace(req.AppKey))
-            return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "appKey is required", effectiveDryRun));
+            return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "appKey is required", effectiveDryRun);
 
         if (!ActuationAllowlistedSandboxApps.ProcessNames.TryGetValue(req.AppKey, out var processName))
         {
-            return Task.FromResult(ActuationResult.Reject(
+            return ActuationResult.Reject(
                 ActuationRejectionCodes.AppNotInAllowlist,
                 $"appKey '{req.AppKey}' is not in the sandbox allowlist (notepad, calculator)",
-                effectiveDryRun));
+                effectiveDryRun);
         }
 
         var rejection = _gate.CheckOrReject();
-        if (rejection is not null) return Task.FromResult(rejection with { DryRun = effectiveDryRun });
+        if (rejection is not null) return rejection with { DryRun = effectiveDryRun };
 
         var evidence = ComputeEvidenceHash("launch_sandbox_app", processName);
         var sw = Stopwatch.StartNew();
@@ -219,24 +219,99 @@ public sealed class SendInputDriver
             _logger.Information(
                 "LaunchSandboxApp DRY-RUN: process={Process} evidence={Evidence} requestDryRun={ReqDR} gateDryRun={GateDR}",
                 processName, evidence, req.DryRun, _gate.IsDryRun);
-            return Task.FromResult(ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: true, evidence));
+            return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: true, evidence);
         }
 
         try
         {
+            // Resolve to an absolute path under a trusted system location (System32, then Windows)
+            // before launching. A bare process name is resolved by Win32 against the app dir + CWD
+            // FIRST, so a planted "notepad.exe" could hijack the launch; pinning the real system path
+            // closes that. Falls back to the bare name (PATH resolution) only if not found there.
             using var p = Process.Start(new ProcessStartInfo
             {
-                FileName = processName,
+                FileName = ResolveTrustedSystemPath(processName),
                 UseShellExecute = false,
                 CreateNoWindow = false,
+                WorkingDirectory = Environment.SystemDirectory,
             });
-            return Task.FromResult(ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: false, evidence));
+
+            // WINDOW-FOCUS: Process.Start returns before the app's window exists, so without waiting +
+            // foregrounding it the NEXT workflow step (type/click) lands in whatever window was already
+            // focused — observed live: a "type" leaked into a PowerShell prompt instead of the launched
+            // Notepad. Wait for the GUI to be input-ready, then bring its main window to the foreground
+            // so the launched app reliably owns subsequent keystrokes. Best-effort: a flaky foreground
+            // call must never fail an otherwise-successful launch.
+            if (p is not null)
+            {
+                try { p.WaitForInputIdle(5000); } catch { /* console / non-GUI apps don't support this */ }
+                var hwnd = await WaitForMainWindowAsync(p, 5000, ct).ConfigureAwait(false);
+                if (hwnd != IntPtr.Zero)
+                {
+                    ShowWindow(hwnd, SW_RESTORE);
+                    SetForegroundWindow(hwnd);
+                    _logger.Information("LaunchSandboxApp: {Process} foregrounded (hwnd=0x{Hwnd:X})", processName, hwnd.ToInt64());
+                }
+                else
+                {
+                    _logger.Warning(
+                        "LaunchSandboxApp: {Process} started but no main window appeared within 5s — focus not guaranteed",
+                        processName);
+                }
+            }
+
+            return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: false, evidence);
         }
         catch (Exception ex)
         {
             _logger.Warning(ex, "LaunchSandboxApp failed for {Process}", processName);
-            return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.ExecutionException, ex.Message, dryRun: false));
+            return ActuationResult.Reject(ActuationRejectionCodes.ExecutionException, ex.Message, dryRun: false);
         }
+    }
+
+    /// <summary>
+    /// Poll a freshly-started process until its main window handle exists (it is not available
+    /// synchronously from <see cref="Process.Start(ProcessStartInfo)"/>), or the timeout elapses /
+    /// the process exits. Returns <see cref="IntPtr.Zero"/> if no window ever appears.
+    /// </summary>
+    private static async Task<IntPtr> WaitForMainWindowAsync(Process p, int timeoutMs, CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs && !ct.IsCancellationRequested)
+        {
+            try
+            {
+                p.Refresh();
+                if (p.HasExited) return IntPtr.Zero;
+                if (p.MainWindowHandle != IntPtr.Zero) return p.MainWindowHandle;
+            }
+            catch
+            {
+                return IntPtr.Zero; // process handle gone
+            }
+            await Task.Delay(100, ct).ConfigureAwait(false);
+        }
+        try { p.Refresh(); return p.MainWindowHandle; } catch { return IntPtr.Zero; }
+    }
+
+    /// <summary>
+    /// Resolve a bare process file name (e.g. "notepad.exe") to its absolute path under a trusted
+    /// system directory (System32, then the Windows dir), defeating the app-dir/CWD launch-hijack a
+    /// bare name is subject to. Returns the bare name unchanged if found in neither (best-effort PATH
+    /// resolution for operator-added apps that live elsewhere).
+    /// </summary>
+    private static string ResolveTrustedSystemPath(string processName)
+    {
+        try
+        {
+            var sys32 = System.IO.Path.Combine(Environment.SystemDirectory, processName);
+            if (System.IO.File.Exists(sys32)) return sys32;
+            var win = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows), processName);
+            if (System.IO.File.Exists(win)) return win;
+        }
+        catch { /* fall through to bare name → PATH resolution */ }
+        return processName;
     }
 
     public static string ComputeEvidenceHash(string verb, string payload)
@@ -316,6 +391,15 @@ public sealed class SendInputDriver
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    private const int SW_RESTORE = 9;
 
     private static int InputSize => Marshal.SizeOf<INPUT>();
 

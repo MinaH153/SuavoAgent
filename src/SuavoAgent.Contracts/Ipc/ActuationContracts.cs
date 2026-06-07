@@ -131,10 +131,88 @@ public static class ActuationAllowlistedSandboxApps
     public const string Notepad = "notepad";
     public const string Calculator = "calculator";
 
-    public static IReadOnlyDictionary<string, string> ProcessNames { get; } =
+    // Built-in safe defaults — ALWAYS present and never removable. A PMS/PHI box gets ONLY these
+    // (it never configures additions). The canary/non-PHI box extends this set via local actuation
+    // config (operator-authorized apps only).
+    private static readonly IReadOnlyDictionary<string, string> Defaults =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             [Notepad] = "notepad.exe",
             [Calculator] = "calc.exe",
         };
+
+    // Volatile reference so a single startup Configure call is visible to the command threads that
+    // follow. Defaults until ExtendAllowlist runs.
+    private static volatile IReadOnlyDictionary<string, string> _current =
+        new Dictionary<string, string>(Defaults, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>app_key → process file name (e.g. "notepad" → "notepad.exe"). Defaults plus any
+    /// operator-authorized additions. Enforced by every actuation verb + the Helper driver.</summary>
+    public static IReadOnlyDictionary<string, string> ProcessNames => _current;
+
+    /// <summary>
+    /// Extend the allowlist with operator-authorized apps (canary/non-PHI boxes only — driven by
+    /// local <c>actuation.json</c>, never by a PMS box). The built-in Notepad/Calculator defaults are
+    /// always retained and cannot be removed or overridden away. Each value must be a bare process
+    /// file name ending in <c>.exe</c> (no path) so a malformed entry can't smuggle an arbitrary
+    /// executable path. Call once at process startup, in BOTH Core and Helper, before commands flow.
+    /// </summary>
+    public static void ExtendAllowlist(IReadOnlyDictionary<string, string>? additions)
+    {
+        var next = new Dictionary<string, string>(Defaults, StringComparer.OrdinalIgnoreCase);
+        if (additions is not null)
+        {
+            foreach (var kv in additions)
+            {
+                if (string.IsNullOrWhiteSpace(kv.Key) || string.IsNullOrWhiteSpace(kv.Value)) continue;
+                var appKey = kv.Key.Trim();
+                // The app_key is ALSO used by the click verbs as a process-name match token, so restrict
+                // it to a plain identifier — a config key can't introduce a surprising process target or
+                // smuggle path/format chars.
+                if (!System.Text.RegularExpressions.Regex.IsMatch(appKey, "^[a-zA-Z0-9_-]{1,64}$")) continue;
+                var proc = kv.Value.Trim();
+                // Bare process file name only — reject paths/separators/wildcards.
+                if (!proc.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
+                if (proc.IndexOfAny(new[] { '\\', '/', ':', '*', '?', '"', '<', '>', '|' }) >= 0) continue;
+                if (Defaults.ContainsKey(appKey)) continue; // never override a default
+                next[appKey] = proc;
+            }
+        }
+        _current = next;
+    }
+
+    /// <summary>
+    /// Read operator-authorized app additions from <c>%PROGRAMDATA%\SuavoAgent\actuation.json</c>
+    /// (object key <c>AllowedApps</c>: <c>{ "app_key": "process.exe" }</c>) and apply them via
+    /// <see cref="ExtendAllowlist"/>. Safe no-op when the file or section is absent/malformed — the
+    /// built-in Notepad/Calculator defaults always remain. MUST be called once at process startup in
+    /// BOTH Core and Helper so the verb pre-check (Core) and the driver's authoritative check (Helper)
+    /// agree; if only one applies it, a launch fails closed in the other. A PMS/PHI box simply has no
+    /// <c>AllowedApps</c> in its config, so it stays defaults-only.
+    /// </summary>
+    public static void LoadAndExtendFromConfig(string? programDataDir = null)
+    {
+        try
+        {
+            var dir = programDataDir
+                ?? System.Environment.GetFolderPath(System.Environment.SpecialFolder.CommonApplicationData);
+            var path = System.IO.Path.Combine(dir, "SuavoAgent", "actuation.json");
+            if (!System.IO.File.Exists(path)) return;
+
+            using var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(path));
+            if (!doc.RootElement.TryGetProperty("AllowedApps", out var apps)
+                || apps.ValueKind != System.Text.Json.JsonValueKind.Object) return;
+
+            var additions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in apps.EnumerateObject())
+                if (p.Value.ValueKind == System.Text.Json.JsonValueKind.String)
+                    additions[p.Name] = p.Value.GetString()!;
+            ExtendAllowlist(additions);
+        }
+        catch
+        {
+            // Best-effort: a malformed config must never widen the allowlist nor crash startup —
+            // the built-in defaults remain in force.
+        }
+    }
 }

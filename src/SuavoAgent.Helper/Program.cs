@@ -104,6 +104,10 @@ try
     // override. Owns the WH_KEYBOARD_LL/WH_MOUSE_LL hooks and the
     // Ctrl+Shift+Esc hotkey on dedicated STA threads.
     var actuationConfig = ActuationBootstrap.LoadConfig(Log.Logger);
+    // Operator-authorized app allowlist additions (canary/non-PHI boxes only) from actuation.json's
+    // AllowedApps. Defaults (Notepad/Calculator) always remain; a PMS box has no AllowedApps so it
+    // stays defaults-only. Core applies the same read at its startup so both checks agree.
+    SuavoAgent.Contracts.Ipc.ActuationAllowlistedSandboxApps.LoadAndExtendFromConfig();
     var actuationGate = new ActuationGate(actuationConfig, Log.Logger);
     var pioneerRxConfig = PioneerRxBootstrap.LoadConfig(Log.Logger);
     SendInputDriver? sendInputDriver = null;

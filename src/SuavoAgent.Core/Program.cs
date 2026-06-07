@@ -181,6 +181,12 @@ try
     // The local copy feeds SuavoCloudClient directly (heartbeat), so apply the same assembly-version override.
     agentOpts.Version = AgentVersion.Resolve(agentOpts.Version);
 
+    // Actuation app-allowlist: apply operator-authorized additions from actuation.json's AllowedApps
+    // so the Core-side verb pre-check (LaunchSandboxAppVerb / ClickBy* verbs) agrees with the Helper's
+    // authoritative driver check. Defaults (Notepad/Calculator) always remain; a PMS box has no
+    // AllowedApps and stays defaults-only. Must run before any signed run_workflow command is handled.
+    SuavoAgent.Contracts.Ipc.ActuationAllowlistedSandboxApps.LoadAndExtendFromConfig();
+
     // Mission Loop Phase 1 — registered behind a config gate so the pilot
     // flip can open it via ConfigSyncWorker without a service restart.
     // Default is off in appsettings.json; the pilot-flip skill is the only
