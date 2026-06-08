@@ -29,4 +29,8 @@ public interface IActuationGateway
     /// Success = matched; Reject(element_not_found|assert_mismatch) otherwise. No raw value crosses
     /// the boundary — only pass/fail + a PHI-safe hint.</summary>
     Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct);
+
+    /// <summary>Enumerate an allowlisted app's actionable UIA elements (read-only). The PHI-scrubbed
+    /// inventory is returned as a JSON string in <see cref="ActuationResult.Payload"/>.</summary>
+    Task<ActuationResult> DiscoverElementsAsync(DiscoverElementsRequest req, CancellationToken ct);
 }

@@ -941,6 +941,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "extend_app_allowlist":
                     await HandleExtendAppAllowlistAsync(scEl, cmd, ct);
                     break;
+                case "discover_elements":
+                    await HandleDiscoverElementsAsync(scEl, cmd, ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -962,6 +965,44 @@ public sealed class HeartbeatWorker : ResilientHostedService
     /// startup. Each addition is pre-validated with the SAME rules ExtendAllowlist enforces so the ack
     /// can NAME each rejection instead of silently dropping it. Rides the signed ECDSA command pipeline.
     /// </summary>
+    // Enumerate an allowlisted app's actionable UIA elements (controlType + automationId +
+    // PHI-scrubbed name) and ack them as the command result — the agent's "look at the UI" capability,
+    // so locators are grounded on real elements instead of guessed.
+    private async Task HandleDiscoverElementsAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        try
+        {
+            if (_actuationGateway is null) { await AckAsync(false, null, "actuation_unavailable"); return; }
+            var process = dataEl.TryGetProperty("process", out var pe) ? pe.GetString() : null;
+            if (string.IsNullOrWhiteSpace(process)) { await AckAsync(false, null, "process required"); return; }
+            var max = dataEl.TryGetProperty("max", out var me) && me.TryGetInt32(out var m) ? m : 60;
+
+            var r = await _actuationGateway
+                .DiscoverElementsAsync(new SuavoAgent.Contracts.Ipc.DiscoverElementsRequest(process, max), ct)
+                .ConfigureAwait(false);
+            if (!r.Ok) { await AckAsync(false, null, $"{r.RejectionCode}: {r.RejectionReason}"); return; }
+
+            System.Text.Json.Nodes.JsonNode? elements = null;
+            try { elements = System.Text.Json.Nodes.JsonNode.Parse(r.Payload ?? "[]"); } catch { /* leave null */ }
+            var count = elements is System.Text.Json.Nodes.JsonArray arr ? arr.Count : 0;
+            _logger.LogInformation("discover_elements process={Process} count={Count}", process, count);
+            await AckAsync(true, new { process, count, elements }, null);
+        }
+        catch (Exception ex)
+        {
+            await AckAsync(false, null, ex.Message);
+        }
+    }
+
     private async Task HandleExtendAppAllowlistAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
     {
         var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;

@@ -238,6 +238,7 @@ public sealed class WorkflowBranchingTests
         public Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct) => Task.FromResult(NextResult ?? ActuationResult.Success(1, true, "x"));
         public Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct) => Task.FromResult(ActuationResult.Success(0, true, "reload"));
         public Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct) => Task.FromResult(NextResult ?? ActuationResult.Success(0, req.DryRun, "assert"));
+        public Task<ActuationResult> DiscoverElementsAsync(DiscoverElementsRequest req, CancellationToken ct) => Task.FromResult(NextResult ?? ActuationResult.SuccessWithPayload(0, req.DryRun, "discover", "[]"));
     }
 
     private sealed class StubAuditClient : IWorkflowAuditClient

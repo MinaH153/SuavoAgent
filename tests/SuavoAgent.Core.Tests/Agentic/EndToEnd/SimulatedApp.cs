@@ -81,6 +81,9 @@ internal sealed class SimulatedAppGateway : IActuationGateway
 
     public Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct) =>
         Task.FromResult(ActuationResult.Success(0, req.DryRun, "assert"));
+
+    public Task<ActuationResult> DiscoverElementsAsync(DiscoverElementsRequest req, CancellationToken ct) =>
+        Task.FromResult(ActuationResult.SuccessWithPayload(0, req.DryRun, "discover", "[]"));
 }
 
 /// <summary>IPerceiver that reports the SimulatedApp's current screen (signatures the replayer/loop ground on).</summary>

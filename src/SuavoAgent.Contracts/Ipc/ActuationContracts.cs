@@ -42,6 +42,11 @@ public static class ActuationIpcCommands
     /// state (Calc reads "12", the note typed). PHI-safe: the raw read value never leaves the box;
     /// only pass/fail + scrubbed length hints are returned.</summary>
     public const string AssertElement = "actuation.assert_element";
+
+    /// <summary>Enumerate an allowlisted app's actionable UIA elements (controlType + automationId +
+    /// PHI-scrubbed name) so the agent can SEE an unfamiliar UI and ground its clicks/asserts on real
+    /// elements instead of guessing locators. READ-ONLY; structural data only (names PHI-filtered).</summary>
+    public const string DiscoverElements = "actuation.discover_elements";
 }
 
 public sealed record ActuationGateState(
@@ -110,6 +115,15 @@ public sealed record LaunchSandboxAppRequest(
 /// <summary>No-arg reload — actuation.json on disk is the source of truth (Core writes it first).</summary>
 public sealed record ReloadAllowlistRequest();
 
+/// <summary>Enumerate the actionable UIA elements of an allowlisted app. Read-only; the response
+/// (in <see cref="ActuationResult.Payload"/>) is a JSON array of {controlType, automationId, name}
+/// with names PHI-scrubbed Helper-side. Lets the agent introspect an unfamiliar UI.</summary>
+public sealed record DiscoverElementsRequest(
+    [property: JsonPropertyName("processName")] string ProcessName,
+    [property: JsonPropertyName("max")] int Max = 60,
+    [property: JsonPropertyName("dryRun")] bool DryRun = false
+);
+
 /// <summary>
 /// Read a UIA element's value and assert it equals/contains <see cref="Expected"/>. Locate the
 /// element by AutomationId (preferred), accessible Name, or ControlType — at least one is required.
@@ -136,7 +150,10 @@ public sealed record ActuationResult(
     [property: JsonPropertyName("durationMs")] long DurationMs,
     [property: JsonPropertyName("rejectionCode")] string? RejectionCode,
     [property: JsonPropertyName("rejectionReason")] string? RejectionReason,
-    [property: JsonPropertyName("evidenceHash")] string? EvidenceHash
+    [property: JsonPropertyName("evidenceHash")] string? EvidenceHash,
+    // Optional structured result for READ commands (discover_elements): a JSON string the caller
+    // surfaces. Null for the actuation verbs. Backward-compatible (defaults null on the wire).
+    [property: JsonPropertyName("payload")] string? Payload = null
 )
 {
     public static ActuationResult Reject(string code, string reason, bool dryRun) =>
@@ -144,6 +161,9 @@ public sealed record ActuationResult(
 
     public static ActuationResult Success(long durationMs, bool dryRun, string evidenceHash) =>
         new(true, dryRun, durationMs, null, null, evidenceHash);
+
+    public static ActuationResult SuccessWithPayload(long durationMs, bool dryRun, string evidenceHash, string payload) =>
+        new(true, dryRun, durationMs, null, null, evidenceHash, payload);
 }
 
 public static class ActuationRejectionCodes

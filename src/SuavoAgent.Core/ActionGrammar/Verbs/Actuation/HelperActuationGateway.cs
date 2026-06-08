@@ -91,6 +91,9 @@ public sealed class HelperActuationGateway : IActuationGateway
     public Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct) =>
         SendAsync(ActuationIpcCommands.AssertElement, req, ct);
 
+    public Task<ActuationResult> DiscoverElementsAsync(DiscoverElementsRequest req, CancellationToken ct) =>
+        SendAsync(ActuationIpcCommands.DiscoverElements, req, ct);
+
     private async Task<ActuationResult> SendAsync<TReq>(string command, TReq req, CancellationToken ct)
     {
         var client = _clientFactory();

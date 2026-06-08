@@ -55,6 +55,7 @@ public sealed class ActuationCommandHandler
                 ActuationIpcCommands.LaunchSandboxApp => await HandleLaunchSandboxAppAsync(data, ct).ConfigureAwait(false),
                 ActuationIpcCommands.ReloadAllowlist => HandleReloadAllowlist(),
                 ActuationIpcCommands.AssertElement => await HandleAssertElementAsync(data, ct).ConfigureAwait(false),
+                ActuationIpcCommands.DiscoverElements => HandleDiscoverElements(data),
                 _ => ActuationResult.Reject(
                     ActuationRejectionCodes.MalformedRequest,
                     $"unknown actuation command '{command}'",
@@ -316,6 +317,33 @@ public sealed class ActuationCommandHandler
             ActuationRejectionCodes.AssertMismatch,
             $"element value did not match expected (mode={req.MatchMode}, expectedLen={req.Expected.Length}, actualLen={read.Length})",
             effectiveDryRun));
+    }
+
+    /// <summary>
+    /// Enumerate an allowlisted app's actionable UIA elements (controlType + automationId +
+    /// PHI-scrubbed name) into the result Payload — the agent's "look at the UI" capability. READ-ONLY:
+    /// no gate/dry-run interaction (reading the tree injects nothing). Names are PHI-scrubbed in the
+    /// resolver before they reach the payload.
+    /// </summary>
+    private ActuationResult HandleDiscoverElements(JsonElement? data)
+    {
+        if (data is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "missing data", _gate.IsDryRun);
+        var req = data.Value.Deserialize<DiscoverElementsRequest>();
+        if (req is null || string.IsNullOrWhiteSpace(req.ProcessName))
+            return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "processName required", _gate.IsDryRun);
+
+        var allowedProcesses = ActuationAllowlistedSandboxApps.ProcessNames.Values
+            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys);
+        if (!allowedProcesses.Contains(req.ProcessName, StringComparer.OrdinalIgnoreCase))
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessNotAllowed,
+                $"processName '{req.ProcessName}' not allowed for sandbox actuation",
+                _gate.IsDryRun);
+
+        var elements = _resolver.DiscoverElements(req.ProcessName, req.Max);
+        var payload = JsonSerializer.Serialize(elements);
+        _logger.Information("DiscoverElements: '{Process}' → {Count} elements", req.ProcessName, elements.Count);
+        return ActuationResult.SuccessWithPayload(0, _gate.IsDryRun, evidenceHash: "discover_elements", payload);
     }
 
     private Task<ActuationResult> HandlePressKeysAsync(JsonElement? data, CancellationToken ct)

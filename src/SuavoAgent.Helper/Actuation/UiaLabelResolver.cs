@@ -316,6 +316,78 @@ public sealed class UiaLabelResolver : IDisposable
     private static ControlType? ParseControlType(string? s) =>
         !string.IsNullOrWhiteSpace(s) && Enum.TryParse<ControlType>(s, ignoreCase: true, out var ct) ? ct : null;
 
+    /// <summary>A PHI-safe descriptor of one UIA element — structural identity only.</summary>
+    public sealed record DiscoveredElement(string ControlType, string AutomationId, string Name);
+
+    /// <summary>
+    /// Enumerate an allowlisted app's actionable UIA elements so the agent can SEE the UI and ground
+    /// its clicks/asserts on REAL elements instead of guessing. Returns the controlType + automationId
+    /// (developer-assigned, not PHI) + accessible name (PHI-SCRUBBED via PhiPatternGuard + length-
+    /// capped). Only elements with an automationId or a name are returned; capped at <paramref name="max"/>.
+    /// </summary>
+    public IReadOnlyList<DiscoveredElement> DiscoverElements(string processName, int max)
+    {
+        var found = new List<DiscoveredElement>();
+        if (string.IsNullOrWhiteSpace(processName)) return found;
+        _automation ??= new UIA2Automation();
+        var cap = max <= 0 ? 60 : Math.Min(max, 200);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var candidate in PackagedAppAliases.CandidateProcessNames(processName))
+        {
+            var procs = Process.GetProcessesByName(candidate);
+            try
+            {
+                foreach (var proc in procs)
+                {
+                    AutomationElement? window;
+                    try { window = ResolveWindow(proc); } catch { continue; }
+                    if (window is null) continue;
+
+                    AutomationElement[] descendants;
+                    try { descendants = window.FindAllDescendants(); } catch { continue; }
+                    foreach (var e in descendants)
+                    {
+                        if (found.Count >= cap) return found;
+                        var ct = SafeControlType(e);
+                        var aid = SafeAutomationId(e);
+                        var rawName = SafeName(e);
+                        var name = ScrubName(rawName);
+                        // Skip purely structural elements with no handle for an action.
+                        if (string.IsNullOrEmpty(aid) && string.IsNullOrEmpty(name)) continue;
+                        var key = $"{ct}|{aid}|{name}";
+                        if (!seen.Add(key)) continue;
+                        found.Add(new DiscoveredElement(ct, aid, name));
+                    }
+                    if (found.Count > 0) return found; // one window's tree is enough
+                }
+            }
+            finally { foreach (var p in procs) p.Dispose(); }
+        }
+        return found;
+    }
+
+    private static string SafeControlType(AutomationElement e)
+    {
+        try { return e.ControlType.ToString(); } catch { return "Unknown"; }
+    }
+
+    private static string SafeAutomationId(AutomationElement e)
+    {
+        try { return e.AutomationId ?? string.Empty; } catch { return string.Empty; }
+    }
+
+    // Accessible names can carry PHI on a real PMS — drop any name that matches a PHI pattern, and
+    // cap length so a long free-text field can't smuggle content. Structural names (button labels,
+    // "Document") pass through.
+    private static string ScrubName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+        if (PhiPatternGuard.ContainsPotentialPhi(name, out _)) return string.Empty;
+        var trimmed = name.Trim();
+        return trimmed.Length > 48 ? trimmed[..48] : trimmed;
+    }
+
     /// <summary>
     /// Discovery aid: when a label can't be resolved, log the accessible names ACTUALLY present so the
     /// real control names are visible instead of guessed. Names are PHI-scrubbed (PhiPatternGuard) and

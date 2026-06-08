@@ -200,6 +200,7 @@ public sealed class IpcCommandServer : IDisposable
                 or ActuationIpcCommands.LaunchSandboxApp
                 or ActuationIpcCommands.ReloadAllowlist
                 or ActuationIpcCommands.AssertElement
+                or ActuationIpcCommands.DiscoverElements
                 => HandleActuationAsync(request, ct),
             PioneerRxActuationIpcCommands.Click
                 or PioneerRxActuationIpcCommands.TypeText

@@ -242,6 +242,9 @@ public sealed class WorkflowExecutorDryRunPropagationTests
             Task.FromResult(ActuationResult.Success(0, true, "reload"));
         public Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct) =>
             Task.FromResult(NextResult ?? ActuationResult.Success(0, req.DryRun, "assert"));
+
+        public Task<ActuationResult> DiscoverElementsAsync(DiscoverElementsRequest req, CancellationToken ct) =>
+            Task.FromResult(NextResult ?? ActuationResult.SuccessWithPayload(0, req.DryRun, "discover", "[]"));
     }
 
     private sealed class RecordingAuditClient : IWorkflowAuditClient
