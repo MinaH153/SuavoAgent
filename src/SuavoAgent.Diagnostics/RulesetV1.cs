@@ -134,24 +134,14 @@ public sealed class RulesetV1
         };
     }
 
-    /// <summary>
-    /// Stub: verify the ruleset's ECDsa P-256 signature against the
-    /// embedded <c>ruleset-signing-key.pub.pem</c> public key.
-    /// </summary>
-    /// <remarks>
-    /// Phase 1: returns true because Authenticode protects the
-    /// EMBEDDED resource only (the publish.ps1-signed assembly carries
-    /// the ruleset bytes as part of the signed PE). The separate
-    /// ruleset-signing ECDsa P-256 key becomes load-bearing in Phase 2,
-    /// when the agent receives signed ruleset deliveries OTA from the
-    /// cloud (cached at runtime, no longer protected by Authenticode).
-    /// At that point this method MUST actually verify <paramref name="signatureBytes"/>
-    /// against the public key. Codex chunk 3 MEDIUM clarification.
-    /// </remarks>
-    public bool VerifySignature(byte[]? signatureBytes = null)
-    {
-        return true;
-    }
+    // NOTE: signature verification for OTA-distributed rulesets lives in
+    // RulesetSignatureVerifier.Verify(RulesetBundle) — real ECDsa P-256 against
+    // the embedded multi-key trust store (ruleset-signing-key-<key_id>.pub.pem),
+    // RFC 8785 canonicalization, fail-closed. ConfigSyncWorker invokes it on BOTH
+    // the cached-load and network-fetch paths. A prior `VerifySignature() => true`
+    // stub once lived here; it had no callers and its stale "Phase 2 will verify"
+    // remark misled readers into thinking verification was unimplemented. Removed
+    // to keep the trust boundary legible (the real verifier is the only authority).
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {

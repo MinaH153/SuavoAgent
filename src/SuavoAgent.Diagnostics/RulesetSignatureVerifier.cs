@@ -19,18 +19,18 @@ namespace SuavoAgent.Diagnostics;
 /// <c>key_id</c> selects which key verifies its signature.
 /// </para>
 /// <para>
-/// Phase 1 has a placeholder PEM that does NOT match the multi-key
-/// convention; <see cref="LoadEmbeddedTrustStore"/> therefore finds zero
-/// keys and fails closed. Comp 2.2 ships a real key ceremony that
-/// produces <c>ruleset-signing-key-&lt;key_id&gt;.pub.pem</c> resources
-/// before the OTA wire path goes live.
+/// The key ceremony has shipped: real keys are embedded
+/// (<c>ruleset-signing-key-ruleset-v1-key-2026-05-13.pub.pem</c> + the rotation
+/// key <c>-2026-05-15-rot</c>), so <see cref="LoadEmbeddedTrustStore"/> loads a
+/// populated trust store. It still fails closed on zero keys / bad PEM.
 /// </para>
 /// <para>
 /// Canonicalization is RFC 8785 ONLY in v1.0 (Codex chunk A CRITICAL
 /// RESOLVED — no custom fallback; drift between cloud + agent produces
-/// signed-but-rejected bundles). Comp 2.1 ships a placeholder canonicaliser
-/// that is stable for self-roundtrip tests; Comp 2.2 swaps in the real
-/// RFC 8785 implementation with the Appendix B golden vectors as a gate.
+/// signed-but-rejected bundles). <see cref="CanonicalizeForSigning"/> invokes
+/// the real <c>JsonCanonicalizer</c> reference implementation; the cloud side
+/// uses the matching <c>canonicalize</c> npm package, both gated on the RFC 8785
+/// Appendix B golden vectors.
 /// </para>
 /// </remarks>
 /// <summary>
