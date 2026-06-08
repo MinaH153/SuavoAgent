@@ -4333,6 +4333,43 @@ public sealed class AgentStateDb : IDisposable
         }
     }
 
+    /// <summary>Full banked skill by id (for replay), or null if absent.</summary>
+    public (string PharmacyId, string TaskKey, string App, string StepsJson, string StepsHash, int SuccessCount)? GetVerifiedSkill(string skillId)
+    {
+        lock (_verifiedSkillLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT pharmacy_id, task_key, app, steps_json, steps_hash, success_count FROM verified_skills WHERE skill_id = @id";
+            cmd.Parameters.AddWithValue("@id", skillId);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            return (reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetInt32(5));
+        }
+    }
+
+    /// <summary>The most-confirmed (highest success_count) banked skill for a (pharmacy, task, app) — the
+    /// thickest tube to replay for a known task. Null if none banked yet.</summary>
+    public (string SkillId, string StepsJson, string StepsHash, int SuccessCount)? GetBestVerifiedSkillForTask(
+        string pharmacyId, string taskKey, string app)
+    {
+        lock (_verifiedSkillLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT skill_id, steps_json, steps_hash, success_count FROM verified_skills
+                WHERE pharmacy_id = @ph AND task_key = @t AND app = @app
+                ORDER BY success_count DESC, last_verified_at DESC
+                LIMIT 1
+                """;
+            cmd.Parameters.AddWithValue("@ph", pharmacyId);
+            cmd.Parameters.AddWithValue("@t", taskKey);
+            cmd.Parameters.AddWithValue("@app", app);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            return (reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3));
+        }
+    }
+
     /// <summary>Count of distinct verified skills banked for a (pharmacy, task) — observability.</summary>
     public int GetVerifiedSkillCountForTask(string pharmacyId, string taskKey)
     {

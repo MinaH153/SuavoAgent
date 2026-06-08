@@ -944,6 +944,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "explore_sandbox":
                     _ = Task.Run(() => HandleSandboxExploreAsync(scEl, cmd, ct), ct);
                     break;
+                case "replay_skill":
+                    _ = Task.Run(() => HandleReplaySkillAsync(scEl, cmd, ct), ct);
+                    break;
                 case "abort_navigation":
                     await HandleAbortNavigationAsync(scEl, cmd, ct);
                     break;
@@ -2010,6 +2013,132 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "verified-skill harvest failed run={RunId} (run unaffected)", runId);
+        }
+    }
+
+    /// <summary>
+    /// MOAT — cash in the amortize ratchet: deterministically REPLAY a banked VerifiedSkill (zero reasoning,
+    /// no LLM). Loads the skill by id, or the most-confirmed skill for (task, app), reconstructs it, and runs
+    /// <see cref="SuavoAgent.Core.Agentic.VerifiedSkillReplayer"/> — which executes each step only while the
+    /// live screen matches the verified path and STOPS fail-closed on any drift. Shares the navigation
+    /// semaphore (one actuating run at a time); sandbox-confined like the run that learned it.
+    /// </summary>
+    private async Task HandleReplaySkillAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        var skillId = dataEl.TryGetProperty("skillId", out var sid) && sid.ValueKind == JsonValueKind.String ? sid.GetString() : null;
+        var taskKey = dataEl.TryGetProperty("taskKey", out var tk) && tk.ValueKind == JsonValueKind.String ? tk.GetString() : null;
+        var app = dataEl.TryGetProperty("app", out var ap) && ap.ValueKind == JsonValueKind.String ? ap.GetString() : null;
+
+        var charterForId = _serviceProvider.GetService<MissionCharter>() ?? BuildEphemeralCharter();
+        var pharmacyId = _options.PharmacyId ?? charterForId.PharmacyId;
+
+        // Resolve the skill: explicit skillId wins; else the most-confirmed skill for (task, app).
+        string resolvedSkillId, stepsJson, stepsHash, resolvedTask, resolvedApp;
+        if (!string.IsNullOrWhiteSpace(skillId))
+        {
+            var row = _stateDb.GetVerifiedSkill(skillId);
+            if (row is null) { await AckAsync(false, null, "skill_not_found"); return; }
+            var rv = row.Value;
+            if (!string.Equals(rv.PharmacyId, pharmacyId, StringComparison.Ordinal)) { await AckAsync(false, null, "skill_pharmacy_mismatch"); return; }
+            resolvedSkillId = skillId!;
+            resolvedTask = rv.TaskKey;
+            resolvedApp = rv.App;
+            stepsJson = rv.StepsJson;
+            stepsHash = rv.StepsHash;
+        }
+        else if (!string.IsNullOrWhiteSpace(taskKey) && !string.IsNullOrWhiteSpace(app))
+        {
+            var best = _stateDb.GetBestVerifiedSkillForTask(pharmacyId, taskKey, app);
+            if (best is null) { await AckAsync(false, null, "no_skill_for_task"); return; }
+            var bv = best.Value;
+            resolvedSkillId = bv.SkillId;
+            stepsJson = bv.StepsJson;
+            stepsHash = bv.StepsHash;
+            resolvedTask = taskKey!;
+            resolvedApp = app!;
+        }
+        else
+        {
+            await AckAsync(false, null, "malformed_replay_skill_payload");
+            return;
+        }
+
+        var runId = dataEl.TryGetProperty("runId", out var rid) && rid.ValueKind == JsonValueKind.String
+            && rid.GetString() is { Length: > 0 } r ? r : Guid.NewGuid().ToString("n");
+        var deadlineSeconds = dataEl.TryGetProperty("deadlineSeconds", out var ds) && ds.TryGetInt32(out var dsv) ? dsv : 120;
+
+        var steps = SuavoAgent.Core.Agentic.VerifiedSkill.DeserializeSteps(stepsJson);
+        if (steps.Count == 0) { await AckAsync(false, null, "empty_skill"); return; }
+        var skill = new SuavoAgent.Core.Agentic.VerifiedSkill(resolvedSkillId, pharmacyId, resolvedTask, resolvedApp, steps, stepsHash);
+
+        if (!await _navigationSemaphore.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            await AckAsync(false, null, "navigation_already_running");
+            return;
+        }
+
+        try
+        {
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: runId,
+                EventType: "replay_skill_received",
+                FromState: "queued",
+                ToState: "starting",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: $"replay skill={resolvedSkillId[..12]} task={resolvedTask} app={resolvedApp} steps={steps.Count}"));
+
+            var charter = charterForId;
+            var audit = _serviceProvider.GetService<SuavoAgent.Core.Audit.AuditChain>() ?? new SuavoAgent.Core.Audit.AuditChain();
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(deadlineSeconds);
+
+            var replayer = SuavoAgent.Core.Agentic.ReplaySkillFactory.Create(_serviceProvider, charter, audit, deadline);
+            var loopOptions = new SuavoAgent.Core.Agentic.AgenticLoopOptions { DryRun = false, Deadline = TimeSpan.FromSeconds(deadlineSeconds) };
+            var objective = new SuavoAgent.Core.Agentic.AgentObjective($"replay skill {resolvedSkillId[..12]}", resolvedTask, pharmacyId);
+
+            using var navCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            lock (_activeNavigationLock) { _activeNavigationCts = navCts; _activeNavigationRunId = runId; }
+
+            SuavoAgent.Core.Agentic.SkillReplayResult result;
+            try
+            {
+                result = await replayer.ReplayAsync(skill, objective, loopOptions, navCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_activeNavigationLock) { _activeNavigationCts = null; _activeNavigationRunId = null; }
+            }
+
+            _logger.LogInformation(
+                "replay_skill run={RunId} skill={SkillId} outcome={Outcome} stepsCompleted={Steps}",
+                runId, resolvedSkillId[..12], result.Outcome, result.StepsCompleted);
+
+            await AckAsync(
+                ok: result.Outcome == SuavoAgent.Core.Agentic.SkillReplayOutcome.Completed,
+                result: new { run_id = runId, skill_id = resolvedSkillId, outcome = result.Outcome.ToString(), steps_completed = result.StepsCompleted, detail = result.Detail },
+                err: result.Outcome == SuavoAgent.Core.Agentic.SkillReplayOutcome.Completed ? null : result.Outcome.ToString());
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "replay_skill execution exception");
+            await AckAsync(false, null, ex.Message);
+        }
+        finally
+        {
+            _navigationSemaphore.Release();
         }
     }
 
