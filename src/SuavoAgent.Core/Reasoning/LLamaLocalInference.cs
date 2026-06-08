@@ -236,20 +236,68 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         {
             MaxTokens = Math.Min(_options.MaxOutputTokens, 256),
             AntiPrompts = new[] { "<|im_end|>", "<|im_start|>" },
-            SamplingPipeline = new DefaultSamplingPipeline { Temperature = 0.6f, TopK = 40, TopP = 0.95f },
+            SamplingPipeline = new DefaultSamplingPipeline
+            {
+                Temperature = 0.6f,
+                TopK = 40,
+                TopP = 0.95f,
+                // Curb the small-model repetition loop. Confirmed live: some prompts (e.g. "what's my
+                // name") sent Qwen3-1.7B into an unbounded generation that never finished on the box's
+                // weak CPU. A repeat penalty breaks the loop so the reply terminates promptly.
+                RepeatPenalty = 1.15f,
+                PenaltyCount = 256,
+            },
         };
 
         var sb = new StringBuilder();
         var sw = Stopwatch.StartNew();
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(15, _options.InferenceTimeoutSeconds * 3)));
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        // HARD wall-clock ceiling. The token we hand InferAsync is best-effort only: on win-x64 the
+        // native loop does NOT reliably observe cancellation mid-generation (confirmed live — a hung
+        // prompt ran far past this timeout and never acked). So we ALSO race the whole consumption
+        // against a real Task.Delay and ABANDON a stuck inference rather than block the caller forever.
+        var ceiling = TimeSpan.FromSeconds(Math.Max(20, _options.InferenceTimeoutSeconds * 3));
+        var timeoutCts = new CancellationTokenSource(ceiling);
+        var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+        // Own the in-flight accounting on the REAL inference lifetime (not the caller's), so an
+        // abandoned-but-still-running generation keeps the model pinned against idle-unload until it
+        // truly ends — and the decrement happens exactly once whether we wait it out or abandon it.
+        async Task ConsumeAsync()
+        {
+            try
+            {
+                await foreach (var token in executor.InferAsync(prompt, inferenceParams, linked.Token).ConfigureAwait(false))
+                {
+                    sb.Append(token);
+                    if (sb.Length > 4096) break;
+                }
+            }
+            finally
+            {
+                _lastUse = DateTime.UtcNow;
+                Interlocked.Decrement(ref _activeInferences);
+                RestartIdleWatcher();
+                timeoutCts.Dispose();
+                linked.Dispose();
+            }
+        }
+
         try
         {
-            await foreach (var token in executor.InferAsync(prompt, inferenceParams, linked.Token))
+            var consume = Task.Run(ConsumeAsync, CancellationToken.None);
+            var finished = await Task.WhenAny(consume, Task.Delay(ceiling, CancellationToken.None)).ConfigureAwait(false);
+            if (finished != consume)
             {
-                sb.Append(token);
-                if (sb.Length > 4096) break;
+                // Wall-clock hit: the native loop is ignoring cancellation. Best-effort cancel, then
+                // detach — swallow the orphan's eventual exception so it can't crash the process — and
+                // fall back. We do NOT read `sb` here (the orphan may still be appending to it).
+                linked.Cancel();
+                _ = consume.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                _logger.LogWarning("LLamaLocalInference.Chat: hard timeout after {Ms}ms — abandoning inference", sw.ElapsedMilliseconds);
+                return null;
             }
+            await consume.ConfigureAwait(false); // observe completion / exceptions
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (OperationCanceledException)
@@ -265,9 +313,6 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         finally
         {
             sw.Stop();
-            _lastUse = DateTime.UtcNow;
-            Interlocked.Decrement(ref _activeInferences);
-            RestartIdleWatcher();
         }
 
         var reply = sb.ToString().Replace("<|im_end|>", "").Replace("<|im_start|>", "");

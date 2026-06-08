@@ -1103,7 +1103,11 @@ public sealed class HeartbeatWorker : ResilientHostedService
     // (defense-in-depth with the cloud ack scrub) before it leaves the box. When the brain isn't ready
     // (reasoning off / model still provisioning), acks ready=false so the cockpit falls back to a
     // cloud/templated reply — the local brain is a bonus, never a hard dependency.
-    private async Task HandleChatAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    // 0/1 single-flight gate for chat inference. The local brain has ONE shared LLama context, which
+    // is not safe to drive concurrently; this also caps how much CPU chat can ever take from PioneerRx.
+    private int _chatInFlight;
+
+    private Task HandleChatAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
     {
         var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
         var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
@@ -1111,33 +1115,46 @@ public sealed class HeartbeatWorker : ResilientHostedService
         async Task AckAsync(bool ok, object? result, string? err)
         {
             if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
-            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+            try { await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct); }
+            catch (Exception ex) { _logger.LogWarning(ex, "chat ack failed"); }
         }
 
-        try
-        {
-            var prompt = dataEl.TryGetProperty("prompt", out var pe) ? pe.GetString() : null;
-            if (string.IsNullOrWhiteSpace(prompt))
-            {
-                await AckAsync(false, null, "prompt required");
-                return;
-            }
-            if (_localInference is null || !_localInference.IsReady)
-            {
-                await AckAsync(true, new { reply = (string?)null, ready = false, model = _localInference?.ModelId ?? "none" }, null);
-                return;
-            }
+        var prompt = dataEl.TryGetProperty("prompt", out var pe) ? pe.GetString() : null;
+        if (string.IsNullOrWhiteSpace(prompt))
+            return AckAsync(false, null, "prompt required");
 
-            using var chatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            chatCts.CancelAfter(TimeSpan.FromSeconds(60));
-            var reply = await _localInference.ChatAsync(prompt!, chatCts.Token).ConfigureAwait(false);
-            var scrubbed = SuavoAgent.Core.Learning.PhiScrubber.ScrubText(reply);
-            await AckAsync(true, new { reply = scrubbed, ready = true, model = _localInference.ModelId }, null);
-        }
-        catch (Exception ex)
+        if (_localInference is null || !_localInference.IsReady)
+            return AckAsync(true, new { reply = (string?)null, ready = false, model = _localInference?.ModelId ?? "none" }, null);
+
+        // Already answering another prompt — ack a fast "not now" (cockpit shows its templated reply)
+        // rather than serialize behind a slow local generation.
+        if (Interlocked.CompareExchange(ref _chatInFlight, 1, 0) != 0)
+            return AckAsync(true, new { reply = (string?)null, ready = true, model = _localInference.ModelId, busy = true }, null);
+
+        // Run inference OFF the heartbeat loop. Chat must NEVER block heartbeats or operational
+        // commands: a single slow/looping local generation used to stall the whole loop (one command
+        // per heartbeat, awaited inline) until the cloud expired the command 5 min later. The nonce is
+        // already consumed by the signed-command verifier, so detaching here is replay-safe. ChatAsync
+        // owns its own hard wall-clock ceiling, so this task always completes and resets the gate.
+        _ = Task.Run(async () =>
         {
-            await AckAsync(false, null, ex.Message);
-        }
+            try
+            {
+                var reply = await _localInference.ChatAsync(prompt!, ct).ConfigureAwait(false);
+                var scrubbed = SuavoAgent.Core.Learning.PhiScrubber.ScrubText(reply);
+                await AckAsync(true, new { reply = scrubbed, ready = true, model = _localInference.ModelId }, null);
+            }
+            catch (Exception ex)
+            {
+                await AckAsync(false, null, ex.Message);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _chatInFlight, 0);
+            }
+        }, CancellationToken.None);
+
+        return Task.CompletedTask;
     }
 
     private async Task HandleExtendAppAllowlistAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
