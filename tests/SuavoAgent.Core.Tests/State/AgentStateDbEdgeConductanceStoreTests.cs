@@ -78,6 +78,47 @@ public class AgentStateDbEdgeConductanceStoreTests : IDisposable
     }
 
     [Fact]
+    public void AllPharmacyTaskPairs_ReturnsDistinctScopes()
+    {
+        _store.Set(new EdgeKey(Pharmacy, Task, "s1", "a1"), 0.5);
+        _store.Set(new EdgeKey(Pharmacy, Task, "s2", "a2"), 0.5);   // same scope, different edge
+        _store.Set(new EdgeKey(Pharmacy, "task.other", "s3", "a3"), 0.5);
+        _store.Set(new EdgeKey("pharmacy.other", Task, "s4", "a4"), 0.5);
+
+        var pairs = _store.AllPharmacyTaskPairs();
+        Assert.Equal(3, pairs.Count); // (P,Task), (P,task.other), (pharmacy.other,Task) — deduped
+        Assert.Contains((Pharmacy, Task), pairs);
+        Assert.Contains((Pharmacy, "task.other"), pairs);
+        Assert.Contains(("pharmacy.other", Task), pairs);
+    }
+
+    [Fact]
+    public void ConcurrentReinforceAndEvaporate_NoCorruptionOrThrow()
+    {
+        // The navigate run (Task.Run) and the evaporation worker (timer) both hit edge_conductance on
+        // the single non-thread-safe SqliteConnection. Stress them concurrently — the _edgeConductanceLock
+        // must serialize so this completes without SQLITE_BUSY / corruption.
+        var steps = Enumerable.Range(0, 40)
+            .Select(i => new StepRecord($"s{i % 8}", $"click(b{i % 8})", ActStatus.Success, PostconditionVerdict.Met))
+            .ToArray();
+
+        var tasks = new List<System.Threading.Tasks.Task>();
+        for (var t = 0; t < 4; t++)
+            tasks.Add(System.Threading.Tasks.Task.Run(() =>
+            {
+                for (var r = 0; r < 25; r++)
+                {
+                    EdgeReinforcement.ApplyRun(_store, Pharmacy, Task, steps, P);
+                    EdgeReinforcement.Evaporate(_store, Pharmacy, Task, P);
+                }
+            }));
+
+        var ex = Record.Exception(() => System.Threading.Tasks.Task.WaitAll(tasks.ToArray()));
+        Assert.Null(ex);
+        Assert.NotEmpty(_store.Edges(Pharmacy, Task));
+    }
+
+    [Fact]
     public void Reinforcement_DrivesDurableStore_SameAsInMemory()
     {
         var edge = Edge("screenA", "click(Save)");

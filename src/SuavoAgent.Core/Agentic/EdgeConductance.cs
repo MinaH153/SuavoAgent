@@ -28,6 +28,10 @@ public interface IEdgeConductanceStore
 
     /// <summary>All known edges for a (pharmacy, task) — drives the periodic evaporation sweep.</summary>
     IReadOnlyCollection<EdgeKey> Edges(string pharmacyId, string taskKey);
+
+    /// <summary>Distinct (pharmacy, task) scopes with at least one edge — lets the evaporation worker
+    /// sweep every scope without knowing them a priori.</summary>
+    IReadOnlyCollection<(string PharmacyId, string TaskKey)> AllPharmacyTaskPairs();
 }
 
 /// <summary>
@@ -44,4 +48,7 @@ public sealed class InMemoryEdgeConductanceStore : IEdgeConductanceStore
 
     public IReadOnlyCollection<EdgeKey> Edges(string pharmacyId, string taskKey) =>
         _edges.Keys.Where(k => k.PharmacyId == pharmacyId && k.TaskKey == taskKey).ToList();
+
+    public IReadOnlyCollection<(string PharmacyId, string TaskKey)> AllPharmacyTaskPairs() =>
+        _edges.Keys.Select(k => (k.PharmacyId, k.TaskKey)).Distinct().ToList();
 }

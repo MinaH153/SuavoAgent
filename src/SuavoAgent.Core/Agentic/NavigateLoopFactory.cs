@@ -30,18 +30,36 @@ public static class NavigateLoopFactory
         NavigateSafetyOptions safetyOptions,
         MissionCharter charter,
         AuditChain audit,
-        DateTimeOffset deadlineUtc)
+        DateTimeOffset deadlineUtc,
+        PhysarumPolicyOptions? policyOptions = null,
+        ISafetyGate? safetyOverride = null)
     {
         var perceiver = new HelperPerceiver(services.GetRequiredService<IIpcCommandClient>());
 
-        var reasoner = new TieredBrainReasoner(
+        var inner = new TieredBrainReasoner(
             services.GetRequiredService<RuleEngine>(),
             services.GetRequiredService<ILocalInference>(),
             services.GetRequiredService<ActionVerifier>(),
             services.GetRequiredService<ICloudReasoning>(),
             services.GetRequiredService<ILogger<TieredBrain>>());
 
-        var safety = new CompositeSafetyGate(
+        // EXPLORE mode (explore_sandbox only): decorate the brain with the Physarum frontier explorer so
+        // verified-thickened (state→action) tubes drive selection. policyOptions is non-null ONLY for
+        // explore_sandbox; live navigate_app / replay_template pass null ⇒ the inner brain directly.
+        IReasoner reasoner = policyOptions is not null
+            ? new PhysarumActionPolicy(
+                inner,
+                services.GetRequiredService<IEdgeConductanceStore>(),
+                ConductanceParams.Default,
+                policyOptions,
+                services.GetRequiredService<ILogger<PhysarumActionPolicy>>(),
+                policyOptions.ProcessName)
+            : inner;
+
+        // safetyOverride is the SandboxExploreSafetyGate, supplied ONLY by the explore_sandbox handler
+        // (Codex Q3 invariant: it is never DI-registered as the shared ISafetyGate). Live commands fall
+        // through to the autonomy-graduated CompositeSafetyGate.
+        var safety = safetyOverride ?? new CompositeSafetyGate(
             gateState: () => new ActuationGateState(
                 Enabled: true, DryRun: false, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null),
             ledger: services.GetRequiredService<TaskAutonomyLedger>(),

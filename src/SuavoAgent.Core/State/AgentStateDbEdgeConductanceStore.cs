@@ -27,4 +27,7 @@ public sealed class AgentStateDbEdgeConductanceStore : IEdgeConductanceStore
         _db.GetEdgeConductanceKeys(pharmacyId, taskKey)
            .Select(k => new EdgeKey(pharmacyId, taskKey, k.StateHash, k.ActionSig))
            .ToList();
+
+    public IReadOnlyCollection<(string PharmacyId, string TaskKey)> AllPharmacyTaskPairs() =>
+        _db.GetAllEdgeConductancePharmacyTaskPairs();
 }

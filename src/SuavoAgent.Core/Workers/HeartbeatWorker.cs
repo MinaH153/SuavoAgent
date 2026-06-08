@@ -941,6 +941,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "replay_template":
                     _ = Task.Run(() => HandleReplayTemplateAsync(scEl, cmd, ct), ct);
                     break;
+                case "explore_sandbox":
+                    _ = Task.Run(() => HandleSandboxExploreAsync(scEl, cmd, ct), ct);
+                    break;
                 case "abort_navigation":
                     await HandleAbortNavigationAsync(scEl, cmd, ct);
                     break;
@@ -1798,6 +1801,177 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "navigate_app execution exception");
+            await AckAsync(false, null, ex.Message);
+        }
+        finally
+        {
+            _navigationSemaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// MOAT — explore_sandbox: run the Physarum frontier explorer against an ALLOWLISTED sandbox app to
+    /// learn UI navigation from real, verified screen changes. This is the ONLY place the permissive
+    /// <see cref="SuavoAgent.Core.Agentic.Adapters.SandboxExploreSafetyGate"/> + ExploreMode policy are
+    /// constructed (Codex Q3 invariant). Real execution (DryRun=false) is structurally confined to the
+    /// sandbox allowlist; the live PMS is never allowlisted, and v1 actuation is click-only (Codex Q1).
+    /// Verified verdicts reinforce conductance post-run (same as navigate); the store is read-only mid-run.
+    /// </summary>
+    private async Task HandleSandboxExploreAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        var objective = dataEl.TryGetProperty("objective", out var o) && o.ValueKind == JsonValueKind.String
+            ? o.GetString() : null;
+        var taskKey = dataEl.TryGetProperty("taskKey", out var tk) && tk.ValueKind == JsonValueKind.String
+            ? tk.GetString() : null;
+        var app = dataEl.TryGetProperty("app", out var ap) && ap.ValueKind == JsonValueKind.String
+            ? ap.GetString() : null;
+        if (string.IsNullOrWhiteSpace(objective) || string.IsNullOrWhiteSpace(taskKey) || string.IsNullOrWhiteSpace(app))
+        {
+            await AckAsync(false, null, "malformed_explore_payload");
+            return;
+        }
+
+        // Fail-closed: the sandbox app MUST be in the actuation allowlist (the Helper re-checks too). The
+        // live PMS is never in this set, so explore can never target it.
+        var allowed = ActuationAllowlistedSandboxApps.ProcessNames.Keys
+            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Values)
+            .Any(a => string.Equals(a, app, StringComparison.OrdinalIgnoreCase));
+        if (!allowed)
+        {
+            await AckAsync(false, null, $"app_not_allowlisted:{app}");
+            return;
+        }
+
+        var runId = dataEl.TryGetProperty("runId", out var rid) && rid.ValueKind == JsonValueKind.String
+            && rid.GetString() is { Length: > 0 } r
+            ? r : Guid.NewGuid().ToString("n");
+        var maxSteps = dataEl.TryGetProperty("maxSteps", out var ms) && ms.TryGetInt32(out var msv) ? msv : 25;
+        var deadlineSeconds = dataEl.TryGetProperty("deadlineSeconds", out var ds) && ds.TryGetInt32(out var dsv) ? dsv : 120;
+
+        // Shared with navigate/replay — actuation is one-at-a-time, which also serializes conductance writes.
+        if (!await _navigationSemaphore.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            await AckAsync(false, null, "navigation_already_running");
+            return;
+        }
+
+        try
+        {
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: runId,
+                EventType: "explore_sandbox_received",
+                FromState: "queued",
+                ToState: "starting",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: $"explore app={app} maxSteps={maxSteps}"));
+
+            var charter = _serviceProvider.GetService<MissionCharter>() ?? BuildEphemeralCharter();
+            var audit = _serviceProvider.GetService<SuavoAgent.Core.Audit.AuditChain>()
+                ?? new SuavoAgent.Core.Audit.AuditChain();
+            var pharmacyId = _options.PharmacyId ?? charter.PharmacyId;
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(deadlineSeconds);
+
+            var safetyOptions = new SuavoAgent.Core.Agentic.Adapters.NavigateSafetyOptions(
+                EnableTaskAutonomy: false,   // explore bypasses graduation via the sandbox gate, not autonomy
+                LivePms: false,              // explore NEVER targets a live PMS
+                ExecutorMode: _options.PricingExecutor,
+                AllowLiveActuation: false);
+
+            // Codex Q3 invariant: the permissive gate is constructed HERE and passed as an explicit override
+            // — never DI-registered. Core has no live-gate IPC, so the synthetic clean state mirrors
+            // NavigateLoopFactory; the authoritative kill/pause enforcement is Helper-side at act time.
+            var exploreGate = new SuavoAgent.Core.Agentic.Adapters.SandboxExploreSafetyGate(
+                gateState: () => new SuavoAgent.Contracts.Ipc.ActuationGateState(
+                    Enabled: true, DryRun: false, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null));
+
+            var policyOptions = new SuavoAgent.Core.Agentic.PhysarumPolicyOptions { ProcessName = app! };
+
+            var runner = SuavoAgent.Core.Agentic.NavigateLoopFactory.Create(
+                _serviceProvider, safetyOptions, charter, audit, deadline,
+                policyOptions: policyOptions, safetyOverride: exploreGate);
+
+            var loopOptions = new SuavoAgent.Core.Agentic.AgenticLoopOptions
+            {
+                MaxSteps = maxSteps,
+                Deadline = TimeSpan.FromSeconds(deadlineSeconds),
+                DryRun = false, // real execution — confined to the sandbox allowlist by the gate + Helper
+                AllowedActions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "Click", "Type", "PressKey", "WaitForElement", "VerifyElement", "Log",
+                },
+            };
+
+            var objectiveModel = new SuavoAgent.Core.Agentic.AgentObjective(objective!, taskKey!, pharmacyId);
+
+            using var navCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            lock (_activeNavigationLock)
+            {
+                _activeNavigationCts = navCts;
+                _activeNavigationRunId = runId;
+            }
+
+            SuavoAgent.Core.Agentic.AgenticLoopResult result;
+            try
+            {
+                result = await runner.RunAsync(objectiveModel, loopOptions, navCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_activeNavigationLock)
+                {
+                    _activeNavigationCts = null;
+                    _activeNavigationRunId = null;
+                }
+            }
+
+            _logger.LogInformation(
+                "explore_sandbox run={RunId} app={App} termination={Term} steps={Steps}",
+                runId, app, result.Termination, result.StepCount);
+
+            // Verified verdict trail → conductance reinforcement (same as navigate). Best-effort, logged.
+            try
+            {
+                var conductance = _serviceProvider.GetService<SuavoAgent.Core.Agentic.IEdgeConductanceStore>()
+                    ?? new SuavoAgent.Core.State.AgentStateDbEdgeConductanceStore(_stateDb);
+                SuavoAgent.Core.Agentic.EdgeReinforcement.ApplyRun(
+                    conductance, pharmacyId, taskKey!, result.FinalMemory.History,
+                    SuavoAgent.Core.Agentic.ConductanceParams.Default);
+            }
+            catch (Exception reinforceEx)
+            {
+                _logger.LogWarning(reinforceEx,
+                    "explore_sandbox run={RunId} edge-conductance reinforcement failed (run unaffected)", runId);
+            }
+
+            await AckAsync(
+                ok: result.Termination == SuavoAgent.Core.Agentic.TerminationReason.Done,
+                result: new
+                {
+                    run_id = runId,
+                    app,
+                    termination = result.Termination.ToString(),
+                    steps = result.StepCount,
+                    detail = result.Detail,
+                },
+                err: result.Termination == SuavoAgent.Core.Agentic.TerminationReason.Done ? null : result.Termination.ToString());
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "explore_sandbox execution exception");
             await AckAsync(false, null, ex.Message);
         }
         finally

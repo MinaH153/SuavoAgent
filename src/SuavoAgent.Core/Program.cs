@@ -451,6 +451,11 @@ try
     // construction (EdgeReinforcement gates on the real PostconditionEvaluator verdict).
     builder.Services.AddSingleton<SuavoAgent.Core.Agentic.IEdgeConductanceStore>(sp =>
         new SuavoAgent.Core.State.AgentStateDbEdgeConductanceStore(sp.GetRequiredService<AgentStateDb>()));
+    // Always-on slime-mold evaporation: decays unused edges toward the Floor on a 5-min tick (drift handling).
+    // NOTE: the explore-only SandboxExploreSafetyGate is deliberately NOT registered here — it is constructed
+    // inside HandleSandboxExploreAsync and passed as an explicit override (Codex Q3 invariant: never the
+    // shared/default ISafetyGate, so live navigate_app / replay_template can't accidentally resolve it).
+    builder.Services.AddHostedService<SuavoAgent.Core.Workers.PhysarumEvaporationWorker>();
 
     // Codex 2026-04-27 — receiver lazy-resolves the active learning session
     // per batch via AgentStateDb.GetActiveSessionId, so events arriving

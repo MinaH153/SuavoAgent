@@ -22,6 +22,12 @@ public sealed class AgentStateDb : IDisposable
     // commands either, so this lock also protects the shared connection.
     private readonly object _auditWriteLock = new();
 
+    // Guards every edge_conductance read/write. The navigate/explore run (HeartbeatWorker Task.Run)
+    // and the PhysarumEvaporationWorker timer can hit these rows concurrently on the single
+    // non-thread-safe SqliteConnection (busy_timeout is a mitigation, not a guarantee). Separate from
+    // _auditWriteLock so edge traffic never contends with the audit chain.
+    private readonly object _edgeConductanceLock = new();
+
     public AgentStateDb(string dbPath, string? password = null)
     {
         SQLitePCL.Batteries_V2.Init();
@@ -4180,51 +4186,75 @@ public sealed class AgentStateDb : IDisposable
     /// <summary>Conductance for one (pharmacy, task, state, action) edge, or <paramref name="absent"/> if never seen.</summary>
     public double GetEdgeConductance(string pharmacyId, string taskKey, string stateHash, string actionSig, double absent)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT conductance FROM edge_conductance
-            WHERE pharmacy_id = @p AND task_key = @t AND state_hash = @s AND action_sig = @a
-            """;
-        cmd.Parameters.AddWithValue("@p", pharmacyId);
-        cmd.Parameters.AddWithValue("@t", taskKey);
-        cmd.Parameters.AddWithValue("@s", stateHash);
-        cmd.Parameters.AddWithValue("@a", actionSig);
-        var v = cmd.ExecuteScalar();
-        return v is null or DBNull ? absent : Convert.ToDouble(v);
+        lock (_edgeConductanceLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT conductance FROM edge_conductance
+                WHERE pharmacy_id = @p AND task_key = @t AND state_hash = @s AND action_sig = @a
+                """;
+            cmd.Parameters.AddWithValue("@p", pharmacyId);
+            cmd.Parameters.AddWithValue("@t", taskKey);
+            cmd.Parameters.AddWithValue("@s", stateHash);
+            cmd.Parameters.AddWithValue("@a", actionSig);
+            var v = cmd.ExecuteScalar();
+            return v is null or DBNull ? absent : Convert.ToDouble(v);
+        }
     }
 
     /// <summary>Persist an already-clamped conductance for one edge (callers clamp via ConductanceLaw).</summary>
     public void SetEdgeConductance(string pharmacyId, string taskKey, string stateHash, string actionSig, double conductance)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO edge_conductance (pharmacy_id, task_key, state_hash, action_sig, conductance, updated_at)
-            VALUES (@p, @t, @s, @a, @c, datetime('now'))
-            ON CONFLICT(pharmacy_id, task_key, state_hash, action_sig) DO UPDATE SET
-                conductance = @c, updated_at = datetime('now')
-            """;
-        cmd.Parameters.AddWithValue("@p", pharmacyId);
-        cmd.Parameters.AddWithValue("@t", taskKey);
-        cmd.Parameters.AddWithValue("@s", stateHash);
-        cmd.Parameters.AddWithValue("@a", actionSig);
-        cmd.Parameters.AddWithValue("@c", conductance);
-        cmd.ExecuteNonQuery();
+        lock (_edgeConductanceLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO edge_conductance (pharmacy_id, task_key, state_hash, action_sig, conductance, updated_at)
+                VALUES (@p, @t, @s, @a, @c, datetime('now'))
+                ON CONFLICT(pharmacy_id, task_key, state_hash, action_sig) DO UPDATE SET
+                    conductance = @c, updated_at = datetime('now')
+                """;
+            cmd.Parameters.AddWithValue("@p", pharmacyId);
+            cmd.Parameters.AddWithValue("@t", taskKey);
+            cmd.Parameters.AddWithValue("@s", stateHash);
+            cmd.Parameters.AddWithValue("@a", actionSig);
+            cmd.Parameters.AddWithValue("@c", conductance);
+            cmd.ExecuteNonQuery();
+        }
     }
 
     /// <summary>All (state_hash, action_sig) edges for a (pharmacy, task) — drives the evaporation sweep.</summary>
     public IReadOnlyList<(string StateHash, string ActionSig)> GetEdgeConductanceKeys(string pharmacyId, string taskKey)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT state_hash, action_sig FROM edge_conductance
-            WHERE pharmacy_id = @p AND task_key = @t
-            """;
-        cmd.Parameters.AddWithValue("@p", pharmacyId);
-        cmd.Parameters.AddWithValue("@t", taskKey);
-        using var reader = cmd.ExecuteReader();
-        var keys = new List<(string, string)>();
-        while (reader.Read()) keys.Add((reader.GetString(0), reader.GetString(1)));
-        return keys;
+        lock (_edgeConductanceLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT state_hash, action_sig FROM edge_conductance
+                WHERE pharmacy_id = @p AND task_key = @t
+                """;
+            cmd.Parameters.AddWithValue("@p", pharmacyId);
+            cmd.Parameters.AddWithValue("@t", taskKey);
+            using var reader = cmd.ExecuteReader();
+            var keys = new List<(string, string)>();
+            while (reader.Read()) keys.Add((reader.GetString(0), reader.GetString(1)));
+            return keys;
+        }
+    }
+
+    /// <summary>Distinct (pharmacy_id, task_key) scopes that have at least one edge — drives the
+    /// evaporation worker's per-scope sweep.</summary>
+    public IReadOnlyList<(string PharmacyId, string TaskKey)> GetAllEdgeConductancePharmacyTaskPairs()
+    {
+        lock (_edgeConductanceLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT DISTINCT pharmacy_id, task_key FROM edge_conductance";
+            using var reader = cmd.ExecuteReader();
+            var pairs = new List<(string, string)>();
+            while (reader.Read()) pairs.Add((reader.GetString(0), reader.GetString(1)));
+            return pairs;
+        }
     }
 
     public string SavePricingDiscoveryCandidate(string absolutePath, string? fileName = null)
