@@ -2125,6 +2125,26 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 "replay_skill run={RunId} skill={SkillId} outcome={Outcome} stepsCompleted={Steps}",
                 runId, resolvedSkillId[..12], result.Outcome, result.StepsCompleted);
 
+            // Slime-mold skill hygiene: a Completed replay re-thickens; a drift / skill-fault outcome decays
+            // and may retire the skill (so a stale path stops being auto-selected + exploration re-learns it).
+            // Environmental denials (kill-switch, perceive-fail, cancel, no-steps) are NOT the skill's fault →
+            // ignored. Best-effort: a hygiene write must never change the run's ack.
+            try
+            {
+                var o = result.Outcome;
+                if (o == SuavoAgent.Core.Agentic.SkillReplayOutcome.Completed)
+                    _stateDb.RecordSkillReplayOutcome(resolvedSkillId, success: true);
+                else if (o is SuavoAgent.Core.Agentic.SkillReplayOutcome.StateMismatch
+                    or SuavoAgent.Core.Agentic.SkillReplayOutcome.PostconditionFailed
+                    or SuavoAgent.Core.Agentic.SkillReplayOutcome.Unparseable
+                    or SuavoAgent.Core.Agentic.SkillReplayOutcome.StepRejected)
+                    _stateDb.RecordSkillReplayOutcome(resolvedSkillId, success: false);
+            }
+            catch (Exception hygieneEx)
+            {
+                _logger.LogWarning(hygieneEx, "replay_skill run={RunId} skill-hygiene update failed (run unaffected)", runId);
+            }
+
             await AckAsync(
                 ok: result.Outcome == SuavoAgent.Core.Agentic.SkillReplayOutcome.Completed,
                 result: new { run_id = runId, skill_id = resolvedSkillId, outcome = result.Outcome.ToString(), steps_completed = result.StepsCompleted, detail = result.Detail },

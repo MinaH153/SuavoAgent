@@ -831,6 +831,18 @@ public sealed class AgentStateDb : IDisposable
             CREATE INDEX IF NOT EXISTS idx_verified_skills_task
                 ON verified_skills(pharmacy_id, task_key);
             """);
+        // Migration 6 — skill decay/retirement (slime-mold cache hygiene for skills, mirroring the
+        // edge-conductance evaporation). A banked skill that keeps FAILING replay (UI drift, stale path)
+        // accrues consecutive failures and retires, so it stops being auto-selected and exploration
+        // re-learns the task. A successful replay resets the failure streak (the tube re-thickens).
+        ApplyMigrationIfNeeded(6,
+            "Verified-skill decay/retirement (replay-outcome feedback)",
+            """
+            ALTER TABLE verified_skills ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE verified_skills ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE verified_skills ADD COLUMN retired_at TEXT;
+            ALTER TABLE verified_skills ADD COLUMN retirement_reason TEXT;
+            """);
     }
 
     /// <summary>
@@ -4305,7 +4317,10 @@ public sealed class AgentStateDb : IDisposable
                 VALUES (@id, @ph, @t, @app, @json, @hash, 1, datetime('now'), datetime('now'))
                 ON CONFLICT(skill_id) DO UPDATE SET
                     success_count = success_count + 1,
-                    last_verified_at = datetime('now')
+                    last_verified_at = datetime('now'),
+                    consecutive_failures = 0,
+                    retired_at = NULL,
+                    retirement_reason = NULL
                 RETURNING success_count
                 """;
             cmd.Parameters.AddWithValue("@id", skillId);
@@ -4339,7 +4354,7 @@ public sealed class AgentStateDb : IDisposable
         lock (_verifiedSkillLock)
         {
             using var cmd = _conn.CreateCommand();
-            cmd.CommandText = "SELECT pharmacy_id, task_key, app, steps_json, steps_hash, success_count FROM verified_skills WHERE skill_id = @id";
+            cmd.CommandText = "SELECT pharmacy_id, task_key, app, steps_json, steps_hash, success_count FROM verified_skills WHERE skill_id = @id AND retired_at IS NULL";
             cmd.Parameters.AddWithValue("@id", skillId);
             using var reader = cmd.ExecuteReader();
             if (!reader.Read()) return null;
@@ -4357,7 +4372,7 @@ public sealed class AgentStateDb : IDisposable
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = """
                 SELECT skill_id, steps_json, steps_hash, success_count FROM verified_skills
-                WHERE pharmacy_id = @ph AND task_key = @t AND app = @app
+                WHERE pharmacy_id = @ph AND task_key = @t AND app = @app AND retired_at IS NULL
                 ORDER BY success_count DESC, last_verified_at DESC
                 LIMIT 1
                 """;
@@ -4367,6 +4382,59 @@ public sealed class AgentStateDb : IDisposable
             using var reader = cmd.ExecuteReader();
             if (!reader.Read()) return null;
             return (reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3));
+        }
+    }
+
+    /// <summary>
+    /// Feed a replay outcome back into the skill (slime-mold hygiene). A SUCCESS resets the failure streak
+    /// and re-thickens (success_count++). A FAILURE accrues a consecutive-failure streak; once it reaches
+    /// <paramref name="retireAfterConsecutiveFailures"/> the skill is RETIRED (excluded from selection) so a
+    /// stale/drifted path stops being replayed and exploration re-learns it. A later re-harvest revives it
+    /// (see <see cref="UpsertVerifiedSkill"/>). Returns the post-update state.
+    /// </summary>
+    public (int SuccessCount, int ConsecutiveFailures, bool Retired) RecordSkillReplayOutcome(
+        string skillId, bool success, int retireAfterConsecutiveFailures = 3)
+    {
+        lock (_verifiedSkillLock)
+        {
+            using (var cmd = _conn.CreateCommand())
+            {
+                if (success)
+                {
+                    cmd.CommandText = """
+                        UPDATE verified_skills SET
+                            success_count = success_count + 1,
+                            consecutive_failures = 0,
+                            last_verified_at = datetime('now')
+                        WHERE skill_id = @id
+                        """;
+                }
+                else
+                {
+                    // OLD column values are used in the SET expressions, so (consecutive_failures + 1) is the
+                    // new streak; retire once it reaches the threshold.
+                    cmd.CommandText = """
+                        UPDATE verified_skills SET
+                            failure_count = failure_count + 1,
+                            consecutive_failures = consecutive_failures + 1,
+                            retired_at = CASE WHEN consecutive_failures + 1 >= @thr AND retired_at IS NULL
+                                THEN datetime('now') ELSE retired_at END,
+                            retirement_reason = CASE WHEN consecutive_failures + 1 >= @thr AND retirement_reason IS NULL
+                                THEN 'consecutive_replay_failures' ELSE retirement_reason END
+                        WHERE skill_id = @id
+                        """;
+                    cmd.Parameters.AddWithValue("@thr", retireAfterConsecutiveFailures);
+                }
+                cmd.Parameters.AddWithValue("@id", skillId);
+                cmd.ExecuteNonQuery();
+            }
+
+            using var read = _conn.CreateCommand();
+            read.CommandText = "SELECT success_count, consecutive_failures, retired_at IS NOT NULL FROM verified_skills WHERE skill_id = @id";
+            read.Parameters.AddWithValue("@id", skillId);
+            using var reader = read.ExecuteReader();
+            if (!reader.Read()) return (0, 0, false);
+            return (reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2) != 0);
         }
     }
 
