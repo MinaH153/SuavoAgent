@@ -291,7 +291,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 // Wall-clock hit: the native loop is ignoring cancellation. Best-effort cancel, then
                 // detach — swallow the orphan's eventual exception so it can't crash the process — and
                 // fall back. We do NOT read `sb` here (the orphan may still be appending to it).
-                linked.Cancel();
+                try { linked.Cancel(); } catch (ObjectDisposedException) { /* orphan already finished + disposed */ }
                 _ = consume.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
                     TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
                 _logger.LogWarning("LLamaLocalInference.Chat: hard timeout after {Ms}ms — abandoning inference", sw.ElapsedMilliseconds);
