@@ -54,6 +54,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
     // Honeytoken immune reflex — read the Helper's gate-state compromise to emit the self-compromise
     // heartbeat signal. Optional (null if not wired); the read is best-effort and never blocks the heartbeat.
     private readonly SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.IActuationGateway? _actuationGateway;
+    // On-device brain for the cockpit "talk to the agent" command. Optional (null/NullLocalInference
+    // when reasoning is off) — the chat command then falls back to a cloud/templated reply.
+    private readonly SuavoAgent.Core.Reasoning.ILocalInference? _localInference;
     private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
     private readonly SemaphoreSlim _workflowSemaphore = new(1, 1);
     private readonly object _activeWorkflowLock = new();
@@ -108,6 +111,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
         _cloudAuthRecovery = serviceProvider.GetService<CloudAuthRecoveryCoordinator>();
         _workflowExecutor = serviceProvider.GetService<WorkflowExecutor>();
         _actuationGateway = serviceProvider.GetService<SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.IActuationGateway>();
+        _localInference = serviceProvider.GetService<SuavoAgent.Core.Reasoning.ILocalInference>();
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -944,6 +948,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "discover_elements":
                     await HandleDiscoverElementsAsync(scEl, cmd, ct);
                     break;
+                case "chat":
+                    await HandleChatAsync(scEl, cmd, ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -996,6 +1003,47 @@ public sealed class HeartbeatWorker : ResilientHostedService
             var count = elements is System.Text.Json.Nodes.JsonArray arr ? arr.Count : 0;
             _logger.LogInformation("discover_elements process={Process} count={Count}", process, count);
             await AckAsync(true, new { process, count, elements }, null);
+        }
+        catch (Exception ex)
+        {
+            await AckAsync(false, null, ex.Message);
+        }
+    }
+
+    // Cockpit "talk to the agent" → the on-device Qwen3 brain. Reply is PHI-scrubbed Core-side
+    // (defense-in-depth with the cloud ack scrub) before it leaves the box. When the brain isn't ready
+    // (reasoning off / model still provisioning), acks ready=false so the cockpit falls back to a
+    // cloud/templated reply — the local brain is a bonus, never a hard dependency.
+    private async Task HandleChatAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        try
+        {
+            var prompt = dataEl.TryGetProperty("prompt", out var pe) ? pe.GetString() : null;
+            if (string.IsNullOrWhiteSpace(prompt))
+            {
+                await AckAsync(false, null, "prompt required");
+                return;
+            }
+            if (_localInference is null || !_localInference.IsReady)
+            {
+                await AckAsync(true, new { reply = (string?)null, ready = false, model = _localInference?.ModelId ?? "none" }, null);
+                return;
+            }
+
+            using var chatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            chatCts.CancelAfter(TimeSpan.FromSeconds(60));
+            var reply = await _localInference.ChatAsync(prompt!, chatCts.Token).ConfigureAwait(false);
+            var scrubbed = SuavoAgent.Core.Learning.PhiScrubber.ScrubText(reply);
+            await AckAsync(true, new { reply = scrubbed, ready = true, model = _localInference.ModelId }, null);
         }
         catch (Exception ex)
         {

@@ -95,6 +95,7 @@ public class BrainStartupProbeTests
 
         public Task<InferenceProposal?> ProposeAsync(InferenceRequest request, CancellationToken ct) =>
             throw new InvalidOperationException("test throw");
+        public Task<string?> ChatAsync(string userMessage, CancellationToken ct) => Task.FromResult<string?>(null);
     }
 
     // Mimics a native llama.cpp generation that does NOT honor the cancellation
@@ -109,5 +110,6 @@ public class BrainStartupProbeTests
             await Task.Delay(TimeSpan.FromSeconds(60), CancellationToken.None);
             return null;
         }
+        public Task<string?> ChatAsync(string userMessage, CancellationToken ct) => Task.FromResult<string?>(null);
     }
 }

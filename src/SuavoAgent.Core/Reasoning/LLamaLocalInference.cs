@@ -198,6 +198,81 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
     }
 
     /// <summary>
+    /// Freeform chat completion — the cockpit "talk to the agent" path. Same load/idle-unload machinery
+    /// as <see cref="ProposeAsync"/> but no grammar (plain text out). Returns null on any failure so the
+    /// caller falls back gracefully (templated reply / cloud) — the local brain is a bonus, never a
+    /// hard dependency. The reply is PHI-scrubbed by the COMMAND handler before it leaves the box.
+    /// </summary>
+    public async Task<string?> ChatAsync(string userMessage, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(userMessage)) return null;
+        ct.ThrowIfCancellationRequested();
+
+        StatelessExecutor? executor;
+        await _lock.WaitAsync(ct);
+        try
+        {
+            if (!await EnsureLoadedLockedAsync(ct)) return null;
+            executor = _executor;
+            if (executor == null) return null;
+            Interlocked.Increment(ref _activeInferences);
+            _lastUse = DateTime.UtcNow;
+        }
+        finally { _lock.Release(); }
+
+        var promptFormat = InferencePromptBuilder.ResolveFormat(ModelId);
+        // Minimal ChatML — Qwen3's native format. A grounded, concise pharmacy-ops persona.
+        var system =
+            "You are SuavoAgent, a concise, friendly assistant running locally on a pharmacy's computer. " +
+            "You help with pharmacy operations and can run tasks on this PC. Keep replies short and plain. " +
+            "Never invent patient data.";
+        var prompt =
+            $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{userMessage.Trim()}<|im_end|>\n<|im_start|>assistant\n";
+
+        var inferenceParams = new InferenceParams
+        {
+            MaxTokens = Math.Min(_options.MaxOutputTokens, 256),
+            AntiPrompts = new[] { "<|im_end|>", "<|im_start|>" },
+            SamplingPipeline = new DefaultSamplingPipeline { Temperature = 0.6f, TopK = 40, TopP = 0.95f },
+        };
+
+        var sb = new StringBuilder();
+        var sw = Stopwatch.StartNew();
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(15, _options.InferenceTimeoutSeconds * 3)));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        try
+        {
+            await foreach (var token in executor.InferAsync(prompt, inferenceParams, linked.Token))
+            {
+                sb.Append(token);
+                if (sb.Length > 4096) break;
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("LLamaLocalInference.Chat: timed out after {Ms}ms", sw.ElapsedMilliseconds);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "LLamaLocalInference.Chat: inference error");
+            return null;
+        }
+        finally
+        {
+            sw.Stop();
+            _lastUse = DateTime.UtcNow;
+            Interlocked.Decrement(ref _activeInferences);
+            RestartIdleWatcher();
+        }
+
+        var reply = sb.ToString().Replace("<|im_end|>", "").Replace("<|im_start|>", "").Trim();
+        _logger.LogInformation("LLamaLocalInference.Chat: {Len} chars in {Ms}ms", reply.Length, sw.ElapsedMilliseconds);
+        return reply.Length == 0 ? null : reply;
+    }
+
+    /// <summary>
     /// Loads weights if not already loaded. MUST be called with _lock held.
     /// Does not swallow OperationCanceledException from the caller's token.
     /// </summary>

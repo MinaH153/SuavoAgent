@@ -366,5 +366,6 @@ public class PricingBrainEvaluatorTests
             // Return null so the brain tries Tier-3 (MockCloudReasoning in the test).
             return Task.FromResult<InferenceProposal?>(null);
         }
+        public Task<string?> ChatAsync(string userMessage, CancellationToken ct) => Task.FromResult<string?>(null);
     }
 }

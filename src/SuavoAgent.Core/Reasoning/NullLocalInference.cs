@@ -17,4 +17,7 @@ public sealed class NullLocalInference : ILocalInference
 
     public Task<InferenceProposal?> ProposeAsync(InferenceRequest request, CancellationToken ct) =>
         Task.FromResult<InferenceProposal?>(null);
+
+    public Task<string?> ChatAsync(string userMessage, CancellationToken ct) =>
+        Task.FromResult<string?>(null);
 }

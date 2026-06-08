@@ -31,4 +31,11 @@ public interface ILocalInference
     /// those are reported as null so the caller can cleanly escalate.
     /// </summary>
     Task<InferenceProposal?> ProposeAsync(InferenceRequest request, CancellationToken ct);
+
+    /// <summary>
+    /// Freeform chat completion for the cockpit "talk to the agent" path. Returns null when the model
+    /// isn't ready or inference fails, so the caller falls back to a templated/cloud reply — the local
+    /// brain is a bonus, never a hard dependency. NEVER throws for inference failures.
+    /// </summary>
+    Task<string?> ChatAsync(string userMessage, CancellationToken ct);
 }

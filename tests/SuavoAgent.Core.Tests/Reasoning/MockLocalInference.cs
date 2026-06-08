@@ -40,6 +40,10 @@ public sealed class MockLocalInference : ILocalInference
         return Responses.Count > 0 ? Responses.Dequeue() : null;
     }
 
+    /// <summary>Canned chat reply for tests; null unless set.</summary>
+    public string? ChatReply { get; set; }
+    public Task<string?> ChatAsync(string userMessage, CancellationToken ct) => Task.FromResult(ChatReply);
+
     /// <summary>Convenience: queue a simple approved proposal.</summary>
     public void EnqueueApproved(RuleActionType type, double confidence,
         params (string Key, string Value)[] parameters)
