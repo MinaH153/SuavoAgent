@@ -226,8 +226,11 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
             "You are SuavoAgent, a concise, friendly assistant running locally on a pharmacy's computer. " +
             "You help with pharmacy operations and can run tasks on this PC. Keep replies short and plain. " +
             "Never invent patient data.";
+        // Prefill an empty think-block so Qwen3 runs in NON-thinking mode (fast, no <think> ramble) —
+        // the documented Qwen3 convention. We also strip any <think>…</think> from the reply as a
+        // belt-and-suspenders for builds that emit it anyway.
         var prompt =
-            $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{userMessage.Trim()}<|im_end|>\n<|im_start|>assistant\n";
+            $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{userMessage.Trim()}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
 
         var inferenceParams = new InferenceParams
         {
@@ -267,7 +270,10 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
             RestartIdleWatcher();
         }
 
-        var reply = sb.ToString().Replace("<|im_end|>", "").Replace("<|im_start|>", "").Trim();
+        var reply = sb.ToString().Replace("<|im_end|>", "").Replace("<|im_start|>", "");
+        // Strip any Qwen3 <think>…</think> reasoning block so the cockpit shows only the answer.
+        reply = System.Text.RegularExpressions.Regex.Replace(reply, @"<think>.*?</think>", "", System.Text.RegularExpressions.RegexOptions.Singleline);
+        reply = reply.Replace("<think>", "").Replace("</think>", "").Trim();
         _logger.LogInformation("LLamaLocalInference.Chat: {Len} chars in {Ms}ms", reply.Length, sw.ElapsedMilliseconds);
         return reply.Length == 0 ? null : reply;
     }
