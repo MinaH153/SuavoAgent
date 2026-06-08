@@ -512,6 +512,14 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     // status from "heartbeating" to either "healthy" or
                     // "heartbeating-but-unhealthy" cloud-side.
                     healthComposite = healthComposite,
+                    // Local-brain (Tier-2 Qwen3) status so the cockpit can show readiness + only route
+                    // chat to the brain when it's actually loaded (no slow round-trip to an off brain).
+                    // modelId/isReady from ILocalInference; "off" when reasoning is disabled.
+                    reasoning = new
+                    {
+                        modelId = _localInference?.ModelId ?? "off",
+                        isReady = _localInference?.IsReady ?? false,
+                    },
                     // Honeytoken immune reflex — PHI-free self-compromise signal (null unless tripped).
                     // apoptosis-level drives the cloud fleet-revoke; lower rungs are alarm + audit only.
                     compromise = compromiseSignal,
@@ -951,6 +959,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "chat":
                     await HandleChatAsync(scEl, cmd, ct);
                     break;
+                case "set_reasoning_config":
+                    await HandleSetReasoningConfigAsync(scEl, cmd, ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -1003,6 +1014,77 @@ public sealed class HeartbeatWorker : ResilientHostedService
             var count = elements is System.Text.Json.Nodes.JsonArray arr ? arr.Count : 0;
             _logger.LogInformation("discover_elements process={Process} count={Count}", process, count);
             await AckAsync(true, new { process, count, elements }, null);
+        }
+        catch (Exception ex)
+        {
+            await AckAsync(false, null, ex.Message);
+        }
+    }
+
+    // Per-box (canary-only) enable of Tier-2 reasoning. Writes %PROGRAMDATA%\SuavoAgent\reasoning.json
+    // (shaped {"Agent":{"Reasoning":{...}}}) which is layered over appsettings + survives OTA. The
+    // ILocalInference factory decides at startup, so this takes effect on the NEXT restart (then the
+    // model + native libs auto-provision; a 2nd restart loads them). Off everywhere it isn't pushed.
+    private async Task HandleSetReasoningConfigAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        try
+        {
+            string? Str(string k) => dataEl.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            int? Int(string k) => dataEl.TryGetProperty(k, out var v) && v.TryGetInt32(out var n) ? n : null;
+            bool Bool(string k) => dataEl.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.True;
+
+            var modelUrl = Str("modelUrl");
+            var nativeLibsUrl = Str("nativeLibsUrl");
+            // Validate URLs are https (no smuggling a local path / http source).
+            foreach (var (name, url) in new[] { ("modelUrl", modelUrl), ("nativeLibsUrl", nativeLibsUrl) })
+            {
+                if (url is not null && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    await AckAsync(false, null, $"{name} must be https");
+                    return;
+                }
+            }
+
+            // Build the Reasoning object; only include provided keys so unset ones fall back to defaults.
+            var reasoning = new System.Text.Json.Nodes.JsonObject { ["Enabled"] = Bool("enabled") };
+            void Put(string k, string? v) { if (!string.IsNullOrWhiteSpace(v)) reasoning[k] = v; }
+            void PutInt(string k, int? v) { if (v is int n) reasoning[k] = n; }
+            Put("ModelUrl", modelUrl);
+            Put("ModelSha256", Str("modelSha256"));
+            Put("ModelPath", Str("modelPath"));
+            Put("ModelId", Str("modelId"));
+            Put("NativeLibsUrl", nativeLibsUrl);
+            Put("NativeLibsSha256", Str("nativeLibsSha256"));
+            Put("NativeLibraryPath", Str("nativeLibraryPath"));
+            PutInt("ContextSize", Int("contextSize"));
+            PutInt("MaxOutputTokens", Int("maxOutputTokens"));
+            PutInt("CpuThreads", Int("cpuThreads"));
+            PutInt("IdleUnloadSeconds", Int("idleUnloadSeconds"));
+
+            var root = new System.Text.Json.Nodes.JsonObject
+            {
+                ["Agent"] = new System.Text.Json.Nodes.JsonObject { ["Reasoning"] = reasoning },
+            };
+
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SuavoAgent");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "reasoning.json");
+            var tmp = path + ".tmp";
+            await File.WriteAllTextAsync(tmp, root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }), ct);
+            if (File.Exists(path)) File.Delete(path);
+            File.Move(tmp, path);
+
+            _logger.LogInformation("set_reasoning_config: wrote reasoning.json (Enabled={Enabled}) — takes effect on next restart", Bool("enabled"));
+            await AckAsync(true, new { applied = true, enabled = Bool("enabled"), fields = reasoning.Select(kv => kv.Key).ToArray(), note = "restart required to activate" }, null);
         }
         catch (Exception ex)
         {

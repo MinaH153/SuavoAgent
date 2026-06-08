@@ -38,6 +38,19 @@ public sealed class ReasoningOptions
     public string? ModelUrl { get; set; }
 
     /// <summary>
+    /// URL to a ZIP of the llama.cpp native DLLs (llama.dll + ggml*.dll + llava_shared.dll for ONE AVX
+    /// variant) to auto-download + extract into <see cref="NativeLibraryPath"/> on first run when those
+    /// DLLs are absent. The native libs are deliberately NOT shipped in the installer (stealth —
+    /// "vendor fingerprint"), so this is how a reasoning-enabled box self-equips. SHA256-verified
+    /// against <see cref="NativeLibsSha256"/>; failure is non-fatal (reasoning stays off). Empty =
+    /// expect operator-placed DLLs.
+    /// </summary>
+    public string? NativeLibsUrl { get; set; }
+
+    /// <summary>Expected SHA256 (hex) of the native-libs ZIP from <see cref="NativeLibsUrl"/>.</summary>
+    public string? NativeLibsSha256 { get; set; }
+
+    /// <summary>
     /// Directory holding the native llama.cpp + ggml binaries that LLamaSharp
     /// P/Invokes into. We do NOT ship these by default — their presence is a
     /// vendor fingerprint (Codex C-1). When Tier-2 is enabled the operator

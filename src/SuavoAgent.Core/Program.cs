@@ -163,6 +163,14 @@ try
         "SuavoAgent",
         "config-overrides.json");
     builder.Configuration.AddJsonFile(configOverridesPath, optional: true, reloadOnChange: true);
+    // Reasoning config is driven PER-BOX from ProgramData (survives OTA; appsettings.json is overwritten
+    // every update) via the set_reasoning_config signed command. Shaped {"Agent":{"Reasoning":{...}}}
+    // so it layers over the Agent:Reasoning section. Canary-only today; off everywhere it isn't pushed.
+    var reasoningConfigPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent",
+        "reasoning.json");
+    builder.Configuration.AddJsonFile(reasoningConfigPath, optional: true, reloadOnChange: true);
     var appSettingsPath = Path.Combine(exeDir, "appsettings.json");
 
     // Version comes from the STAMPED ASSEMBLY, not appsettings.json — the OTA swaps the binaries but
@@ -610,12 +618,24 @@ try
     // brain ships with a client install); with no URL it behaves exactly like the legacy verify-only
     // LocalFileModelManager. Fail-soft — a download failure just leaves reasoning off.
     builder.Services.AddSingleton<IModelManager, HttpModelProvisioner>();
+    // NativeLibProvisioner downloads the llama.cpp native DLLs on first run when NativeLibsUrl is set
+    // (they're deliberately not shipped — stealth). Background + fail-soft, like the model provisioner.
+    builder.Services.AddSingleton<NativeLibProvisioner>();
     builder.Services.AddSingleton<ILocalInference>(sp =>
     {
         var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
         if (!opts.Enabled)
         {
             Log.Information("Tier-2 LocalInference disabled (Reasoning.Enabled=false) — running rules-only");
+            return new NullLocalInference();
+        }
+
+        // Ensure the native llama.cpp DLLs are present (kicks a one-time background download if not).
+        // Until they're there, run rules-only this session — the libs + model both activate on the
+        // restart after their downloads finish.
+        if (!sp.GetRequiredService<NativeLibProvisioner>().EnsureOrProvision())
+        {
+            Log.Information("Tier-2 LocalInference: native libs not yet present — provisioning, rules-only this session");
             return new NullLocalInference();
         }
 
