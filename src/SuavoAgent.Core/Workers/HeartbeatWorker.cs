@@ -1761,6 +1761,27 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 "navigate_app run={RunId} termination={Term} steps={Steps} cloud={Cloud} escalated={Esc}",
                 runId, result.Termination, result.StepCount, result.CloudCallsUsed, result.EscalationEmitted);
 
+            // MOAT — feed this run's VERIFIED verdict trail into the Physarum edge-conductance memory:
+            // a Met step thickens its (state→action) edge, an unverified/failed step evaporates it. This
+            // is the discarded-history gap closed (Phase 1.2) + the substrate PhysarumActionPolicy will
+            // explore over (Phase 2). Verified-only by construction (EdgeReinforcement). Exploration stays
+            // shadow/dry-run confined upstream; this only RECORDS what the real verifier already decided,
+            // so it is safe regardless of dryRun. Best-effort: a learning-layer fault must never fail the
+            // navigate ack, but we log it rather than swallow (no silent failure).
+            try
+            {
+                var conductance = _serviceProvider.GetService<SuavoAgent.Core.Agentic.IEdgeConductanceStore>()
+                    ?? new SuavoAgent.Core.State.AgentStateDbEdgeConductanceStore(_stateDb);
+                SuavoAgent.Core.Agentic.EdgeReinforcement.ApplyRun(
+                    conductance, pharmacyId, taskKey!, result.FinalMemory.History,
+                    SuavoAgent.Core.Agentic.ConductanceParams.Default);
+            }
+            catch (Exception reinforceEx)
+            {
+                _logger.LogWarning(reinforceEx,
+                    "navigate_app run={RunId} edge-conductance reinforcement failed (run unaffected)", runId);
+            }
+
             await AckAsync(
                 ok: result.Termination == SuavoAgent.Core.Agentic.TerminationReason.Done,
                 result: new

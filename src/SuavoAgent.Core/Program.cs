@@ -445,6 +445,13 @@ try
         return db;
     });
 
+    // MOAT — durable Physarum edge-conductance store (slime-mold exploration memory). Backed by the
+    // agent state.db so verified-verdict reinforcement survives restart. HeartbeatWorker feeds it after
+    // every navigate run; PhysarumActionPolicy (Phase 2) will explore over it. Verified-only by
+    // construction (EdgeReinforcement gates on the real PostconditionEvaluator verdict).
+    builder.Services.AddSingleton<SuavoAgent.Core.Agentic.IEdgeConductanceStore>(sp =>
+        new SuavoAgent.Core.State.AgentStateDbEdgeConductanceStore(sp.GetRequiredService<AgentStateDb>()));
+
     // Codex 2026-04-27 — receiver lazy-resolves the active learning session
     // per batch via AgentStateDb.GetActiveSessionId, so events arriving
     // before LearningWorker boots still land under the correct session id

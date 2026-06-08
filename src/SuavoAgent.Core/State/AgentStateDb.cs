@@ -774,6 +774,26 @@ public sealed class AgentStateDb : IDisposable
             CREATE INDEX IF NOT EXISTS idx_sp_skill_step
                 ON selector_patches(skill_id, step_id) WHERE retired_at IS NULL;
             """);
+        // Migration 4 — Physarum edge-conductance store (the moat's slime-mold exploration memory).
+        // One row per (pharmacy, task, screen-state, action) frontier edge; conductance is the
+        // externalized "tube thickness" reinforced ONLY on a verified Met (EdgeReinforcement) and
+        // decayed otherwise. State lives OUTSIDE the model — this table IS that state. PHI-safe:
+        // state_hash + action_sig are scrubbed structural strings, never patient content.
+        ApplyMigrationIfNeeded(4,
+            "Physarum edge-conductance store (verified-only exploration memory)",
+            """
+            CREATE TABLE IF NOT EXISTS edge_conductance (
+                pharmacy_id TEXT NOT NULL,
+                task_key TEXT NOT NULL,
+                state_hash TEXT NOT NULL,
+                action_sig TEXT NOT NULL,
+                conductance REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (pharmacy_id, task_key, state_hash, action_sig)
+            );
+            CREATE INDEX IF NOT EXISTS idx_edge_conductance_task
+                ON edge_conductance(pharmacy_id, task_key);
+            """);
     }
 
     /// <summary>
@@ -4151,6 +4171,60 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@n", totalRuns);
         cmd.Parameters.AddWithValue("@o", (object?)lastOutcome ?? DBNull.Value);
         cmd.ExecuteNonQuery();
+    }
+
+    // ── Physarum edge-conductance store (durable slime-mold exploration memory) ──
+    // Primitive (no Agentic types) so this layer stays decoupled from the Agentic contracts;
+    // AgentStateDbEdgeConductanceStore adapts these to IEdgeConductanceStore / EdgeKey.
+
+    /// <summary>Conductance for one (pharmacy, task, state, action) edge, or <paramref name="absent"/> if never seen.</summary>
+    public double GetEdgeConductance(string pharmacyId, string taskKey, string stateHash, string actionSig, double absent)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT conductance FROM edge_conductance
+            WHERE pharmacy_id = @p AND task_key = @t AND state_hash = @s AND action_sig = @a
+            """;
+        cmd.Parameters.AddWithValue("@p", pharmacyId);
+        cmd.Parameters.AddWithValue("@t", taskKey);
+        cmd.Parameters.AddWithValue("@s", stateHash);
+        cmd.Parameters.AddWithValue("@a", actionSig);
+        var v = cmd.ExecuteScalar();
+        return v is null or DBNull ? absent : Convert.ToDouble(v);
+    }
+
+    /// <summary>Persist an already-clamped conductance for one edge (callers clamp via ConductanceLaw).</summary>
+    public void SetEdgeConductance(string pharmacyId, string taskKey, string stateHash, string actionSig, double conductance)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO edge_conductance (pharmacy_id, task_key, state_hash, action_sig, conductance, updated_at)
+            VALUES (@p, @t, @s, @a, @c, datetime('now'))
+            ON CONFLICT(pharmacy_id, task_key, state_hash, action_sig) DO UPDATE SET
+                conductance = @c, updated_at = datetime('now')
+            """;
+        cmd.Parameters.AddWithValue("@p", pharmacyId);
+        cmd.Parameters.AddWithValue("@t", taskKey);
+        cmd.Parameters.AddWithValue("@s", stateHash);
+        cmd.Parameters.AddWithValue("@a", actionSig);
+        cmd.Parameters.AddWithValue("@c", conductance);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>All (state_hash, action_sig) edges for a (pharmacy, task) — drives the evaporation sweep.</summary>
+    public IReadOnlyList<(string StateHash, string ActionSig)> GetEdgeConductanceKeys(string pharmacyId, string taskKey)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT state_hash, action_sig FROM edge_conductance
+            WHERE pharmacy_id = @p AND task_key = @t
+            """;
+        cmd.Parameters.AddWithValue("@p", pharmacyId);
+        cmd.Parameters.AddWithValue("@t", taskKey);
+        using var reader = cmd.ExecuteReader();
+        var keys = new List<(string, string)>();
+        while (reader.Read()) keys.Add((reader.GetString(0), reader.GetString(1)));
+        return keys;
     }
 
     public string SavePricingDiscoveryCandidate(string absolutePath, string? fileName = null)
