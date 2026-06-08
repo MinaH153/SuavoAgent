@@ -1785,6 +1785,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     "navigate_app run={RunId} edge-conductance reinforcement failed (run unaffected)", runId);
             }
 
+            // Amortize ratchet: a successful verified navigate trajectory becomes a replayable skill.
+            HarvestVerifiedSkill(objectiveModel, string.Empty, result, runId);
+
             await AckAsync(
                 ok: result.Termination == SuavoAgent.Core.Agentic.TerminationReason.Done,
                 result: new
@@ -1956,6 +1959,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     "explore_sandbox run={RunId} edge-conductance reinforcement failed (run unaffected)", runId);
             }
 
+            // Amortize ratchet: a successful verified explore trajectory becomes a replayable skill.
+            HarvestVerifiedSkill(objectiveModel, app!, result, runId);
+
             await AckAsync(
                 ok: result.Termination == SuavoAgent.Core.Agentic.TerminationReason.Done,
                 result: new
@@ -1977,6 +1983,33 @@ public sealed class HeartbeatWorker : ResilientHostedService
         finally
         {
             _navigationSemaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// MOAT — the amortize step (lever 3): after a run, bank a SUCCESSFUL execution-verified trajectory as a
+    /// replayable <see cref="SuavoAgent.Core.Agentic.VerifiedSkill"/>. Re-verifying the same path thickens
+    /// its success count rather than duplicating. Verified-only by construction (Done + every banked step
+    /// Met). Off the hot path (post-run) + best-effort (logged, never fails the run). Returns silently when
+    /// the run didn't succeed or had no verified steps.
+    /// </summary>
+    private void HarvestVerifiedSkill(
+        SuavoAgent.Core.Agentic.AgentObjective objective, string app,
+        SuavoAgent.Core.Agentic.AgenticLoopResult result, string runId)
+    {
+        try
+        {
+            var skill = SuavoAgent.Core.Agentic.VerifiedTrajectoryHarvester.Harvest(objective, app, result);
+            if (skill is null) return;
+            var count = _stateDb.UpsertVerifiedSkill(
+                skill.SkillId, skill.PharmacyId, skill.TaskKey, skill.App, skill.SerializeSteps(), skill.StepsHash);
+            _logger.LogInformation(
+                "verified-skill banked run={RunId} skill={SkillId} steps={Steps} successCount={Count}",
+                runId, skill.SkillId[..12], skill.Steps.Count, count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "verified-skill harvest failed run={RunId} (run unaffected)", runId);
         }
     }
 

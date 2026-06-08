@@ -28,6 +28,15 @@ public sealed class AgentStateDb : IDisposable
     // _auditWriteLock so edge traffic never contends with the audit chain.
     private readonly object _edgeConductanceLock = new();
 
+    // Guards verified_skills read/writes. Post-run harvest (HeartbeatWorker Task.Run) is the only writer
+    // and is already serialized by the navigation semaphore, but the lock keeps the single SqliteConnection
+    // safe against any concurrent reader. KNOWN DEBT (Codex 2026-06-08 Q2): per-feature locks
+    // (_auditWriteLock / _edgeConductanceLock / _verifiedSkillLock) don't serialize against the UNLOCKED
+    // pricing-path methods on the SAME connection, so a navigate/explore post-run write can race a
+    // concurrent pricing run client-side. The new write is best-effort (HeartbeatWorker catches), so it
+    // degrades safely; the real fix is one connection-wide lock — a separate, careful refactor.
+    private readonly object _verifiedSkillLock = new();
+
     public AgentStateDb(string dbPath, string? password = null)
     {
         SQLitePCL.Batteries_V2.Init();
@@ -799,6 +808,28 @@ public sealed class AgentStateDb : IDisposable
             );
             CREATE INDEX IF NOT EXISTS idx_edge_conductance_task
                 ON edge_conductance(pharmacy_id, task_key);
+            """);
+        // Migration 5 — verified-skill store (the amortize ratchet, lever 3). One row per banked
+        // (pharmacy, task, app, verified-path); success_count = how many times the SAME verified path was
+        // re-confirmed (the tube thickening). Steps are scrubbed structural (state hash + action signature)
+        // — PHI-safe. Distinct from workflow_templates (the legacy DFG path); this is the explorer's own
+        // vocabulary so a label/signature-click trajectory banks faithfully.
+        ApplyMigrationIfNeeded(5,
+            "Verified-skill store (amortize ratchet — derive once, bank, replay)",
+            """
+            CREATE TABLE IF NOT EXISTS verified_skills (
+                skill_id TEXT PRIMARY KEY,
+                pharmacy_id TEXT NOT NULL,
+                task_key TEXT NOT NULL,
+                app TEXT NOT NULL,
+                steps_json TEXT NOT NULL,
+                steps_hash TEXT NOT NULL,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                first_verified_at TEXT NOT NULL,
+                last_verified_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_verified_skills_task
+                ON verified_skills(pharmacy_id, task_key);
             """);
     }
 
@@ -4254,6 +4285,64 @@ public sealed class AgentStateDb : IDisposable
             var pairs = new List<(string, string)>();
             while (reader.Read()) pairs.Add((reader.GetString(0), reader.GetString(1)));
             return pairs;
+        }
+    }
+
+    // ── Verified-skill store (amortize ratchet) ──
+    // Primitive (no Agentic types) so the DB layer stays decoupled; VerifiedSkill (de)serializes its own steps.
+
+    /// <summary>Insert a banked verified skill, or — if this exact (skill_id) path was banked before —
+    /// increment its success_count (the tube thickening). Returns the new success_count.</summary>
+    public int UpsertVerifiedSkill(
+        string skillId, string pharmacyId, string taskKey, string app, string stepsJson, string stepsHash)
+    {
+        lock (_verifiedSkillLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO verified_skills
+                    (skill_id, pharmacy_id, task_key, app, steps_json, steps_hash, success_count, first_verified_at, last_verified_at)
+                VALUES (@id, @ph, @t, @app, @json, @hash, 1, datetime('now'), datetime('now'))
+                ON CONFLICT(skill_id) DO UPDATE SET
+                    success_count = success_count + 1,
+                    last_verified_at = datetime('now')
+                RETURNING success_count
+                """;
+            cmd.Parameters.AddWithValue("@id", skillId);
+            cmd.Parameters.AddWithValue("@ph", pharmacyId);
+            cmd.Parameters.AddWithValue("@t", taskKey);
+            cmd.Parameters.AddWithValue("@app", app);
+            cmd.Parameters.AddWithValue("@json", stepsJson);
+            cmd.Parameters.AddWithValue("@hash", stepsHash);
+            var v = cmd.ExecuteScalar();
+            return v is null or DBNull ? 0 : Convert.ToInt32(v);
+        }
+    }
+
+    /// <summary>Raw row for a banked skill (success_count + steps), or null if never banked.</summary>
+    public (int SuccessCount, string StepsJson, string StepsHash)? GetVerifiedSkillRaw(string skillId)
+    {
+        lock (_verifiedSkillLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT success_count, steps_json, steps_hash FROM verified_skills WHERE skill_id = @id";
+            cmd.Parameters.AddWithValue("@id", skillId);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            return (reader.GetInt32(0), reader.GetString(1), reader.GetString(2));
+        }
+    }
+
+    /// <summary>Count of distinct verified skills banked for a (pharmacy, task) — observability.</summary>
+    public int GetVerifiedSkillCountForTask(string pharmacyId, string taskKey)
+    {
+        lock (_verifiedSkillLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM verified_skills WHERE pharmacy_id = @ph AND task_key = @t";
+            cmd.Parameters.AddWithValue("@ph", pharmacyId);
+            cmd.Parameters.AddWithValue("@t", taskKey);
+            return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
         }
     }
 
