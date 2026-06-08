@@ -50,7 +50,17 @@ public sealed class DeferredLocalInference : ILocalInference
     }
 
     public string ModelId => _options.ModelId;
-    public bool IsReady => _inner is not null;
+
+    // Ready once the ASSETS are present (not only once _inner is built) — callers (e.g. the chat
+    // command) gate on IsReady BEFORE invoking, and _inner is constructed lazily INSIDE the first
+    // invocation. Reporting ready on assets-present is what lets that first call through to build +
+    // load the engine; reporting only on _inner!=null would deadlock (never invoked → never built).
+    public bool IsReady => _inner is not null || AssetsPresent();
+
+    private bool AssetsPresent() =>
+        _nativeProvisioner.DllsPresent()
+        && !string.IsNullOrWhiteSpace(_options.ModelPath)
+        && File.Exists(_options.ModelPath);
 
     public async Task<InferenceProposal?> ProposeAsync(InferenceRequest request, CancellationToken ct)
     {
