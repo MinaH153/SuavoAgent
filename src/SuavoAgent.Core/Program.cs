@@ -630,48 +630,17 @@ try
             return new NullLocalInference();
         }
 
-        // Ensure the native llama.cpp DLLs are present (kicks a one-time background download if not).
-        // Until they're there, run rules-only this session — the libs + model both activate on the
-        // restart after their downloads finish.
-        if (!sp.GetRequiredService<NativeLibProvisioner>().EnsureOrProvision())
-        {
-            Log.Information("Tier-2 LocalInference: native libs not yet present — provisioning, rules-only this session");
-            return new NullLocalInference();
-        }
-
-        // IModelManager verification with a bounded timeout so SHA-256 of a
-        // 2 GB model cannot stall Windows service start indefinitely (Codex
-        // suggestion). Run as Task.Run so the sync-wait doesn't deadlock on
-        // the startup thread's sync context.
-        var mgr = sp.GetRequiredService<IModelManager>();
-        ModelVerificationResult verify;
-        try
-        {
-            using var verifyCts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-            verify = Task.Run(() => mgr.VerifyAsync(verifyCts.Token)).GetAwaiter().GetResult();
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "Tier-2 LocalInference verification threw — falling back to NullLocalInference");
-            return new NullLocalInference();
-        }
-
-        if (!verify.IsValid)
-        {
-            Log.Warning("Tier-2 LocalInference unavailable — {Reason}. Falling back to NullLocalInference",
-                verify.Reason);
-            return new NullLocalInference();
-        }
-
-        // Model verified — construct the real LLamaSharp-backed inference.
-        // Weights load lazily on first ProposeAsync call (2–5 s on CPU).
-        // Native llama.cpp binaries come from ReasoningOptions.NativeLibraryPath
-        // (Codex C-1); they are NOT shipped by the installer.
-        Log.Information("Tier-2 LocalInference ENABLED — model '{Id}' at {Path}",
-            opts.ModelId, verify.Path);
-        var agentOpts = sp.GetRequiredService<IOptions<AgentOptions>>();
-        var llmLog = sp.GetRequiredService<ILogger<LLamaLocalInference>>();
-        return new LLamaLocalInference(agentOpts, verify.Path!, llmLog);
+        // DeferredLocalInference kicks the one-time background provisioning of the model GGUF + native
+        // llama.cpp DLLs and runs rules-only until they land, then lazily constructs the real engine on
+        // the next call — no second restart, no startup stall (the old factory blocked here verifying a
+        // 2 GB SHA-256). Native binaries stay off the installer (stealth); they're fetched on demand.
+        Log.Information("Tier-2 LocalInference ENABLED — model '{Id}' (deferred: provisioning if absent)", opts.ModelId);
+        return new DeferredLocalInference(
+            sp.GetRequiredService<IOptions<AgentOptions>>(),
+            sp.GetRequiredService<NativeLibProvisioner>(),
+            sp.GetRequiredService<IModelManager>(),
+            sp.GetRequiredService<ILogger<LLamaLocalInference>>(),
+            sp.GetRequiredService<ILogger<DeferredLocalInference>>());
     });
 
     // Tier-3 Reasoning — cloud Claude via /api/agent/reason. Opt-in via
