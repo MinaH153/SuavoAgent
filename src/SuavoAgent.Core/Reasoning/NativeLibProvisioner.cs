@@ -81,18 +81,19 @@ public sealed class NativeLibProvisioner
                 await src.CopyToAsync(dst, 1 << 20, ct);
             }
 
-            if (!string.IsNullOrWhiteSpace(_options.NativeLibsSha256))
+            // These DLLs get LOADED INTO THE PROCESS — integrity verification is MANDATORY, never
+            // best-effort (security review). sha256-pinning is the control: Authenticode doesn't apply
+            // (community-built llama.cpp binaries are unsigned). No expected hash → refuse to extract.
+            if (string.IsNullOrWhiteSpace(_options.NativeLibsSha256))
             {
-                var actual = await ComputeSha256Async(tmpZip, ct);
-                if (!string.Equals(actual, _options.NativeLibsSha256, StringComparison.OrdinalIgnoreCase))
-                {
-                    _logger.LogError("Native libs SHA-256 mismatch (got {Actual}) — refusing to extract.", actual);
-                    return;
-                }
+                _logger.LogError("NativeLibsSha256 not configured — refusing to extract UNVERIFIED native code.");
+                return;
             }
-            else
+            var actual = await ComputeSha256Async(tmpZip, ct);
+            if (!string.Equals(actual, _options.NativeLibsSha256, StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogWarning("NativeLibsSha256 not set — native libs integrity NOT verified.");
+                _logger.LogError("Native libs SHA-256 mismatch (got {Actual}) — refusing to extract.", actual);
+                return;
             }
 
             // Extract to a temp dir, confirm the required DLLs are there, THEN copy into place — a

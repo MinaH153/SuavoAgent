@@ -1053,6 +1053,13 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     return;
                 }
             }
+            // Native code (the DLLs) MUST be pinned by sha256 — refuse to configure a native-libs
+            // download with no integrity hash (it would be refused at extract time anyway; reject early).
+            if (!string.IsNullOrWhiteSpace(nativeLibsUrl) && string.IsNullOrWhiteSpace(Str("nativeLibsSha256")))
+            {
+                await AckAsync(false, null, "nativeLibsSha256 is required when nativeLibsUrl is set (native code must be sha-pinned)");
+                return;
+            }
 
             // Build the Reasoning object; only include provided keys so unset ones fall back to defaults.
             var reasoning = new System.Text.Json.Nodes.JsonObject { ["Enabled"] = Bool("enabled") };
