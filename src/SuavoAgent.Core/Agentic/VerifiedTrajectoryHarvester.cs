@@ -1,4 +1,7 @@
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using SuavoAgent.Core.Learning;
 
 namespace SuavoAgent.Core.Agentic;
 
@@ -48,7 +51,16 @@ public static class VerifiedTrajectoryHarvester
             // this hard-stops the navigate path too. Lifting this needs a scrubbing-aware harvest (Phase-3B).
             if (!IsBankableActionSig(s.ActionSignature))
                 return null;
-            steps.Add(new VerifiedStep(s.DecisionScreenHash, s.ActionSignature));
+            // PHI guard (Codex Q3): scan the signature string ALWAYS — it is banked verbatim, and this is
+            // the only scan that runs when ActionParams is null (legacy / uncaptured steps). Plus a
+            // value-level scan of each structured param when present. A label/value that looks like patient
+            // data refuses the WHOLE trajectory — bank nothing rather than persist possible PHI.
+            if (PhiScrubber.ContainsPhi(s.ActionSignature))
+                return null;
+            if (s.ActionParams is { } ps && ps.Values.Any(v => !string.IsNullOrEmpty(v) && PhiScrubber.ContainsPhi(v)))
+                return null;
+            var paramsJson = s.ActionParams is { Count: > 0 } ? JsonSerializer.Serialize(s.ActionParams) : null;
+            steps.Add(new VerifiedStep(s.DecisionScreenHash, s.ActionSignature, s.ActionVerb, paramsJson));
         }
 
         if (steps.Count == 0) return null;

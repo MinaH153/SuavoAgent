@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using SuavoAgent.Core.Agentic.Adapters;
@@ -80,16 +83,14 @@ public sealed class VerifiedSkillReplayer
                 return new SkillReplayResult(SkillReplayOutcome.StateMismatch, completed,
                     $"step {i}: expected state {step.StateHash}, saw {screen.ContentHash}");
 
-            // 2. Reconstruct the action from the banked signature — fail-closed unless it round-trips EXACTLY
-            //    (a misparse reconstructs a different signature and is rejected, never executed).
-            //    Codex 2026-06-08 residuals, both BOUNDED by sandbox-confinement + the step-1 state-match:
-            //    (Q2) Signature() is unescaped, so a value literally containing ",key=" is theoretically
-            //    ambiguous; the round-trip guard catches every realistic case, and the worst a contrived one
-            //    could do is ONE wrong click in an allowlisted $0 sandbox process — which the NEXT step's
-            //    state-match immediately aborts. The airtight fix is structured params (StepRecord
-            //    enrichment), deferred. (Q1) TOCTOU between this perceive and the click is the same gap the
-            //    agentic loop has; the next state-match catches a wrong landing.
-            var action = ActionSignatureParser.TryParse(step.ActionSignature);
+            // 2. Reconstruct the action. AIRTIGHT path (Codex Q2 retired): if the skill banked structured
+            //    params (Verb + ParamsJson, delimiter-safe JSON), rebuild the EXACT action from them — no
+            //    parsing of the unescaped signature, so a value containing "," or "=" replays correctly.
+            //    LEGACY fallback: sig-only rows banked before this change reconstruct via the round-trip
+            //    parser. Either way the result is rejected fail-closed unless its signature round-trips
+            //    EXACTLY to the banked one. (Q1 TOCTOU between this perceive and the click is the same gap
+            //    the agentic loop has; the next step's state-match catches a wrong landing.)
+            var action = ReconstructAction(step);
             if (action is null || !string.Equals(action.Signature(), step.ActionSignature, StringComparison.Ordinal))
                 return new SkillReplayResult(SkillReplayOutcome.Unparseable, completed,
                     $"step {i}: {step.ActionSignature}");
@@ -118,6 +119,28 @@ public sealed class VerifiedSkillReplayer
         }
 
         return new SkillReplayResult(SkillReplayOutcome.Completed, completed, null);
+    }
+
+    /// <summary>Rebuild the executable action for a step: structured (Verb + ParamsJson) when present
+    /// (airtight), else parse the legacy signature. Returns null on any failure (caller rejects).</summary>
+    private static NextAction? ReconstructAction(VerifiedStep step)
+    {
+        if (!string.IsNullOrEmpty(step.Verb))
+        {
+            try
+            {
+                var raw = string.IsNullOrEmpty(step.ParamsJson)
+                    ? new Dictionary<string, string>()
+                    : JsonSerializer.Deserialize<Dictionary<string, string>>(step.ParamsJson) ?? new Dictionary<string, string>();
+                var p = raw.ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
+                return NextAction.Act(step.Verb, p);
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
+        return ActionSignatureParser.TryParse(step.ActionSignature); // legacy sig-only banked rows
     }
 
     /// <summary>Bounded settle: poll until the screen hash is stable for SettleStableReads reads or

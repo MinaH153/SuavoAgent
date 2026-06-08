@@ -168,11 +168,20 @@ public sealed record SafetyVerdict(SafetyDecision Decision, string? Reason = nul
 public sealed record ActuationContext(string PharmacyId, string TaskKey, bool DryRun);
 
 /// <summary>One completed step of working memory. Immutable; bounded to the memory window.</summary>
+/// <param name="ActionVerb">The action's verb (e.g. "click_by_label"), captured structurally so a banked
+/// skill can reconstruct the EXACT action without parsing the (unescaped) <see cref="ActionSignature"/>.
+/// Null for legacy/terminal steps. Optional — existing readers use only the fields above.</param>
+/// <param name="ActionParams">The action's parameters as scrubbed structural strings (e.g.
+/// label→"Seven", process_name→"calc.exe"). Pairs with <see cref="ActionVerb"/> for airtight replay.
+/// NOTE: being a dictionary, it participates in the record's synthesized equality by REFERENCE (Codex Q1);
+/// no consumer compares StepRecords by value (readers use individual fields), so this is inert today.</param>
 public sealed record StepRecord(
     string DecisionScreenHash,
     string ActionSignature,
     ActStatus? Outcome,
-    PostconditionVerdict? Verdict);
+    PostconditionVerdict? Verdict,
+    string? ActionVerb = null,
+    IReadOnlyDictionary<string, string>? ActionParams = null);
 
 /// <summary>
 /// Bounded, immutable working memory threaded through the loop and fed back into

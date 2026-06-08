@@ -13,7 +13,11 @@ namespace SuavoAgent.Core.Agentic;
 /// The signature is self-contained (verb + ordered params, e.g. <c>click_by_label(label=Seven,process_name=calc.exe)</c>)
 /// so a future replayer can execute it directly without re-deriving anything.
 /// </summary>
-public readonly record struct VerifiedStep(string StateHash, string ActionSignature);
+/// <param name="Verb">The action verb for airtight replay reconstruction (e.g. "click_by_label"); null on
+/// legacy sig-only banked rows, which replay via the <see cref="ActionSignatureParser"/> fallback.</param>
+/// <param name="ParamsJson">The action's params as a JSON object string (delimiter-safe, unlike the
+/// signature) — replay deserializes it to rebuild the EXACT action even when a value contains "," or "=".</param>
+public readonly record struct VerifiedStep(string StateHash, string ActionSignature, string? Verb = null, string? ParamsJson = null);
 
 /// <summary>
 /// The amortize ratchet's artifact (lever 3 of the moat: "derive a task's decomposition ONCE → bank it

@@ -38,7 +38,15 @@ public static class ContextAccumulator
         PostconditionVerdict? verdict,
         int memoryWindow)
     {
-        var record = new StepRecord(decisionScreenHash, action.Signature(), outcome, verdict);
+        // Capture the action structurally (verb + stringified params) alongside its signature, so a banked
+        // skill can reconstruct the EXACT action on replay without parsing the unescaped signature string.
+        var actionParams = action.Parameters is { Count: > 0 }
+            ? action.Parameters.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty)
+            : null;
+        var record = new StepRecord(
+            decisionScreenHash, action.Signature(), outcome, verdict,
+            ActionVerb: action.Kind == NextActionKind.Act ? action.Verb : null,
+            ActionParams: actionParams);
 
         var history = prior.History.Append(record).ToList();
         if (history.Count > memoryWindow)
