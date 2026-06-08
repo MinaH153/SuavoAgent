@@ -606,7 +606,10 @@ try
     // Week 2c once a signed model manifest is shipped to GitHub releases.
     builder.Services.AddSingleton<ActionVerifier>(sp =>
         new ActionVerifier(sp.GetRequiredService<IOptions<AgentOptions>>()));
-    builder.Services.AddSingleton<IModelManager, LocalFileModelManager>();
+    // HttpModelProvisioner auto-downloads the GGUF on first run when ModelUrl is set (so the local
+    // brain ships with a client install); with no URL it behaves exactly like the legacy verify-only
+    // LocalFileModelManager. Fail-soft — a download failure just leaves reasoning off.
+    builder.Services.AddSingleton<IModelManager, HttpModelProvisioner>();
     builder.Services.AddSingleton<ILocalInference>(sp =>
     {
         var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;

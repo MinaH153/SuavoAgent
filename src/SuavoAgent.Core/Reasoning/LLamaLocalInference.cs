@@ -256,12 +256,23 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
             _logger.LogInformation("LLamaLocalInference: loading model from {Path}", _modelPath);
             var sw = Stopwatch.StartNew();
 
+            // Cap inference threads to protect PioneerRx on a 4-core i5: leaving cores free for the PMS
+            // matters more than a faster reply. 0 (auto) = half the cores, min 1.
+            var coreCount = Environment.ProcessorCount;
+            var threads = _options.CpuThreads > 0
+                ? Math.Min(_options.CpuThreads, coreCount)
+                : Math.Max(1, coreCount / 2);
             var parameters = new ModelParams(_modelPath)
             {
                 ContextSize = (uint)_options.ContextSize,
                 GpuLayerCount = 0, // pharmacy PCs have no GPU
                 UseMemorymap = true,
+                Threads = threads,        // never starve PioneerRx of CPU
+                BatchThreads = threads,
             };
+            _logger.LogInformation(
+                "LLamaLocalInference: loading with {Threads}/{Cores} CPU threads (PioneerRx-protective cap)",
+                threads, coreCount);
 
             _weights = await LLamaWeights.LoadFromFileAsync(parameters, ct);
             _executor = new StatelessExecutor(_weights, parameters);

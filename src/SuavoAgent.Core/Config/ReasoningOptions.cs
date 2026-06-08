@@ -29,6 +29,15 @@ public sealed class ReasoningOptions
     public string? ModelSha256 { get; set; }
 
     /// <summary>
+    /// URL to auto-download the GGUF from on first run when it's absent at <see cref="ModelPath"/> —
+    /// this is what makes the local brain ship with a CLIENT install instead of a manual drop. The
+    /// download is SHA256-verified against <see cref="ModelSha256"/> before use, and failure is
+    /// non-fatal (reasoning stays off; never blocks the agent or hinders PioneerRx). Empty = verify
+    /// an operator-placed file only (legacy behaviour).
+    /// </summary>
+    public string? ModelUrl { get; set; }
+
+    /// <summary>
     /// Directory holding the native llama.cpp + ggml binaries that LLamaSharp
     /// P/Invokes into. We do NOT ship these by default — their presence is a
     /// vendor fingerprint (Codex C-1). When Tier-2 is enabled the operator
@@ -86,6 +95,20 @@ public sealed class ReasoningOptions
     /// ~800 MB RAM occupation on pharmacy PCs that may have 8 GB total.
     /// </summary>
     public int IdleUnloadSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Max CPU threads llama.cpp may use for inference. THE guardrail that keeps a local model from
+    /// starving PioneerRx on a 4-core i5: capping inference to ~half the cores leaves headroom for the
+    /// PMS, at the cost of slower generation. 0 = auto = max(1, processorCount/2). Never let inference
+    /// take every core — PioneerRx responsiveness is the client's livelihood and wins every contention.
+    /// </summary>
+    public int CpuThreads { get; set; }
+
+    /// <summary>
+    /// Run inference at BelowNormal process/thread priority so the OS scheduler always favours
+    /// PioneerRx (and the rest of the desktop) when the CPU is contended. Default true.
+    /// </summary>
+    public bool BelowNormalPriority { get; set; } = true;
 
     /// <summary>
     /// Tier-3 (Cloud Claude) escalation. When true and an agent ApiKey is
