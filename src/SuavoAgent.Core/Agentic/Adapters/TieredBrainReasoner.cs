@@ -71,10 +71,11 @@ public sealed class TieredBrainReasoner : IReasoner
         bool allowCloud,
         CancellationToken ct)
     {
-        // v1: completion is model-driven — the reasoner emits Done when the objective is achieved.
-        // The verify step's job here is only to let the loop settle + re-perceive (already done by
-        // the time we're called). Return Ambiguous (loop treats as NotMet ⇒ re-reason on the fresh
-        // screen) with zero cloud cost. A local-predicate / cloud postcondition check is a follow-up.
-        return Task.FromResult(new VerifyResult(PostconditionVerdict.Ambiguous, UsedCloud: false));
+        // Execution-grounded post-state check (v1: screen-change detection) — replaces the previous
+        // always-Ambiguous stub so an actuating action that produced no observable effect is caught as
+        // NotMet instead of being silently treated as progress. Zero cloud cost. The expected-element /
+        // SQL-write-confirmation checks layer on top of this baseline (Phase-1 follow-on).
+        var verdict = PostconditionEvaluator.Evaluate(lastAction, before, after);
+        return Task.FromResult(new VerifyResult(verdict, UsedCloud: false));
     }
 }
