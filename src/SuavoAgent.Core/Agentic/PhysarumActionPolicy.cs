@@ -64,16 +64,34 @@ public sealed class PhysarumActionPolicy : IReasoner
         {
             var inner = await _inner.ReasonNextAsync(objective, memory, allowedActions, allowCloud, ct).ConfigureAwait(false);
             usedCloud = inner.UsedCloud;
-            // Terminal authority stays with the brain: Done/Escalate (and a spent cloud budget) end the run.
-            if (inner.CloudDenied || inner.Action.Kind == NextActionKind.Done || inner.Action.Kind == NextActionKind.Escalate)
-                return inner;
-            // The brain's pick becomes an endorsed candidate — but only if it's a click verb (v1 explore is
-            // click-only; the sandbox gate denies type/press, so emitting one would just GateDeny-terminate).
-            if (inner.Action.Kind == NextActionKind.Act && IsClickVerb(inner.Action.Verb))
-                brainSig = inner.Action.Signature();
 
-            if (candidates.Count == 0)
-                return inner; // nothing to rank — defer to the brain's single decision
+            // Done = objective met → honor (terminates the run + triggers the verified-skill harvest).
+            if (inner.Action.Kind == NextActionKind.Done)
+                return inner;
+
+            // Escalate / cloud-denied = the brain can't or won't pick (e.g. the on-device LLM is unavailable
+            // or unsure). In a SANDBOX EXPLORE run there is NO human to escalate to and the explorer's whole
+            // job is to keep exploring — so when we have enumerated candidates, fall back to pure Physarum
+            // selection (conductance + explore jitter, no endorsement) instead of ending the run. Only defer
+            // to the brain's terminal when there is nothing to rank (truly stuck). This is what lets the legs
+            // explore without the brain every tick — the moat's CPU-cheap, brain-intermittent design.
+            if (inner.CloudDenied || inner.Action.Kind == NextActionKind.Escalate)
+            {
+                if (candidates.Count == 0)
+                    return inner;
+                // else fall through with brainSig == null → pure conductance exploration.
+            }
+            else
+            {
+                // The brain proposed an action: endorse it as a candidate, but only if it's a click verb
+                // (v1 explore is click-only; the sandbox gate denies type/press, so emitting one would just
+                // GateDeny-terminate).
+                if (inner.Action.Kind == NextActionKind.Act && IsClickVerb(inner.Action.Verb))
+                    brainSig = inner.Action.Signature();
+
+                if (candidates.Count == 0)
+                    return inner; // nothing to rank — defer to the brain's single decision
+            }
         }
 
         var stateHash = screen?.ContentHash ?? string.Empty;

@@ -10,7 +10,8 @@ namespace SuavoAgent.Core.Tests.Agentic;
 
 /// <summary>
 /// Pins the slime-mold frontier explorer: on off-ticks it selects the highest-CONDUCTANCE candidate with
-/// zero LLM cost (conductance is load-bearing, not advisory); brain Done/Escalate is honored; the store is
+/// zero LLM cost (conductance is load-bearing, not advisory); brain Done is honored, while brain Escalate
+/// falls back to exploration when candidates exist (no human to escalate to in a sandbox); the store is
 /// never written during a run; verification passes straight through to the real verifier; and when
 /// conductance is flat the brain's endorsement breaks the tie (semantic grounding).
 /// </summary>
@@ -92,12 +93,16 @@ public class PhysarumActionPolicyTests
     }
 
     [Fact]
-    public async Task BrainEscalate_IsHonored()
+    public async Task BrainEscalate_WithCandidates_FallsBackToExploration()
     {
+        // SANDBOX explore has no human to escalate to — when the brain escalates (e.g. the on-device LLM is
+        // unavailable/unsure) but candidates exist, the explorer keeps exploring via conductance instead of
+        // ending the run. (Escalate WITH NO candidates IS still honored — see NoCandidates_FallsBackToInner.)
         var inner = new FakeReasoner { OnReason = () => new ReasonResult(NextAction.Escalate("stuck"), false) };
         var policy = Policy(inner, new RecordingStore(), Deterministic());
         var r = await policy.ReasonNextAsync(Objective, Memory("button:High"), ClickAllowed, false, default);
-        Assert.Equal(NextActionKind.Escalate, r.Action.Kind);
+        Assert.Equal(NextActionKind.Act, r.Action.Kind);      // fell back to a candidate click
+        Assert.Equal(Sig("High"), r.Action.Signature());
     }
 
     [Fact]
