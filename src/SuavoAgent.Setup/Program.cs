@@ -25,6 +25,12 @@ internal static class Program
             EnableSentry = true,
         });
 
+        if (IsUninstallMode(args))
+        {
+            AttachParentConsole();
+            return UninstallInstaller.RunAsync(args).GetAwaiter().GetResult();
+        }
+
         if (IsConsoleMode(args))
         {
             AttachParentConsole();
@@ -60,6 +66,11 @@ internal static class Program
         args.Any(a =>
             string.Equals(a, "--console", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(a, "--silent", StringComparison.OrdinalIgnoreCase));
+
+    // Uninstall is its own headless mode (no setup.json / pharmacy creds needed):
+    // SuavoSetup.exe --uninstall  (the GUI Welcome screen also routes here).
+    private static bool IsUninstallMode(string[] args) =>
+        args.Any(a => string.Equals(a, "--uninstall", StringComparison.OrdinalIgnoreCase));
 
     // Reattach to the parent process's console when launched from PowerShell / cmd.
     // Lets fleet-deploy scripts still see phase output from a WinExe binary.

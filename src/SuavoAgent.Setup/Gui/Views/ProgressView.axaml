@@ -10,7 +10,7 @@
     <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="80,32,80,32">
 
         <StackPanel Grid.Row="0" Spacing="6">
-            <TextBlock Text="Installing SuavoAgent"
+            <TextBlock Text="{Binding Title}"
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="28" FontWeight="Light"/>
             <TextBlock Text="{Binding ActivePhase}"
@@ -68,7 +68,7 @@
 
         <DockPanel Grid.Row="3" Margin="0,16,0,0" LastChildFill="False">
             <TextBlock DockPanel.Dock="Left"
-                       Text="Cancel aborts before services start. Already-downloaded binaries stay on disk until retry."
+                       Text="{Binding CancelHint}"
                        Foreground="{DynamicResource SuavoTextSubtleBrush}"
                        FontSize="11"
                        VerticalAlignment="Center"/>
