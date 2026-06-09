@@ -449,16 +449,18 @@ public sealed class IpcCommandServer : IDisposable
                 "Sandbox capture refused — target window is not an allowlisted sandbox app");
         }
 
-        // Foreground gate: the sandbox app must be the foreground app (UWP-robust — compares the EFFECTIVE
-        // app PID, since a UWP app's foreground HWND is the AFH frame). Belt-and-suspenders with
-        // PrintWindow's HWND-scoping.
+        // We deliberately do NOT REQUIRE the sandbox app to be foreground. PrintWindow is HWND-scoped — it
+        // renders ONLY the allowlisted target window's own content (via WM_PRINT), even when the window is
+        // occluded or not focused — so capturing it regardless of foreground leaks nothing (window-scoping +
+        // allowlist + owner-PID re-check ARE the HIPAA guarantee; this path is also build-time-gated to
+        // non-PHI boxes). Requiring foreground made explore fragile: a self-launched app the agent is driving
+        // loses focus the moment a menu/dialog opens, or simply isn't frontmost, yielding spurious
+        // no_perception. Foreground is now an advisory signal only (logged), never a refusal.
         if (!SuavoAgent.Helper.Actuation.SandboxWindowResolver.IsSandboxAppForeground(effectiveAppPid))
         {
-            _logger.Information(
-                "IpcCommandServer: sandbox capture_screen rejected — sandbox app pid={Pid} not foreground requestId={Id}",
+            _logger.Debug(
+                "IpcCommandServer: sandbox capture — target pid={Pid} not foreground; capturing window-scoped anyway (requestId={Id})",
                 effectiveAppPid, request.Id);
-            return Error(request.Id, request.Command, "not_foreground",
-                "Sandbox capture refused — sandbox app is not the foreground window");
         }
 
         // Build (and cache by HWND) the window-scoped capture controller. Rebuilt only when the target
