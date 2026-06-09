@@ -168,6 +168,7 @@ try
         intentCursor: intentCursor,
         actuation: actuationHandler,
         pioneerRx: pioneerRxHandler,
+        sandboxDriver: sendInputDriver, // source of the launch-established sandbox HWND for window-scoped capture
         relaxClientPathValidation: actuationConfig.RelaxIpcClientPathValidation);
     cmdServer.Start(cts.Token);
 

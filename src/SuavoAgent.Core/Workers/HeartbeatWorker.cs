@@ -1922,6 +1922,42 @@ public sealed class HeartbeatWorker : ResilientHostedService
 
             var objectiveModel = new SuavoAgent.Core.Agentic.AgentObjective(objective!, taskKey!, pharmacyId);
 
+            // MOAT pre-launch: explore_sandbox perceives via WINDOW-SCOPED capture of the launch-established
+            // window, so the app MUST be running + foreground (and _activeTarget set in the Helper) before the
+            // loop's first perceive — else capture returns sandbox_not_launched. CandidateEnumerator is
+            // click-only, so the loop never launches on its own. Goes through the real Helper ActuationGate
+            // (allowlist + Enabled), so on a disabled/locked box it fails fast with a clear reason, not a blind loop.
+            if (_actuationGateway is null)
+            {
+                await AckAsync(false, null, "actuation_gateway_unavailable");
+                return;
+            }
+            SuavoAgent.Contracts.Ipc.ActuationResult launchResult;
+            try
+            {
+                launchResult = await _actuationGateway
+                    .LaunchSandboxAppAsync(new SuavoAgent.Contracts.Ipc.LaunchSandboxAppRequest(app!, DryRun: false), ct)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception launchEx)
+            {
+                _logger.LogWarning(launchEx, "explore_sandbox: pre-launch exception app={App}", app);
+                await AckAsync(false, null, $"launch_exception:{launchEx.GetType().Name}");
+                return;
+            }
+            if (!launchResult.Ok)
+            {
+                _logger.LogWarning("explore_sandbox: pre-launch rejected app={App} code={Code}", app, launchResult.RejectionCode);
+                await AckAsync(false, null, $"launch_rejected:{launchResult.RejectionCode ?? "unknown"}");
+                return;
+            }
+            _logger.LogInformation(
+                "explore_sandbox: pre-launched app={App} (durationMs={Ms}) — settling before perceive",
+                app, launchResult.DurationMs);
+            try { await Task.Delay(TimeSpan.FromMilliseconds(750), ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+
             using var navCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             lock (_activeNavigationLock)
             {

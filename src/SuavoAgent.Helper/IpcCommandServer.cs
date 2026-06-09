@@ -70,6 +70,13 @@ public sealed class IpcCommandServer : IDisposable
     private readonly IntentCursorController? _intentCursor;
     private readonly ActuationCommandHandler? _actuation;
     private readonly PioneerRxCommandHandler? _pioneerRx;
+    // Source of the launch_sandbox_app target HWND/PID for the window-scoped sandbox capture path.
+    private readonly SendInputDriver? _sandboxDriver;
+    // Cached window-scoped sandbox capture controller, rebuilt only when the target HWND changes
+    // (avoids reconstructing EncryptedScreenStore on every perceive). Guarded by _sandboxVisionLock.
+    private ScreenCaptureController? _sandboxVision;
+    private IntPtr _sandboxVisionHwnd = IntPtr.Zero;
+    private readonly object _sandboxVisionLock = new();
     private readonly ILogger _logger;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
@@ -86,6 +93,7 @@ public sealed class IpcCommandServer : IDisposable
         IntentCursorController? intentCursor = null,
         ActuationCommandHandler? actuation = null,
         PioneerRxCommandHandler? pioneerRx = null,
+        SendInputDriver? sandboxDriver = null,
         bool relaxClientPathValidation = false)
     {
         _pipeName = pipeName;
@@ -102,6 +110,7 @@ public sealed class IpcCommandServer : IDisposable
         _intentCursor = intentCursor;
         _actuation = actuation;
         _pioneerRx = pioneerRx;
+        _sandboxDriver = sandboxDriver;
         _logger = logger;
     }
 
@@ -326,6 +335,22 @@ public sealed class IpcCommandServer : IDisposable
     // ------------------------------------------------------------------
     private async Task<IpcResponse> HandleCaptureScreenAsync(IpcRequest request, CancellationToken ct)
     {
+        // Optional routing token: targetProcess="sandbox" → WINDOW-SCOPED sandbox capture, which uses the
+        // launch-established HWND and is INDEPENDENT of the PHI-vision opt-in (_vision is null on a non-PHI
+        // box). Parsed BEFORE the _vision null-check so the sandbox path is reachable there. Absent/other →
+        // the PMS/PHI cadence path below, byte-for-byte unchanged.
+        string? targetProcess = null;
+        if (request.Data is { } d
+            && d.TryGetProperty("targetProcess", out var tpEl)
+            && tpEl.ValueKind == JsonValueKind.String)
+        {
+            targetProcess = tpEl.GetString();
+        }
+        if (string.Equals(targetProcess, "sandbox", StringComparison.OrdinalIgnoreCase))
+        {
+            return await HandleSandboxCaptureAsync(request, ct);
+        }
+
         if (_vision == null)
         {
             return Error(request.Id, request.Command, "vision_unavailable",
@@ -381,6 +406,151 @@ public sealed class IpcCommandServer : IDisposable
         {
             _logger.Warning(ex, "IpcCommandServer: capture_screen dispatch error — requestId={Id}", request.Id);
             return Error(request.Id, request.Command, "capture_error", ex.Message);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // SANDBOX capture (explore_sandbox on a NON-PHI box). Captures ONLY the window the preceding
+    // launch_sandbox_app established (window-scoped PrintWindow) — structurally cannot leak any other
+    // window's pixels, so it skips the PMS-foreground gate (there is no PMS) yet stays HIPAA-safe:
+    //   • _sandboxDriver.ActiveTargetHwnd is an allowlisted sandbox app's window (set by launch).
+    //   • VisionBootstrap.TryBuildWindowSandbox hard-refuses if PioneerRx is installed (build-time gate).
+    //   • the request-time foreground check is a best-effort "user is watching the sandbox" signal; the
+    //     real isolation is PrintWindow reading only that HWND's pixels.
+    // ------------------------------------------------------------------
+    private async Task<IpcResponse> HandleSandboxCaptureAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (_sandboxDriver == null)
+        {
+            return Error(request.Id, request.Command, "sandbox_driver_unavailable",
+                "Helper started without an actuation/sandbox driver");
+        }
+
+        var targetPid = _sandboxDriver.ActiveTargetPid;
+        var targetHwnd = _sandboxDriver.ActiveTargetHwnd;
+        if (targetPid <= 0 || targetHwnd == IntPtr.Zero)
+        {
+            _logger.Information(
+                "IpcCommandServer: sandbox capture_screen — no active target (send launch_sandbox_app first) requestId={Id}",
+                request.Id);
+            return Error(request.Id, request.Command, "sandbox_not_launched",
+                "No sandbox app target established — send launch_sandbox_app first");
+        }
+
+        // AUTHORITATIVE request-time validation (Codex Q1/Q3 fix): the target HWND must STILL be owned by
+        // the launch-resolved PID AND that PID's process must be an allowlisted sandbox app. This closes the
+        // WindowFocusManager fallback gap where launch resolution could latch onto ANY new top-level window
+        // (a PMS / banking dialog appearing during launch) and store it as _activeTarget. We capture ONLY
+        // when the window provably belongs to calc/notepad/operator-authorized — never an arbitrary window.
+        if (!IsAllowlistedSandboxWindow(targetHwnd, targetPid))
+        {
+            return Error(request.Id, request.Command, "target_not_allowlisted",
+                "Sandbox capture refused — target window is not an allowlisted sandbox app");
+        }
+
+        // Request-time foreground gate (belt-and-suspenders with PrintWindow's HWND-scoping).
+        if (!SuavoAgent.Helper.SystemObservers.ForegroundGuard.IsPidForeground(targetPid))
+        {
+            _logger.Information(
+                "IpcCommandServer: sandbox capture_screen rejected — target pid={Pid} not foreground requestId={Id}",
+                targetPid, request.Id);
+            return Error(request.Id, request.Command, "not_foreground",
+                "Sandbox capture refused — sandbox app is not the foreground window");
+        }
+
+        // Build (and cache by HWND) the window-scoped capture controller. Rebuilt only when the target
+        // window changes (a new launch) — avoids reconstructing EncryptedScreenStore on every perceive.
+        ScreenCaptureController? sandboxVision;
+        lock (_sandboxVisionLock)
+        {
+            if (_sandboxVision == null || _sandboxVisionHwnd != targetHwnd)
+            {
+                _sandboxVision = VisionBootstrap.TryBuildWindowSandbox(targetHwnd, targetPid, _logger);
+                _sandboxVisionHwnd = targetHwnd;
+            }
+            sandboxVision = _sandboxVision;
+        }
+
+        if (sandboxVision == null)
+        {
+            return Error(request.Id, request.Command, "sandbox_vision_unavailable",
+                "Sandbox vision pipeline unavailable — PMS installed or non-Windows");
+        }
+
+        _logger.Information(
+            "IpcCommandServer: sandbox capture_screen dispatch — hwnd=0x{Hwnd:X} pid={Pid} requestId={Id}",
+            targetHwnd.ToInt64(), targetPid, request.Id);
+
+        try
+        {
+            var result = await sandboxVision.CaptureAndExtractAsync(ct);
+            if (result == null)
+            {
+                return Error(request.Id, request.Command, "capture_failed",
+                    "Sandbox capture returned null — rate-limited or PrintWindow failed");
+            }
+
+            _logger.Information(
+                "IpcCommandServer: sandbox capture_screen success — requestId={Id} storageId={StorageId} elements={Elements}",
+                request.Id, result.StorageId, result.Frame?.Elements?.Count ?? 0);
+
+            var payload = JsonSerializer.SerializeToElement(new
+            {
+                storageId = result.StorageId,
+                frame = result.Frame,
+            });
+            return Ok(request.Id, request.Command, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: sandbox capture_screen error — requestId={Id}", request.Id);
+            return Error(request.Id, request.Command, "capture_error", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// True iff <paramref name="hwnd"/> is STILL owned by <paramref name="expectedPid"/> AND that PID's
+    /// process image is an allowlisted sandbox app (calc/notepad/operator-authorized). Fail-closed: any
+    /// mismatch, missing process, or error returns false. This is the authoritative HIPAA gate ensuring a
+    /// window-scoped capture targets a real sandbox app, never a window the launch resolver mis-latched.
+    /// </summary>
+    private bool IsAllowlistedSandboxWindow(IntPtr hwnd, int expectedPid)
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        try
+        {
+            var ownerPid = SuavoAgent.Helper.SystemObservers.ForegroundGuard.WindowOwnerPid(hwnd);
+            if (ownerPid == 0 || ownerPid != expectedPid)
+            {
+                _logger.Information(
+                    "IpcCommandServer: sandbox capture refused — hwnd owner pid={Owner} != launch pid={Expected}",
+                    ownerPid, expectedPid);
+                return false;
+            }
+
+            using var proc = System.Diagnostics.Process.GetProcessById(expectedPid);
+            var name = proc.ProcessName; // image base name, no ".exe" (e.g. "notepad")
+            foreach (var kv in SuavoAgent.Contracts.Ipc.ActuationAllowlistedSandboxApps.ProcessNames)
+            {
+                var valueBase = kv.Value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                    ? kv.Value[..^4]
+                    : kv.Value;
+                if (string.Equals(name, kv.Key, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(name, valueBase, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            _logger.Warning(
+                "IpcCommandServer: sandbox capture refused — target pid={Pid} process='{Name}' is NOT an allowlisted sandbox app",
+                expectedPid, name);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "IpcCommandServer: sandbox allowlist verification failed — refusing (fail-closed)");
+            return false;
         }
     }
 

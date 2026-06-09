@@ -34,7 +34,12 @@ public static class NavigateLoopFactory
         PhysarumPolicyOptions? policyOptions = null,
         ISafetyGate? safetyOverride = null)
     {
-        var perceiver = new HelperPerceiver(services.GetRequiredService<IIpcCommandClient>());
+        // explore_sandbox (policyOptions != null) perceives via the Helper's WINDOW-SCOPED sandbox
+        // capture path (targetProcess="sandbox") — independent of the PHI-vision opt-in, captures only
+        // the launch-established sandbox window. Live navigate/replay pass null ⇒ PMS cadence path.
+        var perceiver = new HelperPerceiver(
+            services.GetRequiredService<IIpcCommandClient>(),
+            targetProcess: policyOptions is not null ? "sandbox" : null);
 
         var inner = new TieredBrainReasoner(
             services.GetRequiredService<RuleEngine>(),

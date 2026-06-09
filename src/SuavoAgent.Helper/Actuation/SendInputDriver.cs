@@ -50,6 +50,20 @@ public sealed class SendInputDriver
 
     private sealed record TargetWindow(int Pid, IntPtr Hwnd, string Label);
 
+    /// <summary>
+    /// PID of the window the last launch_sandbox_app established, or 0 if none / unresolved.
+    /// Read-only snapshot of the volatile target — used ONLY by the sandbox capture path to
+    /// validate the foreground before PrintWindow (never for keystroke injection).
+    /// </summary>
+    public int ActiveTargetPid => _activeTarget?.Pid ?? 0;
+
+    /// <summary>
+    /// HWND of the window the last launch_sandbox_app established, or IntPtr.Zero if none.
+    /// Used by the sandbox capture path to construct a window-scoped PrintWindow capturer.
+    /// A slightly-stale HWND is harmless: WindowScopedScreenCapture re-checks IsWindowVisible.
+    /// </summary>
+    public IntPtr ActiveTargetHwnd => _activeTarget?.Hwnd ?? IntPtr.Zero;
+
     // Ticks (UtcNow) of the last successful live click (click_by_label / click_by_signature →
     // ClickAtAsync). A real click establishes keyboard focus on the clicked control, so a type that
     // arrives shortly after must NOT re-focus the window centre (which would undo the click_by_label

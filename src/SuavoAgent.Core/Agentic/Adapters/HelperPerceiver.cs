@@ -26,12 +26,17 @@ public sealed class HelperPerceiver : IPerceiver
     private readonly IIpcCommandClient _ipc;
     private readonly Func<string> _commandId;
     private readonly TimeSpan _captureTimeout;
+    // Non-null ONLY for explore_sandbox runs — embeds {targetProcess} in the capture_screen request
+    // so the Helper routes to the window-scoped sandbox capture path. Null for PMS/navigate/replay.
+    private readonly string? _targetProcess;
 
-    public HelperPerceiver(IIpcCommandClient ipc, Func<string>? commandId = null, TimeSpan? captureTimeout = null)
+    public HelperPerceiver(IIpcCommandClient ipc, Func<string>? commandId = null, TimeSpan? captureTimeout = null,
+        string? targetProcess = null)
     {
         _ipc = ipc ?? throw new ArgumentNullException(nameof(ipc));
         _commandId = commandId ?? (() => Guid.NewGuid().ToString("n"));
         _captureTimeout = captureTimeout ?? TimeSpan.FromSeconds(15);
+        _targetProcess = targetProcess;
     }
 
     public async Task<PerceivedScreen?> PerceiveAsync(CancellationToken ct)
@@ -40,7 +45,12 @@ public sealed class HelperPerceiver : IPerceiver
         if (!connected)
             return null;
 
-        var request = new IpcRequest(_commandId(), IpcCommands.CaptureScreen, 1, null);
+        // Sandbox explore runs embed targetProcess so the Helper uses window-scoped capture; all other
+        // callers send null Data (PMS cadence path), preserving the existing contract byte-for-byte.
+        JsonElement? requestData = _targetProcess is null
+            ? null
+            : JsonSerializer.SerializeToElement(new { targetProcess = _targetProcess });
+        var request = new IpcRequest(_commandId(), IpcCommands.CaptureScreen, 1, requestData);
         var response = await _ipc.SendAsync(request, _captureTimeout, ct).ConfigureAwait(false);
 
         if (response is null || response.Status != 200 || response.Data is not { } data)
