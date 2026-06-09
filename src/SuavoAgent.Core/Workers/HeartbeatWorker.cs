@@ -2544,6 +2544,23 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 SentryBeforeSendFailedTotal: global::SuavoAgent.Diagnostics.Wire.SentryBeforeSendFailedTotal,
                 RulesetVersion: global::SuavoAgent.Diagnostics.Wire.RulesetVersion);
 
+            // Live Helper actuation-gate state — surfaces WHY actuation is gated (gate_disabled /
+            // paused / kill-switch / honeytoken-compromise) remotely. Best-effort; never fail the snapshot.
+            object? actuationGate = null;
+            if (_actuationGateway != null)
+            {
+                try
+                {
+                    actuationGate = await _actuationGateway.GetStateAsync(ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception gateEx)
+                {
+                    actuationGate = new { error = gateEx.GetType().Name };
+                    _logger.LogDebug(gateEx, "fetch_diagnostics: actuation gate state read failed");
+                }
+            }
+
             var snapshot = DiagnosticsSnapshotBuilder.Build(
                 _options,
                 sql,
@@ -2554,7 +2571,8 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 commandPipeConnected: _ipcCommandClient?.IsConnected ?? false,
                 uptimeSeconds: (long)(DateTimeOffset.UtcNow - _startTime).TotalSeconds,
                 processId: Environment.ProcessId,
-                collectedAtUtc: DateTimeOffset.UtcNow);
+                collectedAtUtc: DateTimeOffset.UtcNow,
+                actuationGate: actuationGate);
 
             _stateDb.AppendChainedAuditEntry(new AuditEntry(
                 TaskId: commandId ?? cmd.Nonce,

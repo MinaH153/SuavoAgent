@@ -50,7 +50,8 @@ public static class DiagnosticsSnapshotBuilder
         bool commandPipeConnected,
         long uptimeSeconds,
         int processId,
-        DateTimeOffset collectedAtUtc)
+        DateTimeOffset collectedAtUtc,
+        object? actuationGate = null)
     {
         return new
         {
@@ -112,6 +113,9 @@ public static class DiagnosticsSnapshotBuilder
             },
             watchdog,
             runtimeHealth,
+            // Live Helper actuation-gate state (Enabled/DryRun/Paused/KillSwitch/compromise) — lets an
+            // operator see WHY actuation is gated (e.g. gate_disabled) remotely, no box-side log needed.
+            actuationGate,
         };
     }
 }
