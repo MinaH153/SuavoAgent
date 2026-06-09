@@ -76,6 +76,7 @@ public sealed class IpcCommandServer : IDisposable
     // (avoids reconstructing EncryptedScreenStore on every perceive). Guarded by _sandboxVisionLock.
     private ScreenCaptureController? _sandboxVision;
     private IntPtr _sandboxVisionHwnd = IntPtr.Zero;
+    private int _sandboxVisionPid; // effective app PID the cached capturer was built for (part of the cache key)
     private readonly object _sandboxVisionLock = new();
     private readonly ILogger _logger;
     private CancellationTokenSource? _cts;
@@ -426,9 +427,8 @@ public sealed class IpcCommandServer : IDisposable
                 "Helper started without an actuation/sandbox driver");
         }
 
-        var targetPid = _sandboxDriver.ActiveTargetPid;
         var targetHwnd = _sandboxDriver.ActiveTargetHwnd;
-        if (targetPid <= 0 || targetHwnd == IntPtr.Zero)
+        if (targetHwnd == IntPtr.Zero)
         {
             _logger.Information(
                 "IpcCommandServer: sandbox capture_screen — no active target (send launch_sandbox_app first) requestId={Id}",
@@ -437,23 +437,26 @@ public sealed class IpcCommandServer : IDisposable
                 "No sandbox app target established — send launch_sandbox_app first");
         }
 
-        // AUTHORITATIVE request-time validation (Codex Q1/Q3 fix): the target HWND must STILL be owned by
-        // the launch-resolved PID AND that PID's process must be an allowlisted sandbox app. This closes the
-        // WindowFocusManager fallback gap where launch resolution could latch onto ANY new top-level window
-        // (a PMS / banking dialog appearing during launch) and store it as _activeTarget. We capture ONLY
-        // when the window provably belongs to calc/notepad/operator-authorized — never an arbitrary window.
-        if (!IsAllowlistedSandboxWindow(targetHwnd, targetPid))
+        // AUTHORITATIVE request-time validation (Codex Q1/Q3 fix, UWP-aware): resolve the EFFECTIVE app
+        // behind the target window (drilling the ApplicationFrameHost → CoreWindow UWP case) and require it
+        // to be an allowlisted sandbox app. This closes the WindowFocusManager fallback gap where launch
+        // resolution could latch onto ANY new top-level window (a PMS / banking dialog) — its effective
+        // process would not be allowlisted → refuse. We capture ONLY when the window provably hosts
+        // calc/notepad/operator-authorized, never an arbitrary window.
+        if (!TryResolveAllowlistedSandboxApp(targetHwnd, out var effectiveAppPid))
         {
             return Error(request.Id, request.Command, "target_not_allowlisted",
                 "Sandbox capture refused — target window is not an allowlisted sandbox app");
         }
 
-        // Request-time foreground gate (belt-and-suspenders with PrintWindow's HWND-scoping).
-        if (!SuavoAgent.Helper.SystemObservers.ForegroundGuard.IsPidForeground(targetPid))
+        // Foreground gate: the sandbox app must be the foreground app (UWP-robust — compares the EFFECTIVE
+        // app PID, since a UWP app's foreground HWND is the AFH frame). Belt-and-suspenders with
+        // PrintWindow's HWND-scoping.
+        if (!SuavoAgent.Helper.Actuation.SandboxWindowResolver.IsSandboxAppForeground(effectiveAppPid))
         {
             _logger.Information(
-                "IpcCommandServer: sandbox capture_screen rejected — target pid={Pid} not foreground requestId={Id}",
-                targetPid, request.Id);
+                "IpcCommandServer: sandbox capture_screen rejected — sandbox app pid={Pid} not foreground requestId={Id}",
+                effectiveAppPid, request.Id);
             return Error(request.Id, request.Command, "not_foreground",
                 "Sandbox capture refused — sandbox app is not the foreground window");
         }
@@ -463,10 +466,14 @@ public sealed class IpcCommandServer : IDisposable
         ScreenCaptureController? sandboxVision;
         lock (_sandboxVisionLock)
         {
-            if (_sandboxVision == null || _sandboxVisionHwnd != targetHwnd)
+            // Cache key = (HWND, effective app PID): rebuild if EITHER changes, so the cached capturer's
+            // expected-PID always equals the just-validated effective app PID (Codex: a same-HWND effective-PID
+            // churn must not leave a stale expected PID that the capturer's TOCTOU check would spuriously reject).
+            if (_sandboxVision == null || _sandboxVisionHwnd != targetHwnd || _sandboxVisionPid != effectiveAppPid)
             {
-                _sandboxVision = VisionBootstrap.TryBuildWindowSandbox(targetHwnd, targetPid, _logger);
+                _sandboxVision = VisionBootstrap.TryBuildWindowSandbox(targetHwnd, effectiveAppPid, _logger);
                 _sandboxVisionHwnd = targetHwnd;
+                _sandboxVisionPid = effectiveAppPid;
             }
             sandboxVision = _sandboxVision;
         }
@@ -478,8 +485,8 @@ public sealed class IpcCommandServer : IDisposable
         }
 
         _logger.Information(
-            "IpcCommandServer: sandbox capture_screen dispatch — hwnd=0x{Hwnd:X} pid={Pid} requestId={Id}",
-            targetHwnd.ToInt64(), targetPid, request.Id);
+            "IpcCommandServer: sandbox capture_screen dispatch — hwnd=0x{Hwnd:X} appPid={Pid} requestId={Id}",
+            targetHwnd.ToInt64(), effectiveAppPid, request.Id);
 
         try
         {
@@ -509,42 +516,37 @@ public sealed class IpcCommandServer : IDisposable
     }
 
     /// <summary>
-    /// True iff <paramref name="hwnd"/> is STILL owned by <paramref name="expectedPid"/> AND that PID's
-    /// process image is an allowlisted sandbox app (calc/notepad/operator-authorized). Fail-closed: any
-    /// mismatch, missing process, or error returns false. This is the authoritative HIPAA gate ensuring a
-    /// window-scoped capture targets a real sandbox app, never a window the launch resolver mis-latched.
+    /// Resolves the EFFECTIVE app behind <paramref name="hwnd"/> (UWP-aware: drills ApplicationFrameHost →
+    /// CoreWindow) and returns true with <paramref name="effectiveAppPid"/> set ONLY if that app is an
+    /// allowlisted sandbox app (calc/notepad/operator-authorized, incl. packaged aliases like CalculatorApp).
+    /// Fail-closed: any non-Windows / missing process / non-allowlisted result returns false. This is the
+    /// authoritative HIPAA gate ensuring a window-scoped capture targets a real sandbox app, never a window
+    /// the launch resolver mis-latched.
     /// </summary>
-    private bool IsAllowlistedSandboxWindow(IntPtr hwnd, int expectedPid)
+    private bool TryResolveAllowlistedSandboxApp(IntPtr hwnd, out int effectiveAppPid)
     {
+        effectiveAppPid = 0;
         if (!OperatingSystem.IsWindows()) return false;
         try
         {
-            var ownerPid = SuavoAgent.Helper.SystemObservers.ForegroundGuard.WindowOwnerPid(hwnd);
-            if (ownerPid == 0 || ownerPid != expectedPid)
+            var pid = SuavoAgent.Helper.Actuation.SandboxWindowResolver.EffectiveAppPid(hwnd);
+            if (pid <= 0)
             {
-                _logger.Information(
-                    "IpcCommandServer: sandbox capture refused — hwnd owner pid={Owner} != launch pid={Expected}",
-                    ownerPid, expectedPid);
+                _logger.Information("IpcCommandServer: sandbox capture refused — could not resolve an app behind the target window");
                 return false;
             }
 
-            using var proc = System.Diagnostics.Process.GetProcessById(expectedPid);
-            var name = proc.ProcessName; // image base name, no ".exe" (e.g. "notepad")
-            foreach (var kv in SuavoAgent.Contracts.Ipc.ActuationAllowlistedSandboxApps.ProcessNames)
+            using var proc = System.Diagnostics.Process.GetProcessById(pid);
+            var name = proc.ProcessName; // image base name, no ".exe" (e.g. "notepad", "CalculatorApp")
+            if (SuavoAgent.Helper.Actuation.SandboxWindowResolver.IsAllowlistedSandboxProcess(name))
             {
-                var valueBase = kv.Value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                    ? kv.Value[..^4]
-                    : kv.Value;
-                if (string.Equals(name, kv.Key, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(name, valueBase, StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
+                effectiveAppPid = pid;
+                return true;
             }
 
             _logger.Warning(
-                "IpcCommandServer: sandbox capture refused — target pid={Pid} process='{Name}' is NOT an allowlisted sandbox app",
-                expectedPid, name);
+                "IpcCommandServer: sandbox capture refused — effective app pid={Pid} process='{Name}' is NOT an allowlisted sandbox app",
+                pid, name);
             return false;
         }
         catch (Exception ex)

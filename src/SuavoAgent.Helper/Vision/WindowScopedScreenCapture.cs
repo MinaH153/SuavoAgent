@@ -96,14 +96,14 @@ public sealed class WindowScopedScreenCapture : IScreenCapture
                         // allowlisted) PID IMMEDIATELY before each PrintWindow — same thread, no await, no GDI
                         // setup in between. Windows reuses HWND values; a reused HWND would have a different
                         // owner PID → refuse. This is the practical floor (PrintWindow itself takes no PID).
-                        if (OwnerPidMismatch()) return null;
+                        if (EffectiveAppPidMismatch()) return null;
 
                         // PW_RENDERFULLCONTENT forces DWM to render the full composited window content
                         // (needed for DWM-composited / UWP apps). Fall back to flag 0 (pre-Win8.1) before
                         // giving up — re-checking the owner PID again before the fallback call.
                         if (!PrintWindow(_targetHwnd, hdc, PW_RENDERFULLCONTENT))
                         {
-                            if (OwnerPidMismatch()) return null;
+                            if (EffectiveAppPidMismatch()) return null;
                             if (!PrintWindow(_targetHwnd, hdc, 0))
                             {
                                 _logger.Warning("WindowScopedScreenCapture: PrintWindow failed for 0x{Hwnd:X}",
@@ -138,18 +138,19 @@ public sealed class WindowScopedScreenCapture : IScreenCapture
     }
 
     /// <summary>
-    /// True when the TOCTOU guard should REFUSE: the target HWND's current owner PID no longer equals the
-    /// expected (IPC-validated, allowlisted) PID. _expectedPid &lt;= 0 (tests) skips the check (returns false).
-    /// Called same-thread immediately before each PrintWindow.
+    /// True when the TOCTOU guard should REFUSE: the EFFECTIVE app behind the target HWND no longer equals
+    /// the expected (IPC-validated, allowlisted) app PID. UWP-aware (drills ApplicationFrameHost → CoreWindow),
+    /// so a reused HWND now hosting a different app is caught. _expectedPid &lt;= 0 (tests) skips. Called
+    /// same-thread immediately before each PrintWindow.
     /// </summary>
-    private bool OwnerPidMismatch()
+    private bool EffectiveAppPidMismatch()
     {
         if (_expectedPid <= 0) return false;
-        GetWindowThreadProcessId(_targetHwnd, out var ownerPid);
-        if (ownerPid != 0 && (int)ownerPid == _expectedPid) return false;
+        var now = SuavoAgent.Helper.Actuation.SandboxWindowResolver.EffectiveAppPid(_targetHwnd);
+        if (now != 0 && now == _expectedPid) return false;
         _logger.Warning(
-            "WindowScopedScreenCapture: owner pid changed (now={Now}, expected={Exp}) for 0x{Hwnd:X} — refusing",
-            (int)ownerPid, _expectedPid, _targetHwnd.ToInt64());
+            "WindowScopedScreenCapture: effective app pid changed (now={Now}, expected={Exp}) for 0x{Hwnd:X} — refusing",
+            now, _expectedPid, _targetHwnd.ToInt64());
         return true;
     }
 
@@ -189,7 +190,4 @@ public sealed class WindowScopedScreenCapture : IScreenCapture
 
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }

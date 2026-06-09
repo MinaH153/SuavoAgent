@@ -32,18 +32,6 @@ public static class ForegroundGuard
         return fgPid != 0 && (int)fgPid == expectedPid;
     }
 
-    /// <summary>
-    /// Returns the PID that owns <paramref name="hwnd"/>, or 0 on any error / non-Windows. Used by the
-    /// sandbox capture path to verify a target window still belongs to the launch-resolved process before
-    /// PrintWindow — closing the gap where window resolution could have latched onto a non-target window.
-    /// </summary>
-    public static int WindowOwnerPid(IntPtr hwnd)
-    {
-        if (hwnd == IntPtr.Zero || !OperatingSystem.IsWindows()) return 0;
-        GetWindowThreadProcessId(hwnd, out var pid);
-        return (int)pid;
-    }
-
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
