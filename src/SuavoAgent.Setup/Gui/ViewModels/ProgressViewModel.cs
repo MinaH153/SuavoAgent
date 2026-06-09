@@ -75,7 +75,7 @@ public sealed class ProgressViewModel : ViewModelBase
     private string _activePhase = "Preparing…";
     private bool _cancelRequested;
 
-    public ProgressViewModel(Action onCancel)
+    public ProgressViewModel(Action onCancel, IReadOnlyList<string>? phaseTitles = null)
     {
         CancelCommand = new RelayCommand(() =>
         {
@@ -83,16 +83,29 @@ public sealed class ProgressViewModel : ViewModelBase
             onCancel();
         });
 
-        Phases = new ObservableCollection<PhaseItem>
+        // Default to the install phases; the uninstall flow supplies its own
+        // titles so the same progress view renders either workflow.
+        var titles = phaseTitles ?? new[]
         {
-            new("Download binaries"),
-            new("Write configuration"),
-            new("Install Windows services"),
+            "Download binaries",
+            "Write configuration",
+            "Install Windows services",
         };
+
+        Phases = new ObservableCollection<PhaseItem>();
+        foreach (var title in titles)
+            Phases.Add(new PhaseItem(title));
     }
 
     public ObservableCollection<PhaseItem> Phases { get; }
     public ObservableCollection<LogLine> LogLines { get; } = new();
+
+    /// <summary>Header shown above the phase list. Install vs uninstall set this.</summary>
+    public string Title { get; init; } = "Installing SuavoAgent";
+
+    /// <summary>Footer hint next to the Cancel button.</summary>
+    public string CancelHint { get; init; } =
+        "Cancel aborts before services start. Already-downloaded binaries stay on disk until retry.";
 
     public string ActivePhase
     {

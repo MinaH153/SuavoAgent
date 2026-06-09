@@ -108,7 +108,7 @@ internal sealed class MainWindowViewModel : ViewModelBase
         StepLabel = "Welcome";
         return new WelcomeView
         {
-            DataContext = new WelcomeViewModel(GoToSystemCheck),
+            DataContext = new WelcomeViewModel(GoToSystemCheck, GoToUninstallConfirm),
         };
     }
 
@@ -206,6 +206,111 @@ internal sealed class MainWindowViewModel : ViewModelBase
         {
             DataContext = new SuccessViewModel(_ctx, () => _shutdown?.Invoke(0)),
         };
+    }
+
+    // ── Uninstall flow (Welcome → Confirm → Progress → Success/Error) ──────
+
+    private void GoToUninstallConfirm()
+    {
+        StepLabel = "Uninstall · Confirm";
+        CurrentView = new UninstallConfirmView
+        {
+            DataContext = new UninstallConfirmViewModel(
+                onConfirm: GoToUninstallProgress,
+                onCancel: () => CurrentView = BuildWelcome()),
+        };
+    }
+
+    private void GoToUninstallProgress()
+    {
+        StepLabel = "Uninstall · Removing";
+
+        // Uninstall is not cancellable mid-flight (ServiceInstaller.Uninstall is a
+        // single blocking call), so the cancel affordance is a no-op pass-through.
+        var cts = new CancellationTokenSource();
+        var vm = new ProgressViewModel(() => { }, new[]
+        {
+            "Stop & remove services",
+            "Remove local data",
+            "Remove program files",
+        })
+        {
+            Title = "Uninstalling SuavoAgent",
+            CancelHint = "Removing services and erasing local data. This cannot be undone.",
+        };
+        CurrentView = new ProgressView { DataContext = vm };
+
+        ConsoleUI.SetReporter(new GuiInstallReporter(vm));
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var orchestrator = new UninstallOrchestrator();
+                vm.MarkPhase(0, PhaseState.Running);
+
+                var result = await orchestrator.RunAsync(
+                    new Progress<UninstallOrchestrator.PhaseEvent>(evt =>
+                    {
+                        var index = (int)evt.Phase;
+                        if (index >= vm.Phases.Count) return;
+
+                        for (int i = 0; i < index; i++)
+                            if (vm.Phases[i].State != PhaseState.Done)
+                                vm.Phases[i].State = PhaseState.Done;
+
+                        if (evt.Phase == UninstallOrchestrator.Phase.Done) return;
+                        vm.MarkPhase(index, PhaseState.Running);
+                    }), cts.Token);
+
+                Dispatcher.UIThread.Post(() =>
+                {
+                    foreach (var phase in vm.Phases)
+                        phase.State = PhaseState.Done;
+
+                    if (result.FullyClean)
+                        GoToUninstallSuccess();
+                    else
+                        GoToError(
+                            "Uninstall incomplete",
+                            BuildResidueSummary(result) + "\n\n" + BuildLogTail(vm),
+                            retry: GoToUninstallProgress);
+                });
+            }
+            catch (Exception ex)
+            {
+                Dispatcher.UIThread.Post(() => GoToError(
+                    "Uninstall failed",
+                    ex.Message + "\n\n" + BuildLogTail(vm),
+                    retry: GoToUninstallProgress));
+            }
+        });
+    }
+
+    private void GoToUninstallSuccess()
+    {
+        StepLabel = "Done";
+        CurrentView = new UninstallSuccessView
+        {
+            DataContext = new UninstallSuccessViewModel(() => _shutdown?.Invoke(0)),
+        };
+    }
+
+    private static string BuildResidueSummary(ServiceInstaller.UninstallResult r)
+    {
+        var residue = new List<string>();
+        if (r.ServicesRemaining > 0)
+            residue.Add($"{r.ServicesRemaining} Windows service(s) still registered");
+        if (!r.DataDirRemoved)
+            residue.Add($"local data dir could not be fully removed ({UninstallOrchestrator.DefaultDataDir})");
+        if (!r.InstallDirRemoved)
+            residue.Add($"install dir could not be fully removed ({UninstallOrchestrator.DefaultInstallDir}) — a file may still be locked");
+
+        var detail = residue.Count > 0
+            ? "Residue remaining:\n• " + string.Join("\n• ", residue)
+            : "Some items could not be removed.";
+
+        return detail + "\n\nReboot to release any locked files, then run the uninstaller again.";
     }
 
     private void GoToError(string title, string detail, Action? retry)

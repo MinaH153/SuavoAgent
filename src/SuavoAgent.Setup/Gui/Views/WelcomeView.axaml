@@ -56,5 +56,22 @@
                        HorizontalAlignment="Center"/>
         </StackPanel>
 
+        <!-- Secondary / danger path: remove an existing install. Visually
+             subordinate to the primary "Get started" button — outlined in
+             wine red, never a filled call-to-action. -->
+        <Button Grid.Row="4"
+                Content="Already installed? Uninstall SuavoAgent"
+                Command="{Binding UninstallCommand}"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Bottom"
+                Margin="0,0,0,4"
+                Padding="18,9"
+                Background="Transparent"
+                Foreground="{DynamicResource SuavoDangerBrush}"
+                BorderBrush="{DynamicResource SuavoDangerBrush}"
+                BorderThickness="1"
+                FontSize="13"
+                CornerRadius="10"/>
+
     </Grid>
 </UserControl>

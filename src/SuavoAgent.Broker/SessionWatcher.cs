@@ -24,6 +24,9 @@ public sealed class SessionWatcher : BackgroundService
     private bool _launchFailureEscalated;
     internal const int MaxConsecutiveLaunchFailuresBeforeEscalation = 3;
 
+    // Fire the SYSTEM self-uninstall cleaner at most once (the Broker is gone seconds later anyway).
+    private bool _selfUninstallLaunched;
+
     private record HelperInfo(int ProcessId, uint SessionId, DateTimeOffset LaunchedAt, string HelperSha256);
 
     public SessionWatcher(ILogger<SessionWatcher> logger)
@@ -83,6 +86,19 @@ public sealed class SessionWatcher : BackgroundService
         return _watchdogProbe.InvokeBootstrapRepair(bootstrap, TimeSpan.FromMinutes(2));
     }
 
+    // Dashboard self-uninstall: Core (LocalService) drops a sentinel it CAN write but cannot act on;
+    // the Broker (LocalSystem) is the privileged, OTA-updated component that launches the SYSTEM
+    // cleaner. Fire-once. Uses the injected _fileExists seam so the trigger is unit-testable.
+    private void CheckSelfUninstall()
+    {
+        if (_selfUninstallLaunched) return;
+        if (!_fileExists(SelfUninstall.SentinelPath())) return;
+        _logger.LogWarning("Self-uninstall sentinel detected — launching SYSTEM cleaner (agent removing itself)");
+        var installDir = Path.GetDirectoryName(Environment.ProcessPath) ?? string.Empty;
+        if (SelfUninstall.TryLaunchCleaner(installDir, _logger))
+            _selfUninstallLaunched = true;
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Session watcher started — monitoring for interactive sessions");
@@ -104,6 +120,7 @@ public sealed class SessionWatcher : BackgroundService
         {
             try
             {
+                CheckSelfUninstall();
                 CheckActiveSessions();
                 CleanupDeadHelpers();
                 RefreshHelperAttestations();

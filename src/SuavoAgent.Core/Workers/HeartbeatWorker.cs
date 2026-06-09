@@ -968,6 +968,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "set_reasoning_config":
                     await HandleSetReasoningConfigAsync(scEl, cmd, ct);
                     break;
+                case "self_uninstall":
+                    await HandleSelfUninstallAsync(scEl, ct);
+                    break;
                 default:
                     _logger.LogDebug("Unknown signed command: {Command}", cmd.Command);
                     break;
@@ -3224,6 +3227,84 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Decommission handling failed");
+        }
+    }
+
+    /// <summary>
+    /// Dashboard self-uninstall ("the agent removes itself"). Core (LocalService) cannot delete
+    /// services or wipe admin-owned dirs, so it best-effort archives the audit chain to the cloud
+    /// (HIPAA 164.530(j)), then drops a sentinel the Broker (LocalSystem) polls for — the Broker
+    /// launches a detached SYSTEM cleaner that removes everything, watchdog-first. Only reachable via
+    /// a signed envelope; the cloud gates it to the Pharmacist-in-Charge.
+    /// </summary>
+    private async Task HandleSelfUninstallAsync(JsonElement scEl, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            try { await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct); } catch { /* best effort */ }
+        }
+
+        try
+        {
+            var agentId = _options.AgentId ?? "";
+            _logger.LogWarning("SELF-UNINSTALL requested — archiving audit (best-effort) then signalling the Broker");
+
+            // Best-effort audit archive to the cloud; do NOT block the uninstall on it (the operator
+            // explicitly requested removal through the PIC-gated dashboard).
+            try
+            {
+                var chainValid = _stateDb.VerifyAuditChain();
+                var auditJson = _stateDb.ExportAuditArchiveJson();
+                var statesJson = _stateDb.ExportWritebackStatesJson();
+                var archivePayload = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    agentId,
+                    auditEntries = auditJson,
+                    writebackStates = statesJson,
+                    auditChainValid = chainValid
+                });
+                var digest = Convert.ToBase64String(
+                    System.Security.Cryptography.SHA256.HashData(
+                        System.Text.Encoding.UTF8.GetBytes(archivePayload)));
+                if (_cloudClient != null)
+                    await _cloudClient.UploadAuditArchiveAsync(archivePayload, digest, ct);
+            }
+            catch (Exception aex) { _logger.LogWarning(aex, "Self-uninstall: audit archive failed (continuing)"); }
+
+            try
+            {
+                _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                    agentId, "self_uninstall", "", "SelfUninstallRequested", "self_uninstall"));
+            }
+            catch { /* audit best-effort */ }
+
+            // Drop the sentinel the Broker (LocalSystem) polls for. Core has Modify on the data dir.
+            var dataDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SuavoAgent");
+            var sentinel = Path.Combine(dataDir, "uninstall.request");
+            try
+            {
+                Directory.CreateDirectory(dataDir);
+                await File.WriteAllTextAsync(sentinel, $"requested {DateTimeOffset.UtcNow:o}", ct);
+            }
+            catch (Exception sex)
+            {
+                _logger.LogError(sex, "Self-uninstall: could not write sentinel — uninstall NOT triggered");
+                await AckAsync(false, null, "sentinel write failed");
+                return;
+            }
+
+            _logger.LogWarning("Self-uninstall sentinel written — the Broker will remove the agent shortly");
+            await AckAsync(true, new { phase = "sentinel_written" }, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Self-uninstall handling failed");
+            await AckAsync(false, null, ex.Message);
         }
     }
 

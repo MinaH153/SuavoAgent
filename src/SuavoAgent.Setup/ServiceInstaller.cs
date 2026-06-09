@@ -146,6 +146,113 @@ internal static class ServiceInstaller
     }
 
     /// <summary>
+    /// Symmetric uninstall: stop + delete all three services (watchdog-first, kills the
+    /// orphan Helper that locks binaries), then remove the data directory and the install
+    /// directory. Directory deletes are best-effort with retry (a just-killed Helper can
+    /// briefly hold a handle). Safe to call when services / dirs are already absent.
+    /// </summary>
+    public static UninstallResult Uninstall(string installDir, string dataDir)
+    {
+        var result = new UninstallResult();
+
+        ConsoleUI.WriteInfo("Stopping and removing SuavoAgent services (watchdog-first)...");
+        StopServices(); // watchdog -> broker -> core + KillOrphanProcesses
+        result.ServicesRemoved = true;
+
+        // Data directory: state.db, state.key, configs, logs, learned templates, audit.
+        if (Directory.Exists(dataDir))
+        {
+            result.DataDirRemoved = SafeDeleteDirectory(dataDir);
+            if (result.DataDirRemoved) ConsoleUI.WriteOk($"Removed data dir: {dataDir}");
+            else ConsoleUI.WriteWarn($"Could not fully remove data dir: {dataDir}");
+        }
+        else { result.DataDirRemoved = true; }
+
+        // Install directory: service binaries + appsettings.json (DPAPI-sealed credentials).
+        var appsettings = Path.Combine(installDir, "appsettings.json");
+        if (File.Exists(appsettings)) { try { File.Delete(appsettings); } catch { /* removed with the dir below */ } }
+        if (Directory.Exists(installDir))
+        {
+            result.InstallDirRemoved = SafeDeleteDirectory(installDir);
+            if (result.InstallDirRemoved) ConsoleUI.WriteOk($"Removed install dir: {installDir}");
+            else ConsoleUI.WriteWarn($"Could not fully remove install dir: {installDir} (a file may still be locked)");
+        }
+        else { result.InstallDirRemoved = true; }
+
+        // Defensive registry cleanup (the installer does not normally create these, but
+        // remove them if a prior/older build did). Services were already removed above.
+        TryDeleteRegistryKeyTree(@"SOFTWARE\SuavoAgent");
+
+        result.ServicesRemaining = CountRemainingServices();
+        return result;
+    }
+
+    /// <summary>Outcome of <see cref="Uninstall"/>, used for zero-residue verification.</summary>
+    public sealed class UninstallResult
+    {
+        public bool ServicesRemoved { get; set; }
+        public bool DataDirRemoved { get; set; }
+        public bool InstallDirRemoved { get; set; }
+        public int ServicesRemaining { get; set; }
+        public bool FullyClean => ServicesRemaining == 0 && DataDirRemoved && InstallDirRemoved;
+    }
+
+    // Recursive delete that tolerates a briefly-held handle from a just-killed process.
+    private static bool SafeDeleteDirectory(string path)
+    {
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                Directory.Delete(path, recursive: true);
+                return true;
+            }
+            catch (DirectoryNotFoundException) { return true; }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                try { ClearReadOnlyRecursive(path); } catch { /* best effort */ }
+                Thread.Sleep(1000);
+            }
+            catch { break; }
+        }
+        return !Directory.Exists(path);
+    }
+
+    private static void ClearReadOnlyRecursive(string path)
+    {
+        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+        {
+            try { var fi = new FileInfo(file); if (fi.IsReadOnly) fi.IsReadOnly = false; } catch { }
+        }
+    }
+
+    private static int CountRemainingServices()
+    {
+        var remaining = 0;
+        foreach (var name in new[] { CoreServiceName, BrokerServiceName, WatchdogServiceName })
+            if (IsServicePresent(name)) remaining++;
+        return remaining;
+    }
+
+    // Present = sc.exe query did NOT return "FAILED 1060" (the service-does-not-exist code).
+    private static bool IsServicePresent(string serviceName)
+    {
+        try
+        {
+            var outp = RunSc($"query {serviceName}", expectSuccess: false);
+            return !outp.Contains("FAILED 1060", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    private static void TryDeleteRegistryKeyTree(string subKey)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try { Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree(subKey, throwOnMissingSubKey: false); }
+        catch { /* absent or insufficient rights — services already removed by StopServices */ }
+    }
+
+    /// <summary>
     /// Kills any lingering SuavoAgent.* process (Helper especially) that survives a service stop,
     /// so the binaries can be overwritten. Best-effort: a process that already exited or that we
     /// can't touch is skipped. Waits briefly for the OS to release the file handles afterward.
