@@ -14,7 +14,11 @@ public sealed record SetupConfig(
     [property: JsonPropertyName("cloud_url")] string CloudUrl,
     [property: JsonPropertyName("release_tag")] string ReleaseTag,
     [property: JsonPropertyName("learning_mode")] bool LearningMode,
-    [property: JsonPropertyName("agent_id")] string AgentId = "")
+    [property: JsonPropertyName("agent_id")] string AgentId = "",
+    // Not from setup.json — set by the device-code/install-context flow so the
+    // installer can bake the on-device brain config (Agent:Reasoning). Null =
+    // no brain config (agent installs rules-only — fail-soft).
+    [property: JsonIgnore] AgentReasoningConfig? Reasoning = null)
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
     {

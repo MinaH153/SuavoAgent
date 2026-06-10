@@ -17,7 +17,8 @@ public sealed record DeviceCodePollResult(
     string? ApiKey = null,
     string? AgentId = null,
     string? PharmacyId = null,
-    string? PharmacyName = null)
+    string? PharmacyName = null,
+    AgentReasoningConfig? Reasoning = null)
 {
     public bool IsAuthorized => string.Equals(Status, "authorized", StringComparison.Ordinal);
     public bool IsPending => string.Equals(Status, "pending", StringComparison.Ordinal);
@@ -113,12 +114,28 @@ public sealed class DeviceCodeService : IDeviceCodeService, IDisposable
         var status = node["status"]?.GetValue<string>()
                      ?? throw new InvalidOperationException("device-token response missing status");
 
+        // Optional on-device brain config (fail-soft: a malformed block is ignored,
+        // the agent just installs rules-only).
+        AgentReasoningConfig? reasoning = null;
+        if (node["reasoning"] is JsonObject reasoningNode)
+        {
+            try
+            {
+                reasoning = reasoningNode.Deserialize<AgentReasoningConfig>();
+            }
+            catch (JsonException)
+            {
+                reasoning = null;
+            }
+        }
+
         return new DeviceCodePollResult(
             status,
             node["apiKey"]?.GetValue<string>(),
             node["agentId"]?.GetValue<string>(),
             node["pharmacyId"]?.GetValue<string>(),
-            node["pharmacyName"]?.GetValue<string>());
+            node["pharmacyName"]?.GetValue<string>(),
+            reasoning);
     }
 
     public void Dispose() => _http.Dispose();

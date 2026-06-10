@@ -59,6 +59,14 @@ internal sealed class InstallOrchestrator
         ConsoleUI.WriteStep("Phase 4: Writing configuration");
         WriteConfigFiles();
 
+        // Regenerate the Broker's integrity manifest from the just-placed binaries
+        // BEFORE the services start. Without this, an install over an existing agent
+        // leaves a stale/absent binaries.manifest -> the Broker rejects the (new)
+        // Helper as tampered and exits -> the agent comes up "online" but BLIND.
+        // The console installer (ConsoleInstaller) already does this; the GUI path
+        // did not. (Parity fix — WS2 of the brain/install plan.)
+        BinaryDownloader.WriteBinariesManifest(_ctx.InstallDir);
+
         ct.ThrowIfCancellationRequested();
 
         progress.Report(new PhaseEvent(Phase.InstallServices, "Installing Windows services"));
@@ -139,8 +147,58 @@ internal sealed class InstallOrchestrator
             }
         }
 
+        // On-device brain: bake the cloud-supplied reasoning config so the agent
+        // boots reasoning-enabled and self-provisions the model + native libs on
+        // first run (no restart, no cloud command). The cloud owns the URLs/SHAs;
+        // we compute the on-box paths from the data dir (Codex-corrected: the
+        // provisioners hard-fail without ModelPath/NativeLibraryPath).
+        BakeReasoning(agent, _ctx.Config.Reasoning, _ctx.DataDir);
+
         var settings = new Dictionary<string, object> { ["Agent"] = agent };
         return JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    /// <summary>
+    /// Adds the Agent:Reasoning section when a provisionable brain config is
+    /// present. Pure + static so it's unit-testable. The model lands at
+    /// {dataDir}\models\{file}, the native libs extract to {dataDir}\native.
+    /// </summary>
+    internal static void BakeReasoning(
+        Dictionary<string, object?> agent, AgentReasoningConfig? reasoning, string dataDir)
+    {
+        if (reasoning is not { IsProvisionable: true }) return;
+
+        var modelFile = SafeFileNameFromUrl(reasoning.ModelUrl, "model.gguf");
+        agent["Reasoning"] = new Dictionary<string, object?>
+        {
+            ["Enabled"] = true,
+            ["ModelId"] = reasoning.ModelId,
+            ["ModelUrl"] = reasoning.ModelUrl,
+            ["ModelSha256"] = reasoning.ModelSha256,
+            ["ModelPath"] = Path.Combine(dataDir, "models", modelFile),
+            ["NativeLibsUrl"] = reasoning.NativeLibsUrl,
+            ["NativeLibsSha256"] = reasoning.NativeLibsSha256,
+            ["NativeLibraryPath"] = Path.Combine(dataDir, "native"),
+            ["ContextSize"] = reasoning.ContextSize,
+            ["MaxOutputTokens"] = reasoning.MaxOutputTokens,
+        };
+    }
+
+    /// <summary>Last path segment of a URL, sanitized to a safe filename; fallback on anything odd.</summary>
+    private static string SafeFileNameFromUrl(string url, string fallback)
+    {
+        try
+        {
+            var path = new Uri(url).AbsolutePath;
+            var name = Path.GetFileName(path);
+            if (string.IsNullOrWhiteSpace(name)) return fallback;
+            foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+            return name;
+        }
+        catch
+        {
+            return fallback;
+        }
     }
 
     private static string GetMachineFingerprint()
