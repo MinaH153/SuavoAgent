@@ -7,6 +7,17 @@
              x:Class="SuavoAgent.Setup.Gui.Views.ProgressView"
              x:DataType="vm:ProgressViewModel">
 
+    <UserControl.Styles>
+        <Style Selector="Border.phaseRow">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Transitions">
+                <Transitions>
+                    <BrushTransition Property="Background" Duration="0:0:0.18" Easing="CubicEaseOut" />
+                </Transitions>
+            </Setter>
+        </Style>
+    </UserControl.Styles>
+
     <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="80,32,80,32">
 
         <StackPanel Grid.Row="0" Spacing="6">
@@ -16,55 +27,83 @@
             <TextBlock Text="{Binding ActivePhase}"
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"/>
+            <Border Height="2" Width="64" HorizontalAlignment="Left" Margin="0,6,0,0"
+                    Background="{DynamicResource SuavoAccentRuleBrush}" CornerRadius="1"/>
         </StackPanel>
 
-        <ItemsControl Grid.Row="1" ItemsSource="{Binding Phases}" Margin="0,20,0,16">
+        <ItemsControl Grid.Row="1" ItemsSource="{Binding Phases}" Margin="0,20,0,12">
             <ItemsControl.ItemTemplate>
                 <DataTemplate x:DataType="vm:PhaseItem">
-                    <Grid ColumnDefinitions="28,*,Auto" Margin="0,6">
-                        <TextBlock Grid.Column="0"
-                                   Text="{Binding Icon}"
-                                   FontSize="16" FontWeight="Bold"
-                                   Foreground="{DynamicResource SuavoAccentTextBrush}"
-                                   VerticalAlignment="Center"/>
-                        <TextBlock Grid.Column="1"
-                                   Text="{Binding Title}"
-                                   Foreground="{DynamicResource SuavoTextBrush}"
-                                   FontSize="14" FontWeight="SemiBold"
-                                   VerticalAlignment="Center"/>
-                        <ProgressBar Grid.Column="2"
-                                     Width="160"
-                                     Height="6"
-                                     Minimum="0" Maximum="100"
-                                     Value="{Binding Percent}"
-                                     IsVisible="{Binding IsActive}"
-                                     Foreground="{DynamicResource SuavoAccentTextBrush}"
-                                     Background="{DynamicResource SuavoBorderBrush}"/>
-                    </Grid>
+                    <Border Classes="phaseRow" Padding="10,8" CornerRadius="{DynamicResource SuavoRadiusMedium}">
+                        <Grid ColumnDefinitions="36,*,Auto,52">
+                            <!-- Status glyph in a soft chip -->
+                            <Border Grid.Column="0" Width="26" Height="26"
+                                    CornerRadius="{DynamicResource SuavoRadiusPill}"
+                                    Background="{DynamicResource SuavoSurfaceElevatedBrush}"
+                                    VerticalAlignment="Center">
+                                <TextBlock Text="{Binding Icon}"
+                                           FontSize="13" FontWeight="Bold"
+                                           Foreground="{DynamicResource SuavoAccentTextBrush}"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+
+                            <!-- Title + playful caption while running -->
+                            <StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding Title}"
+                                           Foreground="{DynamicResource SuavoTextBrush}"
+                                           FontSize="14" FontWeight="SemiBold"/>
+                                <TextBlock Text="{Binding Caption}"
+                                           IsVisible="{Binding HasCaption}"
+                                           Foreground="{DynamicResource SuavoAccentTextBrush}"
+                                           FontSize="12" FontStyle="Italic"/>
+                            </StackPanel>
+
+                            <ProgressBar Grid.Column="2"
+                                         Width="180" Height="6"
+                                         Minimum="0" Maximum="100"
+                                         Value="{Binding Percent}"
+                                         IsVisible="{Binding IsActive}"
+                                         VerticalAlignment="Center"
+                                         Foreground="{DynamicResource SuavoAccentBrush}"
+                                         Background="{DynamicResource SuavoBorderBrush}"/>
+                            <TextBlock Grid.Column="3"
+                                       Text="{Binding PercentLabel}"
+                                       IsVisible="{Binding IsActive}"
+                                       Foreground="{DynamicResource SuavoTextMutedBrush}"
+                                       FontSize="12" FontWeight="SemiBold"
+                                       HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                        </Grid>
+                    </Border>
                 </DataTemplate>
             </ItemsControl.ItemTemplate>
         </ItemsControl>
 
-        <Border Grid.Row="2"
-                Background="#16140F"
-                BorderBrush="{DynamicResource SuavoBorderBrush}"
-                BorderThickness="1"
-                CornerRadius="{DynamicResource SuavoRadiusMedium}">
-            <ScrollViewer Padding="12">
-                <ItemsControl ItemsSource="{Binding LogLines}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:LogLine">
-                            <TextBlock Text="{Binding Text}"
-                                       Foreground="{Binding Brush}"
-                                       FontFamily="Consolas,Menlo,monospace"
-                                       FontSize="11"
-                                       TextWrapping="Wrap"
-                                       Margin="0,1"/>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </ScrollViewer>
-        </Border>
+        <!-- Technical log — tucked behind a disclosure; the phases above are the story. -->
+        <Expander Grid.Row="2" Header="Details"
+                  FontSize="12"
+                  Foreground="{DynamicResource SuavoTextMutedBrush}"
+                  VerticalAlignment="Stretch">
+            <Border Background="{DynamicResource SuavoLogBackgroundBrush}"
+                    BorderBrush="{DynamicResource SuavoBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{DynamicResource SuavoRadiusMedium}"
+                    MaxHeight="220">
+                <ScrollViewer Padding="12">
+                    <ItemsControl ItemsSource="{Binding LogLines}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:LogLine">
+                                <TextBlock Text="{Binding Text}"
+                                           Foreground="{Binding Brush}"
+                                           FontFamily="Consolas,Menlo,monospace"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,1"/>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Border>
+        </Expander>
 
         <DockPanel Grid.Row="3" Margin="0,16,0,0" LastChildFill="False">
             <TextBlock DockPanel.Dock="Left"

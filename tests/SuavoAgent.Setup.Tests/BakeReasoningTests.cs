@@ -48,6 +48,8 @@ public sealed class BakeReasoningTests
         Assert.Equal(Provisionable().NativeLibsSha256, r["NativeLibsSha256"]);
         Assert.Equal(4096, r["ContextSize"]);
         Assert.Equal(512, r["MaxOutputTokens"]);
+        // Size powers the agent's download-percent telemetry (dashboard Brain card).
+        Assert.Equal(1282439584L, r["ModelSizeBytes"]);
     }
 
     [Fact]

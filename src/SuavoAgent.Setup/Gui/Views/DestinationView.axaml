@@ -117,7 +117,7 @@
                     Command="{Binding InstallCommand}"
                     Padding="28,12"
                     Background="{DynamicResource SuavoAccentBrush}"
-                    Foreground="#101010"
+                    Foreground="{DynamicResource SuavoAccentTextInverseBrush}"
                     BorderThickness="0"
                     FontWeight="SemiBold"
                     CornerRadius="10"/>

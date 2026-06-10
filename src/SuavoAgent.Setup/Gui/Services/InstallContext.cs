@@ -21,6 +21,10 @@ internal sealed class InstallContext
     public string? AgentId { get; set; }
     public string? MachineFingerprint { get; set; }
 
+    /// <summary>True when the brain phase fully landed the model + libs (Success
+    /// screen shows "brain ready" vs "finishing in the background").</summary>
+    public bool BrainInstalled { get; set; }
+
     public InstallContext(SetupConfig config)
     {
         Config = config;

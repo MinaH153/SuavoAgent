@@ -38,4 +38,27 @@ public interface ILocalInference
     /// brain is a bonus, never a hard dependency. NEVER throws for inference failures.
     /// </summary>
     Task<string?> ChatAsync(string userMessage, CancellationToken ct);
+
+    /// <summary>
+    /// Where the brain is in its provisioning lifecycle — powers the dashboard's
+    /// "Installing the brain… NN%" card. Default derives from <see cref="IsReady"/>
+    /// so existing implementations/mocks keep compiling; only the deferred
+    /// (self-provisioning) implementation reports the download phases.
+    /// </summary>
+    BrainProvisioningState ProvisioningState =>
+        IsReady ? BrainProvisioningState.Ready : BrainProvisioningState.Off;
+
+    /// <summary>Model-download progress 0-100 while provisioning; null when unknown/not applicable.</summary>
+    int? ProvisioningPercent => null;
+}
+
+/// <summary>Lifecycle of the on-device brain's assets. Serialized by NAME into the
+/// heartbeat (cloud parses the string) — renaming a member is a wire change.</summary>
+public enum BrainProvisioningState
+{
+    Off,
+    DownloadingLibs,
+    DownloadingModel,
+    Verifying,
+    Ready,
 }

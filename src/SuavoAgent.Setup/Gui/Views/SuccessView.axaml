@@ -15,7 +15,7 @@
                     Background="{DynamicResource SuavoSuccessBrush}"
                     CornerRadius="36">
                 <TextBlock Text="✓"
-                           Foreground="#101010"
+                           Foreground="{DynamicResource SuavoAccentTextInverseBrush}"
                            FontSize="40" FontWeight="Bold"
                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
@@ -54,6 +54,10 @@
                     <TextBlock Grid.Column="0" Text="SQL" Foreground="{DynamicResource SuavoTextSubtleBrush}" FontSize="12"/>
                     <TextBlock Grid.Column="1" Text="{Binding SqlSummary}" Foreground="{DynamicResource SuavoTextBrush}" FontSize="12" FontFamily="Consolas,Menlo,monospace" TextWrapping="Wrap"/>
                 </Grid>
+                <Grid ColumnDefinitions="110,*">
+                    <TextBlock Grid.Column="0" Text="Brain" Foreground="{DynamicResource SuavoTextSubtleBrush}" FontSize="12"/>
+                    <TextBlock Grid.Column="1" Text="{Binding BrainSummary}" Foreground="{DynamicResource SuavoAccentTextBrush}" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                </Grid>
             </StackPanel>
         </Border>
 
@@ -62,7 +66,7 @@
                     Command="{Binding OpenDashboardCommand}"
                     Padding="24,12"
                     Background="{DynamicResource SuavoAccentBrush}"
-                    Foreground="#101010"
+                    Foreground="{DynamicResource SuavoAccentTextInverseBrush}"
                     BorderThickness="0"
                     FontWeight="SemiBold"
                     CornerRadius="10"/>

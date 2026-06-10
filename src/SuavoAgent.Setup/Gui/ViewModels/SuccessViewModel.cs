@@ -14,6 +14,11 @@ internal sealed class SuccessViewModel
         SqlSummary = ctx.SqlCredentials is { } c
             ? $"{c.Server} / {c.Database} ({(c.IsWindowsAuth ? "Windows auth" : $"SQL: {c.User}")})"
             : "unknown";
+        BrainSummary = ctx.BrainInstalled
+            ? $"{ctx.Config.Reasoning?.ModelId ?? "qwen3"} · installed and ready"
+            : ctx.Config.Reasoning is { IsProvisionable: true }
+                ? "finishing up in the background"
+                : "configures automatically once available";
         DashboardUrl = ctx.Config.CloudUrl.TrimEnd('/') + "/dashboard";
 
         OpenDashboardCommand = new RelayCommand(() =>
@@ -36,6 +41,7 @@ internal sealed class SuccessViewModel
     public string DataPath { get; }
     public string AgentId { get; }
     public string SqlSummary { get; }
+    public string BrainSummary { get; }
     public string DashboardUrl { get; }
 
     public ICommand OpenDashboardCommand { get; }

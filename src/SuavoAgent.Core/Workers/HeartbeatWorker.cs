@@ -519,6 +519,11 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     {
                         modelId = _localInference?.ModelId ?? "off",
                         isReady = _localInference?.IsReady ?? false,
+                        // Provisioning lifecycle + download percent — the dashboard's
+                        // "Installing the brain… NN%" card. Enum serialized by NAME.
+                        provisioningState = (_localInference?.ProvisioningState
+                            ?? Reasoning.BrainProvisioningState.Off).ToString(),
+                        provisioningPercent = _localInference?.ProvisioningPercent,
                     },
                     // Honeytoken immune reflex — PHI-free self-compromise signal (null unless tripped).
                     // apoptosis-level drives the cloud fleet-revoke; lower rungs are alarm + audit only.

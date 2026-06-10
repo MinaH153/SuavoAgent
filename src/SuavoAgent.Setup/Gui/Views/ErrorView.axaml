@@ -47,7 +47,7 @@
                     IsVisible="{Binding CanRetry}"
                     Padding="22,12"
                     Background="{DynamicResource SuavoAccentBrush}"
-                    Foreground="#101010"
+                    Foreground="{DynamicResource SuavoAccentTextInverseBrush}"
                     BorderThickness="0"
                     FontWeight="SemiBold"
                     CornerRadius="10"/>

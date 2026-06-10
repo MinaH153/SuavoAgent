@@ -30,6 +30,7 @@ public sealed class PhaseItem : ViewModelBase
 {
     private PhaseState _state = PhaseState.Pending;
     private int _percent;
+    private string _caption = string.Empty;
 
     public PhaseItem(string title)
     {
@@ -47,14 +48,34 @@ public sealed class PhaseItem : ViewModelBase
             RaisePropertyChanged(nameof(IsActive));
             RaisePropertyChanged(nameof(IsDone));
             RaisePropertyChanged(nameof(Icon));
+            RaisePropertyChanged(nameof(HasCaption));
         }
     }
 
     public int Percent
     {
         get => _percent;
-        set => SetField(ref _percent, value);
+        set
+        {
+            if (SetField(ref _percent, value))
+                RaisePropertyChanged(nameof(PercentLabel));
+        }
     }
+
+    /// <summary>Playful sub-line under the title while the phase runs (the brain
+    /// phase rotates through these — "Waking the brain…" etc.).</summary>
+    public string Caption
+    {
+        get => _caption;
+        set
+        {
+            if (SetField(ref _caption, value))
+                RaisePropertyChanged(nameof(HasCaption));
+        }
+    }
+
+    public bool HasCaption => IsActive && !string.IsNullOrEmpty(_caption);
+    public string PercentLabel => _percent > 0 ? $"{_percent}%" : string.Empty;
 
     public bool IsActive => _state == PhaseState.Running;
     public bool IsDone => _state == PhaseState.Done;
@@ -84,18 +105,37 @@ public sealed class ProgressViewModel : ViewModelBase
         });
 
         // Default to the install phases; the uninstall flow supplies its own
-        // titles so the same progress view renders either workflow.
+        // titles so the same progress view renders either workflow. Order MUST
+        // match InstallOrchestrator.Phase (the int cast indexes this list).
         var titles = phaseTitles ?? new[]
         {
-            "Download binaries",
+            "Download SuavoAgent",
             "Write configuration",
-            "Install Windows services",
+            "Install the SuavoAgent brain",
+            "Start Windows services",
         };
 
         Phases = new ObservableCollection<PhaseItem>();
         foreach (var title in titles)
             Phases.Add(new PhaseItem(title));
     }
+
+    /// <summary>
+    /// Rotating captions for the brain phase — a 1.3 GB download deserves some
+    /// personality. Deterministically keyed off percent (testable, no timer).
+    /// </summary>
+    internal static readonly IReadOnlyList<string> BrainCaptions = new[]
+    {
+        "Waking the brain…",
+        "Loading 1.7 billion neurons…",
+        "Teaching it pharmacy…",
+        "Calibrating synapses…",
+        "Practicing its bedside manner…",
+        "Almost sentient (the good kind)…",
+    };
+
+    internal static string BrainCaptionFor(int percent) =>
+        BrainCaptions[Math.Clamp(percent, 0, 99) * BrainCaptions.Count / 100];
 
     public ObservableCollection<PhaseItem> Phases { get; }
     public ObservableCollection<LogLine> LogLines { get; } = new();
@@ -138,6 +178,9 @@ public sealed class ProgressViewModel : ViewModelBase
         {
             if (!phase.IsActive) continue;
             phase.Percent = percent;
+            // The brain phase gets its rotating personality line.
+            if (phase.Title.Contains("brain", StringComparison.OrdinalIgnoreCase))
+                phase.Caption = BrainCaptionFor(percent);
             return;
         }
     }
