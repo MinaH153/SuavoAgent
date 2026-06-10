@@ -85,4 +85,12 @@
         <GradientStop Color="#D4A57400" Offset="1" />
     </LinearGradientBrush>
 
+    <!-- Ink on gold (CTA labels sitting on SuavoAccent fills). -->
+    <Color x:Key="SuavoAccentTextInverse">#101010</Color>
+    <SolidColorBrush x:Key="SuavoAccentTextInverseBrush" Color="{StaticResource SuavoAccentTextInverse}" />
+
+    <!-- Console/log panel — the one intentionally dark surface in the light theme. -->
+    <Color x:Key="SuavoLogBackground">#16140F</Color>
+    <SolidColorBrush x:Key="SuavoLogBackgroundBrush" Color="{StaticResource SuavoLogBackground}" />
+
 </ResourceDictionary>

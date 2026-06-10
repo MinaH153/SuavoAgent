@@ -62,6 +62,47 @@ public sealed class DeferredLocalInference : ILocalInference
         && !string.IsNullOrWhiteSpace(_options.ModelPath)
         && File.Exists(_options.ModelPath);
 
+    /// <summary>Provisioning lifecycle derived from what's on disk — no new counters,
+    /// no races with the background downloads. Powers the dashboard Brain card.</summary>
+    public BrainProvisioningState ProvisioningState
+    {
+        get
+        {
+            if (_inner is not null) return BrainProvisioningState.Ready;
+            if (string.IsNullOrWhiteSpace(_options.ModelPath)) return BrainProvisioningState.Off;
+            if (!_nativeProvisioner.DllsPresent()) return BrainProvisioningState.DownloadingLibs;
+            if (File.Exists(_options.ModelPath)) return BrainProvisioningState.Ready;
+            // Libs present, final model file absent: the download is in flight (temp
+            // file growing) or about to start — the honest label is "downloading".
+            return BrainProvisioningState.DownloadingModel;
+        }
+    }
+
+    /// <summary>Download percent from the provisioner's temp file size vs the known
+    /// model size (baked at install / pushed via set_reasoning_config). Null when
+    /// either side is unknown.</summary>
+    public int? ProvisioningPercent
+    {
+        get
+        {
+            var state = ProvisioningState;
+            if (state == BrainProvisioningState.Ready) return 100;
+            if (state != BrainProvisioningState.DownloadingModel) return null;
+            var total = _options.ModelSizeBytes;
+            if (total is null or <= 0 || string.IsNullOrWhiteSpace(_options.ModelPath)) return null;
+            try
+            {
+                var tmp = new FileInfo(_options.ModelPath + ".download");
+                if (!tmp.Exists) return 0;
+                return (int)Math.Clamp(tmp.Length * 100 / total.Value, 0, 99);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
     public async Task<InferenceProposal?> ProposeAsync(InferenceRequest request, CancellationToken ct)
     {
         var inner = await EnsureInnerAsync(ct).ConfigureAwait(false);

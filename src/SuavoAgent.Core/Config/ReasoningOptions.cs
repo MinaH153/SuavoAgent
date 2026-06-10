@@ -38,6 +38,13 @@ public sealed class ReasoningOptions
     public string? ModelUrl { get; set; }
 
     /// <summary>
+    /// Expected model file size in bytes. Powers the provisioning-percent telemetry
+    /// (temp-file size ÷ this) on the dashboard's Brain card. Optional — null just
+    /// means no percent is reported while downloading.
+    /// </summary>
+    public long? ModelSizeBytes { get; set; }
+
+    /// <summary>
     /// URL to a ZIP of the llama.cpp native DLLs (llama.dll + ggml*.dll + llava_shared.dll for ONE AVX
     /// variant) to auto-download + extract into <see cref="NativeLibraryPath"/> on first run when those
     /// DLLs are absent. The native libs are deliberately NOT shipped in the installer (stealth —

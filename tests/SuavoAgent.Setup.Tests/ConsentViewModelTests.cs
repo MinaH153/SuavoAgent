@@ -1,3 +1,4 @@
+using System.Linq;
 using SuavoAgent.Setup.Gui.Services;
 using SuavoAgent.Setup.Gui.ViewModels;
 using Xunit;
@@ -112,6 +113,57 @@ public sealed class ConsentViewModelTests
         vm.AgreeCommand.Execute(null);
 
         Assert.Equal("Authorized Representative", ctx.Consent!.AuthorizingTitle);
+    }
+
+    [Fact]
+    public void SelectedState_drives_StateCode_and_notice_logic()
+    {
+        var vm = NewVm();
+        vm.SelectedState = ConsentViewModel.AllStates.First(s => s.Code == "NY");
+
+        Assert.Equal("NY", vm.StateCode);
+        Assert.True(vm.RequiresEmployeeNotice); // NY = mandatory-notice state
+        Assert.Contains("NY", vm.NoticeBannerText);
+    }
+
+    [Fact]
+    public void StateList_has_51_entries_with_unique_codes()
+    {
+        Assert.Equal(51, ConsentViewModel.AllStates.Count); // 50 states + DC
+        Assert.Equal(51, ConsentViewModel.AllStates.Select(s => s.Code).Distinct().Count());
+    }
+
+    [Fact]
+    public void MissingHint_names_whats_missing_and_clears_when_complete()
+    {
+        var vm = NewVm();
+        Assert.Contains("your full name", vm.MissingHint);
+        Assert.Contains("your state", vm.MissingHint);
+        Assert.Contains("authorization checkbox", vm.MissingHint);
+
+        vm.Name = "Jane";
+        Assert.DoesNotContain("your full name", vm.MissingHint);
+
+        vm.SelectedState = ConsentViewModel.AllStates.First(s => s.Code == "CA");
+        vm.AgreedToTerms = true;
+        Assert.Equal(string.Empty, vm.MissingHint); // complete -> hint disappears
+        Assert.True(vm.AgreeCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void MissingHint_includes_employee_notice_for_mandatory_states()
+    {
+        var vm = NewVm();
+        vm.Name = "Jane";
+        vm.SelectedState = ConsentViewModel.AllStates.First(s => s.Code == "CT");
+        vm.AgreedToTerms = true;
+
+        Assert.Contains("employee-notice", vm.MissingHint);
+        Assert.False(vm.AgreeCommand.CanExecute(null));
+
+        vm.AgreedToNotice = true;
+        Assert.Equal(string.Empty, vm.MissingHint);
+        Assert.True(vm.AgreeCommand.CanExecute(null));
     }
 
     private static ConsentViewModel NewVm() => new(NewContext(), () => { });

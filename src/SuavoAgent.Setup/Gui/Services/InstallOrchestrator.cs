@@ -11,9 +11,10 @@ namespace SuavoAgent.Setup.Gui.Services;
 /// </summary>
 internal sealed class InstallOrchestrator
 {
-    public enum Phase { Download, WriteConfig, InstallServices, Done }
+    public enum Phase { Download, WriteConfig, InstallBrain, InstallServices, Done }
 
-    public sealed record PhaseEvent(Phase Phase, string Message);
+    /// <summary>Percent is per-phase (0-100); null = indeterminate/no progress info.</summary>
+    public sealed record PhaseEvent(Phase Phase, string Message, int? Percent = null);
 
     private readonly InstallContext _ctx;
 
@@ -69,8 +70,32 @@ internal sealed class InstallOrchestrator
 
         ct.ThrowIfCancellationRequested();
 
+        // ── The brain phase: land the model + native libs DURING install so the
+        // agent boots brainReady on its first heartbeat (instead of a silent
+        // multi-minute background download after). FAIL-SOFT by contract — any
+        // failure logs + continues; the agent's own provisioners self-heal.
+        progress.Report(new PhaseEvent(Phase.InstallBrain, "Installing the SuavoAgent brain", 0));
+        ConsoleUI.WriteStep("Phase 5: Installing the SuavoAgent brain");
+        if (_ctx.Config.Reasoning is { IsProvisionable: true } reasoning)
+        {
+            var brainProgress = new Progress<int>(p =>
+                progress.Report(new PhaseEvent(Phase.InstallBrain, "Installing the SuavoAgent brain", p)));
+            _ctx.BrainInstalled = await BrainInstaller.InstallAsync(
+                reasoning, _ctx.DataDir, brainProgress, ct);
+            if (_ctx.BrainInstalled)
+                ConsoleUI.WriteOk($"Brain installed — {reasoning.ModelId} verified on disk.");
+            else
+                ConsoleUI.WriteWarn("Brain download deferred — the agent finishes it in the background.");
+        }
+        else
+        {
+            ConsoleUI.WriteInfo("No brain config from the cloud — the agent provisions it later.");
+        }
+
+        ct.ThrowIfCancellationRequested();
+
         progress.Report(new PhaseEvent(Phase.InstallServices, "Installing Windows services"));
-        ConsoleUI.WriteStep("Phase 5: Installing Windows services");
+        ConsoleUI.WriteStep("Phase 6: Installing Windows services");
         var started = ServiceInstaller.InstallAndStart(_ctx.InstallDir, _ctx.DataDir);
         if (!started)
             ConsoleUI.WriteWarn("Core service did not report running. Check post-install logs.");
@@ -168,37 +193,24 @@ internal sealed class InstallOrchestrator
     {
         if (reasoning is not { IsProvisionable: true }) return;
 
-        var modelFile = SafeFileNameFromUrl(reasoning.ModelUrl, "model.gguf");
         agent["Reasoning"] = new Dictionary<string, object?>
         {
             ["Enabled"] = true,
             ["ModelId"] = reasoning.ModelId,
             ["ModelUrl"] = reasoning.ModelUrl,
             ["ModelSha256"] = reasoning.ModelSha256,
-            ["ModelPath"] = Path.Combine(dataDir, "models", modelFile),
+            // ModelSizeBytes powers the agent's provisioning-percent telemetry
+            // (download progress on the dashboard's Brain card).
+            ["ModelSizeBytes"] = reasoning.ModelSizeBytes,
+            // Paths come from the SHARED helpers on AgentReasoningConfig so the
+            // bake and the installer's brain phase can never disagree.
+            ["ModelPath"] = reasoning.GetModelPath(dataDir),
             ["NativeLibsUrl"] = reasoning.NativeLibsUrl,
             ["NativeLibsSha256"] = reasoning.NativeLibsSha256,
-            ["NativeLibraryPath"] = Path.Combine(dataDir, "native"),
+            ["NativeLibraryPath"] = reasoning.GetNativeLibsDir(dataDir),
             ["ContextSize"] = reasoning.ContextSize,
             ["MaxOutputTokens"] = reasoning.MaxOutputTokens,
         };
-    }
-
-    /// <summary>Last path segment of a URL, sanitized to a safe filename; fallback on anything odd.</summary>
-    private static string SafeFileNameFromUrl(string url, string fallback)
-    {
-        try
-        {
-            var path = new Uri(url).AbsolutePath;
-            var name = Path.GetFileName(path);
-            if (string.IsNullOrWhiteSpace(name)) return fallback;
-            foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
-            return name;
-        }
-        catch
-        {
-            return fallback;
-        }
     }
 
     private static string GetMachineFingerprint()

@@ -15,7 +15,7 @@
                     CornerRadius="16"
                     Background="{DynamicResource SuavoAccentBrush}">
                 <TextBlock Text="S"
-                           Foreground="#101010"
+                           Foreground="{DynamicResource SuavoAccentTextInverseBrush}"
                            FontWeight="Bold"
                            FontSize="36"
                            HorizontalAlignment="Center"
@@ -39,7 +39,7 @@
                 Margin="0,56,0,0"
                 Padding="28,14"
                 Background="{DynamicResource SuavoAccentBrush}"
-                Foreground="#101010"
+                Foreground="{DynamicResource SuavoAccentTextInverseBrush}"
                 BorderThickness="0"
                 FontWeight="SemiBold"
                 FontSize="16"

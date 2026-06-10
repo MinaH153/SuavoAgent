@@ -74,7 +74,7 @@
                     IsVisible="{Binding ShowCode}"
                     Padding="22,12"
                     Background="{DynamicResource SuavoAccentBrush}"
-                    Foreground="#101010"
+                    Foreground="{DynamicResource SuavoAccentTextInverseBrush}"
                     BorderThickness="0"
                     FontWeight="SemiBold"
                     CornerRadius="10"/>
@@ -83,7 +83,7 @@
                     IsVisible="{Binding IsFailed}"
                     Padding="22,12"
                     Background="{DynamicResource SuavoAccentBrush}"
-                    Foreground="#101010"
+                    Foreground="{DynamicResource SuavoAccentTextInverseBrush}"
                     BorderThickness="0"
                     FontWeight="SemiBold"
                     CornerRadius="10"/>

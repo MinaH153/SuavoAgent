@@ -171,6 +171,9 @@ internal sealed class MainWindowViewModel : ViewModelBase
                     // Current phase → running (unless Done event)
                     if (evt.Phase == InstallOrchestrator.Phase.Done) return;
                     vm.MarkPhase(index, PhaseState.Running);
+                    // Live percent (the brain download streams 0-100 + captions).
+                    if (evt.Percent is int p)
+                        vm.UpdatePhaseProgress(evt.Message, p);
                 }), cts.Token);
 
                 // All phases completed
