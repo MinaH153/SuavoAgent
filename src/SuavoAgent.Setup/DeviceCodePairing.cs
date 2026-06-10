@@ -85,13 +85,27 @@ public sealed class DeviceCodePairing
 
             if (poll.IsAuthorized)
             {
+                // Fail LOUD if the server authorized us but delivered no API key.
+                // device-token is a single-read key: if a prior poll consumed it,
+                // a re-poll returns authorized WITHOUT the key. Building a config
+                // with ApiKey="" would install a DEAD agent (Program.cs never
+                // creates the cloud client → never heartbeats → offline). The
+                // operator retries pairing rather than getting a silent dead box.
+                if (string.IsNullOrWhiteSpace(poll.ApiKey))
+                {
+                    progress?.Report(new PairingProgress(
+                        created.DeviceCode, created.VerificationUrl, 0, "no_credentials"));
+                    return PairingResult.Failure("no_credentials");
+                }
+
                 var config = new SetupConfig(
                     PharmacyId: poll.PharmacyId ?? "",
-                    ApiKey: poll.ApiKey ?? "",
+                    ApiKey: poll.ApiKey,
                     CloudUrl: _cloudUrl,
                     ReleaseTag: "",
                     LearningMode: false,
-                    AgentId: poll.AgentId ?? "");
+                    AgentId: poll.AgentId ?? "",
+                    Reasoning: poll.Reasoning);
                 progress?.Report(new PairingProgress(
                     created.DeviceCode, created.VerificationUrl,
                     Math.Max(0, deadlineSeconds - waited), "authorized"));
