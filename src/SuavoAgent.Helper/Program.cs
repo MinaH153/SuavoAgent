@@ -15,14 +15,19 @@ using SuavoAgent.Contracts.Models;
 // executable statement (spec §7 PR 4 wire-ordering invariant; verified
 // by WireOrderingTests). Helper had no pre-existing crash sink; Wire's
 // LocalCrashLogPath fills that gap with a structured journal.
+// Helper logs live in logs\helper\ — the ONLY log dir the interactive user can
+// write. Services keep logs\ root user-untouchable, so a local user can never
+// pre-plant junctions/links where SYSTEM appends (log-dir EoP class).
 Wire.AttachUnhandledHooks(WireComponent.Helper, new WireOptions
 {
     LocalCrashLogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-        "SuavoAgent", "logs", "helper-crash.log"),
+        "SuavoAgent", "logs", "helper", "helper-crash.log"),
+    // Helper-owned journal file — diagnostics\ root is SYSTEM-append territory
+    // (Broker/Watchdog events.jsonl); the user-context Helper writes its own.
     LocalJournalPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-        "SuavoAgent", "diagnostics", "events.jsonl"),
+        "SuavoAgent", "diagnostics", "helper", "events.jsonl"),
     Dsn = Environment.GetEnvironmentVariable("SUAVO_SENTRY_DSN"),
     EnableSentry = true,
 });
@@ -35,7 +40,7 @@ Log.Logger = new LoggerConfiguration()
     .WriteTo.File(
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "SuavoAgent", "logs", "helper-.log"),
+            "SuavoAgent", "logs", "helper", "helper-.log"),
         encoding: new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
         rollingInterval: RollingInterval.Day,
         retainedFileCountLimit: 14)

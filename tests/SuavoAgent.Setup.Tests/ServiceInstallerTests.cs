@@ -75,4 +75,45 @@ public class ServiceInstallerTests
         // clause specifically — the exact regression we are guarding against.
         Assert.DoesNotMatch(@"obj=[^\n]*NetworkService", source);
     }
+
+    // Regression for the 2026-06-10 Helper crash-loop: LockdownDirectoryAcl strips
+    // the data dir to SYSTEM/Admins/LocalService, but the Helper runs as the
+    // INTERACTIVE user and died on its first log write — before it could log
+    // anything. The carve-out must give INTERACTIVE: traverse on the root (dir-only,
+    // NO inherited file reads — state.db is plaintext PHI, state.key machine-DPAPI),
+    // Modify on logs + diagnostics, and per-file read on the two helper configs.
+    [Fact]
+    public void Interactive_helper_carveout_grants_minimum_and_never_root_file_reads()
+    {
+        var grants = ServiceInstaller.BuildInteractiveGrantArgs(@"C:\ProgramData\SuavoAgent");
+
+        Assert.Equal(10, grants.Count);
+
+        var root = grants[0];
+        Assert.Equal(@"C:\ProgramData\SuavoAgent", root.Target);
+        Assert.Equal(@"NT AUTHORITY\INTERACTIVE:(RX)", root.Grant);
+        // The root grant must NOT inherit to files — (OI) would expose state.db/state.key.
+        Assert.DoesNotContain("(OI)", root.Grant);
+        Assert.DoesNotContain("(CI)", root.Grant);
+
+        // logs\ root: traverse only — SYSTEM services write here, so the interactive
+        // user must never gain create/delete (junction-planting EoP).
+        var logsRoot = grants[1];
+        Assert.EndsWith("logs", logsRoot.Target);
+        Assert.Equal(@"NT AUTHORITY\INTERACTIVE:(RX)", logsRoot.Grant);
+
+        Assert.Contains(grants, g => g.Target.EndsWith(Path.Combine("logs", "helper")) && g.Grant.Contains("(OI)(CI)(M)") && g.EnsureDir);
+        // diagnostics\ root: traverse only (SYSTEM appends events.jsonl there);
+        // the Helper's journal gets its own Modify subtree.
+        Assert.Contains(grants, g => g.Target.EndsWith("diagnostics") && g.Grant.EndsWith(":(RX)") && g.EnsureDir);
+        Assert.Contains(grants, g => g.Target.EndsWith(Path.Combine("diagnostics", "helper")) && g.Grant.Contains("(OI)(CI)(M)") && g.EnsureDir);
+        Assert.Contains(grants, g => g.Target.EndsWith("honeytokens") && g.Grant.Contains("(OI)(CI)(M)") && g.EnsureDir);
+        Assert.Contains(grants, g => g.Target.EndsWith("vision.json") && g.Grant.EndsWith(":(R)") && !g.EnsureDir);
+        Assert.Contains(grants, g => g.Target.EndsWith("actuation.json") && g.Grant.EndsWith(":(R)") && !g.EnsureDir);
+        Assert.Contains(grants, g => g.Target.EndsWith("pioneerrx.json") && g.Grant.EndsWith(":(R)") && !g.EnsureDir);
+        Assert.Contains(grants, g => g.Target.EndsWith("honeytoken-attribution.json") && g.Grant.EndsWith(":(R)") && !g.EnsureDir);
+
+        // Every grant goes to the interactive-session principal only — never Users/Everyone.
+        Assert.All(grants, g => Assert.StartsWith(@"NT AUTHORITY\INTERACTIVE:", g.Grant));
+    }
 }

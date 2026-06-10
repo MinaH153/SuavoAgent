@@ -372,7 +372,48 @@ try
                     System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
                     System.Security.AccessControl.PropagationFlags.None,
                     System.Security.AccessControl.AccessControlType.Allow));
+                // The Helper runs as the INTERACTIVE user and must traverse the data
+                // dir (this-dir-only — NO inherited file reads: state.db is plaintext
+                // PHI and state.key is machine-DPAPI). Mirrors the installer's
+                // GrantInteractiveHelperAccess so whichever lockdown runs last leaves
+                // the Helper alive. (2026-06-10 helper crash-loop on fresh install.)
+                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.InteractiveSid, null),
+                    System.Security.AccessControl.FileSystemRights.ReadAndExecute,
+                    System.Security.AccessControl.InheritanceFlags.None,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
                 dirInfo.SetAccessControl(dirSecurity);
+
+                // Helper-writable subtrees: logs\helper (Serilog + helper-crash.log)
+                // and diagnostics\helper (Wire journal) get inherited Modify; the
+                // logs\ and diagnostics\ roots get traverse ONLY so a local user can
+                // never plant junctions where SYSTEM (Broker/Watchdog) appends —
+                // log-dir EoP class. honeytokens\ is Helper-planted decoy bait.
+                foreach (var (sub, rights, inherit) in new[]
+                {
+                    ("logs", System.Security.AccessControl.FileSystemRights.ReadAndExecute, false),
+                    (Path.Combine("logs", "helper"), System.Security.AccessControl.FileSystemRights.Modify, true),
+                    ("diagnostics", System.Security.AccessControl.FileSystemRights.ReadAndExecute, false),
+                    (Path.Combine("diagnostics", "helper"), System.Security.AccessControl.FileSystemRights.Modify, true),
+                    ("honeytokens", System.Security.AccessControl.FileSystemRights.Modify, true),
+                })
+                {
+                    var subDir = new DirectoryInfo(Path.Combine(dataDir, sub));
+                    subDir.Create();
+                    var subSec = subDir.GetAccessControl();
+                    subSec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                        new System.Security.Principal.SecurityIdentifier(
+                            System.Security.Principal.WellKnownSidType.InteractiveSid, null),
+                        rights,
+                        inherit
+                            ? System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit
+                            : System.Security.AccessControl.InheritanceFlags.None,
+                        System.Security.AccessControl.PropagationFlags.None,
+                        System.Security.AccessControl.AccessControlType.Allow));
+                    subDir.SetAccessControl(subSec);
+                }
             }
             catch (UnauthorizedAccessException ex)
             {

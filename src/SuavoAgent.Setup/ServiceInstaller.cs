@@ -89,8 +89,14 @@ internal static class ServiceInstaller
         RunSc($"failureflag {WatchdogServiceName} 1");
         ConsoleUI.WriteOk($"{WatchdogServiceName} service registered");
 
-        // Step 4: Lock down data directory ACL (install dir already locked in Phase 4)
+        // Step 4: Lock down data directory ACL (install dir already locked in Phase 4),
+        // then carve out the Helper's minimum. The Helper runs as the INTERACTIVE
+        // user (CreateProcessAsUser — it must own the visible desktop), so a
+        // SYSTEM/Admins/LocalService-only DACL makes it die on its first log write
+        // before it can log anything (2026-06-10 crash-loop: Broker relaunched a
+        // fresh PID every 5s, zero helper logs, cloud stuck helper_attached=false).
         LockdownDirectoryAcl(dataDir);
+        GrantInteractiveHelperAccess(dataDir);
 
         // Step 5: Start services — Core first, then Broker (depends on Core),
         // then Watchdog last so it doesn't race the fresh Core/Broker starts.
@@ -121,6 +127,22 @@ internal static class ServiceInstaller
             ConsoleUI.WriteOk($"{WatchdogServiceName} is running");
         else
             ConsoleUI.WriteWarn($"{WatchdogServiceName} may not be running yet");
+
+        // Step 7: The Helper is the agent's hands and eyes — the Broker launches it
+        // into the interactive session within seconds. Warn-grade only (a locked or
+        // headless session legitimately has no Helper yet), but it catches the
+        // crash-loop class on the spot instead of via cloud telemetry 10 minutes
+        // later (2026-06-10: ACL lockdown killed the Helper pre-log; install still
+        // said success).
+        if (coreRunning && brokerRunning)
+        {
+            if (WaitForHelperProcess(TimeSpan.FromSeconds(20)))
+                ConsoleUI.WriteOk("SuavoAgent.Helper is running in the interactive session");
+            else
+                ConsoleUI.WriteWarn(
+                    "SuavoAgent.Helper has not appeared after 20s — if this session is unlocked, " +
+                    "check the data-dir ACL carve-out and the broker log for a launch loop");
+        }
 
         return coreRunning; // Core must be up; Watchdog will repair Broker if needed.
     }
@@ -335,6 +357,80 @@ internal static class ServiceInstaller
         {
             ConsoleUI.WriteWarn($"ACL lockdown failed: {ex.Message}");
         }
+    }
+
+    // The Helper's least-privilege carve-out, applied AFTER LockdownDirectoryAcl.
+    // Deliberately NOT an inherited read on the data-dir root: state.db is plaintext
+    // SQLite (PHI on a PMS box) and state.key is machine-scope DPAPI (any local
+    // reader could decrypt), and SQLite recreates -wal/-shm constantly so even a
+    // strip-after-grant would reopen a read window on every checkpoint. So:
+    //   root            -> INTERACTIVE (RX), THIS DIR ONLY (traverse + list, no file reads)
+    //   logs\helper\, diagnostics\helper\ -> INTERACTIVE (OI)(CI)M — the ONLY
+    //     user-writable log/journal dirs. The logs\ and diagnostics\ roots stay
+    //     service-only (traverse) so a local user can never plant junctions or
+    //     links where SYSTEM (Broker/Watchdog) appends — log-dir EoP class
+    //     (Codex review 2026-06-10 Q2).
+    //   honeytokens\    -> INTERACTIVE (OI)(CI)M (decoy bait — user-touchable by design)
+    //   vision.json / actuation.json / pioneerrx.json / honeytoken-attribution.json
+    //     -> INTERACTIVE (R) per-file when present (flows that create or atomically
+    //     rewrite these later must re-grant — replace drops per-file ACEs).
+    public static void GrantInteractiveHelperAccess(string dataDir)
+    {
+        try
+        {
+            foreach (var args in BuildInteractiveGrantArgs(dataDir))
+            {
+                var (target, grant, ensureDir) = args;
+                if (ensureDir)
+                    Directory.CreateDirectory(target);
+                else if (!File.Exists(target))
+                    continue;
+                RunCmd("icacls", $"\"{target}\" /grant \"{grant}\"");
+            }
+            ConsoleUI.WriteOk("Helper (interactive user) ACL carve-out applied: traverse + logs/diagnostics write + config reads");
+        }
+        catch (Exception ex)
+        {
+            ConsoleUI.WriteWarn($"Helper ACL carve-out failed: {ex.Message} — the Helper cannot log or read configs until this is fixed");
+        }
+    }
+
+    /// <summary>Pure builder so the exact icacls grants are unit-testable.
+    /// Tuple: (target path, grant spec, target-is-directory-to-create).</summary>
+    internal static IReadOnlyList<(string Target, string Grant, bool EnsureDir)> BuildInteractiveGrantArgs(string dataDir) =>
+    [
+        (dataDir, @"NT AUTHORITY\INTERACTIVE:(RX)", true),
+        (Path.Combine(dataDir, "logs"), @"NT AUTHORITY\INTERACTIVE:(RX)", true),
+        (Path.Combine(dataDir, "logs", "helper"), @"NT AUTHORITY\INTERACTIVE:(OI)(CI)(M)", true),
+        (Path.Combine(dataDir, "diagnostics"), @"NT AUTHORITY\INTERACTIVE:(RX)", true),
+        (Path.Combine(dataDir, "diagnostics", "helper"), @"NT AUTHORITY\INTERACTIVE:(OI)(CI)(M)", true),
+        // Honeytokens are decoy bait the Helper plants and watches — user-touchable
+        // is their entire purpose; no SYSTEM process writes files here.
+        (Path.Combine(dataDir, "honeytokens"), @"NT AUTHORITY\INTERACTIVE:(OI)(CI)(M)", true),
+        (Path.Combine(dataDir, "vision.json"), @"NT AUTHORITY\INTERACTIVE:(R)", false),
+        (Path.Combine(dataDir, "actuation.json"), @"NT AUTHORITY\INTERACTIVE:(R)", false),
+        (Path.Combine(dataDir, "pioneerrx.json"), @"NT AUTHORITY\INTERACTIVE:(R)", false),
+        (Path.Combine(dataDir, "honeytoken-attribution.json"), @"NT AUTHORITY\INTERACTIVE:(R)", false),
+    ];
+
+    /// <summary>Polls for the Helper process appearing in the interactive session.</summary>
+    private static bool WaitForHelperProcess(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                if (System.Diagnostics.Process.GetProcessesByName("SuavoAgent.Helper").Length > 0)
+                    return true;
+            }
+            catch
+            {
+                // Process enumeration hiccup — keep polling until the deadline.
+            }
+            Thread.Sleep(2000);
+        }
+        return false;
     }
 
     private static bool IsServiceRunning(string serviceName)
