@@ -76,4 +76,22 @@ public sealed class BinaryDownloaderTests
             try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
         }
     }
+
+    // Regression for the 2026-06-10 fresh-install brick: SuavoAgent.Watchdog.exe was
+    // published in every release but absent from the download list, so ServiceInstaller
+    // found no Watchdog binary and bailed BEFORE registering any service — while the GUI
+    // still reported "Installation complete". The download list must carry every
+    // executable the service installer requires.
+    [Fact]
+    public void RequiredBinaries_include_every_service_executable_setup_must_place()
+    {
+        string[] required =
+        [
+            "SuavoAgent.Core.exe",
+            "SuavoAgent.Broker.exe",
+            "SuavoAgent.Helper.exe",
+            "SuavoAgent.Watchdog.exe",
+        ];
+        Assert.Equal(required, BinaryDownloader.RequiredBinaries);
+    }
 }

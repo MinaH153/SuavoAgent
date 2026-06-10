@@ -98,7 +98,16 @@ internal sealed class InstallOrchestrator
         ConsoleUI.WriteStep("Phase 6: Installing Windows services");
         var started = ServiceInstaller.InstallAndStart(_ctx.InstallDir, _ctx.DataDir);
         if (!started)
-            ConsoleUI.WriteWarn("Core service did not report running. Check post-install logs.");
+        {
+            // HARD FAIL — "Installation complete" with zero running services is a lie
+            // that bricks the install invisibly (2026-06-10: missing Watchdog.exe made
+            // InstallAndStart bail before registering anything; the GUI still showed
+            // success and the agent never heartbeated). The ViewModel routes this to
+            // the Error view with a retry path.
+            throw new InstallException(
+                "Windows services failed to install or start — the agent is NOT running. " +
+                $"Details: {SetupLog.LogPath}");
+        }
 
         progress.Report(new PhaseEvent(Phase.Done, "Installation complete"));
     }

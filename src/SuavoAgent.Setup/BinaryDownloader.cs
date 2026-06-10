@@ -17,12 +17,21 @@ internal static class BinaryDownloader
     private const string PublicKeyBase64 =
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA==";
 
+    // ONE list of truth for every agent executable Setup must place. ServiceInstaller
+    // refuses to register ANY service when a service binary is absent from the install
+    // dir — the 2026-06-10 fresh-install brick was exactly this list missing
+    // Watchdog.exe (published in the release, never downloaded) while the GUI still
+    // reported "Installation complete". WriteBinariesManifest hashes this same list.
     private static readonly string[] Binaries =
     [
         "SuavoAgent.Core.exe",
         "SuavoAgent.Broker.exe",
         "SuavoAgent.Helper.exe",
+        "SuavoAgent.Watchdog.exe",
     ];
+
+    /// <summary>Test seam — the canonical set of executables Setup downloads and verifies.</summary>
+    internal static IReadOnlyList<string> RequiredBinaries => Binaries;
 
     /// Maximum download size per binary (200 MB). Aborts if Content-Length exceeds this (H-4).
     private const long MaxDownloadBytes = 200 * 1024 * 1024;
@@ -242,13 +251,8 @@ internal static class BinaryDownloader
     /// </summary>
     public static void WriteBinariesManifest(string installDir, string? manifestPathOverride = null)
     {
-        string[] all =
-        [
-            "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe",
-            "SuavoAgent.Helper.exe", "SuavoAgent.Watchdog.exe",
-        ];
         var entries = new List<string>();
-        foreach (var bin in all)
+        foreach (var bin in Binaries)
         {
             var path = Path.Combine(installDir, bin);
             if (!File.Exists(path)) continue; // e.g. a box without the Watchdog

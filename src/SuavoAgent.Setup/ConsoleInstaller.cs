@@ -125,8 +125,13 @@ internal static class ConsoleInstaller
             var serviceSuccess = ServiceInstaller.InstallAndStart(InstallDir, DataDir);
             if (!serviceSuccess)
             {
-                ConsoleUI.WriteWarn("Services registered but may need a manual start.");
-                ConsoleUI.WriteInfo("Run: sc.exe start SuavoAgent.Core");
+                // HARD FAIL (parity with the GUI orchestrator) — exit non-zero so
+                // fleet-deploy scripts see the brick instead of a fake success.
+                // setup.json is intentionally NOT deleted on this path so a re-run
+                // can reuse the credentials.
+                ConsoleUI.WriteFail("Windows services failed to install or start — the agent is NOT running.");
+                ConsoleUI.WriteInfo($"Details: {SetupLog.LogPath}");
+                return 1;
             }
 
             ConsoleUI.WriteStep("Phase 6: Verification complete");

@@ -15,12 +15,14 @@ internal static class ConsoleUI
 
     public static void SetReporter(IInstallReporter reporter) => _reporter = reporter;
 
-    public static void WriteStep(string msg) => _reporter.Step(msg);
-    public static void WriteOk(string msg) => _reporter.Ok(msg);
-    public static void WriteWarn(string msg) => _reporter.Warn(msg);
-    public static void WriteFail(string msg) => _reporter.Fail(msg);
-    public static void WriteInfo(string msg) => _reporter.Info(msg);
-    public static void WriteProgress(string label, long current, long total) => _reporter.Progress(label, current, total);
+    // Every step line also lands in %ProgramData%\SuavoAgent\logs\setup.log — the GUI
+    // has no console, and a failed GUI install used to leave zero on-box evidence.
+    public static void WriteStep(string msg) { SetupLog.Append("STEP", msg); _reporter.Step(msg); }
+    public static void WriteOk(string msg) { SetupLog.Append("OK", msg); _reporter.Ok(msg); }
+    public static void WriteWarn(string msg) { SetupLog.Append("WARN", msg); _reporter.Warn(msg); }
+    public static void WriteFail(string msg) { SetupLog.Append("FAIL", msg); _reporter.Fail(msg); }
+    public static void WriteInfo(string msg) { SetupLog.Append("INFO", msg); _reporter.Info(msg); }
+    public static void WriteProgress(string label, long current, long total) => _reporter.Progress(label, current, total); // not logged — would spam thousands of lines per download
 
     public static void Banner(string pharmacyId, string releaseTag)
     {
