@@ -1,6 +1,6 @@
 # Flywheel Activation — Design Brief
 
-**Status:** Phase-3B BUILT on this branch (`feat/phase3b-scrubbing-aware-harvest`); increments 2–4 DESIGNED, not built.
+**Status:** Phase-3B SHIPPED (merged to main, #227). Increment 2 (replay-first) BUILT on `feat/replay-first` — pending Codex adversarial + HIPAA review before any box flip. Increments 3–4 DESIGNED, not built.
 **Scope:** activate the replay flywheel (harvest verified trajectories → bank → replay deterministically → retrieve as few-shot → distill) without ever letting PHI into `verified_skills`.
 **Precedence:** HIPAA (Precedence-1) > replay safety > flywheel throughput. Every ambiguity resolves fail-closed (bank nothing / replay nothing).
 
@@ -141,7 +141,24 @@ through the normal gates. Banking changes nothing about what may execute.
 
 ---
 
-## Increment 2 — Replay-first (fingerprint-match before any Tier-2 LLM call) — DESIGN ONLY
+## Increment 2 — Replay-first (fingerprint-match before any Tier-2 LLM call) — BUILT (`feat/replay-first`)
+
+> Build notes (2026-06-11), three logged deltas from the wiring below, all fail-closed strengthenings:
+> (1) **Supervised stand-down instead of dry-run replay** — a dry-run dispatch cannot move the screen, so
+> a dry-run replay always dies `PostconditionFailed` at step 0 and would FALSELY decay a healthy skill
+> (3 supervised navigates would retire it). When the run is dry-run or the composite gate answers anything
+> but Allow for the skill's first action, `ReplayFirstRunner` skips the attempt and the loop — which
+> dry-runs + escalates exactly as today — keeps the operator boundary. Same gate INSTANCE is consulted,
+> so pre-check and replay can never disagree. The "replay without earned autonomy dry-runs + escalates"
+> invariant holds — via the loop, without the mis-attribution.
+> (2) **steps_hash pin at load** — a banked row that doesn't deserialize or hash back to its stored
+> `steps_hash` is treated as Unparseable-class (decay + skip), so a corrupt row can't pin replay-first
+> off forever NOR replay tampered steps.
+> (3) **`Agent.ReplayFirstAllowTypeSteps` added to the config-override blocklist** (AutoExecution.*
+> precedent): the type-step unlock is a deliberate local change after its own review, never a remote flip.
+> Entry-StateHash mismatch records NOTHING (an unrelated screen is not the skill's fault); the validation
+> drift test's `consecutive_failures` increment is the MID-FLOW StateMismatch (replay started, then
+> diverged) — both pinned by tests.
 
 **Goal:** when a navigate/explore objective arrives for a (pharmacy, taskKey, app) that has a healthy
 banked skill whose first `StateHash` matches the live screen, run `VerifiedSkillReplayer` INSTEAD of the

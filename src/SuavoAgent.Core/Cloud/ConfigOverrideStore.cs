@@ -38,6 +38,12 @@ public sealed class ConfigOverrideStore
         "Agent.AutoExecution.WritebackEnabled",
         "AutoExecution.Enabled",
         "AutoExecution.WritebackEnabled",
+        // Replay-first v1 HARD RULE: type/press-bearing skills must never auto-replay (a banked
+        // literal types the OLD value). Unlocking that is a deliberate LOCAL config change after its
+        // own review (TOCTOU focus-steal + value staleness) — never a remote flip. Agent.ReplayFirst
+        // itself stays overridable: that is the per-box rollout switch.
+        "Agent.ReplayFirstAllowTypeSteps",
+        "ReplayFirstAllowTypeSteps",
     };
 
     private static readonly string[] BlockedPrefixes =
