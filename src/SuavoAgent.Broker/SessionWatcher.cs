@@ -27,6 +27,11 @@ public sealed class SessionWatcher : BackgroundService
     // Fire the SYSTEM self-uninstall cleaner at most once (the Broker is gone seconds later anyway).
     private bool _selfUninstallLaunched;
 
+    // Helper-restart sentinel (restart_helper command / Core self-heal): Broker-side anti-thrash —
+    // even if Core misbehaves and spams sentinels, we never cycle the Helper more than once a minute.
+    private DateTimeOffset _lastHelperRestartAt = DateTimeOffset.MinValue;
+    internal static readonly TimeSpan MinHelperRestartSpacing = TimeSpan.FromMinutes(1);
+
     private record HelperInfo(int ProcessId, uint SessionId, DateTimeOffset LaunchedAt, string HelperSha256);
 
     public SessionWatcher(ILogger<SessionWatcher> logger)
@@ -121,6 +126,7 @@ public sealed class SessionWatcher : BackgroundService
             try
             {
                 CheckSelfUninstall();
+                CheckHelperRestartRequest();
                 CheckActiveSessions();
                 CleanupDeadHelpers();
                 RefreshHelperAttestations();
@@ -160,6 +166,119 @@ public sealed class SessionWatcher : BackgroundService
         {
             _logger.LogWarning(ex, "WatchdogServiceGuard failed (non-fatal)");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // restart_helper / self-heal sentinel (Core → Broker). Core cannot kill or relaunch a
+    // process in the interactive session (LocalService); we can (LocalSystem) and we already
+    // own the Helper lifecycle. Consume-once + freshness-bounded + Broker-side rate limit:
+    //   - stale/malformed sentinel → delete WITHOUT acting (fail-closed),
+    //   - honored at most once per MinHelperRestartSpacing even if Core spams requests,
+    //   - the file is deleted BEFORE the kill so a crash mid-restart can never loop the kill,
+    //   - relaunch happens in the SAME watch tick via the existing CheckActiveSessions path
+    //     (integrity-verified CreateProcessAsUser into the active console session).
+    // This is the remote lever that clears a stranded/wedged Helper command pipe without a
+    // machine reboot. See HelperRestartRequest for the contract.
+    // ------------------------------------------------------------------
+    private void CheckHelperRestartRequest()
+    {
+        var path = HelperRestartRequest.DefaultPath();
+        if (!_fileExists(path)) return;
+
+        var now = DateTimeOffset.UtcNow;
+        var payload = HelperRestartRequest.TryRead(path, now);
+        if (payload is null)
+        {
+            _logger.LogWarning(
+                "Helper-restart sentinel at {Path} is stale or malformed — deleting without acting (fail-closed)",
+                path);
+            HelperRestartRequest.TryDelete(path);
+            return;
+        }
+
+        if (!ShouldHonorRestartRequest(true, _lastHelperRestartAt, now))
+        {
+            _logger.LogWarning(
+                "Helper-restart request (reason={Reason}) IGNORED — last restart {Seconds:F0}s ago, " +
+                "minimum spacing {Min}s (anti-thrash). Sentinel consumed.",
+                payload.Reason, (now - _lastHelperRestartAt).TotalSeconds, MinHelperRestartSpacing.TotalSeconds);
+            HelperRestartRequest.TryDelete(path);
+            return;
+        }
+
+        // Consume BEFORE acting — crash-safety over delivery: a Broker crash here loses one
+        // request (operator/self-heal simply re-requests) instead of replaying kills forever.
+        HelperRestartRequest.TryDelete(path);
+        _lastHelperRestartAt = now;
+
+        _logger.LogWarning(
+            "Helper-restart request honored (requestedBy={By}, reason={Reason}) — killing all Helper " +
+            "processes; relaunch follows in this same watch tick",
+            payload.RequestedBy, payload.Reason);
+
+        var killed = KillAllHelperProcesses($"restart_request:{payload.RequestedBy}");
+
+        try
+        {
+            File.WriteAllText(HelperRestartRequest.DefaultReceiptPath(), System.Text.Json.JsonSerializer.Serialize(new
+            {
+                completedAtUtc = DateTimeOffset.UtcNow,
+                killedCount = killed,
+                requestedBy = payload.RequestedBy,
+                reason = payload.Reason,
+            }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Helper-restart receipt write failed (non-fatal)");
+        }
+    }
+
+    /// <summary>Pure anti-thrash rule for honoring a restart sentinel — unit-testable.</summary>
+    internal static bool ShouldHonorRestartRequest(bool payloadValid, DateTimeOffset lastRestartAt, DateTimeOffset now) =>
+        payloadValid && now - lastRestartAt >= MinHelperRestartSpacing;
+
+    /// <summary>
+    /// Kills every running SuavoAgent.Helper process (tracked or stray) and clears tracking, so
+    /// the single-instance command pipe is released and the next launch starts clean. Returns
+    /// the number of processes killed. Best-effort, never fatal.
+    /// </summary>
+    private int KillAllHelperProcesses(string reason)
+    {
+        var killed = 0;
+        try
+        {
+            var running = Process.GetProcessesByName("SuavoAgent.Helper");
+            try
+            {
+                foreach (var proc in running)
+                {
+                    try
+                    {
+                        proc.Kill();
+                        proc.WaitForExit(3000); // release the IPC pipe before relaunch
+                        killed++;
+                        _logger.LogWarning("Killed Helper PID {Pid} ({Reason})", proc.Id, reason);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to kill Helper PID {Pid} ({Reason})", proc.Id, reason);
+                    }
+                }
+            }
+            finally
+            {
+                foreach (var proc in running) proc.Dispose();
+            }
+
+            _helpers.Clear();
+            PersistHelperAttestations(ReadPipeNonce());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "KillAllHelperProcesses failed (non-fatal)");
+        }
+        return killed;
     }
 
     // Kill Helper processes left over from a prior Broker instance so the fresh Helper we launch
@@ -215,6 +334,69 @@ public sealed class SessionWatcher : BackgroundService
         return runningHelperPids.Where(pid => !tracked.Contains(pid)).ToHashSet();
     }
 
+    /// <summary>The running Helper PIDs that are stale after a session transition: every Helper whose
+    /// Windows session is NOT the active console session. Session 0 helpers (the blind-actuation
+    /// failure) are stale by construction since the active console is never Session 0 here (callers
+    /// pass a validated non-0xFFFFFFFF id). Pure + testable.</summary>
+    internal static HashSet<int> StaleSessionHelperPids(
+        IEnumerable<(int Pid, uint SessionId)> runningHelpers, uint activeSessionId) =>
+        runningHelpers.Where(h => h.SessionId != activeSessionId).Select(h => h.Pid).ToHashSet();
+
+    /// <summary>Kills every Helper (tracked or stray) running OUTSIDE the active console session and
+    /// drops its tracking entry, releasing the single-instance command pipe for the active session's
+    /// Helper. Windows-only (session ids are meaningless elsewhere). Best-effort, never fatal.</summary>
+    private void KillStaleSessionHelpers(uint activeSessionId)
+    {
+        if (!OperatingSystem.IsWindows() || activeSessionId == 0) return;
+        try
+        {
+            var running = Process.GetProcessesByName("SuavoAgent.Helper");
+            try
+            {
+                var snapshot = new List<(int Pid, uint SessionId)>(running.Length);
+                foreach (var proc in running)
+                {
+                    try { snapshot.Add((proc.Id, (uint)proc.SessionId)); }
+                    catch { /* exited between enumerate and read — nothing to do */ }
+                }
+
+                var stale = StaleSessionHelperPids(snapshot, activeSessionId);
+                if (stale.Count == 0) return;
+
+                foreach (var proc in running)
+                {
+                    if (!stale.Contains(proc.Id)) continue;
+                    try
+                    {
+                        proc.Kill();
+                        proc.WaitForExit(3000); // release the IPC pipe before the active session's launch
+                        _logger.LogWarning(
+                            "Killed stale-session Helper PID {Pid} (was in a non-active session; active console is {Active}) " +
+                            "— it was blind to the screen and could strand the command pipe",
+                            proc.Id, activeSessionId);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to kill stale-session Helper PID {Pid}", proc.Id);
+                    }
+                }
+
+                var staleTracked = _helpers.Where(kv => stale.Contains(kv.Value.ProcessId))
+                    .Select(kv => kv.Key).ToList();
+                foreach (var session in staleTracked) _helpers.Remove(session);
+                if (staleTracked.Count > 0) PersistHelperAttestations(ReadPipeNonce());
+            }
+            finally
+            {
+                foreach (var proc in running) proc.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Stale-session Helper reconciliation failed (non-fatal)");
+        }
+    }
+
     private void CheckActiveSessions()
     {
         var activeSessionId = GetActiveConsoleSessionId();
@@ -223,6 +405,17 @@ public sealed class SessionWatcher : BackgroundService
             _logger.LogDebug("No active console session");
             return;
         }
+
+        // Root-cause fix for the session-transition strand (live box, 2026-06-11): after a
+        // console-session change (CRD/RDP attach, fast user switch) this watcher launched a
+        // NEW Helper for the new session but left the OLD-session Helper alive — and that
+        // blind survivor still owned the single-instance command pipe, so the fresh Helper
+        // could never bind it: commands stranded while the process table looked healthy.
+        // A Helper outside the active console session is blind by definition (the pricing
+        // pre-flight refuses it anyway) — kill it so the pipe is free for the Helper that can
+        // actually see the screen. Lock screen / UAC don't change the console session id, so
+        // normal overnight operation never triggers this.
+        KillStaleSessionHelpers(activeSessionId);
 
         if (_helpers.ContainsKey(activeSessionId))
         {

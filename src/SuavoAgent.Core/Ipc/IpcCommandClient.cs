@@ -12,6 +12,16 @@ namespace SuavoAgent.Core.Ipc;
 public interface IIpcCommandClient
 {
     bool IsConnected { get; }
+
+    /// <summary>
+    /// True when another command round-trip currently holds this client (a pricing lookup,
+    /// discovery scan, …). The actuation-readiness probe checks this FIRST and skips its ping
+    /// instead of queueing behind a 30–60s in-flight command — "busy" means the pipe is in
+    /// active use, which is not evidence of a strand. Default false so existing test fakes
+    /// (which have no internal lock) keep compiling and never report busy.
+    /// </summary>
+    bool IsBusy => false;
+
     Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct);
     Task<IpcResponse?> SendAsync(IpcRequest request, TimeSpan timeout, CancellationToken ct);
 }
@@ -33,6 +43,9 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
     private static readonly TimeSpan ReconnectTimeout = TimeSpan.FromSeconds(2);
 
     public bool IsConnected => _pipe?.IsConnected ?? false;
+
+    /// <summary>A command round-trip is in flight (the send lock is held). See <see cref="IIpcCommandClient.IsBusy"/>.</summary>
+    public bool IsBusy => _lock.CurrentCount == 0;
 
     public IpcCommandClient(string pipeName, ILogger<IpcCommandClient> logger)
     {

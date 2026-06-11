@@ -84,6 +84,23 @@ public sealed class IpcCommandServer : IDisposable
 
     private readonly bool _relaxClientPathValidation;
 
+    // ------------------------------------------------------------------
+    // Dispatch wedge watchdog. This server is a SINGLE pipe instance with ONE sequential
+    // connection handler, and several dispatches run synchronous UIA/COM work (pricing lookup,
+    // actuation) that can hang FOREVER against a hung PMS or a torn-down session. A wedged
+    // dispatch therefore strands the entire command pipe permanently while the process looks
+    // alive — the exact "agent says healthy but the cursor never moves" failure. The watchdog
+    // bounds every dispatch: past the ceiling we log FATAL and self-terminate, and the Broker's
+    // 5s watch loop relaunches a clean Helper (self-amputation > permanent deafness).
+    // Ceiling rationale: the longest LEGITIMATE dispatch is find_file (Core waits 60s) and a
+    // slow UIA pricing lookup (Core waits 30s); 5 minutes is >4x the worst legitimate case, so
+    // a watchdog fire is always a genuine wedge, and worst-case blind time before auto-recovery
+    // is ~5 minutes instead of forever.
+    // ------------------------------------------------------------------
+    internal static readonly TimeSpan DispatchWedgeCeiling = TimeSpan.FromMinutes(5);
+    internal const int WedgedDispatchExitCode = 86;
+    private readonly Action _onWedgedDispatch;
+
     public IpcCommandServer(
         string pipeName,
         PricingWorkflow pricing,
@@ -95,7 +112,8 @@ public sealed class IpcCommandServer : IDisposable
         ActuationCommandHandler? actuation = null,
         PioneerRxCommandHandler? pioneerRx = null,
         SendInputDriver? sandboxDriver = null,
-        bool relaxClientPathValidation = false)
+        bool relaxClientPathValidation = false,
+        Action? onWedgedDispatch = null)
     {
         _pipeName = pipeName;
         _pricing = pricing;
@@ -113,6 +131,7 @@ public sealed class IpcCommandServer : IDisposable
         _pioneerRx = pioneerRx;
         _sandboxDriver = sandboxDriver;
         _logger = logger;
+        _onWedgedDispatch = onWedgedDispatch ?? (() => Environment.Exit(WedgedDispatchExitCode));
     }
 
     public void Start(CancellationToken ct)
@@ -173,7 +192,7 @@ public sealed class IpcCommandServer : IDisposable
 
                 _logger.Debug("IpcCommandServer: received {Command} [{Id}]", request.Command, request.Id);
 
-                var response = await DispatchAsync(request, ct);
+                var response = await DispatchGuardedAsync(request, ct);
                 var responseJson = JsonSerializer.Serialize(response);
                 await IpcFraming.WriteFrameAsync(pipe, responseJson, ct);
             }
@@ -190,6 +209,49 @@ public sealed class IpcCommandServer : IDisposable
             {
                 _logger.Warning(ex, "IpcCommandServer: message error");
             }
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="DispatchAsync"/> under the wedge watchdog. On a wedge (dispatch exceeds
+    /// <see cref="DispatchWedgeCeiling"/>): log FATAL and invoke the wedge action — in
+    /// production that exits the process so the Broker relaunches a clean Helper within ~5s,
+    /// freeing the single-instance command pipe a hung UIA/COM call would otherwise hold
+    /// forever. The error response below is only reachable with an injected non-exiting
+    /// action (tests) or in the narrow window before Exit tears the process down.
+    /// </summary>
+    private async Task<IpcResponse> DispatchGuardedAsync(IpcRequest request, CancellationToken ct)
+    {
+        var (wedged, response) = await AwaitWithWedgeGuard(
+            DispatchAsync(request, ct), DispatchWedgeCeiling, _onWedgedDispatch).ConfigureAwait(false);
+        if (!wedged) return response!;
+
+        _logger.Fatal(
+            "IpcCommandServer: dispatch of {Command} [{Id}] WEDGED — exceeded the {Ceiling} ceiling " +
+            "(hung UIA/COM call). Self-terminating with exit code {ExitCode} so the Broker relaunches " +
+            "a clean Helper and frees the command pipe.",
+            request.Command, request.Id, DispatchWedgeCeiling, WedgedDispatchExitCode);
+        return Error(request.Id, request.Command, "dispatch_wedged",
+            $"Dispatch exceeded the {DispatchWedgeCeiling.TotalMinutes:F0}-minute wedge ceiling");
+    }
+
+    /// <summary>
+    /// The wedge-guard mechanism, extracted pure-ish for unit tests: await the dispatch up to
+    /// <paramref name="ceiling"/>; past it, invoke <paramref name="onWedged"/> (production:
+    /// process exit) and report wedged=true. The abandoned task keeps running on its wedged
+    /// thread — irrelevant in production (the process exits) and harmless in tests.
+    /// </summary>
+    internal static async Task<(bool Wedged, IpcResponse? Response)> AwaitWithWedgeGuard(
+        Task<IpcResponse> dispatch, TimeSpan ceiling, Action onWedged)
+    {
+        try
+        {
+            return (false, await dispatch.WaitAsync(ceiling).ConfigureAwait(false));
+        }
+        catch (TimeoutException)
+        {
+            onWedged();
+            return (true, null);
         }
     }
 
