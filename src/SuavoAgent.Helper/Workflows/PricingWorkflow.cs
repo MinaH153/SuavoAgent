@@ -354,7 +354,9 @@ public sealed class PricingWorkflow
 
     /// <summary>
     /// Verifies that the Edit Rx Item window contains the expected NDC after Quick Search loads.
-    /// Scans all text-bearing elements for the normalized NDC (hyphens removed, 11 digits).
+    /// Scans the loaded item's text-bearing elements for the normalized NDC (hyphens removed,
+    /// 11 digits) — EXCLUDING the Quick Search box, which retains the typed query and would
+    /// tautologically "verify" any NDC (see <see cref="IsQuickSearchField"/>).
     /// Returns false if the NDC is not found within the element timeout, indicating the wrong
     /// item was loaded or no result was returned.
     /// </summary>
@@ -379,6 +381,14 @@ public sealed class PricingWorkflow
 
                 foreach (var el in candidates)
                 {
+                    // [C-3] NEVER verify against the Quick Search box: it still holds the NDC we
+                    // just typed, so matching it is tautological — verification "passes" for ANY
+                    // NDC even when the wrong item (or no item) loaded. That is exactly how the
+                    // previously-selected item's pricing got written as if it were this NDC's, and
+                    // it pre-empted the Do-Not-Use guard below. Exclude the search input (same
+                    // HelpText marker SearchByNdc resolves it by); verify only the loaded item.
+                    if (IsQuickSearchField(el)) continue;
+
                     var raw = el.AsTextBox()?.Text ?? el.Name ?? "";
                     if (string.IsNullOrEmpty(raw)) continue;
 
@@ -414,6 +424,21 @@ public sealed class PricingWorkflow
         _logger.Warning("PricingWorkflow: NDC {Ndc} not found in loaded item after {Timeout}s",
             ndc, ElementTimeout.TotalSeconds);
         return false;
+    }
+
+    /// <summary>
+    /// True if <paramref name="el"/> is the Quick Search input — identified by the same HelpText
+    /// marker <see cref="SearchByNdc"/> resolves it by (<see cref="QuickSearchHint"/>). It retains
+    /// the typed query after load, so <see cref="VerifyLoadedNdc"/> must skip it: reading it would
+    /// tautologically confirm the requested NDC regardless of what actually loaded. The property
+    /// fetch is guarded — a UIA read can throw, which we conservatively treat as "not the box".
+    /// NOTE: when PioneerRx exposes no HelpText, SearchByNdc falls back to the first Edit control;
+    /// hardening this exclusion to the resolved search-box identity is a tracked follow-up.
+    /// </summary>
+    private static bool IsQuickSearchField(AutomationElement el)
+    {
+        try { return string.Equals(el.HelpText, QuickSearchHint, StringComparison.OrdinalIgnoreCase); }
+        catch { return false; }
     }
 
     private bool ClickPricingTab(Window editWindow, ConditionFactory cf, SelectorResolver resolver)
