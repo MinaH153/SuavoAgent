@@ -57,6 +57,10 @@ public sealed class HeartbeatWorker : ResilientHostedService
     // On-device brain for the cockpit "talk to the agent" command. Optional (null/NullLocalInference
     // when reasoning is off) — the chat command then falls back to a cloud/templated reply.
     private readonly SuavoAgent.Core.Reasoning.ILocalInference? _localInference;
+    // Actuation-readiness (strand detector). Tracker is written by ActuationReadinessWorker's
+    // ping-only probe; the heartbeat just reads the latest snapshot — never probes inline.
+    private readonly ActuationReadinessTracker? _actuationReadiness;
+    private readonly HelperSelfHealCoordinator? _selfHealCoordinator;
     private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
     private readonly SemaphoreSlim _workflowSemaphore = new(1, 1);
     private readonly object _activeWorkflowLock = new();
@@ -112,6 +116,8 @@ public sealed class HeartbeatWorker : ResilientHostedService
         _workflowExecutor = serviceProvider.GetService<WorkflowExecutor>();
         _actuationGateway = serviceProvider.GetService<SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.IActuationGateway>();
         _localInference = serviceProvider.GetService<SuavoAgent.Core.Reasoning.ILocalInference>();
+        _actuationReadiness = serviceProvider.GetService<ActuationReadinessTracker>();
+        _selfHealCoordinator = serviceProvider.GetService<HelperSelfHealCoordinator>();
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
@@ -760,6 +766,44 @@ public sealed class HeartbeatWorker : ResilientHostedService
             ipcRejectionCount = rejectionCount,
             lastIpcRejectReason = lastReason,
             lastIpcRejectAt = lastAt?.ToString("o"),
+            // Actuation-readiness — the strand detector. `attached` above reads the EVENT pipe
+            // (Helper→Core) and is structurally blind to a stranded COMMAND pipe; this block is
+            // the truthful "can the agent act right now" signal the cloud composite must use.
+            // Null until the first probe completes (or on agents without the readiness worker).
+            actuation = BuildActuationPayload(_actuationReadiness?.Current, _selfHealCoordinator?.Snapshot()),
+        };
+    }
+
+    /// <summary>
+    /// Wire shape of <c>helper.actuation</c> in the heartbeat payload — the agent-side half of
+    /// the actuation-readiness contract. PHI-free: booleans, session ids, pid, static codes,
+    /// ISO timestamps. The cloud computes its health composite component from
+    /// <c>ready</c> + freshness of <c>lastConclusiveCheckAt</c> (a stale verdict is UNKNOWN,
+    /// not healthy) and renders <c>failureReason</c> in the cockpit when not ready.
+    /// </summary>
+    internal static object? BuildActuationPayload(ActuationReadinessSnapshot? s, SelfHealState? selfHeal)
+    {
+        if (s is null) return null;
+        return new
+        {
+            ready = s.Ready,
+            commandPipeResponsive = s.CommandPipeResponsive,
+            isConsoleInteractive = s.IsConsoleInteractive,
+            helperSessionId = s.HelperSessionId,
+            activeConsoleSessionId = s.ActiveConsoleSessionId,
+            helperPid = s.HelperPid,
+            failureCode = s.FailureCode,
+            failureReason = s.FailureReason,
+            lastConclusiveCheckAt = s.LastConclusiveCheckAtUtc?.ToString("o"),
+            lastProbeAttemptAt = s.LastProbeAttemptAtUtc.ToString("o"),
+            lastCheckSkippedReason = s.SkippedReason,
+            consecutiveStrandFailures = s.ConsecutiveStrandFailures,
+            selfHeal = selfHeal is null ? null : new
+            {
+                lastAttemptAt = selfHeal.LastAttemptAtUtc?.ToString("o"),
+                attemptsInWindow = selfHeal.AttemptsInWindow,
+                exhausted = selfHeal.Exhausted,
+            },
         };
     }
 
@@ -972,6 +1016,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     break;
                 case "set_reasoning_config":
                     await HandleSetReasoningConfigAsync(scEl, cmd, ct);
+                    break;
+                case "restart_helper":
+                    await HandleRestartHelperAsync(scEl, cmd, ct);
                     break;
                 case "self_uninstall":
                     await HandleSelfUninstallAsync(scEl, ct);
@@ -2573,6 +2620,100 @@ public sealed class HeartbeatWorker : ResilientHostedService
         Environment.Exit(1);
     }
 
+    /// <summary>
+    /// restart_helper — the remote recovery lever for a stranded Helper command pipe. Core
+    /// (LocalService) cannot kill/relaunch a process in the interactive session, so it drops
+    /// the <see cref="HelperRestartRequest"/> sentinel; the Broker (LocalSystem) consumes it
+    /// within ~5s, kills every Helper, and relaunches a fresh one into the active console
+    /// session. Distinct from force_restart (which restarts CORE — useless against a wedged
+    /// Helper holding the single-instance pipe).
+    ///
+    /// Safety gates, in order:
+    ///   1. REFUSE while any actuation is mid-flight — all actuating paths single-flight
+    ///      through the pricing/workflow/navigation semaphores, so try-acquiring ALL THREE
+    ///      with zero wait is an exact "nothing is actuating" test. The sentinel is written
+    ///      WHILE holding them, so no job can begin between the check and the write.
+    ///   2. Jobs that start after the write see the pending sentinel (checked after semaphore
+    ///      acquisition in the pricing handlers) and refuse until the Broker consumes it.
+    ///   3. The sentinel is freshness-bounded (2 min) and consumed exactly once Broker-side.
+    /// Idempotent: a second restart_helper while one is pending overwrites the same sentinel
+    /// and collapses into a single restart.
+    /// </summary>
+    private async Task HandleRestartHelperAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) && cid.ValueKind == JsonValueKind.String
+            ? cid.GetString() : null;
+        var reason = dataEl.TryGetProperty("reason", out var rr) && rr.ValueKind == JsonValueKind.String
+            ? rr.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            try { await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct); }
+            catch (Exception ex) { _logger.LogWarning(ex, "restart_helper ack failed"); }
+        }
+
+        // Gate 1: nothing may be actuating. Fixed acquisition order + zero wait + full rollback
+        // on partial acquisition — cannot deadlock, cannot leak a permit.
+        var held = new List<SemaphoreSlim>(3);
+        try
+        {
+            foreach (var sem in new[] { _pricingJobSemaphore, _workflowSemaphore, _navigationSemaphore })
+            {
+                if (!await sem.WaitAsync(TimeSpan.Zero, ct))
+                {
+                    _logger.LogWarning(
+                        "restart_helper REFUSED — an actuation (pricing/workflow/navigation) is mid-flight; " +
+                        "yanking the Helper under a live run is never allowed");
+                    await AckAsync(false, new { state = "refused_actuation_in_flight" },
+                        "refused: an actuation is mid-flight — retry when the job finishes or abort it first");
+                    return;
+                }
+                held.Add(sem);
+            }
+
+            var payload = new HelperRestartRequest.Payload(
+                DateTimeOffset.UtcNow,
+                string.IsNullOrWhiteSpace(reason) ? "operator_restart_helper" : reason!,
+                "operator",
+                commandId);
+            HelperRestartRequest.Write(HelperRestartRequest.DefaultPath(), payload);
+
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: cmd.Nonce,
+                EventType: "helper_restart_requested",
+                FromState: "running",
+                ToState: "restart_pending",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: payload.Reason));
+
+            _logger.LogWarning(
+                "restart_helper accepted (reason={Reason}) — sentinel written; Broker will kill + relaunch " +
+                "the Helper into the active console session within ~5s", payload.Reason);
+
+            await AckAsync(true, new
+            {
+                state = "restart_pending",
+                requestedAtUtc = payload.RequestedAtUtc.ToString("o"),
+                note = "Broker consumes the request within ~5s; watch helper.actuation.ready flip true on the next probe (≤60s)",
+            }, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "restart_helper failed to write the restart sentinel");
+            await AckAsync(false, null, $"restart_helper_failed:{ex.GetType().Name}");
+        }
+        finally
+        {
+            foreach (var sem in held) sem.Release();
+        }
+    }
+
     private MissionCharter BuildEphemeralCharter() => new(
         CharterId: Guid.Empty,
         PharmacyId: _options.PharmacyId ?? "",
@@ -4014,6 +4155,16 @@ public sealed class HeartbeatWorker : ResilientHostedService
 
         try
         {
+            // A pending Helper restart means the Broker is about to KILL the Helper (≤5s).
+            // Starting a UIA job now would have it yanked mid-typing. Checked AFTER acquiring
+            // the semaphore (restart_helper writes the sentinel while holding it — no TOCTOU).
+            if (HelperRestartRequest.IsPending(HelperRestartRequest.DefaultPath(), DateTimeOffset.UtcNow))
+            {
+                _logger.LogWarning("run_pricing_job: refused — a Helper restart is pending");
+                await AckAsync(false, null, "helper restart in progress — retry in ~1 minute");
+                return;
+            }
+
             var jobId = Guid.NewGuid().ToString("N");
             var spec = new PricingJobSpec(jobId, canonicalPath, ndcColumn, supplierColumn, costColumn);
 
@@ -4169,6 +4320,15 @@ public sealed class HeartbeatWorker : ResilientHostedService
 
             try
             {
+                // Same gate as run_pricing_job: never start a UIA run the Broker is about to
+                // kill the Helper out from under (sentinel checked under the semaphore).
+                if (HelperRestartRequest.IsPending(HelperRestartRequest.DefaultPath(), DateTimeOffset.UtcNow))
+                {
+                    _logger.LogWarning("find_and_run_pricing_job: refused — a Helper restart is pending");
+                    await AckAsync(false, null, "helper restart in progress — retry in ~1 minute");
+                    return;
+                }
+
                 var jobId = Guid.NewGuid().ToString("N");
                 var jobSpec = new PricingJobSpec(jobId, canonical, ndcColumn, supplierColumn, costColumn);
                 _logger.LogInformation("find_and_run_pricing_job: auto-running pricing job {JobId}", jobId);

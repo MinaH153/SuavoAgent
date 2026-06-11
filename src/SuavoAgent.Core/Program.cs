@@ -855,6 +855,42 @@ try
     // AgentStateDb (286). See roadmap H2 #13.
     SuavoAgent.Core.Health.HealthCompositeServiceCollectionExtensions.AddHealthComposite(builder.Services);
 
+    // Actuation-readiness (the strand detector). The legacy composite above reads only the
+    // EVENT pipe, so a Helper whose COMMAND pipe is half-open (connected but deaf — the live-box
+    // strand of 2026-06-11) still reported healthy while every pricing run failed pre-flight.
+    // This stack pings the command pipe (ping-only, never actuates) on its own bounded timer,
+    // mirrors the verdict into heartbeat `helper.actuation.*`, and — when the strand signature
+    // persists — drops the HelperRestartRequest sentinel so the Broker relaunches the Helper
+    // (same bounded self-heal the restart_helper command triggers manually).
+    builder.Services.AddSingleton<SuavoAgent.Core.Health.ActuationReadinessTracker>();
+    builder.Services.AddSingleton(sp => new SuavoAgent.Core.Health.ActuationReadinessProbe(
+        sp.GetService<IpcCommandClient>(),
+        sp.GetRequiredService<SuavoAgent.Core.Health.ActuationReadinessTracker>(),
+        sp.GetRequiredService<ILogger<SuavoAgent.Core.Health.ActuationReadinessProbe>>()));
+    builder.Services.AddSingleton(sp =>
+    {
+        var stateDb = sp.GetRequiredService<AgentStateDb>();
+        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
+        return new SuavoAgent.Core.Health.HelperSelfHealCoordinator(
+            writeSentinel: payload => SuavoAgent.Contracts.Ipc.HelperRestartRequest.Write(
+                SuavoAgent.Contracts.Ipc.HelperRestartRequest.DefaultPath(), payload),
+            audit: reason => stateDb.AppendChainedAuditEntry(new SuavoAgent.Core.State.AuditEntry(
+                TaskId: opts.AgentId ?? "",
+                EventType: "helper_restart_requested",
+                FromState: "stranded",
+                ToState: "restart_pending",
+                Trigger: "self_heal",
+                Actor: "system",
+                SourceComponent: "actuation_readiness_worker",
+                CaptureReason: reason)),
+            logger: sp.GetRequiredService<ILogger<SuavoAgent.Core.Health.HelperSelfHealCoordinator>>());
+    });
+    builder.Services.AddHostedService(sp => new SuavoAgent.Core.Workers.ActuationReadinessWorker(
+        sp.GetRequiredService<SuavoAgent.Core.Health.ActuationReadinessProbe>(),
+        sp.GetService<SuavoAgent.Core.Health.HelperSelfHealCoordinator>(),
+        sp.GetRequiredService<ILogger<SuavoAgent.Core.Workers.ActuationReadinessWorker>>(),
+        sp.GetService<WorkerHealthRegistry>()));
+
     builder.Services.AddHostedService<WritebackProcessor>();
 
     // Learning Agent — only active when LearningMode is enabled
