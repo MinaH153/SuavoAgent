@@ -372,14 +372,15 @@ try
                     System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
                     System.Security.AccessControl.PropagationFlags.None,
                     System.Security.AccessControl.AccessControlType.Allow));
-                // The Helper runs as the INTERACTIVE user and must traverse the data
-                // dir (this-dir-only — NO inherited file reads: state.db is plaintext
-                // PHI and state.key is machine-DPAPI). Mirrors the installer's
-                // GrantInteractiveHelperAccess so whichever lockdown runs last leaves
-                // the Helper alive. (2026-06-10 helper crash-loop on fresh install.)
+                // The Helper runs as a de-privileged user (always in BUILTIN\Users) and must
+                // traverse the data dir (this-dir-only — NO inherited file reads: state.db is
+                // plaintext PHI and state.key is machine-DPAPI). Mirrors the installer's
+                // GrantInteractiveHelperAccess (BUILTIN\Users — robust vs INTERACTIVE for a
+                // UAC-filtered token) so whichever lockdown runs last leaves the Helper alive.
+                // (2026-06-10 helper crash-loop on fresh install.)
                 dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
                     new System.Security.Principal.SecurityIdentifier(
-                        System.Security.Principal.WellKnownSidType.InteractiveSid, null),
+                        System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
                     System.Security.AccessControl.FileSystemRights.ReadAndExecute,
                     System.Security.AccessControl.InheritanceFlags.None,
                     System.Security.AccessControl.PropagationFlags.None,
@@ -405,7 +406,7 @@ try
                     var subSec = subDir.GetAccessControl();
                     subSec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
                         new System.Security.Principal.SecurityIdentifier(
-                            System.Security.Principal.WellKnownSidType.InteractiveSid, null),
+                            System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
                         rights,
                         inherit
                             ? System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit
