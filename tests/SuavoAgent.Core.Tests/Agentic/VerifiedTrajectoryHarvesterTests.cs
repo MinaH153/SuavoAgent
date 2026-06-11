@@ -71,8 +71,10 @@ public class VerifiedTrajectoryHarvesterTests
     [Fact]
     public void TypeStepInVerifiedPath_IsRefused_PhiGuard()
     {
-        // A verified type_into_field embeds the typed value — potential PHI — so the whole trajectory is
-        // refused (bank nothing) rather than persisting a patient-data-bearing signature.
+        // Phase-3B: a SIG-ONLY type_into_field (no structured params) cannot be certified value-by-value
+        // — the whole trajectory is refused (bank nothing) rather than persisting a possibly
+        // patient-data-bearing signature. Structured + certified-clean type steps DO bank now
+        // (see ScrubbedHarvestPhase3BTests).
         var result = Result(TerminationReason.Done,
             Step("s0", Click("Search"), PostconditionVerdict.Met),
             Step("s1", "type_into_field(text=John Patient,process_name=pms.exe)", PostconditionVerdict.Met));
@@ -82,6 +84,7 @@ public class VerifiedTrajectoryHarvesterTests
     [Fact]
     public void PressKeysInVerifiedPath_IsRefused_PhiGuard()
     {
+        // Phase-3B: sig-only press_keys (no structured chords param) refuses fail-closed, same as above.
         var result = Result(TerminationReason.Done,
             Step("s0", Click("Open"), PostconditionVerdict.Met),
             Step("s1", "press_keys(chords=Enter)", PostconditionVerdict.Met));

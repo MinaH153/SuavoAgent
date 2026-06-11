@@ -1,7 +1,5 @@
 using System.Collections.Generic;
-using System.Linq;
 using System.Text.Json;
-using SuavoAgent.Core.Learning;
 
 namespace SuavoAgent.Core.Agentic;
 
@@ -15,6 +13,16 @@ namespace SuavoAgent.Core.Agentic;
 /// Phase-1 <see cref="PostconditionVerdict.Met"/> step. Unverified detours (NotMet/Ambiguous dead clicks
 /// that didn't change the screen) are DROPPED, never banked — the banked chain is the clean verified path
 /// that actually advanced the screen toward success. Nothing is banked from a run that didn't succeed.</para>
+///
+/// <para><b>PHI-certified by construction (Phase-3B).</b> Banked signatures + params are persisted
+/// VERBATIM, so every step must be certified provably PHI-free by <see cref="HarvestPhiCertifier"/>
+/// before banking: verb allowlisted, signature + every param key/value scrub-certified (certify-or-refuse
+/// — never bank a transformed value), free-text (typed) values held to the strictest standard
+/// (shadow denylist + identifier-digit / name-shape / goal-echo vetoes), and the final serialized
+/// steps_json re-certified end-of-pipe. ANY uncertifiable step refuses the WHOLE trajectory (a partial
+/// chain is unreplayable anyway) — bank nothing rather than possible PHI. This lifts the old
+/// click-only hard-stop on the navigate path: type_into_field / press_keys steps now bank when, and
+/// only when, their exact values are certified clean.</para>
 /// </summary>
 public static class VerifiedTrajectoryHarvester
 {
@@ -24,7 +32,18 @@ public static class VerifiedTrajectoryHarvester
     /// pass empty for non-sandbox navigate runs.
     /// </summary>
     public static VerifiedSkill? Harvest(AgentObjective objective, string app, AgenticLoopResult result)
+        => Harvest(objective, app, result, out _);
+
+    /// <summary>
+    /// As <see cref="Harvest(AgentObjective, string, AgenticLoopResult)"/>, additionally surfacing WHY a
+    /// trajectory was refused. <paramref name="refusalReason"/> is a PHI-free operational code (e.g.
+    /// <c>step2:free_text_goal_echo:text</c>) — safe to log; null when banked or when there was simply
+    /// nothing to bank (non-Done run / no verified steps).
+    /// </summary>
+    public static VerifiedSkill? Harvest(
+        AgentObjective objective, string app, AgenticLoopResult result, out string? refusalReason)
     {
+        refusalReason = null;
         if (objective is null || result is null) return null;
 
         // Gate 1: only a run that reached its objective is worth banking as a replayable skill.
@@ -37,38 +56,41 @@ public static class VerifiedTrajectoryHarvester
         // actuating steps are exploration detours that produced no observable effect — dropped, never
         // banked (verified-only). Terminal / no-action steps carry no (state, action) key — skipped.
         var steps = new List<VerifiedStep>();
-        foreach (var s in history)
+        for (var i = 0; i < history.Count; i++)
         {
+            var s = history[i];
             if (string.IsNullOrEmpty(s.DecisionScreenHash) || string.IsNullOrEmpty(s.ActionSignature))
                 continue;
             if (s.Verdict != PostconditionVerdict.Met)
                 continue;
-            // PHI guard (Codex 2026-06-08): a banked signature is persisted verbatim. Only structural CLICK
-            // signatures are PHI-safe (label = a UI control name, automationId = structural — green-tier). A
-            // type_into_field / press_keys signature embeds the typed VALUE, which on the navigate path could
-            // be patient data — so a verified trajectory that used one is REFUSED entirely (bank nothing)
-            // rather than persisting a partial or PHI-bearing skill. explore_sandbox is already click-only;
-            // this hard-stops the navigate path too. Lifting this needs a scrubbing-aware harvest (Phase-3B).
-            if (!IsBankableActionSig(s.ActionSignature))
+
+            // Gate 3 (Phase-3B): the step's action must be CERTIFIED PHI-free to persist verbatim.
+            // One uncertifiable step refuses the whole trajectory — bank nothing, never a partial or
+            // possibly-PHI-bearing skill.
+            var cert = HarvestPhiCertifier.CertifyStep(s, objective.Goal);
+            if (!cert.Certified)
+            {
+                refusalReason = $"step{i}:{cert.RefusalReason}";
                 return null;
-            // PHI guard (Codex Q3): scan the signature string ALWAYS — it is banked verbatim, and this is
-            // the only scan that runs when ActionParams is null (legacy / uncaptured steps). Plus a
-            // value-level scan of each structured param when present. A label/value that looks like patient
-            // data refuses the WHOLE trajectory — bank nothing rather than persist possible PHI.
-            if (PhiScrubber.ContainsPhi(s.ActionSignature))
-                return null;
-            if (s.ActionParams is { } ps && ps.Values.Any(v => !string.IsNullOrEmpty(v) && PhiScrubber.ContainsPhi(v)))
-                return null;
+            }
+
             var paramsJson = s.ActionParams is { Count: > 0 } ? JsonSerializer.Serialize(s.ActionParams) : null;
             steps.Add(new VerifiedStep(s.DecisionScreenHash, s.ActionSignature, s.ActionVerb, paramsJson));
         }
 
         if (steps.Count == 0) return null;
-        return VerifiedSkill.Create(objective.PharmacyId, objective.TaskKey, app ?? string.Empty, steps);
-    }
+        var skill = VerifiedSkill.Create(objective.PharmacyId, objective.TaskKey, app ?? string.Empty, steps);
 
-    /// <summary>Only structural click signatures are PHI-safe to persist verbatim (see PHI guard above).</summary>
-    private static bool IsBankableActionSig(string actionSig)
-        => actionSig.StartsWith("click_by_label(", System.StringComparison.Ordinal)
-           || actionSig.StartsWith("click_by_signature(", System.StringComparison.Ordinal);
+        // Gate 4 (Phase-3B, end-of-pipe): re-certify the EXACT serialized string that will land in
+        // verified_skills.steps_json — belt-and-suspenders against PHI shapes assembled across value
+        // boundaries by serialization.
+        var pipe = HarvestPhiCertifier.CertifySerializedSteps(skill.SerializeSteps());
+        if (!pipe.Certified)
+        {
+            refusalReason = pipe.RefusalReason;
+            return null;
+        }
+
+        return skill;
+    }
 }

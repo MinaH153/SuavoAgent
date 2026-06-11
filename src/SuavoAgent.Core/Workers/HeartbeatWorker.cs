@@ -2046,8 +2046,16 @@ public sealed class HeartbeatWorker : ResilientHostedService
     {
         try
         {
-            var skill = SuavoAgent.Core.Agentic.VerifiedTrajectoryHarvester.Harvest(objective, app, result);
-            if (skill is null) return;
+            var skill = SuavoAgent.Core.Agentic.VerifiedTrajectoryHarvester.Harvest(objective, app, result, out var refusalReason);
+            if (skill is null)
+            {
+                // PHI-certification refusal (Phase-3B): the reason is an operational code, never a value
+                // — safe to log. Silent-null (non-Done run / nothing verified) stays silent.
+                if (refusalReason is not null)
+                    _logger.LogInformation(
+                        "verified-skill harvest refused run={RunId} reason={Reason}", runId, refusalReason);
+                return;
+            }
             var count = _stateDb.UpsertVerifiedSkill(
                 skill.SkillId, skill.PharmacyId, skill.TaskKey, skill.App, skill.SerializeSteps(), skill.StepsHash);
             _logger.LogInformation(
