@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Variant options + seeded item catalog + per-variant expected outcomes.
+       Split out of the WPF shell so the rehearsal driver (plain net8.0) and the simulator
+       (net8.0-windows, VM-built) consume ONE source of truth and can never drift, while
+       everything except the WPF shell still builds on macOS/Linux. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>PioneerRxSim</RootNamespace>
+    <AssemblyName>PioneerRxSim.Shared</AssemblyName>
+    <AssemblyTitle>PioneerRxSim.Shared</AssemblyTitle>
+    <Description>Seed catalog, variants, and expected outcomes for the PioneerRx dress-rehearsal simulator.</Description>
+  </PropertyGroup>
+
+</Project>

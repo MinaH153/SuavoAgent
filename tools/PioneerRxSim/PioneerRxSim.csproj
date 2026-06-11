@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- PioneerRx dress-rehearsal simulator.
+       A WPF app whose UI Automation surface matches what PricingWorkflow + PioneerRxUiaEngine
+       assert against the real PioneerRx (menu bar -> Item -> Rx Item, "Edit Rx Item" window,
+       Quick Search edit with HelpText, Pricing tab, virtualized supplier DataGrid with
+       header-name-resolvable columns and ValuePattern cells).
+
+       AssemblyName MUST be PioneerPharmacy: PioneerRxUiaEngine.TryAttach() attaches by
+       Process.GetProcessesByName("PioneerPharmacy") — the sim conforms to the engine,
+       never the reverse.
+
+       Deliberately NOT in SuavoAgent.sln (same precedent as tests/SuavoAgent.UiaHarness):
+       net8.0-windows must not enter the ubuntu build-and-test job. EnableWindowsTargeting
+       lets `dotnet build tools/PioneerRxSim` compile on macOS/Linux for CI of this tool;
+       it only RUNS on Windows. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>PioneerPharmacy</AssemblyName>
+    <RootNamespace>PioneerRxSim</RootNamespace>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyTitle>PioneerRxSim</AssemblyTitle>
+    <Description>PioneerRx-shaped UIA dress-rehearsal simulator for the SuavoAgent pricing workflow.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Shared/ is its own (net8.0, cross-platform) project — keep its sources out of this glob. -->
+    <Compile Remove="Shared/**" />
+    <ProjectReference Include="Shared/PioneerRxSim.Shared.csproj" />
+  </ItemGroup>
+
+</Project>
