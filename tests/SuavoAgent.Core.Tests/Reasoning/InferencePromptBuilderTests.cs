@@ -191,6 +191,20 @@ public class InferencePromptBuilderTests
         Assert.Contains(new string('x', 400), msg); // prior_actions retained well past 200
     }
 
+    [Fact]
+    public void BuildUserMessage_KnownSkills_RenderedWithDedicatedBudget() // Increment 3 retrieval few-shot
+    {
+        // The known_skills flag must reach the prompt and keep a budget larger than the generic 200-char
+        // cap (so a 1–3-example worked block isn't clipped), but bounded so it can't blow Tier-2 tokens.
+        var block = "task.calc: click Seven → click Eight; " + new string('y', 400);
+        var msg = InferencePromptBuilder.BuildUserMessage(WithFlags(
+            new Dictionary<string, string> { ["known_skills"] = block }));
+
+        Assert.Contains("known_skills", msg);
+        Assert.Contains("click Seven", msg);
+        Assert.Contains(new string('y', 300), msg); // retained well past the generic 200 cap
+    }
+
     private static InferenceRequest WithFlags(Dictionary<string, string> flags) => new()
     {
         Context = new RuleContext

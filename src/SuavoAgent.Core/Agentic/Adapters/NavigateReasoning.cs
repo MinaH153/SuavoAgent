@@ -44,6 +44,17 @@ public static class NavigateReasoning
     /// "goal + what I see now + what I already tried and how it went".
     /// </summary>
     public static RuleContext BuildContext(AgentObjective objective, WorkingMemory memory)
+        => BuildContext(objective, memory, knownSkills: null);
+
+    /// <summary>
+    /// As <see cref="BuildContext(AgentObjective, WorkingMemory)"/>, plus an optional retrieval few-shot
+    /// block (Flywheel Increment 3): when <paramref name="knownSkills"/> is non-empty it is threaded as
+    /// the <see cref="SkillRetrieval.KnownSkillsFlag"/> flag — up to 1–3 banked worked examples the model
+    /// can imitate. Null/empty ⇒ identical to the 2-arg overload (zero behavior change when retrieval is
+    /// off or finds nothing). The block is advisory; it never changes what is allowed, only what's
+    /// proposed (see <see cref="SkillRetrieval"/>).
+    /// </summary>
+    public static RuleContext BuildContext(AgentObjective objective, WorkingMemory memory, string? knownSkills)
     {
         var screen = memory.LatestScreen;
         var visible = screen?.ElementSummary is { } els
@@ -54,6 +65,8 @@ public static class NavigateReasoning
         var transcript = BuildPriorActionsTranscript(memory);
         if (transcript.Length > 0)
             flags["prior_actions"] = transcript;
+        if (!string.IsNullOrEmpty(knownSkills))
+            flags[SkillRetrieval.KnownSkillsFlag] = knownSkills;
 
         return new RuleContext
         {

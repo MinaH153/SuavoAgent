@@ -64,6 +64,26 @@ public sealed class NavigateReasoningTests
         Assert.Contains("Rejected", ctx.Flags["prior_actions"]);
     }
 
+    [Fact]
+    public void BuildContext_ThreadsKnownSkills_WhenProvided() // Increment 3
+    {
+        var m = ContextAccumulator.Start(Obj);
+        var ctx = NavigateReasoning.BuildContext(Obj, m, knownSkills: "task.calc: click Seven → click Eight");
+
+        Assert.True(ctx.Flags.ContainsKey(SkillRetrieval.KnownSkillsFlag));
+        Assert.Contains("click Seven", ctx.Flags[SkillRetrieval.KnownSkillsFlag]);
+    }
+
+    [Fact]
+    public void BuildContext_OmitsKnownSkills_WhenNullOrEmpty() // Increment 3 — zero behavior change when off
+    {
+        var m = ContextAccumulator.Start(Obj);
+        Assert.False(NavigateReasoning.BuildContext(Obj, m, knownSkills: null).Flags.ContainsKey(SkillRetrieval.KnownSkillsFlag));
+        Assert.False(NavigateReasoning.BuildContext(Obj, m, knownSkills: "").Flags.ContainsKey(SkillRetrieval.KnownSkillsFlag));
+        // 2-arg overload is identical to "off".
+        Assert.False(NavigateReasoning.BuildContext(Obj, m).Flags.ContainsKey(SkillRetrieval.KnownSkillsFlag));
+    }
+
     // --- MapDecision ---------------------------------------------------------
 
     [Fact]

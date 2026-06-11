@@ -32,7 +32,8 @@ public static class NavigateLoopFactory
         AuditChain audit,
         DateTimeOffset deadlineUtc,
         PhysarumPolicyOptions? policyOptions = null,
-        ISafetyGate? safetyOverride = null)
+        ISafetyGate? safetyOverride = null,
+        Func<string?>? knownSkillsProvider = null)
     {
         // explore_sandbox (policyOptions != null) perceives via the Helper's WINDOW-SCOPED sandbox
         // capture path (targetProcess="sandbox") — independent of the PHI-vision opt-in, captures only
@@ -41,12 +42,18 @@ public static class NavigateLoopFactory
             services.GetRequiredService<IIpcCommandClient>(),
             targetProcess: policyOptions is not null ? "sandbox" : null);
 
+        // knownSkillsProvider (Flywheel Increment 3, flag-gated by the caller): supplies the retrieval
+        // few-shot block; null ⇒ retrieval off ⇒ unchanged reasoning. Passed through to the inner brain
+        // so the worked examples reach the Tier-2 prompt (explore_sandbox can pass it too; the Physarum
+        // decorator wraps this same inner reasoner).
         var inner = new TieredBrainReasoner(
             services.GetRequiredService<RuleEngine>(),
             services.GetRequiredService<ILocalInference>(),
             services.GetRequiredService<ActionVerifier>(),
             services.GetRequiredService<ICloudReasoning>(),
-            services.GetRequiredService<ILogger<TieredBrain>>());
+            services.GetRequiredService<ILogger<TieredBrain>>(),
+            targetProcessName: null,
+            knownSkillsProvider: knownSkillsProvider);
 
         // EXPLORE mode (explore_sandbox only): decorate the brain with the Physarum frontier explorer so
         // verified-thickened (state→action) tubes drive selection. policyOptions is non-null ONLY for

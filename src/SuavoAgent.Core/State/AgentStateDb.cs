@@ -4451,6 +4451,37 @@ public sealed class AgentStateDb : IDisposable
         }
     }
 
+    /// <summary>
+    /// Retrieval candidates for Flywheel Increment 3 (retrieval-as-few-shot): the most-confirmed
+    /// live (non-retired) verified skills for a (pharmacy, app), newest-confirmed first. The caller
+    /// (<see cref="Agentic.SkillRetrieval"/>) ranks the small candidate set lexically against the live
+    /// objective and injects the top 1–3 as worked examples into the Tier-2 prompt — NO embedder. Bounded
+    /// by <paramref name="limit"/> (tens of skills per app at most) so the ranking stays trivial.
+    /// Every banked field is Phase-3B PHI-certified, so these rows are safe to surface into a prompt.
+    /// </summary>
+    public IReadOnlyList<(string SkillId, string TaskKey, string StepsJson, int SuccessCount)> GetVerifiedSkillsForApp(
+        string pharmacyId, string app, int limit = 24)
+    {
+        var rows = new List<(string, string, string, int)>();
+        lock (_verifiedSkillLock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT skill_id, task_key, steps_json, success_count FROM verified_skills
+                WHERE pharmacy_id = @ph AND app = @app AND retired_at IS NULL
+                ORDER BY success_count DESC, last_verified_at DESC
+                LIMIT @lim
+                """;
+            cmd.Parameters.AddWithValue("@ph", pharmacyId);
+            cmd.Parameters.AddWithValue("@app", app);
+            cmd.Parameters.AddWithValue("@lim", limit <= 0 ? 24 : limit);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3)));
+        }
+        return rows;
+    }
+
     public string SavePricingDiscoveryCandidate(string absolutePath, string? fileName = null)
     {
         var token = $"pdc_{Guid.NewGuid():N}";
