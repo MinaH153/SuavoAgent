@@ -19,6 +19,13 @@ public sealed class WatchdogOptions
     /// writes (Users = ReadAndExecute), so the signal can't be spoofed by a logged-in pharmacy user.
     public string? RestartRequestPath { get; init; }
 
+    /// Re-applies the de-privileged Helper's install-dir read carve-out (BUILTIN\Users:RX on the dir +
+    /// Helper.exe). An OTA binary swap (File.Move) drops the per-file ACE and Core (LocalService) lacks
+    /// WRITE_DAC to restore it, so the LocalSystem Watchdog does — BEFORE cycling the Broker that
+    /// relaunches the Helper, and on its own startup (self-heal). Injectable for tests; the default is
+    /// the real icacls grant. Input = install dir; returns whether the grant fully succeeded.
+    public Func<string, bool>? ReapplyHelperExeGrant { get; init; }
+
     /// A RUNNING service whose liveness beacon is older than this is treated as hung (deadlocked /
     /// IPC-unresponsive) and force-cycled. Generous enough to never restart a legitimately slow loop.
     public TimeSpan HangStaleThreshold { get; init; } = TimeSpan.FromSeconds(90);
@@ -38,6 +45,7 @@ public sealed class WatchdogWorker : BackgroundService
     private readonly ILogger<WatchdogWorker> _logger;
     private readonly IServiceCommand _command;
     private readonly WatchdogOptions _options;
+    private readonly Func<string, bool> _reapplyHelperGrant;
     private readonly WatchdogDecisionEngine _engine = new();
     private readonly Dictionary<string, ServiceLedger> _ledgers = new(StringComparer.OrdinalIgnoreCase);
     private WatchdogRemoteRepairTelemetry? _lastRemoteRepair;
@@ -62,8 +70,40 @@ public sealed class WatchdogWorker : BackgroundService
         _logger = logger;
         _command = command;
         _options = options;
+        _reapplyHelperGrant = options.ReapplyHelperExeGrant
+            ?? (dir => SuavoAgent.Diagnostics.HelperExeAclGrant.Apply(
+                    dir, m => _logger.LogInformation("Helper ACL re-grant: {Message}", m)));
         _beaconStore = new SuavoAgent.Diagnostics.LivenessBeaconStore(
             options.HangBeaconDirectory ?? SuavoAgent.Diagnostics.LivenessBeaconStore.DefaultDirectory);
+    }
+
+    /// The install dir = where the post-OTA restart-request lives (Program.cs sets RestartRequestPath
+    /// to &lt;installDir&gt;\watchdog-restart-request.json); falls back to this process's own directory.
+    private string? ResolveInstallDir() =>
+        !string.IsNullOrEmpty(_options.RestartRequestPath)
+            ? Path.GetDirectoryName(_options.RestartRequestPath)
+            : Path.GetDirectoryName(Environment.ProcessPath);
+
+    /// Best-effort re-grant of the Helper's read carve-out (never throws — a failure is logged and the
+    /// caller proceeds; the churn, if any, is visible in heartbeat telemetry).
+    private void ReapplyHelperGrant(string? installDir, string context)
+    {
+        if (string.IsNullOrEmpty(installDir))
+        {
+            _logger.LogDebug("Helper ACL re-grant skipped ({Context}) — install dir unresolved", context);
+            return;
+        }
+        try
+        {
+            if (!_reapplyHelperGrant(installDir))
+                _logger.LogWarning(
+                    "Helper ACL re-grant incomplete ({Context}) for {Dir} — Helper may churn until re-granted",
+                    context, installDir);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Helper ACL re-grant threw ({Context}) — proceeding", context);
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -80,6 +120,12 @@ public sealed class WatchdogWorker : BackgroundService
             _options.PollInterval.TotalSeconds,
             _engine.UnhealthyGrace.TotalMinutes,
             _engine.EscalateAfterConsecutiveFailures);
+
+        // Self-heal on every start: an OTA File.Move (or any drift) may have dropped the de-priv
+        // Helper's read carve-out, leaving it unable to self-extract its single-file apphost (it then
+        // churns and helper_attached never flips). Re-apply it once here as LocalSystem; idempotent.
+        // A churning Helper recovers on its next Broker relaunch (~seconds) once the grant is back.
+        ReapplyHelperGrant(ResolveInstallDir(), "startup");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -331,6 +377,13 @@ public sealed class WatchdogWorker : BackgroundService
             RecordUpdateRestart(requestPath, now, request.Version, request.RequestedAt, "expired", Array.Empty<string>(), delete: true);
             return;
         }
+
+        // The OTA binary swap (SelfUpdater.SwapBinaries → File.Move) landed a fresh Helper.exe that
+        // dropped the per-file BUILTIN\Users:RX ACE; Core (LocalService) can't restore it. Re-apply it
+        // HERE — as LocalSystem, BEFORE cycling the Broker — so the Broker relaunches a Helper that can
+        // read+self-extract its single-file apphost (else it churns and helper_attached never flips).
+        // Best-effort: a grant failure is logged but never blocks the restart.
+        ReapplyHelperGrant(Path.GetDirectoryName(requestPath), $"post-OTA v{request.Version}");
 
         // Cycle each target service so the new on-disk binary loads.
         var restarted = new List<string>();
