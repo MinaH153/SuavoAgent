@@ -1,4 +1,5 @@
 using System.Globalization;
+using SuavoAgent.Contracts.Pricing;
 
 namespace SuavoAgent.Helper.Workflows;
 
@@ -123,5 +124,26 @@ public static class ProfitOptimizer
         if (a.Profit != best.Profit) return a.Profit > best.Profit;
         if (a.AcquisitionCost != best.AcquisitionCost) return a.AcquisitionCost < best.AcquisitionCost;
         return string.CompareOrdinal(a.Ndc, best.Ndc) < 0;
+    }
+
+    /// <summary>
+    /// The B2→B1 seam: project the reader's contract candidates (<see cref="PreferredNdcCandidate"/>,
+    /// with NULLABLE cost/reimbursement) into the engine's <see cref="NdcCandidate"/> inputs. A candidate
+    /// missing EITHER number is DROPPED here (fail-closed at the boundary) — there is no real profit to
+    /// compute from a missing cost or a missing reimbursement, and a dropped candidate is invisible to
+    /// argmax rather than defaulting to a misleading zero. Status carries through unchanged so the
+    /// engine's usable-status filter still applies. Pure; <see cref="SelectMostProfitable"/> consumes the
+    /// result. (Lives here, not in Contracts, because Contracts must not depend on Helper.)
+    /// </summary>
+    public static IReadOnlyList<NdcCandidate> ToCandidates(IEnumerable<PreferredNdcCandidate> read)
+    {
+        var list = new List<NdcCandidate>();
+        foreach (var c in read)
+        {
+            if (c.AcquisitionCost is not { } cost) continue;       // missing cost → drop, fail closed
+            if (c.Reimbursement is not { } reimb) continue;        // missing reimbursement → drop
+            list.Add(new NdcCandidate(c.Ndc, c.Manufacturer, cost, reimb, c.Status));
+        }
+        return list;
     }
 }

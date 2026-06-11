@@ -1,3 +1,4 @@
+using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Helper.Workflows;
 using Xunit;
 using Cand = SuavoAgent.Helper.Workflows.ProfitOptimizer.NdcCandidate;
@@ -208,5 +209,60 @@ public sealed class ProfitOptimizerTests
         var parsed = ProfitOptimizer.TryParseMoney(text, out var v);
         Assert.Equal(ok, parsed);
         if (ok) Assert.Equal((decimal)expected, v);
+    }
+
+    // ── B2→B1 seam: ToCandidates projects the reader contract, fail-closed on missing numbers ──
+
+    [Fact]
+    public void ToCandidates_drops_candidates_missing_cost_or_reimbursement()
+    {
+        var read = new[]
+        {
+            new PreferredNdcCandidate("good",     "M", AcquisitionCost: 3m,   Reimbursement: 10m,   Status: "Available"),
+            new PreferredNdcCandidate("nocost",   "M", AcquisitionCost: null, Reimbursement: 10m,   Status: "Available"),
+            new PreferredNdcCandidate("noreimb",  "M", AcquisitionCost: 3m,   Reimbursement: null,  Status: "Available"),
+            new PreferredNdcCandidate("neither",  "M", AcquisitionCost: null, Reimbursement: null,  Status: "Available"),
+        };
+
+        var mapped = ProfitOptimizer.ToCandidates(read);
+
+        Assert.Single(mapped);
+        Assert.Equal("good", mapped[0].Ndc); // only the fully-populated candidate survives the boundary
+    }
+
+    [Fact]
+    public void ToCandidates_carries_status_through_for_the_engine_filter()
+    {
+        var read = new[]
+        {
+            new PreferredNdcCandidate("x", "M", 3m, 10m, Status: "Discontinued"),
+        };
+        var mapped = ProfitOptimizer.ToCandidates(read);
+        Assert.Equal("Discontinued", mapped[0].Status); // status preserved so SelectMostProfitable can filter it
+    }
+
+    [Fact]
+    public void Full_seam_read_then_project_then_select_endToEnd()
+    {
+        // The realistic chain a B3 runner executes: reader result → ToCandidates → SelectMostProfitable.
+        var readResult = new PreferredNdcReadResult(
+            JobId: "j", RowIndex: 0, DrugGroupKey: "omeprazole-20", PlanId: "PLAN1",
+            Found: true,
+            Candidates: new[]
+            {
+                new PreferredNdcCandidate("11111111111", "Mfr A", 4m, 10m, "Available"),   // profit 6
+                new PreferredNdcCandidate("22222222222", "Mfr B", 3m, 12m, "Available"),   // profit 9 → best
+                new PreferredNdcCandidate("33333333333", "Mfr C", 1m, 30m, "Discontinued"),// profit 29 but unusable
+                new PreferredNdcCandidate("44444444444", "Mfr D", null, 50m, "Available"), // missing cost → dropped
+            },
+            Basis: ReimbursementBasis.ContractOrMac,
+            ErrorMessage: null);
+
+        var picked = ProfitOptimizer.SelectMostProfitable(ProfitOptimizer.ToCandidates(readResult.Candidates));
+
+        Assert.NotNull(picked);
+        Assert.Equal("22222222222", picked!.Value.Ndc); // discontinued + missing-cost excluded; argmax of the rest
+        Assert.Equal(9m, picked.Value.Profit);
+        Assert.Equal(3m, picked.Value.DeltaOverRunnerUp); // 9 − 6
     }
 }
