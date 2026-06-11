@@ -77,30 +77,32 @@ public class ServiceInstallerTests
     }
 
     // Regression for the 2026-06-10 Helper crash-loop: LockdownDirectoryAcl strips
-    // the data dir to SYSTEM/Admins/LocalService, but the Helper runs as the
-    // INTERACTIVE user and died on its first log write — before it could log
-    // anything. The carve-out must give INTERACTIVE: traverse on the root (dir-only,
+    // the data dir to SYSTEM/Admins/LocalService, but the Helper runs de-privileged
+    // and died on its first log write — before it could log anything. The carve-out
+    // grants BUILTIN\Users (*S-1-5-32-545 — robust vs INTERACTIVE for a UAC-filtered
+    // token; the proven principal from bootstrap.ps1): traverse on the root (dir-only,
     // NO inherited file reads — state.db is plaintext PHI, state.key machine-DPAPI),
-    // Modify on logs + diagnostics, and per-file read on the two helper configs.
+    // Modify on logs\helper + diagnostics\helper, per-file read on the helper configs.
     [Fact]
-    public void Interactive_helper_carveout_grants_minimum_and_never_root_file_reads()
+    public void Helper_carveout_grants_minimum_and_never_root_file_reads()
     {
+        const string users = @"*S-1-5-32-545"; // BUILTIN\Users
         var grants = ServiceInstaller.BuildInteractiveGrantArgs(@"C:\ProgramData\SuavoAgent");
 
         Assert.Equal(10, grants.Count);
 
         var root = grants[0];
         Assert.Equal(@"C:\ProgramData\SuavoAgent", root.Target);
-        Assert.Equal(@"NT AUTHORITY\INTERACTIVE:(RX)", root.Grant);
+        Assert.Equal($"{users}:(RX)", root.Grant);
         // The root grant must NOT inherit to files — (OI) would expose state.db/state.key.
         Assert.DoesNotContain("(OI)", root.Grant);
         Assert.DoesNotContain("(CI)", root.Grant);
 
-        // logs\ root: traverse only — SYSTEM services write here, so the interactive
+        // logs\ root: traverse only — SYSTEM services write here, so the de-privileged
         // user must never gain create/delete (junction-planting EoP).
         var logsRoot = grants[1];
         Assert.EndsWith("logs", logsRoot.Target);
-        Assert.Equal(@"NT AUTHORITY\INTERACTIVE:(RX)", logsRoot.Grant);
+        Assert.Equal($"{users}:(RX)", logsRoot.Grant);
 
         Assert.Contains(grants, g => g.Target.EndsWith(Path.Combine("logs", "helper")) && g.Grant.Contains("(OI)(CI)(M)") && g.EnsureDir);
         // diagnostics\ root: traverse only (SYSTEM appends events.jsonl there);
@@ -113,7 +115,8 @@ public class ServiceInstallerTests
         Assert.Contains(grants, g => g.Target.EndsWith("pioneerrx.json") && g.Grant.EndsWith(":(R)") && !g.EnsureDir);
         Assert.Contains(grants, g => g.Target.EndsWith("honeytoken-attribution.json") && g.Grant.EndsWith(":(R)") && !g.EnsureDir);
 
-        // Every grant goes to the interactive-session principal only — never Users/Everyone.
-        Assert.All(grants, g => Assert.StartsWith(@"NT AUTHORITY\INTERACTIVE:", g.Grant));
+        // Every grant goes to BUILTIN\Users — never Everyone/Authenticated Users; the SID form
+        // is locale-independent (icacls won't mis-resolve a localized "Users" on a non-en box).
+        Assert.All(grants, g => Assert.StartsWith($"{users}:", g.Grant));
     }
 }

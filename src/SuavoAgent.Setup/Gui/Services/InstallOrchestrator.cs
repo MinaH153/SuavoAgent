@@ -121,6 +121,9 @@ internal sealed class InstallOrchestrator
 
         Directory.CreateDirectory(_ctx.InstallDir);
         ServiceInstaller.LockdownDirectoryAcl(_ctx.InstallDir);
+        // The de-privileged Helper must read its single-file self-extracting apphost; without this
+        // carve-out the install-dir lockdown makes it die pre-log and the Broker churns it (2026-06-10).
+        ServiceInstaller.GrantInteractiveHelperExeAccess(_ctx.InstallDir);
         Directory.CreateDirectory(_ctx.DataDir);
 
         File.WriteAllText(

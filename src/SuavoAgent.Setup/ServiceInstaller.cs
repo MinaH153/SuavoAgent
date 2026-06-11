@@ -359,20 +359,59 @@ internal static class ServiceInstaller
         }
     }
 
-    // The Helper's least-privilege carve-out, applied AFTER LockdownDirectoryAcl.
+    // The de-privileged Helper runs as the interactive user (CreateProcessAsUser). Its token is
+    // ALWAYS a member of BUILTIN\Users (S-1-5-32-545) regardless of UAC token-filtering or logon
+    // type — unlike the INTERACTIVE group (S-1-5-4), which a filtered/edge-case token can lack.
+    // bootstrap.ps1 (the proven install path) grants Users:RX for exactly this reason, so we use
+    // the same principal. SID form (*S-1-5-32-545) = locale-independent (icacls won't mis-resolve
+    // "Users" on a non-English box).
+    private const string HelperPrincipal = "*S-1-5-32-545"; // BUILTIN\Users
+
+    /// <summary>
+    /// Install-dir read carve-out, applied AFTER LockdownDirectoryAcl pins the install dir to
+    /// Admins/SYSTEM/LocalService. SuavoAgent.Helper.exe is a COMPRESSED single-file
+    /// self-extracting apphost (publish: --self-contained PublishSingleFile + EnableCompression);
+    /// at startup it RE-OPENS and self-extracts its OWN exe as the running (de-privileged) user.
+    /// Without read access that open is denied → the Helper dies BEFORE its first log line and the
+    /// Broker churns a fresh PID ~every 5s (helper_attached=false forever; root cause 2026-06-10,
+    /// confirmed on box; bootstrap.ps1 already grants this, the GUI/console installers did not).
+    /// Scoped to traverse-on-dir + RX-on-Helper.exe so appsettings.json (ApiKey + SQL creds) and
+    /// the other service binaries stay UNREADABLE by local users.
+    /// </summary>
+    public static void GrantInteractiveHelperExeAccess(string installDir)
+    {
+        try
+        {
+            // Traverse + list THIS DIR ONLY (no OI/CI → child files do NOT inherit read).
+            RunCmd("icacls", $"\"{installDir}\" /grant \"{HelperPrincipal}:(RX)\"");
+            // Read + execute the single-file apphost itself — the only install-dir file the Helper reads.
+            var helperExe = Path.Combine(installDir, "SuavoAgent.Helper.exe");
+            if (File.Exists(helperExe))
+                RunCmd("icacls", $"\"{helperExe}\" /grant \"{HelperPrincipal}:(RX)\"");
+            else
+                ConsoleUI.WriteWarn($"Helper apphost not found for read-grant: {helperExe}");
+            ConsoleUI.WriteOk("Helper apphost readable by the interactive user (single-file self-extract); appsettings stays protected");
+        }
+        catch (Exception ex)
+        {
+            ConsoleUI.WriteWarn($"Helper apphost read-grant FAILED: {ex.Message} — the Helper will churn (cannot self-extract)");
+        }
+    }
+
+    // The Helper's DATA-dir least-privilege carve-out, applied AFTER LockdownDirectoryAcl.
     // Deliberately NOT an inherited read on the data-dir root: state.db is plaintext
     // SQLite (PHI on a PMS box) and state.key is machine-scope DPAPI (any local
     // reader could decrypt), and SQLite recreates -wal/-shm constantly so even a
     // strip-after-grant would reopen a read window on every checkpoint. So:
-    //   root            -> INTERACTIVE (RX), THIS DIR ONLY (traverse + list, no file reads)
-    //   logs\helper\, diagnostics\helper\ -> INTERACTIVE (OI)(CI)M — the ONLY
+    //   root            -> Users (RX), THIS DIR ONLY (traverse + list, no file reads)
+    //   logs\helper\, diagnostics\helper\ -> Users (OI)(CI)M — the ONLY
     //     user-writable log/journal dirs. The logs\ and diagnostics\ roots stay
     //     service-only (traverse) so a local user can never plant junctions or
     //     links where SYSTEM (Broker/Watchdog) appends — log-dir EoP class
     //     (Codex review 2026-06-10 Q2).
-    //   honeytokens\    -> INTERACTIVE (OI)(CI)M (decoy bait — user-touchable by design)
+    //   honeytokens\    -> Users (OI)(CI)M (decoy bait — user-touchable by design)
     //   vision.json / actuation.json / pioneerrx.json / honeytoken-attribution.json
-    //     -> INTERACTIVE (R) per-file when present (flows that create or atomically
+    //     -> Users (R) per-file when present (flows that create or atomically
     //     rewrite these later must re-grant — replace drops per-file ACEs).
     public static void GrantInteractiveHelperAccess(string dataDir)
     {
@@ -387,11 +426,11 @@ internal static class ServiceInstaller
                     continue;
                 RunCmd("icacls", $"\"{target}\" /grant \"{grant}\"");
             }
-            ConsoleUI.WriteOk("Helper (interactive user) ACL carve-out applied: traverse + logs/diagnostics write + config reads");
+            ConsoleUI.WriteOk("Helper (interactive user) data-dir carve-out applied: traverse + logs/diagnostics write + config reads");
         }
         catch (Exception ex)
         {
-            ConsoleUI.WriteWarn($"Helper ACL carve-out failed: {ex.Message} — the Helper cannot log or read configs until this is fixed");
+            ConsoleUI.WriteWarn($"Helper data-dir carve-out failed: {ex.Message} — the Helper cannot log or read configs until this is fixed");
         }
     }
 
@@ -399,18 +438,18 @@ internal static class ServiceInstaller
     /// Tuple: (target path, grant spec, target-is-directory-to-create).</summary>
     internal static IReadOnlyList<(string Target, string Grant, bool EnsureDir)> BuildInteractiveGrantArgs(string dataDir) =>
     [
-        (dataDir, @"NT AUTHORITY\INTERACTIVE:(RX)", true),
-        (Path.Combine(dataDir, "logs"), @"NT AUTHORITY\INTERACTIVE:(RX)", true),
-        (Path.Combine(dataDir, "logs", "helper"), @"NT AUTHORITY\INTERACTIVE:(OI)(CI)(M)", true),
-        (Path.Combine(dataDir, "diagnostics"), @"NT AUTHORITY\INTERACTIVE:(RX)", true),
-        (Path.Combine(dataDir, "diagnostics", "helper"), @"NT AUTHORITY\INTERACTIVE:(OI)(CI)(M)", true),
+        (dataDir, $"{HelperPrincipal}:(RX)", true),
+        (Path.Combine(dataDir, "logs"), $"{HelperPrincipal}:(RX)", true),
+        (Path.Combine(dataDir, "logs", "helper"), $"{HelperPrincipal}:(OI)(CI)(M)", true),
+        (Path.Combine(dataDir, "diagnostics"), $"{HelperPrincipal}:(RX)", true),
+        (Path.Combine(dataDir, "diagnostics", "helper"), $"{HelperPrincipal}:(OI)(CI)(M)", true),
         // Honeytokens are decoy bait the Helper plants and watches — user-touchable
         // is their entire purpose; no SYSTEM process writes files here.
-        (Path.Combine(dataDir, "honeytokens"), @"NT AUTHORITY\INTERACTIVE:(OI)(CI)(M)", true),
-        (Path.Combine(dataDir, "vision.json"), @"NT AUTHORITY\INTERACTIVE:(R)", false),
-        (Path.Combine(dataDir, "actuation.json"), @"NT AUTHORITY\INTERACTIVE:(R)", false),
-        (Path.Combine(dataDir, "pioneerrx.json"), @"NT AUTHORITY\INTERACTIVE:(R)", false),
-        (Path.Combine(dataDir, "honeytoken-attribution.json"), @"NT AUTHORITY\INTERACTIVE:(R)", false),
+        (Path.Combine(dataDir, "honeytokens"), $"{HelperPrincipal}:(OI)(CI)(M)", true),
+        (Path.Combine(dataDir, "vision.json"), $"{HelperPrincipal}:(R)", false),
+        (Path.Combine(dataDir, "actuation.json"), $"{HelperPrincipal}:(R)", false),
+        (Path.Combine(dataDir, "pioneerrx.json"), $"{HelperPrincipal}:(R)", false),
+        (Path.Combine(dataDir, "honeytoken-attribution.json"), $"{HelperPrincipal}:(R)", false),
     ];
 
     /// <summary>Polls for the Helper process appearing in the interactive session.</summary>

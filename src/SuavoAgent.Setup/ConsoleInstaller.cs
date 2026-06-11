@@ -111,6 +111,9 @@ internal static class ConsoleInstaller
             var configPath = Path.Combine(InstallDir, "appsettings.json");
             Directory.CreateDirectory(InstallDir);
             ServiceInstaller.LockdownDirectoryAcl(InstallDir);
+            // The de-privileged Helper must read its single-file self-extracting apphost; without this
+            // carve-out the install-dir lockdown makes it die pre-log and the Broker churns it (2026-06-10).
+            ServiceInstaller.GrantInteractiveHelperExeAccess(InstallDir);
             File.WriteAllText(configPath, configJson);
             ConsoleUI.WriteOk($"appsettings.json written to {InstallDir} (ACL applied first)");
 
