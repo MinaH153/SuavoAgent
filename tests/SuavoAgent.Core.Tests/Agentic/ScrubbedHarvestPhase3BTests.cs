@@ -57,6 +57,7 @@ public class ScrubbedHarvestPhase3BTests
             Step("s1", "type_into_field", ("text", phi)));
 
         Assert.Null(skill);
+        // The per-param trusted-catalog guard fires first (catalog PHI in a value) — pinpoints the key.
         Assert.Contains("param_trusted_phi:text", reason);
         Assert.DoesNotContain(phi, reason); // the refusal reason itself must never leak the value
     }
@@ -127,13 +128,13 @@ public class ScrubbedHarvestPhase3BTests
     }
 
     [Fact]
-    public void VerbSignatureMismatch_Refused_DefenseInDepth()
+    public void VerbSignatureMismatch_SigOnly_Refused_DefenseInDepth()
     {
-        // A forged/corrupt step whose structured verb disagrees with the signature's verb prefix could
-        // smuggle a type action under the click standard — refused, never guessed.
+        // A forged sig-only step whose structured verb disagrees with the signature's verb prefix could
+        // smuggle a type action under the click standard — refused, never guessed (no params → the
+        // verb-prefix cross-check is the available guard).
         var forged = new StepRecord("s0", "type_into_field(text=whatever)", ActStatus.Success,
-            PostconditionVerdict.Met, "click_by_label",
-            new Dictionary<string, string> { ["label"] = "Save" });
+            PostconditionVerdict.Met, "click_by_label", null);
         var skill = Harvest(Obj(), out var reason, forged);
 
         Assert.Null(skill);
@@ -193,6 +194,171 @@ public class ScrubbedHarvestPhase3BTests
 
         Assert.False(cert.Certified);
         Assert.Equal("serialized_steps_trusted_phi", cert.RefusalReason);
+    }
+
+    // ───────── (a2) Codex HIPAA round-2 holes: each PHI/forged input must be REFUSED ─────────
+
+    [Fact]
+    public void SplitTypedName_AcrossSteps_Refused_KeyboardStream() // Codex #1 CRITICAL
+    {
+        // "Jo" + "hn" → "John". Each chunk passes per-step (goal-echo needs 3+ alpha; name-shape needs
+        // two words). The cross-step keyboard-stream pass concatenates them → "John" echoes the goal.
+        var skill = Harvest(new AgentObjective("open john record", "task.flow", "ph"), out var reason,
+            Step("s0", "type_into_field", ("text", "Jo")),
+            Step("s1", "type_into_field", ("text", "hn")));
+
+        Assert.Null(skill);
+        Assert.Contains("keyboard_stream", reason);
+        Assert.DoesNotContain("john", reason.ToLowerInvariant());
+    }
+
+    [Fact]
+    public void SplitTypedName_NoGoalEcho_StillRefused_NameShapeInStream()
+    {
+        // Even with no goal provenance, "John" + " Doe" assembles to "John Doe" → name-shape in stream.
+        var skill = Harvest(Obj("navigate to billing"), out var reason,
+            Step("s0", "type_into_field", ("text", "John")),
+            Step("s1", "type_into_field", ("text", " Doe")));
+
+        Assert.Null(skill);
+        Assert.Contains("keyboard_stream", reason);
+        Assert.Contains("free_text_name_shape", reason);
+    }
+
+    [Theory]
+    [InlineData("123 45 6789")]   // SSN with spaces (Codex #2)
+    [InlineData("01.02.1990")]    // DOB with dots
+    [InlineData("123 456")]       // separated MRN
+    public void SeparatedNumericIdentifier_Refused_TotalDigitCount(string typed)
+    {
+        var skill = Harvest(Obj(), out var reason,
+            Step("s0", "type_into_field", ("text", typed)));
+
+        Assert.Null(skill);
+        Assert.Contains("free_text_identifier_digits", reason);
+        Assert.DoesNotContain("123", reason);
+    }
+
+    [Fact]
+    public void UnicodeDiacriticName_GoalEcho_Refused() // Codex #3 HIGH
+    {
+        // Goal "find patient García"; typed "garcia". The ASCII tokenizer would miss "García"→"Garc";
+        // diacritic+case fold on BOTH sides makes "garcia" == "garcia".
+        var skill = Harvest(new AgentObjective("find patient García profile", "task.flow", "ph"),
+            out var reason,
+            Step("s0", "type_into_field", ("text", "garcia")));
+
+        Assert.Null(skill);
+        Assert.Contains("free_text_goal_echo:text", reason);
+        Assert.DoesNotContain("garcia", reason);
+    }
+
+    [Fact]
+    public void TypedEmail_Refused_EmailRule() // Codex #6 (certifier rule)
+    {
+        var skill = Harvest(Obj(), out var reason,
+            Step("s0", "type_into_field", ("text", "jane.rivera@example.com")));
+
+        Assert.Null(skill);
+        Assert.Contains("free_text_email:text", reason);
+        Assert.DoesNotContain("jane", reason);
+    }
+
+    [Fact]
+    public void HelperRejectedStep_Dropped_NeverBanks() // Codex #6 (Outcome gate)
+    {
+        // The Helper REJECTED a typed-email step (PhiPatternGuard), but its Verdict reads Met. Without
+        // the Outcome==Success gate it would still bank. With the gate it's dropped — and since it's the
+        // only candidate step, nothing banks.
+        var rejected = new StepRecord("s0",
+            NextAction.Act("type_into_field", new Dictionary<string, object?> { ["text"] = "x@y.com" }).Signature(),
+            ActStatus.Rejected, PostconditionVerdict.Met, "type_into_field",
+            new Dictionary<string, string> { ["text"] = "x@y.com" });
+        var skill = Harvest(Obj(), out var reason, rejected);
+
+        Assert.Null(skill);
+        Assert.Null(reason); // dropped pre-certification → silent (nothing to bank), not a refusal code
+    }
+
+    [Fact]
+    public void RejectedDirtyStep_DoesNotContaminate_CleanRunStillBanks()
+    {
+        // A rejected PHI step interleaved with clean executed clicks: the rejected step is DROPPED, the
+        // clean steps still bank (the reject doesn't poison the trajectory).
+        var rejected = new StepRecord("sX",
+            NextAction.Act("type_into_field", new Dictionary<string, object?> { ["text"] = "a@b.com" }).Signature(),
+            ActStatus.Rejected, PostconditionVerdict.Met, "type_into_field",
+            new Dictionary<string, string> { ["text"] = "a@b.com" });
+        var skill = Harvest(Obj(), out var reason,
+            Click("s0", "Seven"), rejected, Click("s1", "Eight"));
+
+        Assert.Null(reason);
+        Assert.NotNull(skill);
+        Assert.Equal(2, skill!.Steps.Count); // only the two clean clicks
+    }
+
+    [Fact]
+    public void StructuralKeySmuggling_OnFreeTextVerb_Refused() // Codex #4 HIGH
+    {
+        // type_into_field(label="Jane Doe"): `label` is structural for CLICKS but NOT for type_into_field
+        // (verb-scoped). It is held to the free-text standard → name-shape refuses it. (The signature is
+        // built from the same params so reconstruction-equality holds; the value veto is what fires.)
+        var sig = NextAction.Act("type_into_field",
+            new Dictionary<string, object?> { ["text"] = "12.99", ["label"] = "Jane Doe" }).Signature();
+        var step = new StepRecord("s0", sig, ActStatus.Success, PostconditionVerdict.Met, "type_into_field",
+            new Dictionary<string, string> { ["text"] = "12.99", ["label"] = "Jane Doe" });
+        var skill = Harvest(Obj(), out var reason, step);
+
+        Assert.Null(skill);
+        Assert.Contains("free_text_name_shape:label", reason);
+        Assert.DoesNotContain("Jane", reason);
+    }
+
+    [Fact]
+    public void ParamsSignatureMismatch_FullEquality_Refused() // Codex #5 HIGH
+    {
+        // ActionSignature claims a clean type, but ActionParams carry a dirty `label`. The prefix-only
+        // check would pass (both "type_into_field"); full reconstruction equality catches that the
+        // rebuilt signature (which INCLUDES label="Jane Doe") differs from the banked one → refuse, so
+        // the dirty ParamsJson never persists.
+        var cleanSig = NextAction.Act("type_into_field",
+            new Dictionary<string, object?> { ["text"] = "12.99" }).Signature();
+        var step = new StepRecord("s0", cleanSig, ActStatus.Success, PostconditionVerdict.Met, "type_into_field",
+            new Dictionary<string, string> { ["text"] = "12.99", ["label"] = "Jane Doe" });
+        var skill = Harvest(Obj(), out var reason, step);
+
+        Assert.Null(skill);
+        Assert.Contains("signature_reconstruction_mismatch", reason);
+        Assert.DoesNotContain("Jane", reason);
+    }
+
+    [Fact]
+    public void ClickLabel_MayEchoGoalVocabulary_StillBanks()
+    {
+        // DESIGN PIN (not a hole): click labels legitimately share vocabulary with the goal — "click
+        // Price" to "update the price". The goal-echo veto is for TYPED text (run-specific values), NOT
+        // labels (UI control names), so a label echoing the goal must STILL bank. The bare-name-label
+        // residual is deferred wholly to Phase-3C label grounding (see design brief). This guards
+        // against a regression that re-introduces a label goal-echo veto and breaks the pricing flow.
+        var skill = Harvest(new AgentObjective("update the price to 12.99", "task.flow", "ph"),
+            out var reason, Click("s0", "Price"), Click("s1", "Update"));
+
+        Assert.Null(reason);
+        Assert.NotNull(skill);
+        Assert.Equal(2, skill!.Steps.Count);
+    }
+
+    [Fact]
+    public void MultiStepChordSpelling_Refused_StreamLetterCap() // Codex #7 HIGH
+    {
+        // "J o" + "h n" → spelled "John" across two press_keys steps. Per-step each is only 2 letters
+        // (≤ cap); the trajectory stream sums to 4 single-letter mains → keyboard_spelling_veto.
+        var skill = Harvest(Obj(), out var reason,
+            Step("s0", "press_keys", ("chords", "J o")),
+            Step("s1", "press_keys", ("chords", "h n")));
+
+        Assert.Null(skill);
+        Assert.Contains("keyboard_spelling_veto", reason);
     }
 
     // ───────────────────── (b) clean trajectories bank + replay round-trip ─────────────────────

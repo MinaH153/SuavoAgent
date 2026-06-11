@@ -1,12 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using SuavoAgent.Core.Learning;
 
 namespace SuavoAgent.Core.Agentic;
 
-/// <summary>Result of certifying a string/step for banking. <see cref="RefusalReason"/> is an
+/// <summary>Result of certifying a string/step/trajectory for banking. <see cref="RefusalReason"/> is an
 /// operational CODE (category + optional param key / rule name) — NEVER the offending value, so the
 /// reason itself can be logged and shipped in telemetry without re-leaking what it refused.</summary>
 public readonly record struct HarvestCertification(bool Certified, string? RefusalReason)
@@ -16,10 +18,10 @@ public readonly record struct HarvestCertification(bool Certified, string? Refus
 }
 
 /// <summary>
-/// Phase-3B scrubbing-aware harvest certification: decides whether ONE verified step's action (verb +
-/// params + signature) is PROVABLY free of PHI per the trusted scrub catalog and therefore safe to bank
-/// verbatim into <c>verified_skills</c>. This is the gate that lifts the navigate-path hard-stop (the old
-/// click-only allowlist) without ever letting patient data into a banked skill.
+/// Phase-3B scrubbing-aware harvest certification: decides whether a verified trajectory's actions
+/// (verbs + params + signatures) are PROVABLY free of PHI per the trusted scrub catalog and therefore
+/// safe to bank verbatim into <c>verified_skills</c>. This is the gate that lifts the navigate-path
+/// hard-stop (the old click-only allowlist) without ever letting patient data into a banked skill.
 ///
 /// <para><b>Certify-or-refuse, never transform.</b> A banked action must replay EXACTLY
 /// (<see cref="VerifiedSkillReplayer"/> rejects any step whose reconstructed signature differs from the
@@ -31,26 +33,22 @@ public readonly record struct HarvestCertification(bool Certified, string? Refus
 /// <para><b>Threat model.</b> The perceived screen is already scrubbed (<c>AssertScrubbed</c>), so the
 /// only paths real patient data can take into action params are (a) the free-form objective Goal
 /// (operator-supplied — "find patient Smith" → the reasoner types "Smith"), and (b) raw UI labels echoed
-/// by the LLM from the goal rather than the scrubbed screen. Hence the layered standard:</para>
+/// by the LLM from the goal rather than the scrubbed screen.</para>
 ///
-/// <list type="bullet">
-/// <item><b>Every banked string</b> (verb, signature, param keys + values, serialized steps JSON):
-/// trusted-catalog certification — <c>ContainsPhi</c> false AND scrub-idempotent. Fail-closed on
-/// scrub timeout/sentinel/exception.</item>
-/// <item><b>Free-text values</b> (typed text — the NEW surface this phase opens): additionally the
-/// ShadowDenylist (NDC / DOB / PioneerRx-id / member-id staged rules — enforced here even though
-/// shadow elsewhere), a length cap, a ≥6-digit-run veto (Rx#/MRN/member-id shaped numerics), a
-/// name-shape veto (two consecutive capitalized words), and a goal-echo veto (any alpha token ≥3 chars
-/// shared with the Goal). Goal-echoed text is refused for a second, independent reason: it is
-/// run-specific by construction, so banking it as a literal would replay a stale value — those are
-/// the holes of a future parameterized template, not constants.</item>
-/// <item><b>Chords</b> (press_keys): must parse under a conservative chord grammar; ≤2 single-letter
-/// main keys per step so a name cannot be spelled letter-by-letter.</item>
-/// <item><b>Structural params / UI labels</b>: trusted-catalog certification (the shipped click
-/// standard, unchanged — labels normally come from the scrubbed screen's vocabulary).</item>
-/// <item><b>Verb allowlist</b>: only verbs the replayer + gates handle deterministically. Free-text
-/// verbs REQUIRE structured params (Verb + ActionParams) — a sig-only type/press step cannot be
-/// certified value-by-value and is refused.</item>
+/// <para><b>Two-pass certification (Codex HIPAA round 2).</b> Per-step checks alone leak a name/SSN
+/// SPLIT across steps (<c>type "Jo"</c> + <c>type "hn"</c>, or <c>press J</c> + <c>press o</c>…). So:</para>
+/// <list type="number">
+/// <item><b>Per-step structural pass</b> (<see cref="CertifyStep"/>): verb allowlist; full
+/// <c>NextAction.Act(verb, params).Signature() == ActionSignature</c> reconstruction equality (a forged
+/// ParamsJson that disagrees with the banked signature is refused — the same identity the replayer
+/// enforces, pulled forward to harvest so dirty params never persist); VERB-SCOPED structural keys
+/// (<c>type_into_field</c> requires <c>text</c> and rejects <c>label</c>/<c>signature</c>/automation —
+/// closing structural-key smuggling); trusted-catalog certification of the signature + every param
+/// key/value; chord grammar.</item>
+/// <item><b>Trajectory keyboard-stream pass</b> (<see cref="CertifyTrajectory"/>): concatenate the
+/// CONTIGUOUS keyboard output (typed text + single-letter chord mains) across steps and run the FULL
+/// free-text vetoes (catalog, shadow denylist, email, total-digit, name-shape, goal-echo) on the
+/// concatenation — so a name/identifier assembled key-by-key is caught.</item>
 /// </list>
 ///
 /// Pure logic, no IO; every regex is NonBacktracking (ReDoS-immune). Any unexpected exception
@@ -70,39 +68,63 @@ public static class HarvestPhiCertifier
         "type_into_field", "press_keys",
     };
 
-    /// <summary>Param keys whose values are bounded structural vocabulary (process names, app keys,
-    /// UIA signatures) — trusted-catalog standard. Everything NOT listed here on a free-text verb is
-    /// held to the strictest (free-text) standard, fail-closed.</summary>
-    private static readonly HashSet<string> StructuralParamKeys = new(StringComparer.Ordinal)
-    {
-        "process_name", "app_key", "signature", "control_type", "automation_id", "label",
-    };
+    /// <summary>
+    /// VERB-SCOPED structural-param allowlist (Codex #4). A param key keeps the bounded-structural
+    /// (trusted-catalog-only) standard ONLY for the verbs that legitimately carry it. Anything not
+    /// listed for a verb is held to the strictest free-text standard, fail-closed — so e.g.
+    /// <c>type_into_field(label="Jane Doe")</c> can no longer smuggle a name through the globally
+    /// "structural" <c>label</c> key.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, HashSet<string>> StructuralKeysByVerb =
+        new Dictionary<string, HashSet<string>>(StringComparer.Ordinal)
+        {
+            ["click_by_label"] = new(StringComparer.Ordinal) { "label", "process_name", "app_key" },
+            ["click_by_signature"] = new(StringComparer.Ordinal) { "signature", "control_type", "automation_id", "process_name", "app_key" },
+            ["launch_sandbox_app"] = new(StringComparer.Ordinal) { "app_key", "process_name" },
+            // type_into_field: NO label/signature/automation here. Only the bounded typed-control knobs.
+            // The value-bearing `text` is deliberately ABSENT → always held to the free-text standard.
+            ["type_into_field"] = new(StringComparer.Ordinal) { "clear_first", "per_key_delay_ms", "process_name" },
+            // press_keys: only the inter-chord delay is structural; `chords` is grammar-checked, not here.
+            ["press_keys"] = new(StringComparer.Ordinal) { "inter_chord_delay_ms", "process_name" },
+        };
+
+    /// <summary>The single required value-bearing param per free-text verb (Codex #4). Absence → refuse
+    /// (a free-text verb with no certifiable payload is malformed).</summary>
+    private static readonly IReadOnlyDictionary<string, string> RequiredFreeTextKey =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["type_into_field"] = "text",
+            ["press_keys"] = "chords",
+        };
 
     private const int MaxFreeTextLength = 256;
     private const int MaxChords = 16;
-    private const int MaxSingleLetterChordMains = 2;
+    private const int MaxStreamSingleLetters = 2;     // trajectory-wide letter-spelling cap (Codex #1/#7)
+    private const int MaxFreeTextTotalDigits = 5;     // ≥6 total digits (separators stripped) → refuse (Codex #2)
 
     // Two consecutive capitalized alpha words — the bare-name shape the regex catalog's
-    // context-anchored rules miss ("John Doe" with no "Patient:" prefix).
+    // context-anchored rules miss ("John Doe" with no "Patient:" prefix). Folded text is lower-cased,
+    // so this runs on the ORIGINAL value (before folding) for the name SHAPE.
     private static readonly Regex NameShape = new(
-        @"\b[A-Z][A-Za-z']+[ \t]+[A-Z][A-Za-z']+\b",
+        @"\b\p{Lu}[\p{L}']+[ \t]+\p{Lu}[\p{L}']+\b",
         RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
-    // Identifier-shaped numerics: any unbroken run of 6+ digits (Rx numbers, MRNs, member IDs typed
-    // bare into a search field carry no catalog context keyword — refuse by shape).
-    private static readonly Regex LongDigitRun = new(
-        @"\d{6,}", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
-
-    // Values that are obviously non-identifying: booleans and short numeric/punctuation strings
-    // (prices, quantities, percentages). The trusted+shadow scans still run FIRST, so date / SSN /
-    // phone / NDC shaped strings never reach this fast-pass.
+    // Booleans and short numeric/punctuation strings (prices, quantities, percentages). The
+    // catalog/shadow/email/total-digit scans all run FIRST, so SSN/date/NDC/identifier shapes never
+    // reach this fast-pass.
     private static readonly Regex BoolValue = new(
         @"^(?i:true|false)$", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
     private static readonly Regex NumericValue = new(
         @"^[0-9 .,%$/()+-]{1,64}$", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
-    private static readonly Regex AlphaToken = new(
-        @"[A-Za-z]{3,}", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+    // Email — typed contact PHI the trusted catalog does not cover (Codex #6). Conservative shape.
+    private static readonly Regex EmailShape = new(
+        @"[\w.+\-]+@[\w\-]+\.[\w.\-]+", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+
+    // Unicode-aware alpha token (≥3 LETTERS, any script) for the goal-echo compare. Operates on
+    // diacritic-FOLDED, case-folded text so "García"→"garcia" matches typed "garcia" (Codex #3).
+    private static readonly Regex UnicodeAlphaToken = new(
+        @"\p{L}{3,}", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
     // Verb names are snake_case identifiers; anything else is malformed and refused.
     private static readonly Regex VerbShape = new(
@@ -110,8 +132,8 @@ public static class HarvestPhiCertifier
 
     /// <summary>Glue words excluded from the goal-echo veto so ordinary instructions ("open the
     /// pricing tab") don't block values that merely share English plumbing. Kept SMALL on purpose:
-    /// a missing entry over-refuses (safe); an extra entry could mask a real echo.</summary>
-    private static readonly HashSet<string> GoalEchoStoplist = new(StringComparer.OrdinalIgnoreCase)
+    /// a missing entry over-refuses (safe); an extra entry could mask a real echo. Folded form.</summary>
+    private static readonly HashSet<string> GoalEchoStoplist = new(StringComparer.Ordinal)
     {
         "the", "and", "for", "with", "then", "this", "that", "from", "into", "when", "each",
         "open", "click", "type", "press", "enter", "select", "search", "find", "save", "close",
@@ -131,9 +153,13 @@ public static class HarvestPhiCertifier
         "ctrl", "control", "shift", "alt", "win", "meta", "lwin",
     };
 
+    // ───────────────────────────── per-step structural pass ─────────────────────────────
+
     /// <summary>
-    /// Certify one verified step for banking. <paramref name="goal"/> is the objective's free-form
-    /// goal text (the PHI provenance channel the goal-echo veto checks against).
+    /// Certify one step's STRUCTURE for banking (verb allowlist, reconstruction equality, verb-scoped
+    /// structural keys, catalog scans, chord grammar). <paramref name="goal"/> seeds the per-step
+    /// free-text vetoes for NON-keyboard free text (the keyboard stream is certified separately, across
+    /// steps, by <see cref="CertifyTrajectory"/>). Returns the first refusal, fail-closed on exception.
     /// </summary>
     public static HarvestCertification CertifyStep(StepRecord step, string goal)
     {
@@ -143,7 +169,61 @@ public static class HarvestPhiCertifier
         }
         catch (Exception)
         {
-            // Fail-closed: an unexpected certification fault must never default to "bankable".
+            return HarvestCertification.Refuse("certifier_exception");
+        }
+    }
+
+    /// <summary>
+    /// Certify a whole trajectory: every step's structure PLUS the cross-step keyboard stream. This is
+    /// the entry point the harvester calls. <paramref name="steps"/> is the ordered Met/Success step
+    /// list already filtered by the harvester; the index in a refusal code is the position WITHIN that
+    /// filtered list. Fail-closed on any exception.
+    /// </summary>
+    public static HarvestCertification CertifyTrajectory(IReadOnlyList<StepRecord> steps, string goal)
+    {
+        try
+        {
+            goal ??= string.Empty;
+
+            // Pass 1: per-step structure.
+            for (var i = 0; i < steps.Count; i++)
+            {
+                var cert = CertifyStepCore(steps[i], goal);
+                if (!cert.Certified)
+                    return HarvestCertification.Refuse($"step{i}:{cert.RefusalReason}");
+            }
+
+            // Pass 2: keyboard-stream vetoes over the CONCATENATION of contiguous typed text + chord
+            // letters (Codex #1/#2/#7). A run of keyboard steps assembles into one logical string; any
+            // non-keyboard step (a click) breaks the run, so we certify each maximal run independently.
+            var stream = new StringBuilder();
+            var streamSingleLetters = 0;
+            for (var i = 0; i <= steps.Count; i++)
+            {
+                var (isKeyboard, text, letters) = i < steps.Count ? KeyboardOutput(steps[i]) : (false, string.Empty, 0);
+                if (isKeyboard)
+                {
+                    stream.Append(text);
+                    streamSingleLetters += letters;
+                    continue;
+                }
+                // Run boundary (click / end): certify the accumulated stream, then reset.
+                if (stream.Length > 0 || streamSingleLetters > 0)
+                {
+                    if (streamSingleLetters > MaxStreamSingleLetters)
+                        return HarvestCertification.Refuse($"stream{i}:keyboard_spelling_veto");
+                    var streamCert = CertifyFreeText(stream.ToString(), "keyboard_stream", goal);
+                    if (!streamCert.Certified)
+                        return HarvestCertification.Refuse($"stream{i}:{streamCert.RefusalReason}");
+                    stream.Clear();
+                    streamSingleLetters = 0;
+                }
+            }
+
+            return HarvestCertification.Ok;
+        }
+        catch (Exception)
+        {
             return HarvestCertification.Refuse("certifier_exception");
         }
     }
@@ -175,23 +255,41 @@ public static class HarvestPhiCertifier
         var verb = !string.IsNullOrEmpty(step.ActionVerb) ? step.ActionVerb : VerbFromSignature(step.ActionSignature);
         if (verb is null || !VerbShape.IsMatch(verb))
             return HarvestCertification.Refuse("verb_unresolvable");
-        // Defense-in-depth: the structured verb must agree with the signature's verb prefix (they are
-        // built from the SAME NextAction in ContextAccumulator — a divergence means a forged/corrupt
-        // step that could smuggle a free-text action under the click standard). Refuse, never guess.
-        if (VerbFromSignature(step.ActionSignature) is { } sigVerb && !string.Equals(sigVerb, verb, StringComparison.Ordinal))
-            return HarvestCertification.Refuse("verb_signature_mismatch");
         var isFreeTextVerb = FreeTextVerbs.Contains(verb);
         if (!ClickFamilyVerbs.Contains(verb) && !isFreeTextVerb)
             return HarvestCertification.Refuse($"verb_not_bankable:{verb}");
 
-        // 2. Free-text verbs (type/press) are certifiable only value-by-value: structured params are
-        //    REQUIRED. A sig-only type/press step is refused — the unescaped signature cannot be
-        //    split back into exact values, so per-value certification is impossible.
-        if (isFreeTextVerb && step.ActionParams is not { Count: > 0 })
-            return HarvestCertification.Refuse($"structured_params_required:{verb}");
+        // 2. Free-text verbs are certifiable only value-by-value: structured params are REQUIRED, and
+        //    the value-bearing key (text / chords) MUST be present (Codex #4).
+        if (isFreeTextVerb)
+        {
+            if (step.ActionParams is not { Count: > 0 })
+                return HarvestCertification.Refuse($"structured_params_required:{verb}");
+            if (RequiredFreeTextKey.TryGetValue(verb, out var reqKey)
+                && !step.ActionParams.ContainsKey(reqKey))
+                return HarvestCertification.Refuse($"free_text_payload_missing:{verb}:{reqKey}");
+        }
 
-        // 3. Certify every param key + value under its class standard (before the whole-signature scan,
-        //    so a dirty value surfaces a pinpoint param-level reason).
+        // 3. RECONSTRUCTION EQUALITY (Codex #5): rebuild the action from the BANKED verb + params and
+        //    require its signature to equal the banked ActionSignature EXACTLY — the same identity the
+        //    replayer enforces, pulled forward so a forged/mismatched ParamsJson (dirty `label` under a
+        //    clean `text` signature) can never persist. Only enforceable when structured params exist;
+        //    sig-only rows are click-family (free-text sig-only already refused in step 2) and fall
+        //    through to the verbatim signature scan.
+        if (step.ActionParams is { Count: > 0 } sp)
+        {
+            var rebuilt = NextAction.Act(verb, sp.ToDictionary(kv => kv.Key, kv => (object?)kv.Value));
+            if (!string.Equals(rebuilt.Signature(), step.ActionSignature, StringComparison.Ordinal))
+                return HarvestCertification.Refuse("signature_reconstruction_mismatch");
+        }
+        else if (VerbFromSignature(step.ActionSignature) is { } sigVerb && !string.Equals(sigVerb, verb, StringComparison.Ordinal))
+        {
+            // Sig-only row: at least the verb prefix must agree.
+            return HarvestCertification.Refuse("verb_signature_mismatch");
+        }
+
+        // 4. Certify every param key + value under its VERB-SCOPED class standard.
+        var structuralKeys = StructuralKeysByVerb.TryGetValue(verb, out var sk) ? sk : null;
         if (step.ActionParams is { } ps)
         {
             foreach (var (key, value) in ps)
@@ -210,10 +308,18 @@ public static class HarvestPhiCertifier
                     continue;
                 }
 
-                // Click-family verbs keep the shipped structural/label standard. On free-text verbs,
-                // only known structural keys keep it — every other value (the typed text itself, and
-                // any unknown key, fail-closed) is held to the strictest free-text standard.
-                if (!isFreeTextVerb || StructuralParamKeys.Contains(key))
+                // Verb-scoped structural keys keep the trusted-catalog-only standard. Everything else
+                // (the typed `text`, any key not structural FOR THIS VERB, fail-closed) gets the full
+                // free-text vetoes here too — the trajectory stream pass is ADDITIONAL, not a substitute.
+                //
+                // NB: a goal-echo check is DELIBERATELY NOT applied to click labels. UI button labels
+                // legitimately share vocabulary with the task goal ("click Price" when the goal is to
+                // update a price), so echo is the NORM for labels, not a signal — it would over-refuse
+                // the canonical pricing workflow. The bare-name-click-label residual is therefore left
+                // wholly to Phase-3C bank-time label grounding (label ∈ scrubbed screen), which is the
+                // only check that distinguishes a real UI control from an LLM-echoed name. (Verified:
+                // an interim label goal-echo veto broke "update the price to 12.99" → click "Price".)
+                if (structuralKeys is not null && structuralKeys.Contains(key))
                     continue;
 
                 var free = CertifyFreeText(v, key, goal);
@@ -221,8 +327,8 @@ public static class HarvestPhiCertifier
             }
         }
 
-        // 4. The signature is banked verbatim → trusted-catalog certification ALWAYS (this is also
-        //    the only value-bearing scan available for legacy sig-only click rows — Codex Q3).
+        // 5. The signature is banked verbatim → trusted-catalog certification ALWAYS (this is also the
+        //    only value-bearing scan available for legacy sig-only click rows — Codex Q3).
         if (!TrustedClean(step.ActionSignature))
             return HarvestCertification.Refuse("signature_trusted_phi");
 
@@ -238,21 +344,34 @@ public static class HarvestPhiCertifier
         return string.Equals(PhiScrubber.ScrubText(value), value, StringComparison.Ordinal);
     }
 
+    /// <summary>The full free-text veto stack — applied per-value AND to the cross-step keyboard
+    /// stream. Order matters: high-recall catalog/shadow/email/total-digit scans run BEFORE the
+    /// numeric/bool fast-pass so identifier/contact shapes can never slip through it.</summary>
     private static HarvestCertification CertifyFreeText(string value, string key, string goal)
     {
         if (value.Length == 0) return HarvestCertification.Ok;
         if (value.Length > MaxFreeTextLength)
             return HarvestCertification.Refuse($"free_text_too_long:{key}");
 
+        if (!TrustedClean(value))
+            return HarvestCertification.Refuse($"free_text_trusted_phi:{key}");
+
         // Staged denylist (NDC / DOB shape / PioneerRx ids / member ids): shadow-mode elsewhere,
         // ENFORCED on this brand-new surface. Rule name is operational metadata, never PHI.
         if (PhiScrubber.ShadowDenylistMatch(value) is { } rule)
             return HarvestCertification.Refuse($"free_text_shadow_denylist:{key}:{rule}");
 
-        if (LongDigitRun.IsMatch(value))
+        if (EmailShape.IsMatch(value))
+            return HarvestCertification.Refuse($"free_text_email:{key}");
+
+        // Total-digit veto (Codex #2): strip separators, count digits. ≥6 total → identifier shape
+        // (SSN "123 45 6789", DOB "01.02.1990", MRN "123 456") UNLESS the value is a narrow
+        // price/qty/percent (handled by the numeric fast-pass below, which a digit count ≥6 reaching
+        // here has already been denied — so a 6+ digit price is refused too; acceptable, rare).
+        if (CountDigits(value) > MaxFreeTextTotalDigits)
             return HarvestCertification.Refuse($"free_text_identifier_digits:{key}");
 
-        // Obvious non-identifying values (prices, quantities, flags) — already past the catalog scans.
+        // Obvious non-identifying values (prices, quantities, flags) — already past every shape scan.
         if (BoolValue.IsMatch(value) || NumericValue.IsMatch(value))
             return HarvestCertification.Ok;
 
@@ -265,23 +384,96 @@ public static class HarvestPhiCertifier
         return HarvestCertification.Ok;
     }
 
-    /// <summary>True when the value shares any non-stoplist alpha token (≥3 chars) with the goal —
-    /// the provenance channel for real patient data, and the signature of a run-specific literal.</summary>
+    /// <summary>True when the value shares any non-stoplist alpha token (≥3 LETTERS) with the goal,
+    /// compared after Unicode-normalize + diacritic-fold + case-fold on BOTH sides (Codex #3) — so a
+    /// goal "find patient García" catches typed "garcia". The goal is the provenance channel for real
+    /// patient data, and a goal-echoed literal is run-specific (wrong to bank) regardless.</summary>
     private static bool SharesGoalToken(string value, string goal)
     {
         if (goal.Length == 0) return false;
-        var goalTokens = new HashSet<string>(
-            AlphaToken.Matches(goal).Select(m => m.Value.ToLowerInvariant())
-                .Where(t => !GoalEchoStoplist.Contains(t)),
-            StringComparer.Ordinal);
+        var goalTokens = FoldedTokens(goal);
         if (goalTokens.Count == 0) return false;
-        return AlphaToken.Matches(value)
-            .Select(m => m.Value.ToLowerInvariant())
-            .Any(t => !GoalEchoStoplist.Contains(t) && goalTokens.Contains(t));
+        return FoldedTokens(value).Overlaps(goalTokens);
+    }
+
+    private static HashSet<string> FoldedTokens(string text)
+    {
+        var folded = FoldDiacriticsLower(text);
+        return new HashSet<string>(
+            UnicodeAlphaToken.Matches(folded).Select(m => m.Value).Where(t => !GoalEchoStoplist.Contains(t)),
+            StringComparer.Ordinal);
+    }
+
+    /// <summary>Unicode NFD-decompose, drop combining marks (diacritic fold), lower-case invariantly.
+    /// "García" → "garcia", "JOSÉ" → "jose". Defends the goal-echo compare against accent/case evasion.</summary>
+    private static string FoldDiacriticsLower(string text)
+    {
+        var decomposed = text.Normalize(NormalizationForm.FormD);
+        var sb = new StringBuilder(decomposed.Length);
+        foreach (var ch in decomposed)
+        {
+            if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
+                sb.Append(ch);
+        }
+        return sb.ToString().ToLowerInvariant();
+    }
+
+    private static int CountDigits(string value)
+    {
+        var n = 0;
+        foreach (var ch in value) if (ch is >= '0' and <= '9') n++;
+        return n;
+    }
+
+    /// <summary>
+    /// The keyboard OUTPUT of a step for the trajectory stream: for <c>type_into_field</c> the typed
+    /// <c>text</c>; for <c>press_keys</c> the printable characters a chord produces (a single un-modified
+    /// alnum main types that character — Shift/Ctrl/named keys produce no stream text but the
+    /// single-LETTER count still feeds the spelling cap). Non-keyboard steps return isKeyboard=false,
+    /// breaking the contiguous run.
+    /// </summary>
+    private static (bool IsKeyboard, string Text, int SingleLetters) KeyboardOutput(StepRecord step)
+    {
+        var verb = !string.IsNullOrEmpty(step.ActionVerb) ? step.ActionVerb : VerbFromSignature(step.ActionSignature);
+        if (verb == "type_into_field")
+        {
+            var text = step.ActionParams is { } p && p.TryGetValue("text", out var t) ? t ?? string.Empty : string.Empty;
+            return (true, text, 0);
+        }
+        if (verb == "press_keys")
+        {
+            var chords = step.ActionParams is { } p && p.TryGetValue("chords", out var c) ? c ?? string.Empty : string.Empty;
+            var (text, letters) = ChordStreamOutput(chords);
+            return (true, text, letters);
+        }
+        return (false, string.Empty, 0);
+    }
+
+    /// <summary>Printable stream + single-letter count from a chord list. An un-modified single
+    /// alphanumeric main contributes its character to the stream; a modified or named/function main
+    /// contributes nothing (navigation, not text). Conservative: malformed chords contribute nothing
+    /// here — the per-step <see cref="CertifyChords"/> pass is what refuses malformed grammar.</summary>
+    private static (string Text, int SingleLetters) ChordStreamOutput(string chords)
+    {
+        var sb = new StringBuilder();
+        var letters = 0;
+        foreach (var token in chords.Split(new[] { ',', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = token.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length != 1) continue; // any modifier present → not literal text output
+            var main = parts[0];
+            if (main.Length == 1 && char.IsLetterOrDigit(main[0]))
+            {
+                sb.Append(main[0]);
+                if (char.IsLetter(main[0])) letters++;
+            }
+        }
+        return (sb.ToString(), letters);
     }
 
     /// <summary>Chords must parse under the conservative chord grammar (modifiers + ONE main key per
-    /// chord), with a hard cap on single-letter mains so PHI cannot be spelled key-by-key.</summary>
+    /// chord), with a hard cap on single-letter mains so PHI cannot be spelled key-by-key within ONE
+    /// step. The TRAJECTORY-wide letter cap (across steps) is enforced in <see cref="CertifyTrajectory"/>.</summary>
     private static HarvestCertification CertifyChords(string value)
     {
         var tokens = value.Split(new[] { ',', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -307,7 +499,7 @@ public static class HarvestPhiCertifier
                 && int.TryParse(main[1..], out var fn) && fn is >= 1 and <= 12;
             if (!isSingleAlnum && !isFunctionKey && !NamedChordKeys.Contains(main))
                 return HarvestCertification.Refuse("chords_bad_key");
-            if (main.Length == 1 && char.IsLetter(main[0]) && ++singleLetterMains > MaxSingleLetterChordMains)
+            if (main.Length == 1 && char.IsLetter(main[0]) && ++singleLetterMains > MaxStreamSingleLetters)
                 return HarvestCertification.Refuse("chords_spelling_veto");
         }
 
@@ -316,6 +508,7 @@ public static class HarvestPhiCertifier
 
     private static string? VerbFromSignature(string signature)
     {
+        if (string.IsNullOrEmpty(signature)) return null;
         var open = signature.IndexOf('(');
         return open > 0 && signature[^1] == ')' ? signature[..open] : null;
     }

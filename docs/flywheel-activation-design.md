@@ -33,33 +33,58 @@ the reasoner types `Smith`) and (b) raw labels echoed by the LLM from the goal i
 screen. The Helper's `PhiPatternGuard` independently rejects SSN/address/email/phone/NDC-shaped typed
 text **before injection** (so such a step never verifies Met) — but it does not catch bare names. Layers:
 
-1. **Verb allowlist** — only `click_by_label`, `click_by_signature`, `launch_sandbox_app`,
+Certification is **two-pass** (per-step structure, then a cross-step keyboard-stream pass — the latter
+added in the Codex HIPAA round-2 hardening to catch PHI split across steps). The harvester calls
+`HarvestPhiCertifier.CertifyTrajectory` once over the filtered Met+Success steps.
+
+1. **Executed-and-verified only** — `VerifiedTrajectoryHarvester` banks a step ONLY when
+   `Outcome == Success` AND `Verdict == Met`. A Helper-REJECTED step (e.g. PhiPatternGuard rejecting a
+   typed email) never banks even if its Verdict reads Met. *(Round-2 #6.)*
+2. **Verb allowlist** — only `click_by_label`, `click_by_signature`, `launch_sandbox_app`,
    `type_into_field`, `press_keys`. Anything else (or an unresolvable verb) refuses the trajectory.
-2. **Trusted-catalog certification on every banked string** — verb, signature, every param key+value:
+3. **Reconstruction equality** — when structured params exist, `NextAction.Act(verb, params).Signature()`
+   must equal the banked `ActionSignature` EXACTLY (the same identity the replayer enforces, pulled
+   forward to harvest) — so a forged/mismatched `ParamsJson` (a dirty `label` under a clean `text`
+   signature) can never persist. Sig-only rows require at least verb-prefix agreement. *(Round-2 #5.)*
+4. **Trusted-catalog certification on every banked string** — verb, signature, every param key+value:
    `PhiScrubber.ContainsPhi == false` AND `ScrubText(x) == x` (scrub-idempotence). Both probes fail
    closed internally (timeout → "PHI present" / sentinel).
-3. **Structured-params requirement for free-text verbs** — a sig-only `type_into_field`/`press_keys`
+5. **Structured-params requirement for free-text verbs** — a sig-only `type_into_field`/`press_keys`
    step can't be certified value-by-value (the unescaped signature is not losslessly splittable) →
-   refused. Sig-only clicks keep the shipped standard (signature-level trusted scan).
-4. **Free-text values (typed text — the new surface) get the strictest standard:**
+   refused; the value-bearing key (`text`/`chords`) must be present. Sig-only clicks keep the shipped
+   standard (signature-level trusted scan).
+6. **Verb-scoped structural keys** — a param key keeps the bounded-structural (trusted-catalog-only)
+   standard ONLY for the verbs that legitimately carry it. `label`/`signature`/`automation_id` are
+   structural for CLICKS but NOT for `type_into_field`/`press_keys`, so
+   `type_into_field(label="Jane Doe")` can no longer smuggle a name through a globally-"structural" key
+   — it gets the full free-text vetoes. *(Round-2 #4.)*
+7. **Free-text values (typed text — the new surface) get the strictest standard:**
+   - trusted-catalog scrub-idempotence;
    - ShadowDenylist **enforced** (NDC / DOB-shape / PioneerRx-id / member-id staged rules; shadow-mode
      elsewhere by design, enforced on this brand-new surface);
-   - length cap (256);
-   - ≥6-digit-run veto (Rx# / MRN / member-id shaped numerics carry no catalog context keyword);
-   - numeric/boolean fast-pass (prices, quantities, flags — already past the catalog+shadow scans);
-   - **name-shape veto** — two consecutive capitalized words ("John Doe" has no catalog context
-     keyword; this is the layer that catches it);
-   - **goal-echo veto** — any alpha token (≥3 chars, non-stoplist, case-insensitive) shared with the
-     Goal refuses. Two independent justifications: (i) the Goal is the PHI provenance channel;
-     (ii) goal-echoed text is run-specific by construction — banking it as a literal would replay a
-     stale value. Those strings are the *holes* of a future parameterized template, not constants.
-5. **Chord grammar for `press_keys`** — must parse as `(modifier+)*main` with main ∈ named keys /
-   single alnum / F1–F12; ≤16 chords; ≤2 single-LETTER mains (PHI cannot be spelled key-by-key).
-6. **End-of-pipe re-certification** — the exact `SerializeSteps()` string that lands in
-   `verified_skills.steps_json` is re-scanned (belt-and-suspenders against shapes assembled across
-   value boundaries).
-7. **Refusal reasons are operational codes** (`step2:free_text_goal_echo:text`) — never values — so
-   they are safe to log and ship.
+   - **email veto** — typed contact PHI the trusted catalog does not cover; *(Round-2 #6.)*
+   - **total-digit veto** — strip separators, refuse ≥6 total digits, so space/dot-separated SSN
+     (`123 45 6789`) / DOB (`01.02.1990`) / MRN (`123 456`) are caught even though no 6 are contiguous;
+     *(Round-2 #2.)*
+   - numeric/boolean fast-pass (prices, quantities, flags — only AFTER every shape scan);
+   - **name-shape veto** — two consecutive capitalized words ("John Doe", Unicode-letter aware);
+   - **goal-echo veto** — any alpha token (≥3 letters, non-stoplist) shared with the Goal refuses,
+     compared after **Unicode-normalize + diacritic-fold + case-fold on BOTH sides**, so goal "García"
+     catches typed "garcia". Two justifications: (i) the Goal is the PHI provenance channel;
+     (ii) goal-echoed text is run-specific — banking it as a literal would replay a stale value. *(Fold
+     added round-2 #3.)*
+8. **Chord grammar for `press_keys`** — must parse as `(modifier+)*main` with main ∈ named keys /
+   single alnum / F1–F12; ≤16 chords; ≤2 single-LETTER mains **per step**.
+9. **Cross-step keyboard stream** — the CONTIGUOUS keyboard output (typed `text` + single-letter chord
+   mains) is concatenated across steps (a click breaks the run) and the **full free-text vetoes** run on
+   the concatenation, PLUS a trajectory-wide ≤2 single-letter-mains cap. This catches a name/identifier
+   assembled key-by-key (`type "Jo"`+`type "hn"`, or `press J`+`press o`…). *(Round-2 #1 + #7 — the
+   structural fix that closes both split-typing and split-chord-spelling at the root.)*
+10. **End-of-pipe re-certification** — the exact `SerializeSteps()` string that lands in
+    `verified_skills.steps_json` is re-scanned (belt-and-suspenders against shapes assembled across
+    value boundaries).
+11. **Refusal reasons are operational codes** (`step2:free_text_goal_echo:text`,
+    `stream2:keyboard_spelling_veto`) — never values — so they are safe to log and ship.
 
 **Known accepted costs (fail-closed over-refusal, by design):**
 - Drug/search terms echoed from the goal ("search Lipitor" → type `Lipitor`) refuse → don't bank.
@@ -68,16 +93,28 @@ text **before injection** (so such a step never verifies Met) — but it does no
   opportunistic — a refused bank just means the LLM runs again next time.
 - Numerics with 6+ digit runs refuse even when legitimate.
 
-**Known residual (pre-existing, NOT introduced here, must be on the Codex/HIPAA review list):**
+**Closed in round-2 (all 7 Codex HIPAA findings):** split typed name across steps (#1) + split chord
+spelling (#7) → cross-step keyboard-stream pass; space/dot-separated SSN/DOB (#2) → total-digit veto;
+Unicode/diacritic surname (#3) → fold-both-sides goal-echo; structural-key smuggling on free-text verbs
+(#4) → verb-scoped structural keys; prefix-only verb/sig check (#5) → full reconstruction equality at
+harvest; Helper-rejected step banking + missing email rule (#6) → Outcome==Success gate + email veto.
+
+**Known residual, CONSCIOUSLY DEFERRED to Phase-3C (must stay on the Codex/HIPAA review list):**
 - A bare-name **click label** ("John Doe" as a row label, no comma, no context keyword) echoed by the
-  LLM from the goal passes the trusted catalog and banks — exactly as it does in the shipped click
+  LLM from the goal still passes the trusted catalog and banks — exactly as it does in the shipped click
   path today. `Doe, John` (LastFirst) IS caught; all-caps `DOE, JOHN` is NOT (catalog rule requires
-  mixed case). Real fix = **bank-time label grounding** (Phase-3C): capture
+  mixed case). The name-shape veto is deliberately NOT applied to click labels (it would refuse
+  legitimate PMS buttons "Patient Search", "Fill Queue"). **A label goal-echo veto was tried and
+  REJECTED:** UI button labels legitimately share vocabulary with the goal ("click Price" to "update the
+  price"), so echo is the NORM for labels — the veto broke the canonical pricing flow
+  (`update the price to 12.99` → click "Price"). Banking labels is therefore certified by the trusted
+  catalog only, same as the shipped click path. Real fix = **bank-time label grounding** (3C): capture
   `label ∈ scrubbed ElementSummary` as a boolean on `StepRecord` at step time in
-  `ContextAccumulator.RecordStep` (the screen is in scope), and have the certifier require it for
-  labels. Deliberately out of scope here — it touches the loop contract, deserves its own reviewed
-  change. The name-shape veto was NOT applied to labels because it would refuse most legitimate PMS
-  buttons ("Patient Search", "Fill Queue").
+  `ContextAccumulator.RecordStep` (the screen is in scope) and require it in the certifier for labels —
+  the ONLY check that distinguishes a real UI control from an LLM-echoed name without over-refusing. It
+  touches the loop contract → its own reviewed change. **Interim exposure** requires: operator puts a
+  patient name in the navigate GOAL, the LLM echoes it as a click label (not from the scrubbed screen),
+  that click VERIFIES Met, on a box where harvest runs — narrow, but real until 3C.
 
 **CPU/RAM delta:** ~40 short-string regex passes per banked step (trusted 18 + shadow 17 + 5 local),
 microseconds each; ≤25 steps per run; runs post-run inside the existing best-effort `Task.Run`. No new

@@ -8,21 +8,26 @@ namespace SuavoAgent.Core.Agentic;
 /// Pure logic over the loop's result (testable; no DB/IO) — the persistence + thickening happens in the
 /// caller via the SQLite store, off the hot path. This is the "derive once → bank" half of lever 3.
 ///
-/// <para>VERIFIED-ONLY by construction, two gates: (1) the run must have reached its objective
-/// (<see cref="TerminationReason.Done"/> — the reasoner returned Done); (2) every banked step is a
-/// Phase-1 <see cref="PostconditionVerdict.Met"/> step. Unverified detours (NotMet/Ambiguous dead clicks
-/// that didn't change the screen) are DROPPED, never banked — the banked chain is the clean verified path
-/// that actually advanced the screen toward success. Nothing is banked from a run that didn't succeed.</para>
+/// <para>VERIFIED-ONLY by construction: (1) the run must have reached its objective
+/// (<see cref="TerminationReason.Done"/> — the reasoner returned Done); (2) every banked step was
+/// actually EXECUTED for real (<see cref="ActStatus.Success"/> — a Helper-REJECTED step, e.g. a
+/// PHI-pattern reject on typed text, never banks even if its Verdict reads Met) AND verified its
+/// postcondition (Phase-1 <see cref="PostconditionVerdict.Met"/>). Unverified detours and
+/// rejected/dry-run steps are DROPPED — the banked chain is the clean executed-and-verified path.
+/// Nothing is banked from a run that didn't succeed.</para>
 ///
-/// <para><b>PHI-certified by construction (Phase-3B).</b> Banked signatures + params are persisted
-/// VERBATIM, so every step must be certified provably PHI-free by <see cref="HarvestPhiCertifier"/>
-/// before banking: verb allowlisted, signature + every param key/value scrub-certified (certify-or-refuse
-/// — never bank a transformed value), free-text (typed) values held to the strictest standard
-/// (shadow denylist + identifier-digit / name-shape / goal-echo vetoes), and the final serialized
-/// steps_json re-certified end-of-pipe. ANY uncertifiable step refuses the WHOLE trajectory (a partial
-/// chain is unreplayable anyway) — bank nothing rather than possible PHI. This lifts the old
-/// click-only hard-stop on the navigate path: type_into_field / press_keys steps now bank when, and
-/// only when, their exact values are certified clean.</para>
+/// <para><b>PHI-certified by construction (Phase-3B, two-pass).</b> Banked signatures + params are
+/// persisted VERBATIM, so the WHOLE trajectory is certified provably PHI-free by
+/// <see cref="HarvestPhiCertifier.CertifyTrajectory"/>: per-step structure (verb allowlist;
+/// reconstruction-equality of the banked params↔signature; verb-scoped structural keys; trusted-catalog
+/// scrub-certification of signature + every key/value — certify-or-refuse, never a transformed value;
+/// chord grammar) PLUS a cross-step keyboard-stream pass (concatenated typed text + chord letters run
+/// through the full free-text vetoes — catalog, shadow denylist, email, total-digit, name-shape,
+/// goal-echo — so a name/identifier assembled key-by-key across steps is caught). The final serialized
+/// steps_json is re-certified end-of-pipe. ANY uncertifiable step refuses the WHOLE trajectory (a
+/// partial chain is unreplayable anyway) — bank nothing rather than possible PHI. This lifts the old
+/// click-only hard-stop: type_into_field / press_keys steps bank when, and only when, their exact
+/// values are certified clean.</para>
 /// </summary>
 public static class VerifiedTrajectoryHarvester
 {
@@ -52,34 +57,45 @@ public static class VerifiedTrajectoryHarvester
         var history = result.FinalMemory?.History;
         if (history is null || history.Count == 0) return null;
 
-        // Gate 2: bank ONLY the verified (Met) actuating steps, in order. NotMet/Ambiguous/unknown
-        // actuating steps are exploration detours that produced no observable effect — dropped, never
-        // banked (verified-only). Terminal / no-action steps carry no (state, action) key — skipped.
-        var steps = new List<VerifiedStep>();
-        for (var i = 0; i < history.Count; i++)
+        // Gate 2: bank ONLY the EXECUTED-and-verified actuating steps, in order. A step is bankable
+        // only when it (a) carries a (state, action) key, (b) was actually EXECUTED for real
+        // (Outcome == Success — a Helper-REJECTED step, e.g. a PHI-pattern reject on typed text, must
+        // NEVER bank even if its Verdict reads Met; Codex #6), and (c) verified its postcondition
+        // (Verdict == Met). NotMet/Ambiguous detours and rejected/dry-run steps are dropped — the
+        // banked chain is the clean executed-and-verified path. Terminal / no-action steps carry no key.
+        var certifiable = new List<StepRecord>();
+        var banked = new List<VerifiedStep>();
+        foreach (var s in history)
         {
-            var s = history[i];
             if (string.IsNullOrEmpty(s.DecisionScreenHash) || string.IsNullOrEmpty(s.ActionSignature))
+                continue;
+            if (s.Outcome != ActStatus.Success)
                 continue;
             if (s.Verdict != PostconditionVerdict.Met)
                 continue;
-
-            // Gate 3 (Phase-3B): the step's action must be CERTIFIED PHI-free to persist verbatim.
-            // One uncertifiable step refuses the whole trajectory — bank nothing, never a partial or
-            // possibly-PHI-bearing skill.
-            var cert = HarvestPhiCertifier.CertifyStep(s, objective.Goal);
-            if (!cert.Certified)
-            {
-                refusalReason = $"step{i}:{cert.RefusalReason}";
-                return null;
-            }
-
-            var paramsJson = s.ActionParams is { Count: > 0 } ? JsonSerializer.Serialize(s.ActionParams) : null;
-            steps.Add(new VerifiedStep(s.DecisionScreenHash, s.ActionSignature, s.ActionVerb, paramsJson));
+            certifiable.Add(s);
         }
 
-        if (steps.Count == 0) return null;
-        var skill = VerifiedSkill.Create(objective.PharmacyId, objective.TaskKey, app ?? string.Empty, steps);
+        if (certifiable.Count == 0) return null;
+
+        // Gate 3 (Phase-3B): the WHOLE trajectory must be CERTIFIED PHI-free to persist verbatim — both
+        // per-step structure AND the cross-step keyboard stream (a name/identifier assembled across
+        // steps). One uncertifiable step refuses the whole trajectory — bank nothing, never a partial
+        // or possibly-PHI-bearing skill. The refusal code is PHI-free and indexes the FILTERED list.
+        var cert = HarvestPhiCertifier.CertifyTrajectory(certifiable, objective.Goal);
+        if (!cert.Certified)
+        {
+            refusalReason = cert.RefusalReason;
+            return null;
+        }
+
+        foreach (var s in certifiable)
+        {
+            var paramsJson = s.ActionParams is { Count: > 0 } ? JsonSerializer.Serialize(s.ActionParams) : null;
+            banked.Add(new VerifiedStep(s.DecisionScreenHash, s.ActionSignature, s.ActionVerb, paramsJson));
+        }
+
+        var skill = VerifiedSkill.Create(objective.PharmacyId, objective.TaskKey, app ?? string.Empty, banked);
 
         // Gate 4 (Phase-3B, end-of-pipe): re-certify the EXACT serialized string that will land in
         // verified_skills.steps_json — belt-and-suspenders against PHI shapes assembled across value
