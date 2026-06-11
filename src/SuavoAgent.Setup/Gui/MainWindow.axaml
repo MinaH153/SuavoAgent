@@ -9,8 +9,9 @@
         x:Class="SuavoAgent.Setup.Gui.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="SuavoAgent Setup"
+        Icon="/Assets/suavo-logo.png"
         Width="960" Height="640"
-        MinWidth="820" MinHeight="560"
+        MinWidth="760" MinHeight="520"
         Background="{DynamicResource SuavoBackgroundBrush}"
         WindowStartupLocation="CenterScreen"
         CanResize="True">
@@ -29,16 +30,9 @@
                 Height="56">
             <DockPanel LastChildFill="False" Margin="24,0">
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-                    <Border Width="28" Height="28"
-                            Background="{DynamicResource SuavoAccentBrush}"
-                            CornerRadius="{DynamicResource SuavoRadiusSmall}">
-                        <TextBlock Text="S"
-                                   Foreground="#101010"
-                                   FontWeight="Bold"
-                                   FontSize="16"
-                                   HorizontalAlignment="Center"
-                                   VerticalAlignment="Center"/>
-                    </Border>
+                    <Image Source="/Assets/suavo-logo.png"
+                           Width="28" Height="28"
+                           RenderOptions.BitmapInterpolationMode="HighQuality"/>
                     <TextBlock Text="SuavoAgent Setup"
                                Foreground="{DynamicResource SuavoTextBrush}"
                                FontWeight="SemiBold"

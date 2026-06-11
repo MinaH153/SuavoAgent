@@ -8,6 +8,8 @@
     <AssemblyTitle>SuavoAgent Setup</AssemblyTitle>
     <Description>Suavo pharmacy agent installer — signed one-click setup with HIPAA BAA consent.</Description>
     <RootNamespace>SuavoAgent.Setup</RootNamespace>
+    <!-- The Suavo mark as the EXE / taskbar / Alt-Tab / UAC-dialog icon (multi-size .ico, 16–256). -->
+    <ApplicationIcon>Assets\suavo.ico</ApplicationIcon>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <SupportedOSPlatformVersion>10.0</SupportedOSPlatformVersion>
@@ -31,6 +33,13 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="SuavoAgent.Setup.Tests" />
+  </ItemGroup>
+
+  <!-- Brand assets embedded as Avalonia resources: suavo-logo.png drives the in-app
+       logo (title strip + Welcome/Success heroes via avares://); suavo.ico is the
+       Window.Icon. -->
+  <ItemGroup>
+    <AvaloniaResource Include="Assets/**" />
   </ItemGroup>
 
   <ItemGroup>

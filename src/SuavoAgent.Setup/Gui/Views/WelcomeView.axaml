@@ -10,17 +10,10 @@
     <Grid RowDefinitions="*,Auto,Auto,Auto,*" Margin="80,48">
 
         <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Bottom" Spacing="16">
-            <Border HorizontalAlignment="Center"
-                    Width="72" Height="72"
-                    CornerRadius="16"
-                    Background="{DynamicResource SuavoAccentBrush}">
-                <TextBlock Text="S"
-                           Foreground="{DynamicResource SuavoAccentTextInverseBrush}"
-                           FontWeight="Bold"
-                           FontSize="36"
-                           HorizontalAlignment="Center"
-                           VerticalAlignment="Center"/>
-            </Border>
+            <Image Source="/Assets/suavo-logo.png"
+                   HorizontalAlignment="Center"
+                   Width="72" Height="72"
+                   RenderOptions.BitmapInterpolationMode="HighQuality"/>
             <TextBlock Text="Install SuavoAgent"
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontWeight="Light"
