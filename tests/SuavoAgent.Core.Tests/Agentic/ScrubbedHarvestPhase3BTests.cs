@@ -103,7 +103,7 @@ public class ScrubbedHarvestPhase3BTests
             Step("s2", "type_into_field", ("text", "hn")));
 
         Assert.Null(skill);
-        Assert.Contains("trajectory:goal_echo", reason);
+        Assert.Contains("goal_echo", reason); // via the full CertifyFreeText stack on the concatenation
         Assert.DoesNotContain("Jo", reason);
     }
 
@@ -118,7 +118,36 @@ public class ScrubbedHarvestPhase3BTests
             Step("s2", "type_into_field", ("text", "456")));
 
         Assert.Null(skill);
-        Assert.Contains("trajectory:identifier_digits", reason);
+        Assert.Contains("identifier_digits", reason);
+    }
+
+    [Fact]
+    public void EmailFragmentedAcrossClick_Refused()
+    {
+        // F1 (Fable): "jane.rivera" + "@example.com" each clear EmailShape alone (no full a@b.c); the
+        // catalog has no email rule. The whole-trajectory pass must run the FULL CertifyFreeText stack
+        // (incl. EmailShape) on the concatenation so the assembled email is caught across the click.
+        var skill = Harvest(Obj("update the contact info now"), out var reason,
+            Step("s0", "type_into_field", ("text", "jane.rivera")),
+            Click("s1", "Field2"),
+            Step("s2", "type_into_field", ("text", "@example.com")));
+
+        Assert.Null(skill);
+        Assert.Contains("free_text_email", reason);
+        Assert.DoesNotContain("jane", reason);
+    }
+
+    [Fact]
+    public void SingleRunValueSharingShortGoalSubstring_Banks()
+    {
+        // F3 (Fable): no click fragments the stream (one keyboard run), so the broad substring goal-echo
+        // must NOT fire — "tablets" contains the goal token "tab", but per-run token-equality (tablets ≠
+        // tab) correctly allows it. The cross-click substring pass is gated on keyboardRuns >= 2.
+        var skill = Harvest(Obj("open the orders tab"), out var reason,
+            Step("s0", "type_into_field", ("text", "tablets")));
+
+        Assert.NotNull(skill);
+        Assert.Null(reason);
     }
 
     [Fact]

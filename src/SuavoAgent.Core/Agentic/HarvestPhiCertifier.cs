@@ -209,6 +209,7 @@ public static class HarvestPhiCertifier
             var runSingleLetters = 0;
             var full = new StringBuilder();
             var fullSingleLetters = 0;
+            var keyboardRuns = 0;
             for (var i = 0; i <= steps.Count; i++)
             {
                 var (isKeyboard, text, letters) = i < steps.Count ? KeyboardOutput(steps[i]) : (false, string.Empty, 0);
@@ -221,6 +222,7 @@ public static class HarvestPhiCertifier
                 // Run boundary (click / end): certify the accumulated contiguous run, then reset the RUN only.
                 if (run.Length > 0 || runSingleLetters > 0)
                 {
+                    keyboardRuns++;
                     if (runSingleLetters > MaxStreamSingleLetters)
                         return HarvestCertification.Refuse($"stream{i}:keyboard_spelling_veto");
                     var runCert = CertifyFreeText(run.ToString(), "keyboard_stream", goal);
@@ -231,16 +233,29 @@ public static class HarvestPhiCertifier
                 }
             }
 
-            // (b) Whole-trajectory cross-click defense: a name/identifier fragmented across clicks.
-            var fullText = full.ToString();
-            if (fullText.Length > 0)
+            // (b) Whole-trajectory cross-click defense — ONLY when a click actually fragmented the typed
+            // stream (≥2 keyboard runs). A goal-derived name/identifier can then be split across the click
+            // into fragments each too short for the per-run vetoes, so run the FULL free-text stack on the
+            // concatenation (catalog / shadow / email / total-digit / name-shape / token goal-echo — the
+            // SAME checks the per-run pass runs, never a subset) PLUS a separator-robust substring goal-echo
+            // for fragments that reassemble only without their separators ("John"+"Doe" → "johndoe" ⊇ "john").
+            // A SINGLE uninterrupted run already cleared the full stack per-run with exact token semantics, so
+            // it is NOT re-checked here — substring semantics on a single run would over-refuse a legit value
+            // that coincidentally contains a short goal token ("tablets" vs goal "…tab"). (2026-06-11 Fable
+            // review of the cross-click fix — the first pass ran a subset and reopened email/name-shape.)
+            if (keyboardRuns >= 2)
             {
-                if (fullSingleLetters > MaxStreamSingleLetters)
-                    return HarvestCertification.Refuse("trajectory:keyboard_spelling_veto");
-                if (CountDigits(fullText) > MaxFreeTextTotalDigits)
-                    return HarvestCertification.Refuse("trajectory:identifier_digits");
-                if (ContainsGoalSubstring(fullText, goal))
-                    return HarvestCertification.Refuse("trajectory:goal_echo");
+                var fullText = full.ToString();
+                if (fullText.Length > 0)
+                {
+                    if (fullSingleLetters > MaxStreamSingleLetters)
+                        return HarvestCertification.Refuse("trajectory:keyboard_spelling_veto");
+                    var fullCert = CertifyFreeText(fullText, "trajectory", goal);
+                    if (!fullCert.Certified)
+                        return HarvestCertification.Refuse($"trajectory:{fullCert.RefusalReason}");
+                    if (ContainsGoalSubstring(fullText, goal))
+                        return HarvestCertification.Refuse("trajectory:goal_echo");
+                }
             }
 
             return HarvestCertification.Ok;
