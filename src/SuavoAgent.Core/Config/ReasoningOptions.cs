@@ -58,6 +58,19 @@ public sealed class ReasoningOptions
     public string? NativeLibsSha256 { get; set; }
 
     /// <summary>
+    /// OPTIONAL AVX2-optimized variant of the native-libs ZIP. <see cref="NativeLibsUrl"/> stays the
+    /// universal NOAVX fallback (runs on ANY x64 CPU, ~5-10x slower); this is preferred when the box's
+    /// CPU reports <c>System.Runtime.Intrinsics.X86.Avx2.IsSupported</c>. Only <c>ggml-cpu.dll</c> differs
+    /// between variants (the AVX2 compute kernel). When set + the CPU supports AVX2, the provisioner
+    /// downloads THIS instead, and re-provisions a box already holding the other variant (tracked by a
+    /// <c>.variant</c> marker). Empty ⇒ noavx everywhere (today's behavior). SHA256-verified like the base.
+    /// </summary>
+    public string? NativeLibsUrlAvx2 { get; set; }
+
+    /// <summary>Expected SHA256 (hex) of the AVX2 native-libs ZIP from <see cref="NativeLibsUrlAvx2"/>.</summary>
+    public string? NativeLibsSha256Avx2 { get; set; }
+
+    /// <summary>
     /// Directory holding the native llama.cpp + ggml binaries that LLamaSharp
     /// P/Invokes into. We do NOT ship these by default — their presence is a
     /// vendor fingerprint (Codex C-1). When Tier-2 is enabled the operator
