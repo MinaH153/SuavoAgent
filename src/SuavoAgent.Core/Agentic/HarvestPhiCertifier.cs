@@ -193,31 +193,54 @@ public static class HarvestPhiCertifier
                     return HarvestCertification.Refuse($"step{i}:{cert.RefusalReason}");
             }
 
-            // Pass 2: keyboard-stream vetoes over the CONCATENATION of contiguous typed text + chord
-            // letters (Codex #1/#2/#7). A run of keyboard steps assembles into one logical string; any
-            // non-keyboard step (a click) breaks the run, so we certify each maximal run independently.
-            var stream = new StringBuilder();
-            var streamSingleLetters = 0;
+            // Pass 2: keyboard-stream vetoes over the CONCATENATION of typed text + chord letters
+            // (Codex #1/#2/#7). TWO scopes, both fail-closed:
+            //   (a) per contiguous RUN (segmented by clicks) — the full free-text stack on a logical
+            //       field entry, where space-joined structure (NameShape, identifier digits typed into
+            //       ONE field) is meaningful.
+            //   (b) the WHOLE trajectory (clicks do NOT reset it) — closes a goal-derived literal split
+            //       ACROSS a click into fragments too short for any per-run veto ("Jo"<click>"hn" →
+            //       "john"). On the assembled keystrokes we run the letter cap + total-digit + a SUBSTRING
+            //       goal-echo: a goal token found ANYWHERE inside the keystrokes is a run-specific echo no
+            //       matter where the agent clicked between them. (A name with no goal provenance leaves
+            //       none — the screen is scrubbed. Substring, not token-equality, because cross-field
+            //       assembly drops the separators the token form relies on.)
+            var run = new StringBuilder();
+            var runSingleLetters = 0;
+            var full = new StringBuilder();
+            var fullSingleLetters = 0;
             for (var i = 0; i <= steps.Count; i++)
             {
                 var (isKeyboard, text, letters) = i < steps.Count ? KeyboardOutput(steps[i]) : (false, string.Empty, 0);
                 if (isKeyboard)
                 {
-                    stream.Append(text);
-                    streamSingleLetters += letters;
+                    run.Append(text); runSingleLetters += letters;
+                    full.Append(text); fullSingleLetters += letters;
                     continue;
                 }
-                // Run boundary (click / end): certify the accumulated stream, then reset.
-                if (stream.Length > 0 || streamSingleLetters > 0)
+                // Run boundary (click / end): certify the accumulated contiguous run, then reset the RUN only.
+                if (run.Length > 0 || runSingleLetters > 0)
                 {
-                    if (streamSingleLetters > MaxStreamSingleLetters)
+                    if (runSingleLetters > MaxStreamSingleLetters)
                         return HarvestCertification.Refuse($"stream{i}:keyboard_spelling_veto");
-                    var streamCert = CertifyFreeText(stream.ToString(), "keyboard_stream", goal);
-                    if (!streamCert.Certified)
-                        return HarvestCertification.Refuse($"stream{i}:{streamCert.RefusalReason}");
-                    stream.Clear();
-                    streamSingleLetters = 0;
+                    var runCert = CertifyFreeText(run.ToString(), "keyboard_stream", goal);
+                    if (!runCert.Certified)
+                        return HarvestCertification.Refuse($"stream{i}:{runCert.RefusalReason}");
+                    run.Clear();
+                    runSingleLetters = 0;
                 }
+            }
+
+            // (b) Whole-trajectory cross-click defense: a name/identifier fragmented across clicks.
+            var fullText = full.ToString();
+            if (fullText.Length > 0)
+            {
+                if (fullSingleLetters > MaxStreamSingleLetters)
+                    return HarvestCertification.Refuse("trajectory:keyboard_spelling_veto");
+                if (CountDigits(fullText) > MaxFreeTextTotalDigits)
+                    return HarvestCertification.Refuse("trajectory:identifier_digits");
+                if (ContainsGoalSubstring(fullText, goal))
+                    return HarvestCertification.Refuse("trajectory:goal_echo");
             }
 
             return HarvestCertification.Ok;
@@ -394,6 +417,22 @@ public static class HarvestPhiCertifier
         var goalTokens = FoldedTokens(goal);
         if (goalTokens.Count == 0) return false;
         return FoldedTokens(value).Overlaps(goalTokens);
+    }
+
+    /// <summary>True when the assembled cross-click keystrokes CONTAIN any non-stoplist goal token
+    /// (≥3 letters) as a SUBSTRING after diacritic+case fold — so a goal-derived literal is caught no
+    /// matter how it was fragmented across clicks/fields ("Jo"&lt;click&gt;"hn" → "john" ⊇ goal "john").
+    /// Substring (not token-equality) because cross-field assembly drops the separators the token form
+    /// relies on. Over-refuses a typed value that coincidentally contains a goal token — safe (a
+    /// goal-echoed literal is run-specific and shouldn't bank anyway; clean non-echoed text has none).</summary>
+    private static bool ContainsGoalSubstring(string concat, string goal)
+    {
+        if (goal.Length == 0) return false;
+        var folded = FoldDiacriticsLower(concat);
+        if (folded.Length == 0) return false;
+        foreach (var token in FoldedTokens(goal))
+            if (folded.Contains(token, StringComparison.Ordinal)) return true;
+        return false;
     }
 
     private static HashSet<string> FoldedTokens(string text)

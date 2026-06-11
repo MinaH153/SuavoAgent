@@ -91,6 +91,65 @@ public class ScrubbedHarvestPhase3BTests
     }
 
     [Fact]
+    public void NameFragmentedAcrossClick_Refused_TrajectoryGoalEcho()
+    {
+        // The two-char fragments "Jo"/"hn" each clear every per-step + per-run veto (too short for the
+        // 3-letter goal-echo token, no name shape). The click between them resets the contiguous RUN —
+        // but the WHOLE-trajectory keyboard stream "John" is substring-matched against the goal token
+        // "john", so the cross-click assembly is still caught.
+        var skill = Harvest(new AgentObjective("find john profile", "task.flow", "ph"), out var reason,
+            Step("s0", "type_into_field", ("text", "Jo")),
+            Click("s1", "Search"),
+            Step("s2", "type_into_field", ("text", "hn")));
+
+        Assert.Null(skill);
+        Assert.Contains("trajectory:goal_echo", reason);
+        Assert.DoesNotContain("Jo", reason);
+    }
+
+    [Fact]
+    public void DigitsFragmentedAcrossClick_Refused_TrajectoryDigits()
+    {
+        // "123" and "456" each clear the per-step identifier-digit veto; the whole-trajectory digit count
+        // (6) refuses the identifier assembled across the click.
+        var skill = Harvest(Obj("enter the reference"), out var reason,
+            Step("s0", "type_into_field", ("text", "123")),
+            Click("s1", "Next"),
+            Step("s2", "type_into_field", ("text", "456")));
+
+        Assert.Null(skill);
+        Assert.Contains("trajectory:identifier_digits", reason);
+    }
+
+    [Fact]
+    public void CleanCrossClickTrajectory_Banks()
+    {
+        // Non-PHI typed values that don't echo the goal must NOT be tripped by the cross-click stream:
+        // "hi" + "30" assembles to "hi30" — no goal-token substring, under the digit threshold.
+        var skill = Harvest(Obj("open notepad and type hi"), out var reason,
+            Step("s0", "type_into_field", ("text", "hi")),
+            Click("s1", "Tab2"),
+            Step("s2", "type_into_field", ("text", "30")));
+
+        Assert.NotNull(skill);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void CanonicalPricingFlow_StillBanks_AfterCrossClickDefense()
+    {
+        // Regression guard: the pricing workflow types a number and CLICKS the "Price" label. The typed
+        // "12.99" shares no token substring with the goal, and the click label is not in the keyboard
+        // stream — so the whole-trajectory defense must not break the canonical flow.
+        var skill = Harvest(Obj("update the price to 12.99"), out var reason,
+            Click("s0", "Price"),
+            Step("s1", "type_into_field", ("text", "12.99")));
+
+        Assert.NotNull(skill);
+        Assert.Null(reason);
+    }
+
+    [Fact]
     public void TypedIdentifierShapedNumber_Refused()
     {
         // A bare 6+ digit run (Rx number / MRN / member id typed into a search box) has no catalog
