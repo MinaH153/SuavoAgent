@@ -195,6 +195,35 @@ public class ProposalParserTests
     }
 
     [Fact]
+    public void TryParse_LeadingQwenThinkBlock_Parses()
+    {
+        const string json = """
+        <think>
+        I should use the visible Save button.
+        </think>
+        { "action": { "type": "Click", "parameters": { "name": "Save" } }, "confidence": 0.9, "rationale": "Save is visible" }
+        """;
+
+        var result = ProposalParser.TryParse(json, "qwen3-1.7b", 0);
+
+        Assert.NotNull(result);
+        Assert.Equal(RuleActionType.Click, result.Action.Type);
+        Assert.Equal("Save", result.Action.Parameters["name"]);
+    }
+
+    [Fact]
+    public void TryParse_UnclosedThinkBlock_ReturnsNull()
+    {
+        const string json = """
+        <think>
+        unfinished reasoning
+        { "action": { "type": "Log", "parameters": {} }, "confidence": 1.0 }
+        """;
+
+        Assert.Null(ProposalParser.TryParse(json, "qwen3-1.7b", 0));
+    }
+
+    [Fact]
     public void TryParse_ConfidenceAsString_ReturnsNull()
     {
         // A model that emits "confidence":"high" must NOT be trusted — fail closed.

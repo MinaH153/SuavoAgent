@@ -121,11 +121,9 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         var promptFormat = InferencePromptBuilder.ResolveFormat(ModelId);
         var prompt = InferencePromptBuilder.Build(request, promptFormat);
 
-        var inferenceParams = new InferenceParams
-        {
-            MaxTokens = _options.MaxOutputTokens,
-            AntiPrompts = InferencePromptBuilder.AntiPromptsFor(promptFormat),
-            SamplingPipeline = new DefaultSamplingPipeline
+        var useGrammar = UsesProposalGrammar(promptFormat);
+        var sampling = useGrammar
+            ? new DefaultSamplingPipeline
             {
                 Temperature = 0.1f,
                 TopK = 40,
@@ -138,23 +136,79 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 // default Extended grammar-resampling path (~5x slower, issue #1099) eating the timeout.
                 Grammar = new Grammar(grammar, "root"),
                 GrammarOptimization = DefaultSamplingPipeline.GrammarOptimizationMode.Basic,
-            },
+            }
+            : new DefaultSamplingPipeline
+            {
+                Temperature = 0.1f,
+                TopK = 40,
+                TopP = 0.95f,
+            };
+
+        if (!useGrammar)
+        {
+            _logger.LogInformation(
+                "LLamaLocalInference: proposal grammar disabled for {Format}; strict parser remains schema gate",
+                promptFormat);
+        }
+
+        var inferenceParams = new InferenceParams
+        {
+            MaxTokens = _options.MaxOutputTokens,
+            AntiPrompts = InferencePromptBuilder.AntiPromptsFor(promptFormat),
+            SamplingPipeline = sampling,
         };
 
         var sb = new StringBuilder();
         var sw = Stopwatch.StartNew();
 
-        // Internal timeout token — distinct from the caller's token so we can
-        // tell them apart below.
-        using var timeoutCts = new CancellationTokenSource(request.Timeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        var timeout = request.Timeout <= TimeSpan.Zero ? TimeSpan.Zero : request.Timeout;
+        var timeoutCts = new CancellationTokenSource(timeout);
+        var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+        async Task ConsumeAsync()
+        {
+            try
+            {
+                await foreach (var token in executor.InferAsync(prompt, inferenceParams, linked.Token).ConfigureAwait(false))
+                {
+                    sb.Append(token);
+                    if (sb.Length > 8192) break; // hard safety cap regardless of MaxTokens
+                }
+            }
+            finally
+            {
+                _lastUse = DateTime.UtcNow;
+                Interlocked.Decrement(ref _activeInferences);
+                RestartIdleWatcher();
+                timeoutCts.Dispose();
+                linked.Dispose();
+            }
+        }
 
         try
         {
-            await foreach (var token in executor.InferAsync(prompt, inferenceParams, linked.Token))
+            var consume = Task.Run(ConsumeAsync, CancellationToken.None);
+            var timeoutGuard = Task.Delay(timeout, CancellationToken.None);
+            var callerCancelGuard = Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            var finished = await Task.WhenAny(consume, timeoutGuard, callerCancelGuard).ConfigureAwait(false);
+
+            if (finished == consume || consume.IsCompleted)
             {
-                sb.Append(token);
-                if (sb.Length > 8192) break; // hard safety cap regardless of MaxTokens
+                await consume.ConfigureAwait(false); // observe completion / exceptions
+            }
+            else if (finished == callerCancelGuard)
+            {
+                try { linked.Cancel(); } catch (ObjectDisposedException) { /* inference already ended */ }
+                ObserveLateFault(consume);
+                ct.ThrowIfCancellationRequested();
+            }
+            else
+            {
+                try { linked.Cancel(); } catch (ObjectDisposedException) { /* inference already ended */ }
+                ObserveLateFault(consume);
+                _logger.LogWarning("LLamaLocalInference: hard timeout after {Ms}ms — abandoning proposal inference",
+                    sw.ElapsedMilliseconds);
+                return null;
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -177,9 +231,6 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         finally
         {
             sw.Stop();
-            _lastUse = DateTime.UtcNow;
-            Interlocked.Decrement(ref _activeInferences);
-            RestartIdleWatcher();
         }
 
         var proposal = ProposalParser.TryParse(sb.ToString(), ModelId, sw.ElapsedMilliseconds);
@@ -195,6 +246,16 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 proposal.Action.Type, proposal.Confidence, sw.ElapsedMilliseconds);
         }
         return proposal;
+    }
+
+    internal static bool UsesProposalGrammar(ChatPromptFormat promptFormat) =>
+        promptFormat != ChatPromptFormat.Qwen3Thinkless;
+
+    private static void ObserveLateFault(Task task)
+    {
+        _ = task.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     /// <summary>
@@ -221,27 +282,33 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         finally { _lock.Release(); }
 
         var promptFormat = InferencePromptBuilder.ResolveFormat(ModelId);
-        // Minimal ChatML — Qwen3's native format. A grounded, concise pharmacy-ops persona.
+        // Grounded, concise pharmacy-ops persona. The prompt template is selected below from ModelId.
+        // Kept deliberately short: on a NOAVX box the prompt PREFILL dominates wall-clock (~8-14 tok/s),
+        // so every persona token delays the first reply token. Keeps the two load-bearing guardrails —
+        // "you have eyes+hands, never say you're just an LLM" and "never invent numbers / fake an action".
         var system =
-            "You ARE SuavoAgent — an AI agent that runs ON this pharmacy's Windows PC, like a person sitting at the keyboard. " +
-            "You can SEE what is on the screen (you read its windows, buttons, and text through the accessibility layer) and you can CONTROL the mouse and keyboard to open apps, click, type, and carry out tasks on this computer. " +
-            "Always answer in the first person about these REAL abilities — NEVER say you 'cannot see the screen', that you 'can't access displays', or that you are 'just a language model'. You are an on-device agent with eyes (the screen) and hands (mouse + keyboard). " +
-            "Keep replies short and plain. Never invent patient data, prices, or numbers, and never claim you performed an action unless it actually happened — state only what is real.";
-        // Prefill an empty think-block so Qwen3 runs in NON-thinking mode (fast, no <think> ramble) —
-        // the documented Qwen3 convention. We also strip any <think>…</think> from the reply as a
-        // belt-and-suspenders for builds that emit it anyway.
-        var prompt =
-            $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{userMessage.Trim()}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+            "You are SuavoAgent, an AI that runs on this pharmacy's Windows PC. You can see the screen " +
+            "(through the accessibility layer) and control the mouse and keyboard to open apps, click, and type. " +
+            "Answer in the first person about these real abilities — never say you can't see the screen or that " +
+            "you're just a language model. Keep replies short and plain. Never invent patient data, prices, or " +
+            "numbers, and never claim you did something unless it actually happened.";
+        var prompt = BuildChatPrompt(userMessage, system, promptFormat);
+        var qwen3Thinkless = promptFormat == ChatPromptFormat.Qwen3Thinkless;
 
         var inferenceParams = new InferenceParams
         {
-            MaxTokens = Math.Min(_options.MaxOutputTokens, 256),
-            AntiPrompts = new[] { "<|im_end|>", "<|im_start|>" },
+            // Cap chat output hard: on NOAVX at ~8-14 tok/s, 256 tokens alone is 18-32s of generation on
+            // top of prefill — enough to blow the ceiling. A concise reply needs far fewer; 128 bounds the
+            // worst case while leaving ample room for a real answer (persona already says "keep it short").
+            MaxTokens = Math.Min(_options.MaxOutputTokens, 128),
+            AntiPrompts = InferencePromptBuilder.AntiPromptsFor(promptFormat),
             SamplingPipeline = new DefaultSamplingPipeline
             {
-                Temperature = 0.6f,
-                TopK = 40,
-                TopP = 0.95f,
+                Temperature = qwen3Thinkless ? 0.7f : 0.6f,
+                TopK = qwen3Thinkless ? 20 : 40,
+                TopP = qwen3Thinkless ? 0.8f : 0.95f,
+                MinP = 0f,
+                PresencePenalty = qwen3Thinkless ? 1.5f : 0f,
                 // Curb the small-model repetition loop. Confirmed live: some prompts (e.g. "what's my
                 // name") sent Qwen3-1.7B into an unbounded generation that never finished on the box's
                 // weak CPU. A repeat penalty breaks the loop so the reply terminates promptly.
@@ -256,13 +323,20 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         // native loop does NOT reliably observe cancellation mid-generation (confirmed live — a hung
         // prompt ran far past this timeout and never acked). So we ALSO race the whole consumption
         // against a real Task.Delay and ABANDON a stuck inference rather than block the caller forever.
-        var ceiling = TimeSpan.FromSeconds(Math.Max(20, _options.InferenceTimeoutSeconds * 3));
+        // Chat is operator-facing freeform text, not an automation decision. On the live NOAVX Qwen3-1.7B
+        // box a one-line prompt reached the old 36s ceiling before returning any token, so keep the hard
+        // abandon guard but give slow prompt-prefill + first decode enough room to produce a short answer.
+        var ceiling = TimeSpan.FromSeconds(Math.Max(120, _options.InferenceTimeoutSeconds * 3));
         var timeoutCts = new CancellationTokenSource(ceiling);
         var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
 
         // Own the in-flight accounting on the REAL inference lifetime (not the caller's), so an
         // abandoned-but-still-running generation keeps the model pinned against idle-unload until it
         // truly ends — and the decrement happens exactly once whether we wait it out or abandon it.
+        // tokensOut is owned separately from `sb` so the abandon path can report progress WITHOUT racing
+        // the orphan's StringBuilder writes (an int read is atomic). 0 at the ceiling = prefill-bound
+        // (too slow / NOAVX); many = runaway generation. The split tells us which knob to turn.
+        var tokensOut = 0;
         async Task ConsumeAsync()
         {
             try
@@ -270,6 +344,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 await foreach (var token in executor.InferAsync(prompt, inferenceParams, linked.Token).ConfigureAwait(false))
                 {
                     sb.Append(token);
+                    Interlocked.Increment(ref tokensOut);
                     if (sb.Length > 4096) break;
                 }
             }
@@ -295,7 +370,12 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 try { linked.Cancel(); } catch (ObjectDisposedException) { /* orphan already finished + disposed */ }
                 _ = consume.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
                     TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-                _logger.LogWarning("LLamaLocalInference.Chat: hard timeout after {Ms}ms — abandoning inference", sw.ElapsedMilliseconds);
+                _logger.LogWarning(
+                    "LLamaLocalInference.Chat: hard timeout after {Ms}ms, {Tokens} tokens produced — abandoning inference ({Diag})",
+                    sw.ElapsedMilliseconds, Volatile.Read(ref tokensOut),
+                    Volatile.Read(ref tokensOut) == 0
+                        ? "prefill-bound: model too slow to emit a first token (NOAVX?) — needs AVX2 libs or a shorter prompt"
+                        : "runaway generation — lower MaxTokens / raise repeat penalty");
                 return null;
             }
             await consume.ConfigureAwait(false); // observe completion / exceptions
@@ -322,6 +402,27 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         reply = reply.Replace("<think>", "").Replace("</think>", "").Trim();
         _logger.LogInformation("LLamaLocalInference.Chat: {Len} chars in {Ms}ms", reply.Length, sw.ElapsedMilliseconds);
         return reply.Length == 0 ? null : reply;
+    }
+
+    internal static string BuildChatPrompt(string userMessage, string system, ChatPromptFormat promptFormat)
+    {
+        var user = userMessage.Trim();
+        return promptFormat switch
+        {
+            ChatPromptFormat.Llama3 =>
+                $"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+            ChatPromptFormat.Zephyr =>
+                $"<|system|>\n{system}</s>\n<|user|>\n{user}</s>\n<|assistant|>\n",
+            ChatPromptFormat.Phi =>
+                $"<|system|>\n{system}<|end|>\n<|user|>\n{user}<|end|>\n<|assistant|>\n",
+            ChatPromptFormat.Qwen3Thinkless =>
+                // Qwen3 enable_thinking=false: plain ChatML + empty <think></think> prefill (training-matched,
+                // fewer generated tokens than /no_think). See InferencePromptBuilder.Build for the rationale.
+                $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            ChatPromptFormat.ChatML =>
+                $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
+            _ => $"{system}\n\n{user}\n\n",
+        };
     }
 
     /// <summary>

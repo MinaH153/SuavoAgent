@@ -14,7 +14,7 @@ public enum ChatPromptFormat
     Phi,
     /// <summary>ChatML — Qwen2.5 / SmolLM2 / Qwen3-*-Instruct-2507 (non-thinking by design).</summary>
     ChatML,
-    /// <summary>Qwen3 HYBRID (e.g. 1.7B) forced NON-thinking: ChatML + an empty prefilled think block.</summary>
+    /// <summary>Qwen3 HYBRID (e.g. 1.7B) forced NON-thinking: ChatML + trailing /no_think.</summary>
     Qwen3Thinkless,
     Plain,
 }
@@ -59,9 +59,9 @@ public static class InferencePromptBuilder
         if (id.Contains("llama-3") || id.Contains("llama3") || id.Contains("llama_3")) return ChatPromptFormat.Llama3;
         // 2026-06 brain upgrade. The TEMPLATE alone must elicit valid JSON (GBNF grammar-masking is a
         // no-op on win-x64). Phi-3.5 = Phi. Qwen3 is the committed family:
-        //  - Qwen3 HYBRID (e.g. 1.7B) is thinking-ON by default → Qwen3Thinkless = ChatML + an empty
-        //    prefilled <think></think> block to force non-thinking, else <think> pollutes the JSON.
-        //  - Qwen3-*-Instruct-2507 is non-thinking BY DESIGN → plain ChatML (the prefill is OOD for it).
+        //  - Qwen3 HYBRID (e.g. 1.7B) is thinking-ON by default → Qwen3Thinkless = ChatML + a trailing
+        //    /no_think switch, else <think> pollutes the JSON.
+        //  - Qwen3-*-Instruct-2507 is non-thinking BY DESIGN → plain ChatML.
         //  - Qwen2.5 / SmolLM2 → plain ChatML.
         if (id.Contains("phi")) return ChatPromptFormat.Phi;
         if (id.Contains("qwen3"))
@@ -80,7 +80,9 @@ public static class InferencePromptBuilder
         ChatPromptFormat.Llama3 => new[] { "<|eot_id|>", "<|end_of_text|>" },
         ChatPromptFormat.Zephyr => new[] { "</s>", "<|user|>" },
         ChatPromptFormat.Phi => new[] { "<|end|>", "<|endoftext|>" },
-        ChatPromptFormat.ChatML or ChatPromptFormat.Qwen3Thinkless => new[] { "<|im_end|>", "<|endoftext|>" },
+        // <|im_start|> stops a runaway small model that begins hallucinating a fresh turn after its
+        // answer (terminates faster on a slow box, too). <|im_end|> is the normal end-of-turn.
+        ChatPromptFormat.ChatML or ChatPromptFormat.Qwen3Thinkless => new[] { "<|im_end|>", "<|im_start|>", "<|endoftext|>" },
         _ => new[] { "</s>", "\n\n\n" },
     };
 
@@ -119,9 +121,12 @@ public static class InferencePromptBuilder
                 sb.Append("<|im_start|>assistant\n");
                 break;
             case ChatPromptFormat.Qwen3Thinkless:
-                // Qwen3 hybrid forced non-thinking: ChatML + an empty PREFILLED think block right after the
-                // assistant header (exactly "<think>\n\n</think>\n\n", the Qwen3 enable_thinking=false
-                // convention). The model decodes the JSON immediately after and never opens its own <think>.
+                // Qwen3's OFFICIAL enable_thinking=false rendering: plain ChatML turns + an EMPTY
+                // <think></think> prefill on the assistant turn. The model is aligned to exactly this form
+                // (it's what tokenizer_config.json emits), so after </think> it goes straight to the answer
+                // — the empty block does NOT cost an early end-of-turn. It also generates FEWER tokens than
+                // the /no_think soft-switch, which a hybrid model can ignore and still emit a <think> block
+                // that wastes the whole time budget on a slow NOAVX box. (2026-06-10 Fable review.)
                 sb.Append("<|im_start|>system\n").Append(SystemPrompt).Append("<|im_end|>\n");
                 sb.Append("<|im_start|>user\n").Append(user).Append("<|im_end|>\n");
                 sb.Append("<|im_start|>assistant\n<think>\n\n</think>\n\n");
