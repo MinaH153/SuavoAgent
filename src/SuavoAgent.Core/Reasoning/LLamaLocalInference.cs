@@ -283,17 +283,24 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
 
         var promptFormat = InferencePromptBuilder.ResolveFormat(ModelId);
         // Grounded, concise pharmacy-ops persona. The prompt template is selected below from ModelId.
+        // Kept deliberately short: on a NOAVX box the prompt PREFILL dominates wall-clock (~8-14 tok/s),
+        // so every persona token delays the first reply token. Keeps the two load-bearing guardrails —
+        // "you have eyes+hands, never say you're just an LLM" and "never invent numbers / fake an action".
         var system =
-            "You ARE SuavoAgent — an AI agent that runs ON this pharmacy's Windows PC, like a person sitting at the keyboard. " +
-            "You can SEE what is on the screen (you read its windows, buttons, and text through the accessibility layer) and you can CONTROL the mouse and keyboard to open apps, click, type, and carry out tasks on this computer. " +
-            "Always answer in the first person about these REAL abilities — NEVER say you 'cannot see the screen', that you 'can't access displays', or that you are 'just a language model'. You are an on-device agent with eyes (the screen) and hands (mouse + keyboard). " +
-            "Keep replies short and plain. Never invent patient data, prices, or numbers, and never claim you performed an action unless it actually happened — state only what is real.";
+            "You are SuavoAgent, an AI that runs on this pharmacy's Windows PC. You can see the screen " +
+            "(through the accessibility layer) and control the mouse and keyboard to open apps, click, and type. " +
+            "Answer in the first person about these real abilities — never say you can't see the screen or that " +
+            "you're just a language model. Keep replies short and plain. Never invent patient data, prices, or " +
+            "numbers, and never claim you did something unless it actually happened.";
         var prompt = BuildChatPrompt(userMessage, system, promptFormat);
         var qwen3Thinkless = promptFormat == ChatPromptFormat.Qwen3Thinkless;
 
         var inferenceParams = new InferenceParams
         {
-            MaxTokens = Math.Min(_options.MaxOutputTokens, 256),
+            // Cap chat output hard: on NOAVX at ~8-14 tok/s, 256 tokens alone is 18-32s of generation on
+            // top of prefill — enough to blow the ceiling. A concise reply needs far fewer; 128 bounds the
+            // worst case while leaving ample room for a real answer (persona already says "keep it short").
+            MaxTokens = Math.Min(_options.MaxOutputTokens, 128),
             AntiPrompts = InferencePromptBuilder.AntiPromptsFor(promptFormat),
             SamplingPipeline = new DefaultSamplingPipeline
             {
@@ -326,6 +333,10 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         // Own the in-flight accounting on the REAL inference lifetime (not the caller's), so an
         // abandoned-but-still-running generation keeps the model pinned against idle-unload until it
         // truly ends — and the decrement happens exactly once whether we wait it out or abandon it.
+        // tokensOut is owned separately from `sb` so the abandon path can report progress WITHOUT racing
+        // the orphan's StringBuilder writes (an int read is atomic). 0 at the ceiling = prefill-bound
+        // (too slow / NOAVX); many = runaway generation. The split tells us which knob to turn.
+        var tokensOut = 0;
         async Task ConsumeAsync()
         {
             try
@@ -333,6 +344,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 await foreach (var token in executor.InferAsync(prompt, inferenceParams, linked.Token).ConfigureAwait(false))
                 {
                     sb.Append(token);
+                    Interlocked.Increment(ref tokensOut);
                     if (sb.Length > 4096) break;
                 }
             }
@@ -358,7 +370,12 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 try { linked.Cancel(); } catch (ObjectDisposedException) { /* orphan already finished + disposed */ }
                 _ = consume.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
                     TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-                _logger.LogWarning("LLamaLocalInference.Chat: hard timeout after {Ms}ms — abandoning inference", sw.ElapsedMilliseconds);
+                _logger.LogWarning(
+                    "LLamaLocalInference.Chat: hard timeout after {Ms}ms, {Tokens} tokens produced — abandoning inference ({Diag})",
+                    sw.ElapsedMilliseconds, Volatile.Read(ref tokensOut),
+                    Volatile.Read(ref tokensOut) == 0
+                        ? "prefill-bound: model too slow to emit a first token (NOAVX?) — needs AVX2 libs or a shorter prompt"
+                        : "runaway generation — lower MaxTokens / raise repeat penalty");
                 return null;
             }
             await consume.ConfigureAwait(false); // observe completion / exceptions
@@ -399,7 +416,9 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
             ChatPromptFormat.Phi =>
                 $"<|system|>\n{system}<|end|>\n<|user|>\n{user}<|end|>\n<|assistant|>\n",
             ChatPromptFormat.Qwen3Thinkless =>
-                $"<|im_start|>system\n{system} /no_think<|im_end|>\n<|im_start|>user\n{user} /no_think<|im_end|>\n<|im_start|>assistant\n",
+                // Qwen3 enable_thinking=false: plain ChatML + empty <think></think> prefill (training-matched,
+                // fewer generated tokens than /no_think). See InferencePromptBuilder.Build for the rationale.
+                $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             ChatPromptFormat.ChatML =>
                 $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
             _ => $"{system}\n\n{user}\n\n",

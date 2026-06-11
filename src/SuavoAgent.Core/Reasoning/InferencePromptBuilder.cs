@@ -80,7 +80,9 @@ public static class InferencePromptBuilder
         ChatPromptFormat.Llama3 => new[] { "<|eot_id|>", "<|end_of_text|>" },
         ChatPromptFormat.Zephyr => new[] { "</s>", "<|user|>" },
         ChatPromptFormat.Phi => new[] { "<|end|>", "<|endoftext|>" },
-        ChatPromptFormat.ChatML or ChatPromptFormat.Qwen3Thinkless => new[] { "<|im_end|>", "<|endoftext|>" },
+        // <|im_start|> stops a runaway small model that begins hallucinating a fresh turn after its
+        // answer (terminates faster on a slow box, too). <|im_end|> is the normal end-of-turn.
+        ChatPromptFormat.ChatML or ChatPromptFormat.Qwen3Thinkless => new[] { "<|im_end|>", "<|im_start|>", "<|endoftext|>" },
         _ => new[] { "</s>", "\n\n\n" },
     };
 
@@ -119,11 +121,15 @@ public static class InferencePromptBuilder
                 sb.Append("<|im_start|>assistant\n");
                 break;
             case ChatPromptFormat.Qwen3Thinkless:
-                // Qwen3 GGUF/llama.cpp uses /no_think as the supported per-turn non-thinking switch.
-                // Do not prefill assistant content here: that can make the next likely token an end-of-turn.
-                sb.Append("<|im_start|>system\n").Append(SystemPrompt).Append(" /no_think<|im_end|>\n");
-                sb.Append("<|im_start|>user\n").Append(user).Append(" /no_think<|im_end|>\n");
-                sb.Append("<|im_start|>assistant\n");
+                // Qwen3's OFFICIAL enable_thinking=false rendering: plain ChatML turns + an EMPTY
+                // <think></think> prefill on the assistant turn. The model is aligned to exactly this form
+                // (it's what tokenizer_config.json emits), so after </think> it goes straight to the answer
+                // — the empty block does NOT cost an early end-of-turn. It also generates FEWER tokens than
+                // the /no_think soft-switch, which a hybrid model can ignore and still emit a <think> block
+                // that wastes the whole time budget on a slow NOAVX box. (2026-06-10 Fable review.)
+                sb.Append("<|im_start|>system\n").Append(SystemPrompt).Append("<|im_end|>\n");
+                sb.Append("<|im_start|>user\n").Append(user).Append("<|im_end|>\n");
+                sb.Append("<|im_start|>assistant\n<think>\n\n</think>\n\n");
                 break;
             default: // Plain
                 sb.Append(SystemPrompt).Append("\n\n").Append(user).Append("\n\nRespond with the JSON action now:\n");
