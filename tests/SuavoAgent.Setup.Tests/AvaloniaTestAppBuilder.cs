@@ -17,9 +17,12 @@ public static class AvaloniaTestAppBuilder
         AppBuilder.Configure<App>()
             .UseHeadless(new AvaloniaHeadlessPlatformOptions
             {
-                // Drawing off keeps the test under the 5s budget; the bugs
-                // we care about (XAML compile, resource type binding) fire
-                // before any pixel is rasterized.
-                UseHeadlessDrawing = false,
+                // Drawing ON: MainWindow.axaml now loads the Suavo logo as an
+                // <Image>/Window.Icon, and Bitmap decode at InitializeComponent
+                // needs IPlatformRenderInterface — with drawing off the smoke
+                // tests throw "Unable to locate 'IPlatformRenderInterface'".
+                // The headless software backend rasterizes in-memory + no-op,
+                // so the 4 construct-only tests stay well under the time budget.
+                UseHeadlessDrawing = true,
             });
 }
