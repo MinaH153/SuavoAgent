@@ -212,6 +212,29 @@ public sealed class AgentOptions
     public bool EnablePricingSavingsEnrichment { get; set; } = false;
 
     /// <summary>
+    /// MOAT Increment 2 — replay-first (<c>Agent:ReplayFirst</c>). When true, a navigate_app /
+    /// explore_sandbox objective whose (pharmacy, taskKey, app) has a HEALTHY banked
+    /// <c>VerifiedSkill</c> (success_count ≥ 2, click-family steps only) whose first step's StateHash
+    /// matches the live screen is satisfied by deterministic <c>VerifiedSkillReplayer</c> replay —
+    /// ZERO LLM/cloud reasoning. Any miss/drift falls through to the agentic loop unchanged.
+    /// OFF by default (fail-closed); flipped per-box only after sandbox validation. Layered safety
+    /// (keep all four): this flag default-off + click-only-v1 + StateHash entry match + the SAME
+    /// composite navigate gate (preflight / autonomy / never-blind-on-live-PMS) as reasoned actions.
+    /// NOT the unrelated <see cref="LearningMode"/> 30-day-observation flag.
+    /// </summary>
+    public bool ReplayFirst { get; set; } = false;
+
+    /// <summary>
+    /// MOAT Increment 2 follow-up (<c>Agent:ReplayFirstAllowTypeSteps</c>). v1 HARD RULE: a skill
+    /// containing <c>type_into_field</c>/<c>press_keys</c> steps must NOT auto-replay — a banked
+    /// literal types the OLD value, and the "screen changed" postcondition would certify a
+    /// semantically wrong write. Such skills replay only via the explicit operator
+    /// <c>replay_skill</c> command. This flag pre-declares the future opt-in for when parameterized
+    /// skills + Helper focused-target binding for type/press exist. MUST stay false in v1.
+    /// </summary>
+    public bool ReplayFirstAllowTypeSteps { get; set; } = false;
+
+    /// <summary>
     /// Trailing window (days) over which dispensed quantity is aggregated for the savings figure.
     /// Default 90 — a realistic recurring volume per NDC.
     /// </summary>

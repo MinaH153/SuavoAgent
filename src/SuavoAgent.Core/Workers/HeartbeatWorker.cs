@@ -1760,6 +1760,32 @@ public sealed class HeartbeatWorker : ResilientHostedService
             SuavoAgent.Core.Agentic.AgenticLoopResult result;
             try
             {
+                // MOAT Increment 2 — replay-first: a HEALTHY banked skill whose entry StateHash matches
+                // the live screen replays deterministically (zero LLM) INSTEAD of the loop. Same composite
+                // gate (preflight / M3 autonomy / never-blind-on-live-PMS) as the loop; any miss/drift
+                // falls through to the loop below unchanged. navigate banks with app="" (see
+                // HarvestVerifiedSkill call), so the lookup uses the same key.
+                if (_options.ReplayFirst)
+                {
+                    var rf = await TryReplayFirstAsync(
+                        objectiveModel, app: string.Empty, loopOptions, charter, audit, deadline,
+                        safetyOptions, safetyOverride: null, targetProcess: null, runId, navCts.Token)
+                        .ConfigureAwait(false);
+                    if (rf is { ReplayCompleted: true, Replay: { } replayed })
+                    {
+                        await AckAsync(true, new
+                        {
+                            run_id = runId,
+                            termination = SuavoAgent.Core.Agentic.TerminationReason.Done.ToString(),
+                            steps = replayed.StepsCompleted,
+                            escalated = false,
+                            detail = "replay_first",
+                            replay_first = true,
+                        }, null);
+                        return; // skip the loop — the skill just re-verified itself (no re-harvest needed)
+                    }
+                }
+
                 result = await runner.RunAsync(objectiveModel, loopOptions, navCts.Token).ConfigureAwait(false);
             }
             finally
@@ -1976,6 +2002,30 @@ public sealed class HeartbeatWorker : ResilientHostedService
             SuavoAgent.Core.Agentic.AgenticLoopResult result;
             try
             {
+                // MOAT Increment 2 — replay-first for explore: the app is pre-launched (above), so the
+                // window-scoped precheck perceive sees the same entry state the banked skill starts at.
+                // Uses the SAME explore gate instance + "sandbox" capture path the loop would use.
+                if (_options.ReplayFirst)
+                {
+                    var rf = await TryReplayFirstAsync(
+                        objectiveModel, app!, loopOptions, charter, audit, deadline,
+                        safetyOptions, safetyOverride: exploreGate, targetProcess: "sandbox", runId, navCts.Token)
+                        .ConfigureAwait(false);
+                    if (rf is { ReplayCompleted: true, Replay: { } replayed })
+                    {
+                        await AckAsync(true, new
+                        {
+                            run_id = runId,
+                            app,
+                            termination = SuavoAgent.Core.Agentic.TerminationReason.Done.ToString(),
+                            steps = replayed.StepsCompleted,
+                            detail = "replay_first",
+                            replay_first = true,
+                        }, null);
+                        return; // skip the loop — the skill just re-verified itself (no re-harvest needed)
+                    }
+                }
+
                 result = await runner.RunAsync(objectiveModel, loopOptions, navCts.Token).ConfigureAwait(false);
             }
             finally
@@ -2065,6 +2115,116 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "verified-skill harvest failed run={RunId} (run unaffected)", runId);
+        }
+    }
+
+    /// <summary>
+    /// MOAT Increment 2 — replay-first attempt for a navigate/explore objective. Looks up the
+    /// most-confirmed banked skill for (pharmacy, taskKey, app) and hands it to
+    /// <see cref="SuavoAgent.Core.Agentic.ReplayFirstRunner"/>, wired by
+    /// <see cref="SuavoAgent.Core.Agentic.NavigateReplayFactory"/> to the SAME perceiver path + safety
+    /// gate + actuator the loop for this command uses. Returns null when nothing is banked or the
+    /// attempt machinery itself faults — the caller falls through to the agentic loop in every
+    /// non-Completed case, so replay-first can never make a run LESS safe or LESS capable than the loop.
+    /// Best-effort by construction: only cancellation propagates.
+    /// </summary>
+    private async Task<SuavoAgent.Core.Agentic.ReplayFirstResult?> TryReplayFirstAsync(
+        SuavoAgent.Core.Agentic.AgentObjective objective,
+        string app,
+        SuavoAgent.Core.Agentic.AgenticLoopOptions loopOptions,
+        MissionCharter charter,
+        SuavoAgent.Core.Audit.AuditChain audit,
+        DateTimeOffset deadline,
+        SuavoAgent.Core.Agentic.Adapters.NavigateSafetyOptions safetyOptions,
+        SuavoAgent.Core.Agentic.ISafetyGate? safetyOverride,
+        string? targetProcess,
+        string runId,
+        CancellationToken ct)
+    {
+        try
+        {
+            var best = _stateDb.GetBestVerifiedSkillForTask(objective.PharmacyId, objective.TaskKey, app);
+            if (best is null)
+                return null; // nothing banked — the routine miss, silent
+            var bv = best.Value;
+
+            // Reconstruct + PIN the banked steps to the stored steps_hash (the identity Phase-3B
+            // certified). A row that does not deserialize or does not hash back to its pin is
+            // Unparseable-class — decay it (3 strikes retires) so a corrupt row cannot pin replay-first
+            // off for this task forever, and fall through to the loop.
+            IReadOnlyList<SuavoAgent.Core.Agentic.VerifiedStep>? steps = null;
+            try { steps = SuavoAgent.Core.Agentic.VerifiedSkill.DeserializeSteps(bv.StepsJson); }
+            catch (JsonException) { /* corrupt row — handled below */ }
+            if (steps is null || steps.Count == 0
+                || !string.Equals(
+                    SuavoAgent.Core.Agentic.VerifiedSkill.ComputeStepsHash(steps), bv.StepsHash, StringComparison.Ordinal))
+            {
+                RecordReplayFirstOutcome(bv.SkillId, success: false, runId);
+                _logger.LogWarning(
+                    "replay-first run={RunId} skill={SkillId} banked steps unreadable or steps-hash mismatch — skipped + decayed",
+                    runId, bv.SkillId[..12]);
+                return null;
+            }
+
+            var skill = new SuavoAgent.Core.Agentic.VerifiedSkill(
+                bv.SkillId, objective.PharmacyId, objective.TaskKey, app, steps, bv.StepsHash);
+
+            var replayRunner = SuavoAgent.Core.Agentic.NavigateReplayFactory.Create(
+                _serviceProvider, safetyOptions, charter, audit, deadline, targetProcess, safetyOverride);
+
+            var result = await replayRunner.TryReplayAsync(
+                skill, bv.SuccessCount, objective, loopOptions, _options.ReplayFirstAllowTypeSteps,
+                (skillId, ok) => RecordReplayFirstOutcome(skillId, ok, runId), ct).ConfigureAwait(false);
+
+            if (result.Replay is { } replay)
+            {
+                // A replay actually fired (entry fingerprint matched + every gate passed) — chain it into
+                // the audit log with the outcome. Reasons/outcomes are operational codes, never values.
+                _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                    TaskId: runId,
+                    EventType: "replay_first_attempt",
+                    FromState: "starting",
+                    ToState: result.ReplayCompleted ? "replayed" : "fell_through",
+                    Trigger: "replay_first",
+                    RequesterId: "agent",
+                    Actor: "agent",
+                    SourceComponent: "heartbeat_worker",
+                    CaptureReason: $"skill={bv.SkillId[..12]} outcome={replay.Outcome} steps={replay.StepsCompleted}"));
+                _logger.LogInformation(
+                    "replay-first run={RunId} skill={SkillId} outcome={Outcome} stepsCompleted={Steps}",
+                    runId, bv.SkillId[..12], replay.Outcome, replay.StepsCompleted);
+            }
+            else
+            {
+                // Pre-replay skips are deliberately quiet (entry mismatch is the routine case) — debug-only.
+                _logger.LogDebug(
+                    "replay-first run={RunId} skill={SkillId} skipped reason={Reason}",
+                    runId, bv.SkillId[..12], result.SkipReason);
+            }
+
+            return result;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "replay-first run={RunId} attempt failed (falling through to agentic loop)", runId);
+            return null;
+        }
+    }
+
+    /// <summary>Slime-mold skill hygiene for replay-first, best-effort: a hygiene write must never
+    /// change the run's control flow (same contract as the replay_skill handler's update).</summary>
+    private void RecordReplayFirstOutcome(string skillId, bool success, string runId)
+    {
+        try
+        {
+            _stateDb.RecordSkillReplayOutcome(skillId, success);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "replay-first run={RunId} skill-hygiene update failed (run unaffected)", runId);
         }
     }
 

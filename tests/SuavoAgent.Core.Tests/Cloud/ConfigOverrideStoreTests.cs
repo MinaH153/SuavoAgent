@@ -177,6 +177,25 @@ public class ConfigOverrideStoreTests : IDisposable
     }
 
     [Fact]
+    public void Apply_BlocksReplayFirstTypeStepUnlock_AllowsRolloutSwitch()
+    {
+        // v1 HARD RULE: the type-step auto-replay unlock is local-only (a banked literal types the OLD
+        // value) — the cloud must not be able to flip it. Agent.ReplayFirst IS the per-box rollout
+        // switch and stays overridable.
+        var store = NewStore();
+        store.Apply(new[]
+        {
+            Override("Agent.ReplayFirst", JsonDocument.Parse("true").RootElement),
+            Override("Agent.ReplayFirstAllowTypeSteps", JsonDocument.Parse("true").RootElement),
+        });
+
+        var root = JsonDocument.Parse(File.ReadAllText(_path)).RootElement;
+        var agent = root.GetProperty("Agent");
+        Assert.True(agent.GetProperty("ReplayFirst").GetBoolean());
+        Assert.False(agent.TryGetProperty("ReplayFirstAllowTypeSteps", out _));
+    }
+
+    [Fact]
     public void Apply_AllowsTestHooksEnabled_AsBooleanOverride()
     {
         var store = NewStore();

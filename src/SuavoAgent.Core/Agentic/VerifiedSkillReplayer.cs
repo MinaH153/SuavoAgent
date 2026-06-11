@@ -122,8 +122,10 @@ public sealed class VerifiedSkillReplayer
     }
 
     /// <summary>Rebuild the executable action for a step: structured (Verb + ParamsJson) when present
-    /// (airtight), else parse the legacy signature. Returns null on any failure (caller rejects).</summary>
-    private static NextAction? ReconstructAction(VerifiedStep step)
+    /// (airtight), else parse the legacy signature. Returns null on any failure (caller rejects).
+    /// Internal: <see cref="ReplayFirstRunner"/> reuses the EXACT same reconstruction for its
+    /// autonomy-gate pre-check, so pre-check and replay can never disagree about the action.</summary>
+    internal static NextAction? ReconstructAction(VerifiedStep step)
     {
         if (!string.IsNullOrEmpty(step.Verb))
         {
