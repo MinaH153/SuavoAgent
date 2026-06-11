@@ -75,16 +75,28 @@ added in the Codex HIPAA round-2 hardening to catch PHI split across steps). The
      added round-2 #3.)*
 8. **Chord grammar for `press_keys`** — must parse as `(modifier+)*main` with main ∈ named keys /
    single alnum / F1–F12; ≤16 chords; ≤2 single-LETTER mains **per step**.
-9. **Cross-step keyboard stream** — the CONTIGUOUS keyboard output (typed `text` + single-letter chord
-   mains) is concatenated across steps (a click breaks the run) and the **full free-text vetoes** run on
-   the concatenation, PLUS a trajectory-wide ≤2 single-letter-mains cap. This catches a name/identifier
-   assembled key-by-key (`type "Jo"`+`type "hn"`, or `press J`+`press o`…). *(Round-2 #1 + #7 — the
-   structural fix that closes both split-typing and split-chord-spelling at the root.)*
+9. **Cross-step keyboard stream — two scopes.** (a) Per CONTIGUOUS run (segmented by clicks): the typed
+   `text` + single-letter chord mains are concatenated and the **full free-text vetoes** run on the
+   concatenation (space-joined structure like name-shape / identifier-digits typed into ONE field is
+   meaningful here), plus a ≤2 single-letter-mains cap. (b) Over the WHOLE trajectory (clicks do NOT
+   reset it): the assembled keystrokes get the letter cap + total-digit veto + a **SUBSTRING** goal-echo
+   (a goal token found anywhere inside the keystrokes is a run-specific echo no matter where the agent
+   clicked between fragments). Scope (a) catches a name/identifier assembled key-by-key in one field
+   (`type "Jo"`+`type "hn"`, or `press J`+`press o`…); scope (b) closes the same literal split ACROSS a
+   click into fragments too short for any per-run veto (`type "Jo"`<click>`type "hn"` → "john"). Substring
+   (not token-equality) for (b) because cross-field assembly drops the separators the token form relies
+   on; it over-refuses a typed value that coincidentally contains a goal token — safe, since a goal-echoed
+   literal is run-specific and shouldn't bank, and clean non-echoed text (the screen is scrubbed) has
+   none. *(Round-2 #1 + #7 = scope (a); cross-click follow-on (commit `cff27ab`) = scope (b).)*
+   NOTE the trajectory letter cap sums only single-letter CHORD mains, never the characters of typed
+   `text` — so ordinary multi-field typing ("ab" in a field) is not letter-counted; only `press_keys`
+   key-by-key spelling is.
 10. **End-of-pipe re-certification** — the exact `SerializeSteps()` string that lands in
     `verified_skills.steps_json` is re-scanned (belt-and-suspenders against shapes assembled across
     value boundaries).
 11. **Refusal reasons are operational codes** (`step2:free_text_goal_echo:text`,
-    `stream2:keyboard_spelling_veto`) — never values — so they are safe to log and ship.
+    `stream2:keyboard_spelling_veto`, `trajectory:goal_echo`) — never values — so they are safe to log
+    and ship.
 
 **Known accepted costs (fail-closed over-refusal, by design):**
 - Drug/search terms echoed from the goal ("search Lipitor" → type `Lipitor`) refuse → don't bank.
@@ -92,6 +104,10 @@ added in the Codex HIPAA round-2 hardening to catch PHI split across steps). The
 - Two-capitalized-word typed text that isn't a name ("Extra Strength") refuses. Acceptable; banking is
   opportunistic — a refused bank just means the LLM runs again next time.
 - Numerics with 6+ digit runs refuse even when legitimate.
+- Whole-trajectory **substring** goal-echo (scope (b) above): typed text that coincidentally CONTAINS a
+  goal token as a substring across the run refuses (goal "set the dose" + a value containing "dose").
+  Broader than the token-equality per-value check by design — the cross-click defense can't rely on
+  separators. Tightenable in 3C with the drug-lexicon allowlist; until then, fail-closed.
 
 **Closed in round-2 (all 7 Codex HIPAA findings):** split typed name across steps (#1) + split chord
 spelling (#7) → cross-step keyboard-stream pass; space/dot-separated SSN/DOB (#2) → total-digit veto;
@@ -247,10 +263,16 @@ Pass = the full loop: derive once (LLM) → bank (certified) → replay forever 
    the right closure and the interim exposure is acceptable: it requires the operator to put a patient
    name in the GOAL of a navigate run whose click on that name VERIFIES Met, on a box where harvest
    runs. Quantify, don't hand-wave.
-3. **Goal-echo tokenization edges.** Stoplist entries can mask real echoes (a patient literally surnamed
-   "Save" is unstoplisted — but check every entry); tokens <3 chars (initials "Jo") are exempt; the veto
-   compares tokens, not substrings ("Smithson" typed vs "smith" in goal does NOT match — is that
-   acceptable?).
+3. **Goal-echo tokenization edges + dual semantics.** Two goal-echo checks now coexist: per-value
+   TOKEN-equality (`SharesGoalToken`, on individual typed/structural values, fold-both-sides) and a
+   whole-trajectory SUBSTRING check (`ContainsGoalSubstring`, on the cross-click assembled keystrokes).
+   Review both: stoplist entries can mask real echoes (a patient literally surnamed "Save" is
+   unstoplisted — check every entry); tokens <3 chars (initials "Jo") are exempt from BOTH (the
+   cross-click substring closes the split-fragment case but a lone 2-char value with no later fragment
+   still slips); per-value token-equality means "Smithson" typed vs goal "smith" does NOT match at the
+   value level, but the trajectory substring WOULD match it if "smith" is a goal token — confirm the
+   asymmetry is understood and acceptable. The substring check is intentionally broad (over-refuses
+   coincidental contains) — verify that tradeoff for the pharmacy vocabulary.
 4. **TOCTOU between replay perceive and act** (replayer step-N perceive → act): unchanged from the
    shipped replayer (Codex Q1 accepted: next step's state-match catches a wrong landing) — but
    re-examine it for type/press replay specifically: a focus steal between state-confirm and
