@@ -14,7 +14,7 @@ public enum ChatPromptFormat
     Phi,
     /// <summary>ChatML — Qwen2.5 / SmolLM2 / Qwen3-*-Instruct-2507 (non-thinking by design).</summary>
     ChatML,
-    /// <summary>Qwen3 HYBRID (e.g. 1.7B) forced NON-thinking: ChatML + an empty prefilled think block.</summary>
+    /// <summary>Qwen3 HYBRID (e.g. 1.7B) forced NON-thinking: ChatML + trailing /no_think.</summary>
     Qwen3Thinkless,
     Plain,
 }
@@ -59,9 +59,9 @@ public static class InferencePromptBuilder
         if (id.Contains("llama-3") || id.Contains("llama3") || id.Contains("llama_3")) return ChatPromptFormat.Llama3;
         // 2026-06 brain upgrade. The TEMPLATE alone must elicit valid JSON (GBNF grammar-masking is a
         // no-op on win-x64). Phi-3.5 = Phi. Qwen3 is the committed family:
-        //  - Qwen3 HYBRID (e.g. 1.7B) is thinking-ON by default → Qwen3Thinkless = ChatML + an empty
-        //    prefilled <think></think> block to force non-thinking, else <think> pollutes the JSON.
-        //  - Qwen3-*-Instruct-2507 is non-thinking BY DESIGN → plain ChatML (the prefill is OOD for it).
+        //  - Qwen3 HYBRID (e.g. 1.7B) is thinking-ON by default → Qwen3Thinkless = ChatML + a trailing
+        //    /no_think switch, else <think> pollutes the JSON.
+        //  - Qwen3-*-Instruct-2507 is non-thinking BY DESIGN → plain ChatML.
         //  - Qwen2.5 / SmolLM2 → plain ChatML.
         if (id.Contains("phi")) return ChatPromptFormat.Phi;
         if (id.Contains("qwen3"))
@@ -119,12 +119,11 @@ public static class InferencePromptBuilder
                 sb.Append("<|im_start|>assistant\n");
                 break;
             case ChatPromptFormat.Qwen3Thinkless:
-                // Qwen3 hybrid forced non-thinking: ChatML + an empty PREFILLED think block right after the
-                // assistant header (exactly "<think>\n\n</think>\n\n", the Qwen3 enable_thinking=false
-                // convention). The model decodes the JSON immediately after and never opens its own <think>.
-                sb.Append("<|im_start|>system\n").Append(SystemPrompt).Append("<|im_end|>\n");
-                sb.Append("<|im_start|>user\n").Append(user).Append("<|im_end|>\n");
-                sb.Append("<|im_start|>assistant\n<think>\n\n</think>\n\n");
+                // Qwen3 GGUF/llama.cpp uses /no_think as the supported per-turn non-thinking switch.
+                // Do not prefill assistant content here: that can make the next likely token an end-of-turn.
+                sb.Append("<|im_start|>system\n").Append(SystemPrompt).Append(" /no_think<|im_end|>\n");
+                sb.Append("<|im_start|>user\n").Append(user).Append(" /no_think<|im_end|>\n");
+                sb.Append("<|im_start|>assistant\n");
                 break;
             default: // Plain
                 sb.Append(SystemPrompt).Append("\n\n").Append(user).Append("\n\nRespond with the JSON action now:\n");

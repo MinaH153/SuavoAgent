@@ -36,6 +36,11 @@ public static class ProposalParser
         // stop tokens or extra newlines after the close brace; trim proactively.
         json = json.Trim();
 
+        // Qwen3 hybrid can still emit a leading reasoning block when the runtime
+        // ignores the empty-think prefill. Strip only that model-native wrapper;
+        // prose-wrapped JSON still fails strict parsing below.
+        json = StripLeadingThinkBlock(json);
+
         // Instruct models (Phi-3.5 / Qwen2.5) sometimes wrap the object in a
         // markdown code fence (```json … ```). Strip a single enclosing fence so
         // the schema validation below still runs. We do NOT mine JSON out of free
@@ -130,5 +135,15 @@ public static class ProposalParser
         if (lastFence >= 0) body = body[..lastFence];
 
         return body.Trim();
+    }
+
+    private static string StripLeadingThinkBlock(string s)
+    {
+        if (!s.StartsWith("<think>", StringComparison.OrdinalIgnoreCase)) return s;
+
+        var end = s.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
+        if (end < 0) return s;
+
+        return s[(end + "</think>".Length)..].TrimStart();
     }
 }
