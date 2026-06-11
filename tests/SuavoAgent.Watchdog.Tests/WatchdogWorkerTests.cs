@@ -45,7 +45,8 @@ public class WatchdogWorkerTests
         string? bootstrapPath = null,
         string? telemetryPath = null,
         string? repairRequestPath = null,
-        string? restartRequestPath = null)
+        string? restartRequestPath = null,
+        Func<string, bool>? reapplyHelperGrant = null)
     {
         var opts = new WatchdogOptions
         {
@@ -56,7 +57,10 @@ public class WatchdogWorkerTests
             // Default to a guaranteed-absent path so the post-OTA handler is a no-op in
             // tests that don't exercise it (never resolve to the test host's install dir).
             RestartRequestPath = restartRequestPath
-                ?? Path.Combine(Path.GetTempPath(), $"no-such-restart-{Guid.NewGuid():N}.json")
+                ?? Path.Combine(Path.GetTempPath(), $"no-such-restart-{Guid.NewGuid():N}.json"),
+            // Default to a no-op grant so tests never shell out to icacls on the host. Tests that
+            // assert the re-grant inject a recording stub.
+            ReapplyHelperExeGrant = reapplyHelperGrant ?? (_ => true),
         };
         var worker = new WatchdogWorker(NullLogger<WatchdogWorker>.Instance, cmd, opts);
         // Seed ledger via reflection-free helper: call TickOnce with a "Running" observation
@@ -529,6 +533,110 @@ public class WatchdogWorkerTests
 
             using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
             Assert.Equal("rejected_schema", doc.RootElement.GetProperty("updateRestart").GetProperty("outcome").GetString());
+        }
+        finally
+        {
+            try { File.Delete(telemetryPath); } catch { }
+            try { File.Delete(requestPath); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Tick_UpdateRestart_ReappliesHelperGrant_BeforeCyclingBroker()
+    {
+        // Post-OTA: the swap (File.Move) dropped the de-priv Helper's per-file read ACE. The Watchdog
+        // (LocalSystem) MUST re-apply it BEFORE cycling the Broker, so the Broker relaunches a Helper
+        // that can self-extract — otherwise it churns and helper_attached never flips.
+        var now = DateTimeOffset.Parse("2026-06-11T12:00:00Z");
+        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
+        var requestPath = WriteRestartRequest(1, "3.58.0", now.ToString("o"), "SuavoAgent.Broker");
+        var expectedInstallDir = Path.GetDirectoryName(requestPath);
+
+        string? grantedDir = null;
+        var startCountAtGrant = -1;
+
+        var cmd = new FakeCommand();
+        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
+        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
+        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath,
+            reapplyHelperGrant: dir =>
+            {
+                grantedDir = dir;
+                startCountAtGrant = cmd.StartCalls.Count; // capture ordering vs the Broker start
+                return true;
+            });
+        SeedLedgers(worker);
+
+        try
+        {
+            worker.TickOnce(now);
+
+            Assert.Equal(expectedInstallDir, grantedDir);   // granted the right install dir
+            Assert.Equal(0, startCountAtGrant);             // BEFORE any Broker start (no churn window)
+            Assert.Contains("SuavoAgent.Broker", cmd.StartCalls); // and the Broker was still cycled
+            Assert.False(File.Exists(requestPath));
+        }
+        finally
+        {
+            try { File.Delete(telemetryPath); } catch { }
+            try { File.Delete(requestPath); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Tick_UpdateRestart_GrantFailure_StillCyclesBroker()
+    {
+        // The re-grant is best-effort: even if icacls fails, we still cycle the Broker (not cycling is
+        // worse — it strands on the old binary). The churn, if any, surfaces in heartbeat telemetry.
+        var now = DateTimeOffset.Parse("2026-06-11T12:00:00Z");
+        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
+        var requestPath = WriteRestartRequest(1, "3.58.0", now.ToString("o"), "SuavoAgent.Broker");
+
+        var cmd = new FakeCommand();
+        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
+        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
+        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath,
+            reapplyHelperGrant: _ => false); // grant fails
+        SeedLedgers(worker);
+
+        try
+        {
+            var ex = Record.Exception(() => worker.TickOnce(now));
+            Assert.Null(ex);
+            Assert.Contains("SuavoAgent.Broker", cmd.StartCalls);
+            Assert.False(File.Exists(requestPath)); // restart still completed + consumed
+        }
+        finally
+        {
+            try { File.Delete(telemetryPath); } catch { }
+            try { File.Delete(requestPath); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Tick_UpdateRestart_RejectedRequest_DoesNotReapplyGrant()
+    {
+        // A poison/forged request (bad schema) is discarded BEFORE any privileged action — the re-grant
+        // must not run for a request we refused to act on.
+        var now = DateTimeOffset.Parse("2026-06-11T12:00:00Z");
+        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
+        var requestPath = WriteRestartRequest(2, "3.58.0", now.ToString("o"), "SuavoAgent.Broker"); // schema 2 = unsupported
+
+        var grantCalls = 0;
+        var cmd = new FakeCommand();
+        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
+        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
+        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath,
+            reapplyHelperGrant: _ => { grantCalls++; return true; });
+        SeedLedgers(worker);
+
+        try
+        {
+            worker.TickOnce(now);
+
+            Assert.Equal(0, grantCalls);          // never granted for a rejected request
+            Assert.Empty(cmd.StartCalls);
+            Assert.False(File.Exists(requestPath));
         }
         finally
         {

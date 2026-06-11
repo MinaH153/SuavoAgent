@@ -365,7 +365,9 @@ internal static class ServiceInstaller
     // bootstrap.ps1 (the proven install path) grants Users:RX for exactly this reason, so we use
     // the same principal. SID form (*S-1-5-32-545) = locale-independent (icacls won't mis-resolve
     // "Users" on a non-English box).
-    private const string HelperPrincipal = "*S-1-5-32-545"; // BUILTIN\Users
+    // BUILTIN\Users — single source of truth lives in SuavoAgent.Diagnostics so the installer
+    // (install-time grant) and the LocalSystem Watchdog (post-OTA re-grant) can never diverge.
+    private const string HelperPrincipal = SuavoAgent.Diagnostics.HelperExeAclGrant.HelperPrincipal;
 
     /// <summary>
     /// Install-dir read carve-out, applied AFTER LockdownDirectoryAcl pins the install dir to
@@ -382,15 +384,12 @@ internal static class ServiceInstaller
     {
         try
         {
-            // Traverse + list THIS DIR ONLY (no OI/CI → child files do NOT inherit read).
-            RunCmd("icacls", $"\"{installDir}\" /grant \"{HelperPrincipal}:(RX)\"");
-            // Read + execute the single-file apphost itself — the only install-dir file the Helper reads.
-            var helperExe = Path.Combine(installDir, "SuavoAgent.Helper.exe");
-            if (File.Exists(helperExe))
-                RunCmd("icacls", $"\"{helperExe}\" /grant \"{HelperPrincipal}:(RX)\"");
+            // Delegate to the shared, idempotent grant so the install-time path and the LocalSystem
+            // Watchdog's post-OTA re-grant are LITERALLY the same code (traverse-on-dir + RX-on-Helper.exe).
+            if (SuavoAgent.Diagnostics.HelperExeAclGrant.Apply(installDir, ConsoleUI.WriteInfo))
+                ConsoleUI.WriteOk("Helper apphost readable by the interactive user (single-file self-extract); appsettings stays protected");
             else
-                ConsoleUI.WriteWarn($"Helper apphost not found for read-grant: {helperExe}");
-            ConsoleUI.WriteOk("Helper apphost readable by the interactive user (single-file self-extract); appsettings stays protected");
+                ConsoleUI.WriteWarn("Helper apphost read-grant did NOT fully succeed — the Helper may churn (cannot self-extract)");
         }
         catch (Exception ex)
         {
