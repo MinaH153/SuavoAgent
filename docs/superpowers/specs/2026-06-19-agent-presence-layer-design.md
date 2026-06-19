@@ -138,9 +138,9 @@ Hotkey / tray / cloud-sync → SetVisible(toggle)   // instant; actuation unaffe
 
 ---
 
-## 7. Open decisions for review
-1. **Renderer path** — recommend GDI-persistent-idle-no-repaint now, DComp in Phase 1.5. (Alternative: go DComp in Phase 1 — correct long-term but slower to the demo and higher risk.)
-2. **Hide default** — recommend default-visible (product vision) with instant hotkey hide + `SuppressWhenSessionDisconnected=true`. A more conservative pharmacy default would be cursor-on / bubble-off until trusted.
+## 7. Decisions (resolved 2026-06-19)
+1. **Renderer path — DECIDED:** GDI-persistent-with-idle-no-repaint for Phase 1 (fastest to demo, reuses the proven path), then migrate to DirectComposition in **Phase 1.5** before any real pharmacy box.
+2. **Hide default — DECIDED:** default-visible (product vision) + instant hotkey/tray hide + `SuppressWhenSessionDisconnected=true`. Pharmacies can dial to a conservative profile via the dashboard preferences.
 
 ---
 
