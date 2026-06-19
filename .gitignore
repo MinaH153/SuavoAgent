@@ -16,3 +16,6 @@ publish-v3.11.1/
 # Ops working dir — local secrets, never commit
 .ops/
 .firecrawl/
+
+# PioneerRx dress-rehearsal staging (rehearsal.ps1 output — VM-local only)
+.rehearsal-stage/

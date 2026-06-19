@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Full-chain dress-rehearsal driver. Composes the REAL pricing chain —
+       HelperInteractivePreflight → DiscoveryClient (find_file) → UiaFirstPricingJobExecutor →
+       PricingJobRunner → IpcCommandClient → (real SuavoAgent.Helper.exe) → IpcCommandServer →
+       PricingWorkflow → PioneerRxUiaEngine — against the PioneerRxSim app, then grades the
+       priced output workbook against SimCatalog's hand-written expectations.
+
+       Plain net8.0: this process only does pipes/Excel/process-launch (all UIA lives in the
+       real Helper process), so it builds on macOS/Linux and runs on the Windows VM.
+
+       The staged apphost must be RENAMED SuavoAgent.Core.exe (rehearsal.ps1 does this):
+       the Helper-side IpcCommandServer.VerifyClientIsCore gate — which we exercise REAL,
+       never relaxed — requires client ProcessName == "SuavoAgent.Core" and the client exe
+       under the Helper's install root.
+
+       NOT in SuavoAgent.sln (same precedent as tests/SuavoAgent.UiaHarness). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>PioneerRxRehearsal</RootNamespace>
+    <AssemblyName>PioneerRxRehearsal</AssemblyName>
+    <AssemblyTitle>PioneerRxRehearsal</AssemblyTitle>
+    <Description>Runs the real SuavoAgent UIA pricing chain against the PioneerRx simulator and grades the output.</Description>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SuavoAgent.Core\SuavoAgent.Core.csproj" />
+    <ProjectReference Include="..\PioneerRxSim\Shared\PioneerRxSim.Shared.csproj" />
+  </ItemGroup>
+
+</Project>

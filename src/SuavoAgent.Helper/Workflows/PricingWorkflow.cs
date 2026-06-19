@@ -93,7 +93,7 @@ public sealed class PricingWorkflow
             try
             {
                 // Step 3: Type NDC into Quick Search and press Enter
-                if (!SearchByNdc(editWindow, cf, request.Ndc, resolver))
+                if (!SearchByNdc(editWindow, cf, request.Ndc, resolver, out var searchBox))
                 {
                     Observe(SelectorStepId.QuickSearchField, SelectorOutcome.Failed, SelectorFailureKind.ElementNotFound,
                         ScanCandidates(editWindow, cf, ControlType.Edit));
@@ -105,7 +105,7 @@ public sealed class PricingWorkflow
                 // Prevents returning pricing data for the previously-selected item when Quick Search
                 // is slow or finds no match. (Selector resolved; the mismatch is semantic, so no
                 // candidate scan — and we must not read element values here.)
-                if (!VerifyLoadedNdc(editWindow, cf, request.Ndc))
+                if (!VerifyLoadedNdc(editWindow, cf, request.Ndc, searchBox))
                 {
                     Observe(SelectorStepId.VerifyNdc, SelectorOutcome.Failed, SelectorFailureKind.VerifyMismatch);
                     return Done(Fail(request, $"Loaded item NDC does not match {request.Ndc} — item may not exist or search timed out"));
@@ -260,8 +260,10 @@ public sealed class PricingWorkflow
     //       all attempts fail rather than firing Enter against an unknown state.
     private const int MaxTypeAttempts = 2;
 
-    private bool SearchByNdc(Window editWindow, ConditionFactory cf, string ndc, SelectorResolver resolver)
+    private bool SearchByNdc(Window editWindow, ConditionFactory cf, string ndc, SelectorResolver resolver,
+        out AutomationElement? resolvedSearchBox)
     {
+        resolvedSearchBox = null;
         try
         {
             // Quick Search is a text box near the top of the Edit Rx Item window
@@ -289,6 +291,10 @@ public sealed class PricingWorkflow
             }
 
             if (searchBox == null) return false;
+
+            // Capture the resolved box so VerifyLoadedNdc can exclude this exact
+            // element by identity (RuntimeId) — robust even when HelpText is absent.
+            resolvedSearchBox = searchBox;
 
             for (int attempt = 1; attempt <= MaxTypeAttempts; attempt++)
             {
@@ -354,11 +360,13 @@ public sealed class PricingWorkflow
 
     /// <summary>
     /// Verifies that the Edit Rx Item window contains the expected NDC after Quick Search loads.
-    /// Scans all text-bearing elements for the normalized NDC (hyphens removed, 11 digits).
+    /// Scans the loaded item's text-bearing elements for the normalized NDC (hyphens removed,
+    /// 11 digits) — EXCLUDING the Quick Search box, which retains the typed query and would
+    /// tautologically "verify" any NDC (see <see cref="IsQuickSearchField"/>).
     /// Returns false if the NDC is not found within the element timeout, indicating the wrong
     /// item was loaded or no result was returned.
     /// </summary>
-    private bool VerifyLoadedNdc(Window editWindow, ConditionFactory cf, string ndc)
+    private bool VerifyLoadedNdc(Window editWindow, ConditionFactory cf, string ndc, AutomationElement? searchBox)
     {
         // Caller already normalized to 11-digit canonical form upstream (ExcelPricingReader).
         // If this invariant breaks we'd silently match shorter substrings, so assert + fall back.
@@ -368,6 +376,11 @@ public sealed class PricingWorkflow
             _logger.Warning("PricingWorkflow: cannot normalize NDC '{Ndc}' for verification", ndc);
             return false;
         }
+
+        // Identity of the Quick Search box we typed into, read once. VerifyLoadedNdc
+        // excludes that exact element so the tautology (matching the box's own echoed
+        // query) can't pass — by identity, not HelpText, so it holds with no HelpText.
+        var searchBoxRid = TryGetRuntimeId(searchBox);
 
         var deadline = DateTime.UtcNow + ElementTimeout;
         while (DateTime.UtcNow < deadline)
@@ -379,6 +392,15 @@ public sealed class PricingWorkflow
 
                 foreach (var el in candidates)
                 {
+                    // [C-3] NEVER verify against the Quick Search box: it still holds the NDC we
+                    // just typed, so matching it is tautological — verification "passes" for ANY
+                    // NDC even when the wrong item (or no item) loaded. That is exactly how the
+                    // previously-selected item's pricing got written as if it were this NDC's, and
+                    // it pre-empted the Do-Not-Use guard below. Exclude it by element IDENTITY (the
+                    // exact box SearchByNdc typed into) so the exclusion holds even when PioneerRx
+                    // exposes no HelpText (the resolver's own fallback path); verify only the loaded item.
+                    if (IsSearchBox(el, searchBoxRid)) continue;
+
                     var raw = el.AsTextBox()?.Text ?? el.Name ?? "";
                     if (string.IsNullOrEmpty(raw)) continue;
 
@@ -414,6 +436,51 @@ public sealed class PricingWorkflow
         _logger.Warning("PricingWorkflow: NDC {Ndc} not found in loaded item after {Timeout}s",
             ndc, ElementTimeout.TotalSeconds);
         return false;
+    }
+
+    /// <summary>
+    /// True if <paramref name="el"/> is the Quick Search box that <see cref="VerifyLoadedNdc"/>
+    /// must NOT verify against (it retains the typed query, so matching it confirms the requested
+    /// NDC regardless of what actually loaded — a tautology).
+    /// <para>
+    /// PRIMARY: element identity. <paramref name="searchBoxRid"/> is the RuntimeId of the exact box
+    /// <see cref="SearchByNdc"/> typed into; comparing RuntimeIds excludes that one element whether
+    /// or not PioneerRx exposes HelpText, and never false-skips a different field that merely shares
+    /// a HelpText string. FALLBACK: only when the box's identity is unknown (RuntimeId unreadable,
+    /// e.g. the resolver never captured it) do we fall back to the HelpText marker — best effort,
+    /// matching legacy behaviour.
+    /// </para>
+    /// </summary>
+    private static bool IsSearchBox(AutomationElement el, int[]? searchBoxRid)
+    {
+        if (searchBoxRid is { Length: > 0 })
+        {
+            var rid = TryGetRuntimeId(el);
+            if (rid != null) return RuntimeIdEquals(rid, searchBoxRid);
+            // RuntimeId unreadable on this candidate — fall through to the HelpText marker.
+        }
+        return IsQuickSearchField(el);
+    }
+
+    /// <summary>RuntimeId of <paramref name="el"/>, or null if unavailable or the read throws.</summary>
+    private static int[]? TryGetRuntimeId(AutomationElement? el)
+    {
+        if (el == null) return null;
+        try { return el.Properties.RuntimeId.ValueOrDefault; }
+        catch { return null; }
+    }
+
+    private static bool RuntimeIdEquals(int[] a, int[] b) => a.SequenceEqual(b);
+
+    /// <summary>
+    /// Degraded fallback identity check: matches the HelpText marker <see cref="SearchByNdc"/>
+    /// resolves the box by (<see cref="QuickSearchHint"/>). Used only when RuntimeId identity is
+    /// unavailable. The property fetch is guarded — a UIA read can throw, treated as "not the box".
+    /// </summary>
+    private static bool IsQuickSearchField(AutomationElement el)
+    {
+        try { return string.Equals(el.HelpText, QuickSearchHint, StringComparison.OrdinalIgnoreCase); }
+        catch { return false; }
     }
 
     private bool ClickPricingTab(Window editWindow, ConditionFactory cf, SelectorResolver resolver)
