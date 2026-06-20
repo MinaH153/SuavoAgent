@@ -78,6 +78,9 @@ public sealed class UserInputObserver : IDisposable
     private readonly ActuationGate _gate;
     private readonly ILogger _logger;
     private readonly TimeSpan _coalesceWindow;
+    // Optional cheap callback for the presence layer (mode flip → Observing). Must do near-nothing
+    // (an interlocked timestamp write) — this fires on the low-level hook path.
+    private readonly Action? _onUserInput;
 
     private DateTimeOffset _lastNotifyUtc = DateTimeOffset.MinValue;
 
@@ -87,11 +90,12 @@ public sealed class UserInputObserver : IDisposable
     private IntPtr _mouseHook = IntPtr.Zero;
     private bool _disposed;
 
-    public UserInputObserver(ActuationGate gate, ILogger logger, TimeSpan? coalesceWindow = null)
+    public UserInputObserver(ActuationGate gate, ILogger logger, TimeSpan? coalesceWindow = null, Action? onUserInput = null)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<UserInputObserver>();
         _coalesceWindow = coalesceWindow ?? TimeSpan.FromSeconds(2);
+        _onUserInput = onUserInput;
     }
 
     /// <summary>
@@ -206,6 +210,7 @@ public sealed class UserInputObserver : IDisposable
         if (now - _lastNotifyUtc < _coalesceWindow) return;
         _lastNotifyUtc = now;
         _gate.NotifyUserInputDetected(source);
+        try { _onUserInput?.Invoke(); } catch { /* presence is cosmetic — never break the safety observer */ }
     }
 
     public void Dispose()
