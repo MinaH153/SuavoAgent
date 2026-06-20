@@ -20,11 +20,16 @@ public sealed class AgentOptions
     public string? SqlPassword { get; set; }
 
     /// <summary>
-    /// When true, SQL connections accept any server certificate. This is an explicit
-    /// break-glass compatibility override for pharmacies with self-signed SQL Server
-    /// certificates; default false avoids silent LAN MITM exposure.
+    /// When true, SQL connections accept a self-signed/internal server certificate (Encrypt
+    /// stays ON — only chain validation is skipped). Defaults TRUE because PioneerRx is always
+    /// deployed as a LOCAL SQL Server instance with a self-signed cert (no CA chain to validate),
+    /// so the prior false default made the agent unable to connect to ANY real pharmacy DB
+    /// ("certificate chain ... not trusted"). The residual LAN-MITM concern is covered by the
+    /// RequiredTables anti-impostor check (the agent proves it reached PioneerRx's actual schema,
+    /// not a LAN impostor). Operators on a CA-issued SQL cert can set this false via the
+    /// Agent.SqlTrustServerCertificate cloud override.
     /// </summary>
-    public bool SqlTrustServerCertificate { get; set; } = false;
+    public bool SqlTrustServerCertificate { get; set; } = true;
 
     /// <summary>
     /// Per-agent HMAC salt for hashing PHI (Rx numbers, etc.) in audit logs and cloud sync.
