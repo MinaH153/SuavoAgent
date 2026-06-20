@@ -184,15 +184,19 @@ public sealed class AgentOptions
     /// <summary>
     /// Which IPricingJobExecutor implementation runs <c>run_pricing_job</c> / <c>find_and_run_pricing_job</c>.
     ///
-    /// <c>SqlFirst</c> (default): SqlFirstPricingJobExecutor reads pricing from the PioneerRx SQL backend
-    /// directly. Fast (~30s for 500 NDCs) and fail-closed — no UIA fallback if SQL is unavailable.
+    /// <c>UiaFirst</c> (default): UiaFirstPricingJobExecutor drives PioneerRx through its UI (Item →
+    /// Rx Item → Quick Search → Pricing tab) for every NDC. Slower (minutes to ~half hour for 500 NDCs
+    /// depending on throttle) but stays inside the documented operator workflow — no direct DB
+    /// connection, no SQL credentials to provision, no vendor-EULA tamper question, and INVISIBLE to
+    /// the PMS (the agent just "uses" PioneerRx like a pharmacist). This is the default because stealth
+    /// is the product model: a pharmacy install must not have to expose the agent to PioneerRx/the
+    /// vendor (asking a DBA for a SQL login does exactly that). Requires PioneerRx to be open.
     ///
-    /// <c>UiaFirst</c>: UiaFirstPricingJobExecutor drives PioneerRx through its UI (Item → Rx Item →
-    /// Quick Search → Pricing tab) for every NDC. Slower (minutes to ~half hour for 500 NDCs depending
-    /// on throttle) but stays inside the documented operator workflow — no direct DB connection,
-    /// no vendor-EULA tamper question. Use for pharmacies that have not (yet) authorized SQL access.
+    /// <c>SqlFirst</c>: SqlFirstPricingJobExecutor reads pricing from the PioneerRx SQL backend directly.
+    /// Faster (~30s for 500 NDCs) and runs headless, but requires provisioned SQL access. Opt in per
+    /// pharmacy via the Agent.PricingExecutor cloud override once the pharmacy has authorized SQL access.
     /// </summary>
-    public PricingExecutorMode PricingExecutor { get; set; } = PricingExecutorMode.SqlFirst;
+    public PricingExecutorMode PricingExecutor { get; set; } = PricingExecutorMode.UiaFirst;
 
     /// <summary>
     /// M3 autonomy: master enable for UNSUPERVISED execution of EARNED tasks. OFF by default
