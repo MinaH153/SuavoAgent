@@ -184,6 +184,9 @@ public sealed class ConfigOverrideStore
         // strings/arrays; their values are pharmacy data, not a safety switch.)
         "Agent.EnablePricingSavingsEnrichment",
         "Agent.LearningMode",
+        // Per-pharmacy pricing modality: "SqlFirst" (read PioneerRx SQL) or "UiaFirst" (drive
+        // PioneerRx's UI — stealth, no SQL/credentials, invisible to the PMS). String enum value.
+        "Agent.PricingExecutor",
         "Agent.SqlTrustServerCertificate",
         "Agent.TemplateLearning.Enabled",
         "Agent.TemplateLearning.RuleGeneration",
