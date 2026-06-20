@@ -36,12 +36,16 @@ public class PricingExecutorConfigTests : IDisposable
     }
 
     [Fact]
-    public void AgentOptions_PricingExecutor_DefaultsToSqlFirst()
+    public void AgentOptions_PricingExecutor_DefaultsToUiaFirst()
     {
-        // Default is intentionally SqlFirst — existing pharmacies must not silently switch
-        // to UIA on upgrade. Opt-in only via explicit appsettings or env override.
+        // Default flipped to UiaFirst (2026-06-20): stealth is the product model — a pharmacy install
+        // must not have to expose the agent to PioneerRx/the vendor, and SqlFirst requires provisioning
+        // SQL access (asking a DBA for a login does exactly that). UiaFirst drives PioneerRx's UI like a
+        // pharmacist — no SQL, no credentials, invisible to the PMS. TRADEOFF: an existing pharmacy that
+        // relied on the SqlFirst default switches to UIA on upgrade; it must opt back in explicitly via
+        // the Agent.PricingExecutor cloud override (now allowlisted) once it has authorized SQL access.
         var options = new AgentOptions();
-        Assert.Equal(PricingExecutorMode.SqlFirst, options.PricingExecutor);
+        Assert.Equal(PricingExecutorMode.UiaFirst, options.PricingExecutor);
     }
 
     [Fact]
