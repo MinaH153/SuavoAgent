@@ -66,6 +66,10 @@ public class HeartbeatWorkerTests : IDisposable
             PharmacyId = TestPharmacyId,
             HeartbeatIntervalSeconds = 30,
             WatchdogRepairRequestPath = _repairRequestPath,
+            // These worker tests exercise the SQL-path pricing dispatch via an injected fake executor.
+            // The product default is now UiaFirst (stealth UI-driven, routes through Helper IPC that
+            // isn't mocked here), so pin SqlFirst explicitly to keep testing the spec-routing behavior.
+            PricingExecutor = PricingExecutorMode.SqlFirst,
             TestHooks = new TestHooksOptions { Enabled = true },
         });
 
