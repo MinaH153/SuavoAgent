@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using Serilog;
 
 namespace SuavoAgent.Helper.Presence;
@@ -13,7 +14,14 @@ public sealed class PresenceController
     private readonly ILogger _logger;
     private readonly Func<bool> _isSessionInteractive;
     private readonly IBubbleRenderer? _bubble;
+    private readonly IGlowRenderer? _glow;
+    private readonly Func<DateTimeOffset> _now;
+    private static readonly TimeSpan DrivingWindow = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan ObserveWindow = TimeSpan.FromSeconds(8);
     private string? _bubbleText;
+    private long _lastAgentTicks;
+    private long _lastHumanTicks;
+    private volatile int _mode = (int)PresenceMode.Idle;
     private readonly object _lock = new();
     private bool _placed;
     private int _lastX, _lastY;
@@ -23,15 +31,24 @@ public sealed class PresenceController
         PresencePreferenceStore store,
         ILogger logger,
         Func<bool>? isSessionInteractive = null,
-        IBubbleRenderer? bubble = null)
+        IBubbleRenderer? bubble = null,
+        IGlowRenderer? glow = null,
+        Func<DateTimeOffset>? clock = null)
     {
         _renderer = renderer;
         _store = store;
         _logger = logger.ForContext<PresenceController>();
         _isSessionInteractive = isSessionInteractive ?? (() => true);
         _bubble = bubble;
+        _glow = glow;
+        _now = clock ?? (() => DateTimeOffset.UtcNow);
         _store.Changed += OnPrefsChanged;
     }
+
+    private void StampAgent() => Interlocked.Exchange(ref _lastAgentTicks, _now().UtcTicks);
+
+    private string ActiveTone(PresencePreferences prefs)
+        => (PresenceMode)_mode == PresenceMode.Observing ? PresenceTones.Observing : prefs.Tone;
 
     private bool Active
     {
@@ -47,6 +64,7 @@ public sealed class PresenceController
     public void MoveTo(int x, int y)
     {
         if (!Active) return;
+        StampAgent(); EvaluateMode();
         try
         {
             var prefs = _store.Current;
@@ -56,11 +74,11 @@ public sealed class PresenceController
                 {
                     _placed = true;
                     _lastX = x; _lastY = y;
-                    _renderer.Reticle(x, y, prefs.CursorSizePx, prefs.Tone); // first appearance, no glide
+                    _renderer.Reticle(x, y, prefs.CursorSizePx, ActiveTone(prefs)); // first appearance, no glide
                     return;
                 }
                 var (dur, easing) = PresenceMotion.PlanGlide(_lastX, _lastY, x, y, prefs);
-                _renderer.Glide(_lastX, _lastY, x, y, dur, easing, prefs.Tone, prefs.CursorSizePx);
+                _renderer.Glide(_lastX, _lastY, x, y, dur, easing, ActiveTone(prefs), prefs.CursorSizePx);
                 _lastX = x; _lastY = y;
                 if (_bubble is not null && _bubbleText is not null)
                 {
@@ -74,10 +92,11 @@ public sealed class PresenceController
     public void Reticle(int x, int y)
     {
         if (!Active) return;
+        StampAgent();
         try
         {
             var prefs = _store.Current;
-            _renderer.Reticle(x, y, prefs.CursorSizePx, prefs.Tone);
+            _renderer.Reticle(x, y, prefs.CursorSizePx, ActiveTone(prefs));
         }
         catch (Exception ex) { _logger.Debug(ex, "presence Reticle failed (non-fatal)"); }
     }
@@ -85,7 +104,8 @@ public sealed class PresenceController
     public void Click(int x, int y)
     {
         if (!Active) return;
-        try { _renderer.ClickPulse(x, y, _store.Current.Tone); }
+        StampAgent(); EvaluateMode();
+        try { _renderer.ClickPulse(x, y, ActiveTone(_store.Current)); }
         catch (Exception ex) { _logger.Debug(ex, "presence Click failed (non-fatal)"); }
     }
 
@@ -97,6 +117,7 @@ public sealed class PresenceController
     public void Narrate(string actionKind, string? label, string? tone = null)
     {
         if (_bubble is null || !Active) return;
+        StampAgent(); EvaluateMode();
         var prefs = _store.Current;
         if (!prefs.BubbleVisible || prefs.BubbleVerbosity == "off") return;
         try
@@ -106,9 +127,43 @@ public sealed class PresenceController
                     ? null : label;
             var text = BubbleText.For(actionKind, safeLabel);
             _bubbleText = text;
-            lock (_lock) { _bubble.Show(text, tone ?? prefs.Tone, _lastX, _lastY); }
+            lock (_lock) { _bubble.Show(text, tone ?? ActiveTone(prefs), _lastX, _lastY); }
         }
         catch (Exception ex) { _logger.Debug(ex, "presence Narrate failed (non-fatal)"); }
+    }
+
+    /// <summary>Record human input (cheap, hook-safe: an interlocked timestamp write only).
+    /// The Driving→Observing flip happens on the next EvaluateMode tick.</summary>
+    public void OnHumanInput() => Interlocked.Exchange(ref _lastHumanTicks, _now().UtcTicks);
+
+    /// <summary>Recompute the mode from activity timestamps and apply it (glow + tone). Called by the
+    /// 1s ticker and inline after agent activity. Returns the current mode.</summary>
+    public PresenceMode EvaluateMode()
+    {
+        var agentTicks = Interlocked.Read(ref _lastAgentTicks);
+        var humanTicks = Interlocked.Read(ref _lastHumanTicks);
+        DateTimeOffset? la = agentTicks == 0 ? null : new DateTimeOffset(agentTicks, TimeSpan.Zero);
+        DateTimeOffset? lh = humanTicks == 0 ? null : new DateTimeOffset(humanTicks, TimeSpan.Zero);
+        var mode = PresenceModeLogic.Evaluate(la, lh, _now(), DrivingWindow, ObserveWindow);
+        if ((int)mode != _mode)
+        {
+            _mode = (int)mode;
+            ApplyGlow(mode);
+        }
+        return mode;
+    }
+
+    private void ApplyGlow(PresenceMode mode)
+    {
+        if (_glow is null) return;
+        var prefs = _store.Current;
+        try
+        {
+            if (!prefs.GlowVisible || mode == PresenceMode.Idle) { _glow.Hide(); return; }
+            var tone = mode == PresenceMode.Observing ? PresenceTones.Observing : prefs.Tone;
+            _glow.Show(tone, prefs.GlowIntensity);
+        }
+        catch (Exception ex) { _logger.Debug(ex, "presence glow apply failed (non-fatal)"); }
     }
 
     private void OnPrefsChanged(PresencePreferences prefs)
@@ -116,7 +171,7 @@ public sealed class PresenceController
         try
         {
             if (prefs.IsCursorActive) _renderer.Show();
-            else { _renderer.Hide(); _bubble?.Hide(); }
+            else { _renderer.Hide(); _bubble?.Hide(); _glow?.Hide(); }
         }
         catch (Exception ex) { _logger.Debug(ex, "presence visibility toggle failed (non-fatal)"); }
     }
