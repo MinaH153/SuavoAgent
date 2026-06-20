@@ -153,14 +153,14 @@ public sealed class IpcCommandServer : IDisposable
                 _logger.Debug("IpcCommandServer: waiting for Core on pipe {Name}", _pipeName);
                 await pipe.WaitForConnectionAsync(ct);
 
-                if (!VerifyClientIsCore(pipe))
-                {
-                    pipe.Disconnect();
-                    continue;
-                }
-
-                _logger.Information("IpcCommandServer: Core connected on pipe {Name}", _pipeName);
-
+                // Client verification happens INSIDE HandleConnection, after the first frame is read
+                // and before that frame is dispatched. VerifyClientIsCore's primary identity proof
+                // (token-SID via ImpersonateNamedPipeClient) only works once the server has read a
+                // message from the pipe — verifying here (pre-read) would make the SID path silently
+                // fall through to the image-path branch (which fails for the de-privileged Helper →
+                // the command-pipe flap). Reading one bounded frame from an as-yet-unverified peer is
+                // safe: the pipe ACL already restricts connectors, and NO command is dispatched until
+                // verification passes.
                 await HandleConnection(pipe, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -181,12 +181,27 @@ public sealed class IpcCommandServer : IDisposable
 
     private async Task HandleConnection(NamedPipeServerStream pipe, CancellationToken ct)
     {
+        var verified = false;
         while (!ct.IsCancellationRequested && pipe.IsConnected)
         {
             try
             {
                 var json = await IpcFraming.ReadFrameAsync(pipe, ct);
                 if (json == null) break;
+
+                // Verify the peer ONCE — now that a frame has been read, ImpersonateNamedPipeClient
+                // (the token-SID identity proof) works. Verification happens BEFORE the frame is
+                // deserialized/dispatched, so no command from an unverified client is ever executed.
+                if (!verified)
+                {
+                    if (!VerifyClientIsCore(pipe))
+                    {
+                        _logger.Warning("IpcCommandServer: client failed verification after first frame — disconnecting");
+                        break;
+                    }
+                    verified = true;
+                    _logger.Information("IpcCommandServer: Core connected + verified on pipe {Name}", _pipeName);
+                }
 
                 var request = JsonSerializer.Deserialize<IpcRequest>(json);
                 if (request == null) continue;
