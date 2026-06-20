@@ -1,5 +1,6 @@
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using Serilog;
@@ -155,14 +156,14 @@ public sealed class IpcCommandServer : IDisposable
                 _logger.Debug("IpcCommandServer: waiting for Core on pipe {Name}", _pipeName);
                 await pipe.WaitForConnectionAsync(ct);
 
-                if (!VerifyClientIsCore(pipe))
-                {
-                    pipe.Disconnect();
-                    continue;
-                }
-
-                _logger.Information("IpcCommandServer: Core connected on pipe {Name}", _pipeName);
-
+                // Client verification happens INSIDE HandleConnection, after the first frame is read
+                // and before that frame is dispatched. VerifyClientIsCore's primary identity proof
+                // (token-SID via ImpersonateNamedPipeClient) only works once the server has read a
+                // message from the pipe — verifying here (pre-read) would make the SID path silently
+                // fall through to the image-path branch (which fails for the de-privileged Helper →
+                // the command-pipe flap). Reading one bounded frame from an as-yet-unverified peer is
+                // safe: the pipe ACL already restricts connectors, and NO command is dispatched until
+                // verification passes.
                 await HandleConnection(pipe, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -183,12 +184,27 @@ public sealed class IpcCommandServer : IDisposable
 
     private async Task HandleConnection(NamedPipeServerStream pipe, CancellationToken ct)
     {
+        var verified = false;
         while (!ct.IsCancellationRequested && pipe.IsConnected)
         {
             try
             {
                 var json = await IpcFraming.ReadFrameAsync(pipe, ct);
                 if (json == null) break;
+
+                // Verify the peer ONCE — now that a frame has been read, ImpersonateNamedPipeClient
+                // (the token-SID identity proof) works. Verification happens BEFORE the frame is
+                // deserialized/dispatched, so no command from an unverified client is ever executed.
+                if (!verified)
+                {
+                    if (!VerifyClientIsCore(pipe))
+                    {
+                        _logger.Warning("IpcCommandServer: client failed verification after first frame — disconnecting");
+                        break;
+                    }
+                    verified = true;
+                    _logger.Information("IpcCommandServer: Core connected + verified on pipe {Name}", _pipeName);
+                }
 
                 var request = JsonSerializer.Deserialize<IpcRequest>(json);
                 if (request == null) continue;
@@ -768,6 +784,42 @@ public sealed class IpcCommandServer : IDisposable
     /// Verifies the connecting client is SuavoAgent.Core and its executable lives under
     /// the SuavoAgent install root. Fail-closed on any read error.
     /// </summary>
+    /// <summary>
+    /// True if the connected pipe client's token carries a well-known SERVICE SID
+    /// (LocalSystem / LocalService / NetworkService) — Core's identities. Read by
+    /// impersonating the connected peer (identity-level; no SeImpersonatePrivilege needed),
+    /// so it works across the user→SYSTEM boundary and is immune to PID-reuse races. An
+    /// interactive-user impostor cannot present a service SID. Returns false (never throws)
+    /// when the client is non-service or the read is inconclusive — caller then falls back
+    /// to the image-path check.
+    /// </summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private bool TryGetClientServiceSid(NamedPipeServerStream pipe, uint clientPid, out string sidLabel)
+    {
+        sidLabel = "";
+        try
+        {
+            SecurityIdentifier? sid = null;
+            pipe.RunAsClient(() =>
+            {
+                using var id = WindowsIdentity.GetCurrent();
+                sid = id.User;
+            });
+            if (sid is null) return false;
+            var isService =
+                sid.IsWellKnown(WellKnownSidType.LocalSystemSid)
+                || sid.IsWellKnown(WellKnownSidType.LocalServiceSid)
+                || sid.IsWellKnown(WellKnownSidType.NetworkServiceSid);
+            if (isService) { sidLabel = sid.Value; return true; }
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug(ex, "IpcCommandServer: client SID check inconclusive for PID {Pid} — falling back to image-path check", clientPid);
+            return false;
+        }
+    }
+
     private bool VerifyClientIsCore(NamedPipeServerStream pipe)
     {
         if (!OperatingSystem.IsWindows()) return true;
@@ -788,6 +840,23 @@ public sealed class IpcCommandServer : IDisposable
                 return false;
             }
 
+            // Primary cross-privilege identity proof: the client's TOKEN SID. Core runs as a Windows
+            // service (SYSTEM/LocalService), so its token carries a well-known service SID that an
+            // interactive-user impostor CANNOT forge (becoming a service requires admin). We read the
+            // SID by impersonating the connected client over the pipe — this reads the REAL connected
+            // peer's token (not a PID re-lookup, so it's free of the GetProcessById PID-reuse TOCTOU),
+            // and works even when the de-privileged Helper can't OpenProcess/read SYSTEM Core's image
+            // path (the original strand cause). Reading identity does not require SeImpersonatePrivilege.
+            // Replaces the reverted ACCESS_DENIED-accept that Codex found exploitable.
+            if (TryGetClientServiceSid(pipe, clientPid, out var serviceSidLabel))
+            {
+                _logger.Information(
+                    "IpcCommandServer: accepting Core (PID {Pid}) — client token is service SID {Sid}; ProcessName=SuavoAgent.Core verified (unforgeable by an interactive user)",
+                    clientPid, serviceSidLabel);
+                return true;
+            }
+
+            // Not a service token (or impersonation inconclusive): fall through to the image-path check.
             // QueryFullProcessImageName works across user/SYSTEM security tokens;
             // MainModule fallback for non-Windows or quirks.
             var clientPath = ProcessImageInterop.Get(clientPid);
