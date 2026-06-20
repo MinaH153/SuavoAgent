@@ -774,28 +774,14 @@ public sealed class IpcCommandServer : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    // Cross-privilege image-path read. The Helper runs de-privileged (interactive user)
-                    // while Core runs as a SYSTEM service, so reading Core's image path can fail with
-                    // ACCESS_DENIED even though the caller IS the legitimate Core — this caused the
-                    // command pipe to flap ("Helper did not answer ping — command pipe is stranded").
-                    //
-                    // Accepting here does NOT weaken the boundary: ProcessName == "SuavoAgent.Core" was
-                    // already verified above, and ACCESS_DENIED specifically indicates a HIGHER-integrity
-                    // caller (SYSTEM Core). An interactive-user impostor named "SuavoAgent.Core" runs at
-                    // the SAME integrity as the Helper, so its image path IS readable — it never reaches
-                    // this catch; it falls through to the install-dir check below and is rejected there.
-                    // To forge this exact signature (ACCESS_DENIED + verified Core name) an attacker must
-                    // already be SYSTEM, at which point the pipe ACL is moot anyway. Non-ACCESS_DENIED
-                    // read failures still reject.
-                    var accessDenied = ex is System.ComponentModel.Win32Exception { NativeErrorCode: 5 }
-                        || ex.InnerException is System.ComponentModel.Win32Exception { NativeErrorCode: 5 };
-                    if (accessDenied)
-                    {
-                        _logger.Information(
-                            "IpcCommandServer: accepting Core (PID {Pid}) — image path unreadable (ACCESS_DENIED across the user→SYSTEM boundary); ProcessName=SuavoAgent.Core verified, a signature an interactive impostor cannot forge",
-                            clientPid);
-                        return true;
-                    }
+                    // REVERTED (v3.65): an earlier fix accepted on ACCESS_DENIED + verified Core name to
+                    // stop the de-privileged-Helper pipe flap. Codex security review found that exploitable
+                    // — a same-user impostor named "SuavoAgent.Core" can tighten its OWN process DACL to
+                    // force ACCESS_DENIED on purpose, then connect via the Interactive pipe ACE and be
+                    // accepted. ACCESS_DENIED proves access denial, NOT SYSTEM identity. Restored to the
+                    // safe reject behavior. The correct fix (verify the pipe CLIENT TOKEN SID is
+                    // SYSTEM/LocalService via RunAsClient impersonation — unforgeable by an interactive
+                    // user) is a tested follow-up, NOT shipped blind to a PHI box.
                     if (_relaxClientPathValidation)
                     {
                         _logger.Warning(ex, "IpcCommandServer: process image path unreadable for PID {Pid} (ProcessName=SuavoAgent.Core verified) — accepting due to RelaxIpcClientPathValidation=true", clientPid);
