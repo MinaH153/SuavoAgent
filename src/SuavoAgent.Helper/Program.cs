@@ -135,10 +135,14 @@ try
         presenceRenderer.Start();
         var bubbleRenderer = new SuavoAgent.Helper.Presence.WindowsBubbleRenderer(Log.Logger);
         bubbleRenderer.Start();
+        var glowRenderer = new SuavoAgent.Helper.Presence.WindowsGlowRenderer(Log.Logger);
+        glowRenderer.Start();
         presenceController = new SuavoAgent.Helper.Presence.PresenceController(
             presenceRenderer, presenceStore, Log.Logger,
             isSessionInteractive: () => Environment.UserInteractive,
-            bubble: bubbleRenderer);
+            bubble: bubbleRenderer,
+            glow: glowRenderer);
+        var presenceModeTicker = new SuavoAgent.Helper.Presence.PresenceModeTicker(presenceController);
         var presenceHotkey = new SuavoAgent.Helper.Presence.PresenceHotkeyListener(presenceStore, Log.Logger);
         presenceHotkey.Start();
 
@@ -146,7 +150,8 @@ try
         uiaResolver = new UiaLabelResolver(Log.Logger);
         actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger, presence: presenceController);
         pioneerRxHandler = new PioneerRxCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, pioneerRxConfig, Log.Logger);
-        var observer = new UserInputObserver(actuationGate, Log.Logger);
+        var observer = new UserInputObserver(actuationGate, Log.Logger,
+            onUserInput: () => presenceController?.OnHumanInput()); // takeover → Observing
         var hotkey = new HotkeyKillSwitch(actuationGate, Log.Logger, requireRegistration: actuationConfig.RequireKillSwitchHotkey);
         actuationRuntime = new ActuationRuntime(actuationGate, observer, hotkey, Log.Logger);
         actuationRuntime.Start();
