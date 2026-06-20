@@ -19,7 +19,11 @@ internal sealed class SuccessViewModel
             : ctx.Config.Reasoning is { IsProvisionable: true }
                 ? "finishing up in the background"
                 : "configures automatically once available";
-        DashboardUrl = ctx.Config.CloudUrl.TrimEnd('/') + "/dashboard";
+        // Land the operator on the pharmacy-facing SuavoAgent surface — NOT /dashboard,
+        // which is the admin/platform Command Center a pharmacy user can't access ("no admin
+        // access on this account"). The person who just installed is a pharmacy user, so the
+        // post-install CTA must open the surface their role can actually see.
+        DashboardUrl = ctx.Config.CloudUrl.TrimEnd('/') + "/pharmacy/agent";
 
         OpenDashboardCommand = new RelayCommand(() =>
         {
