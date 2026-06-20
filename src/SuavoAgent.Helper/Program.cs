@@ -133,15 +133,18 @@ try
         presenceStore = new SuavoAgent.Helper.Presence.PresencePreferenceStore(presencePrefs);
         var presenceRenderer = new SuavoAgent.Helper.Presence.WindowsPresenceRenderer(Log.Logger);
         presenceRenderer.Start();
+        var bubbleRenderer = new SuavoAgent.Helper.Presence.WindowsBubbleRenderer(Log.Logger);
+        bubbleRenderer.Start();
         presenceController = new SuavoAgent.Helper.Presence.PresenceController(
             presenceRenderer, presenceStore, Log.Logger,
-            isSessionInteractive: () => Environment.UserInteractive);
+            isSessionInteractive: () => Environment.UserInteractive,
+            bubble: bubbleRenderer);
         var presenceHotkey = new SuavoAgent.Helper.Presence.PresenceHotkeyListener(presenceStore, Log.Logger);
         presenceHotkey.Start();
 
         sendInputDriver = new SendInputDriver(actuationGate, actuationConfig, Log.Logger, intentCursor, presenceController);
         uiaResolver = new UiaLabelResolver(Log.Logger);
-        actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger);
+        actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger, presence: presenceController);
         pioneerRxHandler = new PioneerRxCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, pioneerRxConfig, Log.Logger);
         var observer = new UserInputObserver(actuationGate, Log.Logger);
         var hotkey = new HotkeyKillSwitch(actuationGate, Log.Logger, requireRegistration: actuationConfig.RequireKillSwitchHotkey);

@@ -23,6 +23,8 @@ public sealed class ActuationCommandHandler
     private readonly UiaSignatureResolver _signatureResolver;
     private readonly ActuationConfig _config;
     private readonly ILogger _logger;
+    // Visual-only narration bubble. Fire-and-forget; null when presence isn't wired.
+    private readonly SuavoAgent.Helper.Presence.PresenceController? _presence;
 
     public ActuationCommandHandler(
         ActuationGate gate,
@@ -30,7 +32,8 @@ public sealed class ActuationCommandHandler
         UiaLabelResolver resolver,
         ActuationConfig config,
         ILogger logger,
-        UiaSignatureResolver? signatureResolver = null)
+        UiaSignatureResolver? signatureResolver = null,
+        SuavoAgent.Helper.Presence.PresenceController? presence = null)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
         _driver = driver ?? throw new ArgumentNullException(nameof(driver));
@@ -38,6 +41,7 @@ public sealed class ActuationCommandHandler
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<ActuationCommandHandler>();
         _signatureResolver = signatureResolver ?? new UiaSignatureResolver(logger);
+        _presence = presence;
     }
 
     public ActuationGateState GetState() => _gate.Snapshot();
@@ -110,12 +114,14 @@ public sealed class ActuationCommandHandler
         var resolved = _resolver.Resolve(req.Label, req.ProcessName, mode, timeout);
         if (resolved is null)
         {
+            _presence?.Narrate("Couldn't find", req.Label, SuavoAgent.Helper.Presence.PresenceTones.Confirm);
             return ActuationResult.Reject(
                 ActuationRejectionCodes.LabelNotFound,
                 $"label '{req.Label}' not found in '{req.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
                 effectiveDryRun);
         }
 
+        _presence?.Narrate("Clicking", req.Label);
         return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct).ConfigureAwait(false);
     }
 
@@ -148,12 +154,14 @@ public sealed class ActuationCommandHandler
         var resolved = _signatureResolver.Resolve(req.ControlType, req.AutomationId, req.ClassName, req.ProcessName, timeout);
         if (resolved is null)
         {
+            _presence?.Narrate("Couldn't find", req.AutomationId, SuavoAgent.Helper.Presence.PresenceTones.Confirm);
             return ActuationResult.Reject(
                 ActuationRejectionCodes.LabelNotFound,
                 $"signature ({req.ControlType}|{req.AutomationId}) not found in '{req.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
                 effectiveDryRun);
         }
 
+        _presence?.Narrate("Clicking", req.AutomationId);
         return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct).ConfigureAwait(false);
     }
 
@@ -163,6 +171,7 @@ public sealed class ActuationCommandHandler
         var req = data.Value.Deserialize<TypeTextRequest>();
         if (req is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun);
 
+        _presence?.Narrate("Typing", null); // NEVER the text — PHI
         var result = await _driver.TypeTextAsync(req, ct).ConfigureAwait(false);
 
         // SELF-VERIFICATION (read-back): after a LIVE successful type, confirm the keystrokes actually
@@ -351,6 +360,7 @@ public sealed class ActuationCommandHandler
         if (data is null) return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "missing data", _gate.IsDryRun));
         var req = data.Value.Deserialize<PressKeysRequest>();
         if (req is null) return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun));
+        _presence?.Narrate("Pressing keys", null);
         return _driver.PressKeysAsync(req, ct);
     }
 
