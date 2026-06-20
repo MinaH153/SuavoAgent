@@ -116,6 +116,8 @@ try
     var actuationGate = new ActuationGate(actuationConfig, Log.Logger);
     var pioneerRxConfig = PioneerRxBootstrap.LoadConfig(Log.Logger);
     SendInputDriver? sendInputDriver = null;
+    SuavoAgent.Helper.Presence.PresencePreferenceStore? presenceStore = null;
+    SuavoAgent.Helper.Presence.PresenceController? presenceController = null;
     UiaLabelResolver? uiaResolver = null;
     ActuationCommandHandler? actuationHandler = null;
     PioneerRxCommandHandler? pioneerRxHandler = null;
@@ -123,7 +125,21 @@ try
     HoneytokenWatcher? honeytokenWatcher = null;
     if (OperatingSystem.IsWindows())
     {
-        sendInputDriver = new SendInputDriver(actuationGate, actuationConfig, Log.Logger, intentCursor);
+        // Presence layer — persistent agentic cursor + preferences + instant hide (Ctrl+Alt+H).
+        // Visual-only; never gates actuation. Operator opt-out via ProgramData\SuavoAgent\presence.json.
+        // UserInteractive gates rendering off when running non-interactively (true under RDP, so the
+        // operator can still watch over a remote session).
+        var presencePrefs = SuavoAgent.Helper.Presence.PresenceBootstrap.LoadConfig(Log.Logger);
+        presenceStore = new SuavoAgent.Helper.Presence.PresencePreferenceStore(presencePrefs);
+        var presenceRenderer = new SuavoAgent.Helper.Presence.WindowsPresenceRenderer(Log.Logger);
+        presenceRenderer.Start();
+        presenceController = new SuavoAgent.Helper.Presence.PresenceController(
+            presenceRenderer, presenceStore, Log.Logger,
+            isSessionInteractive: () => Environment.UserInteractive);
+        var presenceHotkey = new SuavoAgent.Helper.Presence.PresenceHotkeyListener(presenceStore, Log.Logger);
+        presenceHotkey.Start();
+
+        sendInputDriver = new SendInputDriver(actuationGate, actuationConfig, Log.Logger, intentCursor, presenceController);
         uiaResolver = new UiaLabelResolver(Log.Logger);
         actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger);
         pioneerRxHandler = new PioneerRxCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, pioneerRxConfig, Log.Logger);
@@ -174,7 +190,8 @@ try
         actuation: actuationHandler,
         pioneerRx: pioneerRxHandler,
         sandboxDriver: sendInputDriver, // source of the launch-established sandbox HWND for window-scoped capture
-        relaxClientPathValidation: actuationConfig.RelaxIpcClientPathValidation);
+        relaxClientPathValidation: actuationConfig.RelaxIpcClientPathValidation,
+        presenceStore: presenceStore); // remote/dashboard presence.set_visible hide toggle
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying

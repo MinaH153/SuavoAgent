@@ -68,6 +68,7 @@ public sealed class IpcCommandServer : IDisposable
     private readonly FileLocatorService? _locator;
     private readonly Func<bool>? _isPmsForeground;
     private readonly IntentCursorController? _intentCursor;
+    private readonly SuavoAgent.Helper.Presence.PresencePreferenceStore? _presenceStore;
     private readonly ActuationCommandHandler? _actuation;
     private readonly PioneerRxCommandHandler? _pioneerRx;
     // Source of the launch_sandbox_app target HWND/PID for the window-scoped sandbox capture path.
@@ -113,8 +114,10 @@ public sealed class IpcCommandServer : IDisposable
         PioneerRxCommandHandler? pioneerRx = null,
         SendInputDriver? sandboxDriver = null,
         bool relaxClientPathValidation = false,
-        Action? onWedgedDispatch = null)
+        Action? onWedgedDispatch = null,
+        SuavoAgent.Helper.Presence.PresencePreferenceStore? presenceStore = null)
     {
+        _presenceStore = presenceStore;
         _pipeName = pipeName;
         _pricing = pricing;
         _relaxClientPathValidation = relaxClientPathValidation;
@@ -263,6 +266,7 @@ public sealed class IpcCommandServer : IDisposable
             IpcCommands.CaptureScreen => HandleCaptureScreenAsync(request, ct),
             IpcCommands.FindFile => HandleFindFileAsync(request, ct),
             IpcCommands.IntentCursor => HandleIntentCursorAsync(request, ct),
+            "presence.set_visible" => Task.FromResult(HandlePresenceSetVisible(request)),
             IpcCommands.Ping => Task.FromResult(Ok(request.Id, request.Command,
                 JsonSerializer.SerializeToElement(HelperSessionProbe.Current()))),
             ActuationIpcCommands.GetState
@@ -281,6 +285,27 @@ public sealed class IpcCommandServer : IDisposable
                 => HandlePioneerRxActuationAsync(request, ct),
             _ => Task.FromResult(Error(request.Id, request.Command, "unknown_command", $"Unknown command: {request.Command}"))
         };
+    }
+
+    /// <summary>Remote/dashboard instant-hide for the presence cursor. Visual-only;
+    /// toggles CursorVisible on the shared preference store.</summary>
+    private IpcResponse HandlePresenceSetVisible(IpcRequest request)
+    {
+        if (_presenceStore is null)
+            return Error(request.Id, request.Command, "presence_unavailable", "Presence not configured");
+        if (request.Data is null)
+            return Error(request.Id, request.Command, "bad_request", "Missing data", IpcStatus.BadRequest);
+        try
+        {
+            var visible = request.Data.Value.GetProperty("visible").GetBoolean();
+            _presenceStore.SetVisible(visible);
+            return Ok(request.Id, request.Command, JsonSerializer.SerializeToElement(new { visible }));
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "presence.set_visible bad request");
+            return Error(request.Id, request.Command, "bad_request", "Invalid presence payload", IpcStatus.BadRequest);
+        }
     }
 
     private async Task<IpcResponse> HandlePioneerRxActuationAsync(IpcRequest request, CancellationToken ct)

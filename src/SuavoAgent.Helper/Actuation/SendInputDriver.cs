@@ -40,6 +40,11 @@ public sealed class SendInputDriver
     // glow can never block, slow, or fail actuation (it only paints).
     private readonly SuavoAgent.Helper.IntentCursor.IntentCursorController? _intentCursor;
 
+    // Persistent "agent presence" cursor — glides to the target and lands a pre-click reticle, then
+    // pulses on click, and never disappears between actions. Preferred over the one-shot IntentCursor
+    // flash when wired. Like the glow, it is purely visual and can never block/slow/fail actuation.
+    private readonly SuavoAgent.Helper.Presence.PresenceController? _presence;
+
     // The window a preceding launch_sandbox_app established as the actuation target. type/press
     // re-assert + VERIFY this is foreground immediately before injecting input (they arrive as
     // separate IPC commands, seconds later — focus can drift in between). Set ONCE per launch on
@@ -76,12 +81,14 @@ public sealed class SendInputDriver
         ActuationGate gate,
         ActuationConfig config,
         ILogger logger,
-        SuavoAgent.Helper.IntentCursor.IntentCursorController? intentCursor = null)
+        SuavoAgent.Helper.IntentCursor.IntentCursorController? intentCursor = null,
+        SuavoAgent.Helper.Presence.PresenceController? presence = null)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<SendInputDriver>();
         _intentCursor = intentCursor;
+        _presence = presence;
     }
 
     /// <summary>
@@ -92,6 +99,17 @@ public sealed class SendInputDriver
     /// </summary>
     private void TryGlow(int x, int y)
     {
+        // Persistent presence cursor: glide to the target and land a reticle BEFORE the click,
+        // so intent is shown before action (the beat one-shot flashes lack). Preferred when wired.
+        var pres = _presence;
+        if (pres is not null)
+        {
+            try { pres.MoveTo(x, y); pres.Reticle(x, y); }
+            catch { /* visual-only — never break actuation */ }
+            return;
+        }
+
+        // Legacy fallback: one-shot IntentCursor flash.
         var ic = _intentCursor;
         if (ic is null) return;
         try
@@ -262,8 +280,9 @@ public sealed class SendInputDriver
 
         try
         {
-            TryGlow(x, y); // paint the "acting here" glow at the click point so the operator sees it
+            TryGlow(x, y); // glide the presence cursor in + land the reticle at the click point
             MoveAndClick(x, y);
+            try { _presence?.Click(x, y); } catch { /* visual-only — never break actuation */ }
             // Record the click so a TYPE arriving shortly after (the click_by_label → type field-entry
             // flow) does NOT re-focus the window centre and undo the focus this click just set.
             System.Threading.Interlocked.Exchange(ref _lastClickUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
