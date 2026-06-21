@@ -10,8 +10,8 @@ namespace SuavoAgent.Setup.Preflight;
 public sealed class VcRedistPreflight
 {
     // Pinned in Task 6 after uploading vc_redist.x64.exe as a release asset on MinaH153/SuavoAgent.
-    public const string AssetUrl = "https://github.com/MinaH153/SuavoAgent/releases/download/vcredist-14.40.33810/vc_redist.x64.exe";
-    public const string Sha256 = "REPLACE_WITH_PINNED_SHA256";
+    public const string AssetUrl = "https://github.com/MinaH153/SuavoAgent/releases/download/vcredist-x64-v1/vc_redist.x64.exe";
+    public const string Sha256 = "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b";
 
     private readonly VcRedistChecker _checker;
     private readonly Func<VcRedistProvider> _providerFactory;
