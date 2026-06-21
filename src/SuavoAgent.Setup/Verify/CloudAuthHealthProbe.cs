@@ -5,7 +5,15 @@ using System.Text.Json;
 
 namespace SuavoAgent.Setup.Verify;
 
-/// <summary>Reads cloud-auth-health.json: status "ok" passes; a 401 / agent_not_found error kind fails.</summary>
+/// <summary>
+/// Reads cloud-auth-health.json: status "ok" passes; a 401 / agent_not_found error kind fails;
+/// missing/unreadable → Warn (non-blocking).
+/// PRODUCTION NOTE: the agent currently writes this file only on its credential-recovery path
+/// (status ∈ {"failed","recovered"}), so a healthy fresh install has NO file yet → this gate is
+/// normally <c>Warn</c> (does not block) and only goes <c>Fail</c> on a real 401/agent_not_found.
+/// That is the desired safety posture — do NOT "fix" the probe to require status:"ok" (the agent
+/// doesn't emit it). A future positive "heartbeat 200" proof would be wired separately.
+/// </summary>
 public sealed class CloudAuthHealthProbe
 {
     private readonly Func<string?> _readHealthJson;

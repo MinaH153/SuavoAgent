@@ -11,6 +11,13 @@ namespace SuavoAgent.Setup.Verify;
 /// </summary>
 public sealed class BrainHealthProbe
 {
+    // Detection depends on the Core logging the brain-load failure WITH its exception:
+    // `_logger.LogError(ex, "LLamaLocalInference: model load failed")`. "model load failed" matches the
+    // message template; "NativeApi" + "TypeInitializationException" match because Serilog serializes the
+    // exception's type + stack into the log file (the real Nadim brick throws TypeInitializationException
+    // from LLama.Native.NativeApi's static ctor when vcruntime140_1.dll is absent). "missing required
+    // native libs" matches the pre-check warning. If that LogError ever drops the `ex` argument, two of
+    // these markers silently stop matching — keep the exception in the log call.
     private static readonly string[] FailureMarkers =
         { "model load failed", "NativeApi", "TypeInitializationException", "missing required native libs" };
 

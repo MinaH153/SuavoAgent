@@ -524,13 +524,18 @@ internal static class ServiceInstaller
 
     /// <summary>
     /// Pure classification logic — testable without real service probes.
-    /// Core/Broker/Helper absent → Fail; Watchdog absent → Warn; all present → Ok.
+    /// Core/Broker absent → Fail; Helper/Watchdog absent → Warn; all present → Ok.
+    /// Helper is Warn (not Fail): a headless / locked / RDP-disconnected session legitimately has no
+    /// interactive Session 1 for the Broker to spawn the Helper into — which is exactly where the
+    /// console fleet-deploy installer runs. InstallAndStart takes the same stance (returns success on
+    /// coreRunning alone). Failing here would brick an otherwise-healthy headless install. Pipe-gate
+    /// liveness still covers the Core-is-serving signal.
     /// </summary>
     public static GateResult ClassifyServices(bool core, bool broker, bool watchdog, bool helper)
     {
         if (!core) return new GateResult("Services", GateState.Fail, "Core service not running");
         if (!broker) return new GateResult("Services", GateState.Fail, "Broker service not running");
-        if (!helper) return new GateResult("Services", GateState.Fail, "Helper process not running");
+        if (!helper) return new GateResult("Services", GateState.Warn, "Helper not running yet (normal on headless/locked sessions)");
         if (!watchdog) return new GateResult("Services", GateState.Warn, "Watchdog not running yet");
         return new GateResult("Services", GateState.Ok, "All services running");
     }
