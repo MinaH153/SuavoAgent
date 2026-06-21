@@ -140,6 +140,13 @@ public sealed class IpcCommandServer : IDisposable
 
     public void Start(CancellationToken ct)
     {
+        // QA C5: the relax flag no longer grants acceptance of an unverified peer. Surface it so an
+        // operator who set it knows it's inert and the field stays referenced (no dead-flag smell).
+        if (_relaxClientPathValidation)
+        {
+            _logger.Warning("IpcCommandServer: RelaxIpcClientPathValidation is set but is now INERT (QA C5) — "
+                + "an unreadable/empty-path peer is never accepted; only a SYSTEM/LocalService token SID passes. Remove the flag.");
+        }
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _listenTask = ListenLoop(_cts.Token);
     }
@@ -876,23 +883,20 @@ public sealed class IpcCommandServer : IDisposable
                     // safe reject behavior. The correct fix (verify the pipe CLIENT TOKEN SID is
                     // SYSTEM/LocalService via RunAsClient impersonation — unforgeable by an interactive
                     // user) is a tested follow-up, NOT shipped blind to a PHI box.
-                    if (_relaxClientPathValidation)
-                    {
-                        _logger.Warning(ex, "IpcCommandServer: process image path unreadable for PID {Pid} (ProcessName=SuavoAgent.Core verified) — accepting due to RelaxIpcClientPathValidation=true", clientPid);
-                        return true;
-                    }
-                    _logger.Warning(ex, "IpcCommandServer: process image path unreadable for PID {Pid} — rejecting", clientPid);
+                    // QA C5 (precedence-1): an unreadable image path is NEVER accepting evidence, even with
+                    // RelaxIpcClientPathValidation=true. The impostor named "SuavoAgent.Core" tightens its
+                    // own DACL to force ACCESS_DENIED here, then connects via the Interactive ACE —
+                    // ACCESS_DENIED proves access denial, NOT SYSTEM identity. Legitimate Core is a service
+                    // token and was already accepted by TryGetClientServiceSid above, so it never reaches
+                    // this branch; the relax flag is retained for config back-compat but no longer accepts.
+                    _logger.Warning(ex, "IpcCommandServer: process image path unreadable for PID {Pid} — rejecting (relax flag no longer grants acceptance, QA C5)", clientPid);
                     return false;
                 }
             }
 
             if (string.IsNullOrEmpty(clientPath))
             {
-                if (_relaxClientPathValidation)
-                {
-                    _logger.Warning("IpcCommandServer: empty client path for PID {Pid} (ProcessName=SuavoAgent.Core verified) — accepting due to RelaxIpcClientPathValidation=true", clientPid);
-                    return true;
-                }
+                // QA C5: empty client path is never accepting evidence; relax flag no longer accepts.
                 _logger.Warning("IpcCommandServer: empty client path for PID {Pid} — rejecting", clientPid);
                 return false;
             }

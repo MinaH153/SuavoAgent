@@ -1,3 +1,5 @@
+using System;
+
 namespace SuavoAgent.Helper.Actuation;
 
 /// <summary>
@@ -32,10 +34,21 @@ public sealed record PioneerRxConfig
     /// </summary>
     public string ProcessName { get; init; } = "PioneerPharmacy.exe";
 
+    /// <summary>
+    /// QA C4 — the BAA scope tags this host is authorized to actuate under. Every PioneerRx request
+    /// carries a <c>baaScopeTag</c> (what the cloud verb declared); the handler rejects the verb unless
+    /// the tag is non-empty AND present here. Default EMPTY → with the opt-in enabled but no scopes
+    /// configured, ALL PioneerRx actuation fails closed on scope. The operator lists the scopes the BAA
+    /// amendment authorizes for this host. Closes the gap where the class contract promised
+    /// "deviations fail closed" but no code read the tag.
+    /// </summary>
+    public string[] AllowedBaaScopeTags { get; init; } = Array.Empty<string>();
+
     public static PioneerRxConfig SafeDefault() => new()
     {
         Enabled = false,
         DryRun = true,
         ProcessName = "PioneerPharmacy.exe",
+        AllowedBaaScopeTags = Array.Empty<string>(),
     };
 }
