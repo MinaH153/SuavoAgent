@@ -22,7 +22,10 @@ public sealed class SqlHealthProbe
 
         bool Has(string s) => log.Contains(s, StringComparison.OrdinalIgnoreCase);
 
-        if (Has("ANONYMOUS LOGON") || Has("Login failed") || Has("18456"))
+        // "Error Number:18456" (SQL Server's exact form), not a bare "18456" — the bare digits would
+        // false-match a benign log line (timestamp / port / row count). ANONYMOUS LOGON + Login failed
+        // already cover the real auth-failure case independently.
+        if (Has("ANONYMOUS LOGON") || Has("Login failed") || Has("Error Number:18456"))
             return new GateResult("SQL", GateState.Fail,
                 "SQL auth failing — the service account has no SQL login. Use SQL Auth or grant the account DB access.");
         if (Has("certificate chain") || Has("not trusted"))
