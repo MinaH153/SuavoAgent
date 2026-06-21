@@ -1,4 +1,5 @@
 using System.Text.Json;
+using SuavoAgent.Setup.Verify;
 
 namespace SuavoAgent.Setup.Gui.Services;
 
@@ -11,7 +12,7 @@ namespace SuavoAgent.Setup.Gui.Services;
 /// </summary>
 internal sealed class InstallOrchestrator
 {
-    public enum Phase { Download, WriteConfig, InstallBrain, InstallServices, Done }
+    public enum Phase { Download, WriteConfig, InstallBrain, InstallServices, Verify, Done }
 
     /// <summary>Percent is per-phase (0-100); null = indeterminate/no progress info.</summary>
     public sealed record PhaseEvent(Phase Phase, string Message, int? Percent = null);
@@ -107,6 +108,26 @@ internal sealed class InstallOrchestrator
             throw new InstallException(
                 "Windows services failed to install or start — the agent is NOT running. " +
                 $"Details: {SetupLog.LogPath}");
+        }
+
+        // Phase B self-verify: prove the agent actually works before reporting "complete".
+        // Same philosophy as the services hard-fail above — a green checkmark over a broken
+        // install (e.g. the brain that couldn't load its native lib) is a lie. A Fail gate
+        // throws here so GoToSuccess() is never reached; Warn/Skip do not block.
+        progress.Report(new PhaseEvent(Phase.Verify, "Verifying installation"));
+        ConsoleUI.WriteStep("Phase 7: Verifying installation");
+        var verifyOutcome = await VerifierFactory.BuildDefault().RunAsync(ct);
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(_ctx.DataDir, "install-verify.json"),
+                PostInstallVerifier.ToJson(verifyOutcome));
+        }
+        catch { /* best-effort forensic artifact — never break the install on a write failure */ }
+        if (!verifyOutcome.Passed)
+        {
+            throw new InstallException(
+                $"Post-install verification failed — {verifyOutcome.Summary} Details: {SetupLog.LogPath}");
         }
 
         progress.Report(new PhaseEvent(Phase.Done, "Installation complete"));
