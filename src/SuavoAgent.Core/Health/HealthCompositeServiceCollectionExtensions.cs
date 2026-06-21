@@ -38,7 +38,11 @@ public static class HealthCompositeServiceCollectionExtensions
             return new HealthSignalsProvider(
                 sp.GetRequiredService<IpcPipeServer>(),
                 sp.GetRequiredService<RxDetectionWorker>(),
-                () => db.GetCanaryHold(pharmacyId, "pioneerrx") is null);
+                () => db.GetCanaryHold(pharmacyId, "pioneerrx") is null,
+                // QA C2: command pipe is "healthy" unless the actuation prober has a CONCLUSIVE strand
+                // (pipe connected but ping dead). Null tracker / no probe yet → healthy (don't false-flag
+                // startup or a headless box; ConsecutiveStrandFailures already excludes the benign cases).
+                () => (sp.GetService<ActuationReadinessTracker>()?.Current?.ConsecutiveStrandFailures ?? 0) == 0);
         });
 
         return services;
