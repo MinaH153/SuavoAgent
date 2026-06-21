@@ -1,3 +1,4 @@
+using System.Threading.Tasks;
 using SuavoAgent.Setup;
 using SuavoAgent.Setup.Gui.Services;
 using SuavoAgent.Setup.Gui.ViewModels;
@@ -32,6 +33,7 @@ public sealed class SystemCheckViewModelTests
         vm.BitLockerCheck.State = CheckState.Warn;   // BitLocker off — recommended, not required
         vm.PioneerCheck.State = CheckState.Deferred; // no PioneerRx — self-configures later
         vm.SqlCheck.State = CheckState.Deferred;     // no SQL target yet — self-configures later
+        vm.RuntimeCheck.State = CheckState.Ok;       // VC++ runtime present
 
         Assert.True(vm.IsReady);
         Assert.True(vm.ContinueCommand.CanExecute(null));
@@ -73,6 +75,7 @@ public sealed class SystemCheckViewModelTests
         vm.BitLockerCheck.State = CheckState.Ok;
         vm.PioneerCheck.State = CheckState.Ok;
         vm.SqlCheck.State = CheckState.Ok;
+        vm.RuntimeCheck.State = CheckState.Ok;
 
         Assert.True(vm.IsReady);
     }
@@ -85,7 +88,8 @@ public sealed class SystemCheckViewModelTests
         var vm = new SystemCheckViewModel(NewContext(), () => { },
             probeIsWindows10: () => true,
             probePioneer: () => throw new InvalidOperationException("boom"),
-            probeSql: _ => null);
+            probeSql: _ => null,
+            probeRuntime: _ => Task.FromResult((CheckState.Ok, "VC++ runtime present")));
 
         vm.Apply(vm.Probe()); // Probe() is pure/background-safe; Apply() is the UI-thread mutation
 
@@ -101,12 +105,42 @@ public sealed class SystemCheckViewModelTests
         var vm = new SystemCheckViewModel(NewContext(), () => { },
             probeIsWindows10: () => false,
             probePioneer: () => null,
-            probeSql: _ => null);
+            probeSql: _ => null,
+            probeRuntime: _ => Task.FromResult((CheckState.Ok, "VC++ runtime present")));
 
         vm.Apply(vm.Probe());
 
         Assert.Equal(CheckState.Fail, vm.OsCheck.State);
         Assert.False(vm.IsReady);
+    }
+
+    [Fact]
+    public void Continue_blocked_when_runtime_components_fail()
+    {
+        var vm = NewVm();
+        vm.OsCheck.State = CheckState.Ok;
+        vm.DiskCheck.State = CheckState.Ok;
+        vm.BitLockerCheck.State = CheckState.Warn;
+        vm.PioneerCheck.State = CheckState.Deferred;
+        vm.SqlCheck.State = CheckState.Deferred;
+        vm.RuntimeCheck.State = CheckState.Fail;   // VC++ missing + install failed
+
+        Assert.False(vm.IsReady);
+        Assert.False(vm.ContinueCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void Continue_enabled_when_runtime_components_ok()
+    {
+        var vm = NewVm();
+        vm.OsCheck.State = CheckState.Ok;
+        vm.DiskCheck.State = CheckState.Ok;
+        vm.BitLockerCheck.State = CheckState.Warn;
+        vm.PioneerCheck.State = CheckState.Deferred;
+        vm.SqlCheck.State = CheckState.Deferred;
+        vm.RuntimeCheck.State = CheckState.Ok;
+
+        Assert.True(vm.IsReady);
     }
 
     private static SystemCheckViewModel NewVm() => new(NewContext(), () => { });

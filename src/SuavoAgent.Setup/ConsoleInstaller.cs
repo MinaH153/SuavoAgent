@@ -1,4 +1,6 @@
+using System.Net.Http;
 using System.Text.Json;
+using SuavoAgent.Setup.Preflight;
 
 namespace SuavoAgent.Setup;
 
@@ -83,6 +85,25 @@ internal static class ConsoleInstaller
             {
                 ConsoleUI.WriteInfo("Phase 2 skipped (no PMS) — SQL credentials deferred.");
             }
+
+            ConsoleUI.WriteStep("Preflight: Checking VC++ runtime");
+            using var http = new HttpClient();
+            var ct = CancellationToken.None;
+            var pf = await new VcRedistPreflight(
+                new VcRedistChecker(),
+                () => new VcRedistProvider(http, VcRedistPreflight.AssetUrl, VcRedistPreflight.Sha256),
+                new VcRedistInstaller()
+            ).EnsureAsync(Path.GetTempPath(), ct);
+
+            if (pf.State == VcRedistPreflightState.Failed)
+            {
+                ConsoleUI.FatalError($"VC++ runtime preflight failed.\n  {pf.Detail}");
+                return 1;
+            }
+
+            ConsoleUI.WriteOk($"VC++ runtime: {pf.Detail}");
+            if (pf.RebootPending)
+                ConsoleUI.WriteWarn("A reboot is required to complete the VC++ runtime installation. Reboot and re-run the installer.");
 
             ConsoleUI.WriteStep("Phase 3: Downloading SuavoAgent binaries");
             ConsoleUI.WriteInfo("Stopping any running SuavoAgent services before download...");
