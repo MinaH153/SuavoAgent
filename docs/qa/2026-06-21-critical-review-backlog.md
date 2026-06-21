@@ -4,6 +4,15 @@ Source: 4 parallel adversarial reviewers (security/HIPAA, UiaFirst pricing, reli
 
 Status legend: ⬜ open · 🔧 in progress · ✅ fixed (commit)
 
+## ✅ ALL 5 CRITICALS RESOLVED (branch `fix/qa-critical-wave1`, opus security-reviewed — no must-fix)
+- **C1** `59ef431` — LookupTimeout 30s→90s (clears the Helper ~42s budget, below the 5min wedge).
+- **C2** `59ef431` — `IpcConnected` = event pipe AND command pipe not stranded (`ConsecutiveStrandFailures`, excludes benign headless/idle → no false-unhealthy). No contract change.
+- **C3** `5cf2bd7` — Watchdog `RepairBackoff` (5min) on NotInstalled; +1 test.
+- **C4** `f70c60d` — `PioneerRxConfig.AllowedBaaScopeTags` (default empty → fail-closed) + tested `IsBaaScopeAuthorized` gate; 7 tests. No live caller (verbs are scaffolds) so fail-closed bricks nothing.
+- **C5** `f70c60d` — removed both relax-flag accept branches; unreadable/empty path always rejects (legit Core via SID check; original flap covered by SID check; flag inert + warned).
+
+Follow-ons surfaced by the security review (added to Important/queued below): C1 dead-Helper worst case ~90s→270s before abort (bounded/resumable) + the `ct`-propagation into `_pricing.Lookup`; C4 per-verb scope granularity (currently any allowlisted tag authorizes any verb — defense-in-depth behind the cloud's per-verb check).
+
 ## 🔴 CRITICAL — fix order C1→C5
 
 - 🔧 **C1 — Pricing timeout disagreement** (`PricingJobRunner.cs:27` `LookupTimeout=30s`). 30s < workflow worst-case UIA budget (~42s) → slow-but-working PioneerRx aborted mid-lookup, miscounted `HelperUnreachable`, job aborts after 3 → false failures on the sale. Helper `_pricing.Lookup` is synchronous (no `ct`) → orphaned UIA on a dead pipe. **Fix:** raise `LookupTimeout` above the workflow max (≥60s); thread `ct` into `_pricing.Lookup` (follow-on). Confidence High.
