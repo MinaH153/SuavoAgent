@@ -60,6 +60,14 @@ public sealed class PioneerRxCommandHandler
                 _gate.IsDryRun);
         }
 
+        // QA C4 (precedence-1): enforce the BAA scope tag the class contract promises ("deviations fail
+        // closed"). Every request DTO carries baaScopeTag (what the cloud verb declared); it must be
+        // present AND in the host's configured allowlist, else the verb fails closed. Without this, any
+        // caller past the pipe boundary drove any click/type regardless of BAA-authorized scope
+        // (§164.502(b) minimum-necessary / §164.504(e) BAA scope).
+        var scopeReject = ValidateBaaScope(data);
+        if (scopeReject is not null) return scopeReject;
+
         try
         {
             return command switch
@@ -80,6 +88,50 @@ public sealed class PioneerRxCommandHandler
             _logger.Warning(ex, "PioneerRxCommandHandler unexpected exception for {Command}", command);
             return ActuationResult.Reject(ActuationRejectionCodes.ExecutionException, ex.Message, _gate.IsDryRun);
         }
+    }
+
+    /// <summary>
+    /// QA C4: fail-closed BAA-scope check. Reads the <c>baaScopeTag</c> common to every PioneerRx
+    /// request DTO straight off the raw JSON (so it applies uniformly to click/type/query/writeback)
+    /// and requires it to be non-empty AND in <see cref="PioneerRxConfig.AllowedBaaScopeTags"/>.
+    /// Returns a reject result when the scope is missing/unauthorized, or null to proceed.
+    /// </summary>
+    private ActuationResult? ValidateBaaScope(JsonElement? data)
+    {
+        if (IsBaaScopeAuthorized(data, _pioneerConfig.AllowedBaaScopeTags, out var reason)) return null;
+        _logger.Warning("PioneerRx actuation rejected on BAA scope: {Reason}", reason);
+        return ActuationResult.Reject(ActuationRejectionCodes.GateDisabled, reason, _gate.IsDryRun);
+    }
+
+    /// <summary>
+    /// Pure, OS-independent BAA-scope gate (QA C4). True only when the request carries a non-empty
+    /// <c>baaScopeTag</c> that is present in <paramref name="allowedScopes"/>. Fail-closed: a missing
+    /// tag, a non-object/absent property, or an empty/unmatched allowlist all return false with a
+    /// caller-facing <paramref name="rejectReason"/>.
+    /// </summary>
+    internal static bool IsBaaScopeAuthorized(JsonElement? data, string[] allowedScopes, out string rejectReason)
+    {
+        string? tag = null;
+        if (data is { ValueKind: JsonValueKind.Object } d
+            && d.TryGetProperty("baaScopeTag", out var t) && t.ValueKind == JsonValueKind.String)
+        {
+            tag = t.GetString();
+        }
+
+        if (string.IsNullOrWhiteSpace(tag))
+        {
+            rejectReason = "PioneerRx actuation rejected: request carries no BAA scope tag (fail closed)";
+            return false;
+        }
+
+        if (allowedScopes is null || Array.IndexOf(allowedScopes, tag) < 0)
+        {
+            rejectReason = $"PioneerRx actuation rejected: BAA scope '{tag}' is not authorized on this host (configure pioneerrx.json AllowedBaaScopeTags)";
+            return false;
+        }
+
+        rejectReason = "";
+        return true;
     }
 
     private async Task<ActuationResult> HandleClickAsync(JsonElement? data, CancellationToken ct)

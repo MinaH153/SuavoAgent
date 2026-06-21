@@ -23,8 +23,13 @@ public sealed class PricingJobRunner
     private readonly PricingBrainEvaluator? _brainEvaluator;
     private readonly TimeSpan _interLookupDelay;
 
-    // Timeout per NDC lookup — UIA navigation can be slow
-    private static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(30);
+    // Timeout per NDC lookup. MUST exceed the Helper PricingWorkflow's worst-case internal UIA budget
+    // (its sequential step timeouts sum to ~42s: WaitForWindow 8 + SearchByNdc 8 + VerifyLoadedNdc 8 +
+    // ClickPricingTab 8 + grid-wait 5 + WaitForStableRows 5) PLUS the actual click/type/read work — else
+    // Core tears down the pipe on a slow-but-WORKING lookup, miscounts it HelperUnreachable, and aborts
+    // the whole job after 3 (QA wave-1 C1). 90s gives generous headroom and still sits far below the
+    // Helper's 5-min dispatch-wedge ceiling, so a genuinely hung lookup is still caught (self-amputation).
+    private static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(90);
     // Back-compat default if the caller doesn't specify a throttle (UIA wiring picks a slower value).
     private static readonly TimeSpan DefaultInterLookupDelay = TimeSpan.FromMilliseconds(500);
     // Hard upper bound — anything above this is almost certainly a misconfiguration that would stall jobs.

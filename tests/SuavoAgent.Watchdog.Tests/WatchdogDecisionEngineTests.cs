@@ -100,6 +100,28 @@ public class WatchdogDecisionEngineTests
     }
 
     [Fact]
+    public void NotInstalled_RepairBackoff_HoldsRepeatPollsThenRepairsAgain()
+    {
+        // QA C3: without the repair backoff, NotInstalled re-ran bootstrap.ps1 on every ~15s poll.
+        var eng = Engine();
+        var ledger = ServiceLedger.Initial("SuavoAgent.Broker", T0);
+
+        var (first, afterRepair) = eng.Decide(ledger, ServiceState.NotInstalled, T0);
+        Assert.Equal(DecisionAction.EscalateRepair, first.Action);
+        Assert.Equal(1, afterRepair.RepairInvocations);
+
+        // A repeat poll within RepairBackoff (default 5min) must NOT re-run the installer.
+        var (within, stillOne) = eng.Decide(afterRepair, ServiceState.NotInstalled, T0.AddMinutes(1));
+        Assert.Equal(DecisionAction.DoNothing, within.Action);
+        Assert.Equal(1, stillOne.RepairInvocations);
+
+        // After the backoff window elapses, it repairs again (in case the first repair didn't take).
+        var (after, two) = eng.Decide(afterRepair, ServiceState.NotInstalled, T0.AddMinutes(6));
+        Assert.Equal(DecisionAction.EscalateRepair, after.Action);
+        Assert.Equal(2, two.RepairInvocations);
+    }
+
+    [Fact]
     public void StartPending_ObservesWithoutAction()
     {
         var eng = Engine();
