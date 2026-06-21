@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Text.Json;
 using SuavoAgent.Setup.Preflight;
+using SuavoAgent.Setup.Verify;
 
 namespace SuavoAgent.Setup;
 
@@ -158,7 +159,25 @@ internal static class ConsoleInstaller
                 return 1;
             }
 
-            ConsoleUI.WriteStep("Phase 6: Verification complete");
+            ConsoleUI.WriteStep("Phase 6: Verifying installation");
+            var verifyOutcome = await VerifierFactory.BuildDefault().RunAsync(System.Threading.CancellationToken.None);
+            try
+            {
+                File.WriteAllText(
+                    Path.Combine(DataDir, "install-verify.json"),
+                    PostInstallVerifier.ToJson(verifyOutcome));
+            }
+            catch { /* best-effort forensic artifact — never break the install on a write failure */ }
+            if (!verifyOutcome.Passed)
+            {
+                // HARD FAIL (parity with the GUI orchestrator + the services check) — a green
+                // "complete" over a broken agent (e.g. the brain that couldn't load) is a lie.
+                ConsoleUI.WriteFail($"Post-install verification failed — {verifyOutcome.Summary}");
+                ConsoleUI.WriteInfo($"Details: {SetupLog.LogPath}");
+                return 1;
+            }
+            ConsoleUI.WriteOk($"Verification passed: {verifyOutcome.Summary}");
+
             ConsoleUI.CompletionSummary(
                 InstallDir, DataDir, agentId,
                 sqlCreds?.Server ?? "(deferred)", sqlCreds?.Database ?? "(deferred)", sqlCreds?.User);

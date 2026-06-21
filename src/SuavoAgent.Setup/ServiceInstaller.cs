@@ -542,5 +542,8 @@ internal static class ServiceInstaller
         IsServiceRunning(CoreServiceName),
         IsServiceRunning(BrokerServiceName),
         IsServiceRunning(WatchdogServiceName),
-        WaitForHelperProcess(TimeSpan.FromSeconds(30)));
+        // 3s grace, not 30s: by self-verify time InstallAndStart has already waited for the Helper
+        // to spawn, so it is already up on a healthy install — a long re-wait here would only delay
+        // a genuine failure (and stall tests on a box without the agent).
+        WaitForHelperProcess(TimeSpan.FromSeconds(3)));
 }
