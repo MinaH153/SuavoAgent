@@ -31,6 +31,10 @@ public sealed class NativeLibProvisioner
     private const string VariantMarkerName = ".variant";
     private static readonly string[] RequiredDlls = { "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll" };
     private static int _downloadStarted;
+    // QA I4: after a FAILED provision, the in-flight guard is cleared only once this cooldown elapses,
+    // so a transient failure (network / SHA mismatch) recovers on a later attempt without a service
+    // restart, while a persistent failure can't storm-retry (the guard stays set during the cooldown).
+    private static readonly TimeSpan ProvisionRetryCooldown = TimeSpan.FromMinutes(5);
 
     private readonly ReasoningOptions _options;
     private readonly ILogger<NativeLibProvisioner> _logger;
@@ -123,6 +127,7 @@ public sealed class NativeLibProvisioner
         var dir = _options.NativeLibraryPath!;
         var tmpZip = Path.Combine(Path.GetTempPath(), $"suavo-native-{Guid.NewGuid():N}.zip");
         var tmpDir = Path.Combine(Path.GetTempPath(), $"suavo-native-{Guid.NewGuid():N}");
+        var provisionFailed = false;
         try
         {
             Directory.CreateDirectory(dir);
@@ -178,12 +183,23 @@ public sealed class NativeLibProvisioner
         }
         catch (Exception ex)
         {
+            provisionFailed = true;
             _logger.LogWarning(ex, "Native libs auto-provision failed (reasoning stays off / on prior variant; agent unaffected)");
         }
         finally
         {
             try { if (File.Exists(tmpZip)) File.Delete(tmpZip); } catch { }
             try { if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, recursive: true); } catch { }
+        }
+
+        // QA I4: clear the in-flight guard after a FAILED provision so a later EnsureOrProvision can
+        // re-attempt — but hold it for ProvisionRetryCooldown first so a persistent failure (no network /
+        // SHA mismatch) can't storm-retry. Success leaves the guard set; the provisioned variant's marker
+        // makes EnsureOrProvision short-circuit, so no re-download happens on the happy path.
+        if (provisionFailed)
+        {
+            try { await Task.Delay(ProvisionRetryCooldown, ct); } catch { /* shutting down */ }
+            Interlocked.Exchange(ref _downloadStarted, 0);
         }
     }
 

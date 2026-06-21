@@ -220,6 +220,18 @@ public sealed class IpcCommandServer : IDisposable
 
                 var response = await DispatchGuardedAsync(request, ct);
                 var responseJson = JsonSerializer.Serialize(response);
+                // QA I1: a response over the frame limit makes WriteFrameAsync throw, which the catch below
+                // swallows — leaving NO response and stranding the caller for its full timeout (e.g. a large
+                // find_file/discover_elements result, 30-60s hang). Fail fast with a small, always-fitting
+                // error frame so the caller errors immediately. Byte count mirrors IpcFraming's own check.
+                if (System.Text.Encoding.UTF8.GetByteCount(responseJson) > IpcFraming.MaxPayloadSize)
+                {
+                    _logger.Warning("IpcCommandServer: {Command} [{Id}] response over the {Max}-byte frame limit — returning response_too_large",
+                        request.Command, request.Id, IpcFraming.MaxPayloadSize);
+                    responseJson = JsonSerializer.Serialize(
+                        Error(request.Id, request.Command, "response_too_large",
+                            $"Response exceeded the {IpcFraming.MaxPayloadSize}-byte IPC frame limit; narrow the request (e.g. fewer candidates)."));
+                }
                 await IpcFraming.WriteFrameAsync(pipe, responseJson, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)

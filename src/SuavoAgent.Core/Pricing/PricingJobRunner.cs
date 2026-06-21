@@ -41,6 +41,15 @@ public sealed class PricingJobRunner
     // everything "failed", and reports a finished job, masking "Helper IPC is down" as "nothing priced".
     internal const int MaxConsecutiveIpcFailuresBeforeAbort = 3;
 
+    // QA I2: after this many CONSECUTIVE lookups where the Helper RESPONDED but PioneerRx isn't attached
+    // (its main window is unavailable — e.g. PMS closed/restarted), HALT the job instead of grinding the
+    // whole workbook into all-error rows and reporting Completed. A green "done" file that priced nothing
+    // is worse than a clear "PioneerRx not open" halt. Like the IPC abort, these rows stay resumable.
+    internal const int MaxConsecutivePmsUnavailableBeforeHalt = 3;
+
+    // The Helper's signal (PricingWorkflow.Lookup) that PioneerRx is not attached for a lookup.
+    private const string PmsUnavailableMarker = "main window not available";
+
     // Result of one NDC lookup. HelperUnreachable = the Helper returned NO response at all (timeout /
     // reconnect failure / pipe error) — an infrastructure failure, distinct from a Helper that
     // responded with "not found". Drives the early-abort + keeps the row unpersisted (resumable).
@@ -106,6 +115,7 @@ public sealed class PricingJobRunner
 
         int consecutiveFailures = 0;
         int consecutiveIpcFailures = 0; // B1: only no-response-at-all lookups (Helper hung/disconnected)
+        int consecutivePmsUnavailable = 0; // QA I2: Helper responded but PioneerRx not attached
         bool halted = false;
         string? haltReason = null;
 
@@ -149,6 +159,29 @@ public sealed class PricingJobRunner
 
             consecutiveIpcFailures = 0; // the Helper responded → it's alive
             var result = lookup.Result;
+
+            // QA I2: the Helper responded but PioneerRx isn't attached (main window unavailable — PMS
+            // closed/restarted). Like a HelperUnreachable, don't persist this (a saved Fail would exclude
+            // the row on resume) — leave it pending and HALT after N consecutive, instead of grinding the
+            // workbook into all-error rows and reporting a green "Completed" that priced nothing.
+            if (IsPmsUnavailable(result))
+            {
+                consecutivePmsUnavailable++;
+                if (consecutivePmsUnavailable >= MaxConsecutivePmsUnavailableBeforeHalt)
+                {
+                    halted = true;
+                    haltReason = "pioneerrx_not_attached";
+                    _logger.LogCritical(
+                        "PricingJobRunner: job {JobId} HALTED — PioneerRx not attached for {N} consecutive lookups " +
+                        "({Remaining} NDCs left unpriced + resumable). Open PioneerRx and re-run the job.",
+                        spec.JobId, consecutivePmsUnavailable, totalItems - completed - failed);
+                    break;
+                }
+                await Task.Delay(_interLookupDelay, ct);
+                continue;
+            }
+            consecutivePmsUnavailable = 0;
+
             _db.SavePricingResult(result);
 
             if (result.Found)
@@ -267,4 +300,10 @@ public sealed class PricingJobRunner
 
     private static SupplierPriceResult Fail(string jobId, NdcRow row, string error) =>
         new(jobId, row.RowIndex, row.NdcNormalized, false, null, null, error);
+
+    // QA I2: a not-found result whose error is the Helper's "PioneerRx not attached" signal.
+    internal static bool IsPmsUnavailable(SupplierPriceResult result) =>
+        !result.Found
+        && result.ErrorMessage is { } msg
+        && msg.Contains(PmsUnavailableMarker, StringComparison.OrdinalIgnoreCase);
 }
