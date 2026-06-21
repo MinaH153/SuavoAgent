@@ -538,6 +538,10 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     // Learning:Template:Enabled is off or no templates have
                     // been extracted yet — safe to emit either way.
                     autoRuleApprovals = autoRuleApprovals,
+                    // Phase C: the installer's post-install self-verify outcome (passed + summary),
+                    // read from install-verify.json, so the cockpit can show install health remotely.
+                    // Null until the installer has written it (older/legacy installs have no file).
+                    installVerify = ReadInstallVerify(),
                 };
 
                 var response = await _cloudClient.HeartbeatAsync(payload, stoppingToken);
@@ -823,6 +827,35 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 lastFaultUtc = w.LastFaultUtc.ToString("o"),
             })
             .ToArray();
+
+    // Phase C: surface the installer's post-install self-verify outcome to the cockpit. Reads the
+    // compact {passed, summary} from install-verify.json (written by SuavoAgent.Setup's PostInstallVerifier).
+    // Read-only, fail-soft; returns null when the file is absent (legacy install) or unreadable.
+    private object? ReadInstallVerify()
+    {
+        var path = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent",
+            "install-verify.json");
+
+        try
+        {
+            if (!File.Exists(path)) return null;
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            var passed = root.TryGetProperty("passed", out var p) && p.ValueKind == JsonValueKind.True;
+            var summary = root.TryGetProperty("summary", out var s) && s.ValueKind == JsonValueKind.String
+                ? s.GetString()
+                : null;
+            return new { passed, summary };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Install verification read failed");
+            return null;
+        }
+    }
 
     private object BuildWatchdogPayload()
     {
