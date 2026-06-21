@@ -113,6 +113,7 @@ public sealed class ProgressViewModel : ViewModelBase
             "Write configuration",
             "Install the SuavoAgent brain",
             "Start Windows services",
+            "Verify installation",
         };
 
         Phases = new ObservableCollection<PhaseItem>();

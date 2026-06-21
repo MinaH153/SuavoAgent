@@ -15,10 +15,12 @@ public sealed class ProgressViewModelTests
     public void DefaultPhases_MatchOrchestratorOrder_IncludingTheBrain()
     {
         var vm = new ProgressViewModel(() => { });
-        Assert.Equal(4, vm.Phases.Count);
+        Assert.Equal(5, vm.Phases.Count);
         Assert.Contains("brain", vm.Phases[2].Title, System.StringComparison.OrdinalIgnoreCase);
-        // Orchestrator enum: Download=0, WriteConfig=1, InstallBrain=2, InstallServices=3.
+        Assert.Contains("Verify", vm.Phases[4].Title, System.StringComparison.OrdinalIgnoreCase);
+        // Orchestrator enum: Download=0, WriteConfig=1, InstallBrain=2, InstallServices=3, Verify=4.
         Assert.Equal(2, (int)Gui.Services.InstallOrchestrator.Phase.InstallBrain);
+        Assert.Equal(4, (int)Gui.Services.InstallOrchestrator.Phase.Verify);
     }
 
     [Fact]
