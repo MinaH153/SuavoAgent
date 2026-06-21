@@ -33,6 +33,9 @@ public sealed class WatchdogDecisionEngine
 {
     public TimeSpan UnhealthyGrace { get; init; } = TimeSpan.FromSeconds(45);
     public TimeSpan RestartBackoff { get; init; } = TimeSpan.FromSeconds(30);
+    // QA C3: cooldown between repair (bootstrap.ps1) escalations on a NotInstalled service, so the
+    // installer script can't be re-run on every ~15s poll tick in a tight loop.
+    public TimeSpan RepairBackoff { get; init; } = TimeSpan.FromMinutes(5);
     public int EscalateAfterConsecutiveFailures { get; init; } = 3;
 
     public (WatchdogDecision Decision, ServiceLedger NextLedger) Decide(
@@ -66,6 +69,15 @@ public sealed class WatchdogDecisionEngine
 
         if (observed == ServiceState.NotInstalled)
         {
+            // QA C3: without this, NotInstalled escalates a repair (runs bootstrap.ps1) on EVERY poll
+            // tick (~15s) forever. Hold if a repair/restart was attempted within RepairBackoff — the
+            // branch sets LastRestartAttemptAt below on each repair, so it self-throttles to one
+            // bootstrap run per RepairBackoff window instead of a tight loop.
+            if (ledger.LastRestartAttemptAt is { } lastRepair && now - lastRepair < RepairBackoff)
+            {
+                return (new(DecisionAction.DoNothing,
+                    $"repair backoff ({RepairBackoff.TotalMinutes}min) — service not installed"), next);
+            }
             return (new(DecisionAction.EscalateRepair, "service not installed"),
                 next with
                 {
