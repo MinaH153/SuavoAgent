@@ -1,8 +1,12 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia.Threading;
 using SuavoAgent.Setup.Gui.Services;
+using SuavoAgent.Setup.Preflight;
 
 namespace SuavoAgent.Setup.Gui.ViewModels;
 
@@ -79,16 +83,20 @@ public enum CheckTier { Required, Informational }
 
 internal sealed class SystemCheckViewModel : ViewModelBase
 {
+    private static readonly HttpClient SharedHttp = new();
+
     private readonly InstallContext _ctx;
     private readonly Action _onReady;
     private readonly Func<bool> _probeIsWindows10;
     private readonly Func<PioneerRxDiscovery.DiscoveryResult?> _probePioneer;
     private readonly Func<string, SqlCredentialDiscovery.SqlCredentials?> _probeSql;
+    private readonly Func<CancellationToken, Task<(CheckState, string)>> _probeRuntime;
     private bool _isReady;
 
     // Required = the only thing the binaries truly need to land + run.
     public CheckItem OsCheck { get; } = new("Windows 10 / 11", CheckTier.Required);
     public CheckItem DiskCheck { get; } = new("Disk space (≥ 2 GB)", CheckTier.Required);
+    public CheckItem RuntimeCheck { get; } = new("Runtime components", CheckTier.Required);
     // Informational = the agent self-heals or only-recommends these.
     public CheckItem BitLockerCheck { get; } = new("BitLocker status", CheckTier.Informational);
     public CheckItem PioneerCheck { get; } = new("PioneerRx installation", CheckTier.Informational);
@@ -142,7 +150,8 @@ internal sealed class SystemCheckViewModel : ViewModelBase
         Action onReady,
         Func<bool>? probeIsWindows10 = null,
         Func<PioneerRxDiscovery.DiscoveryResult?>? probePioneer = null,
-        Func<string, SqlCredentialDiscovery.SqlCredentials?>? probeSql = null)
+        Func<string, SqlCredentialDiscovery.SqlCredentials?>? probeSql = null,
+        Func<CancellationToken, Task<(CheckState, string)>>? probeRuntime = null)
     {
         _ctx = ctx;
         _onReady = onReady;
@@ -151,10 +160,11 @@ internal sealed class SystemCheckViewModel : ViewModelBase
         _probeIsWindows10 = probeIsWindows10 ?? (() => OperatingSystem.IsWindowsVersionAtLeast(10));
         _probePioneer = probePioneer ?? PioneerRxDiscovery.Discover;
         _probeSql = probeSql ?? SqlCredentialDiscovery.TryAutoDiscover;
+        _probeRuntime = probeRuntime ?? RealProbeRuntime;
 
         Items = new ObservableCollection<CheckItem>
         {
-            OsCheck, DiskCheck, BitLockerCheck, PioneerCheck, SqlCheck,
+            OsCheck, DiskCheck, RuntimeCheck, BitLockerCheck, PioneerCheck, SqlCheck,
         };
 
         // Readiness is a live function of the probe states — the Continue button
@@ -183,11 +193,14 @@ internal sealed class SystemCheckViewModel : ViewModelBase
     /// non-blocking state, and none is still scanning. PioneerRx / SQL absence
     /// is <see cref="CheckState.Deferred"/>, never a blocker — the agent
     /// self-heals them after it's online.
+    /// RuntimeCheck must specifically be Ok (not just non-Fail) — the VC++ runtime
+    /// is a hard binary dependency; Warn is not a valid install state for it.
     /// </summary>
     private void RecomputeReadiness() =>
         IsReady = Items.All(i => i.State != CheckState.Pending)
                   && Items.Where(i => i.Tier == CheckTier.Required)
-                          .All(i => i.State != CheckState.Fail);
+                          .All(i => i.State != CheckState.Fail)
+                  && RuntimeCheck.State == CheckState.Ok;
 
     /// <summary>
     /// Runs every probe on a background thread (manage-bde, registry, SQL — all
@@ -206,11 +219,15 @@ internal sealed class SystemCheckViewModel : ViewModelBase
     {
         var os = ProbeOs();
         var disk = ProbeDisk();
+        // ProbeRuntime may download+install the VC++ redistributable — it is async internally
+        // but called with .GetAwaiter().GetResult() because Probe() is always invoked from a
+        // background thread (inside Task.Run), never from the UI thread.
+        var runtime = _probeRuntime(CancellationToken.None).GetAwaiter().GetResult();
         var bitLocker = ProbeBitLocker();
         var (pioneerState, pioneerDetail, pioneer) = ProbePioneer();
         var (sqlState, sqlDetail, sqlCreds) = ProbeSql(pioneer);
         return new ProbeOutcome(
-            os, disk, bitLocker,
+            os, disk, runtime, bitLocker,
             (pioneerState, pioneerDetail), (sqlState, sqlDetail),
             pioneer, sqlCreds);
     }
@@ -220,6 +237,7 @@ internal sealed class SystemCheckViewModel : ViewModelBase
     {
         (OsCheck.State, OsCheck.Detail) = o.Os;
         (DiskCheck.State, DiskCheck.Detail) = o.Disk;
+        (RuntimeCheck.State, RuntimeCheck.Detail) = o.Runtime;
         (BitLockerCheck.State, BitLockerCheck.Detail) = o.BitLocker;
         (PioneerCheck.State, PioneerCheck.Detail) = o.Pioneer;
         (SqlCheck.State, SqlCheck.Detail) = o.Sql;
@@ -329,12 +347,43 @@ internal sealed class SystemCheckViewModel : ViewModelBase
             return (CheckState.Warn, "Auto-discovery failed — you'll enter credentials manually.", null);
         }
     }
+
+    /// <summary>
+    /// Real runtime probe: checks for the VC++ 2015-2022 x64 redistributable;
+    /// if absent, downloads and silently installs it. Runs on the background probe
+    /// thread — never on the UI thread.
+    /// </summary>
+    private static async Task<(CheckState, string)> RealProbeRuntime(CancellationToken ct)
+    {
+        try
+        {
+            var status = new VcRedistChecker().Check();
+            if (status.Installed)
+                return (CheckState.Ok, "VC++ runtime present");
+
+            var outcome = await new VcRedistPreflight(
+                new VcRedistChecker(),
+                () => new VcRedistProvider(SharedHttp, VcRedistPreflight.AssetUrl, VcRedistPreflight.Sha256),
+                new VcRedistInstaller()
+            ).EnsureAsync(Path.GetTempPath(), ct);
+
+            return outcome.State == VcRedistPreflightState.Failed
+                ? (CheckState.Fail, outcome.Detail)
+                : (CheckState.Ok, outcome.Detail);
+        }
+        catch (Exception ex)
+        {
+            return (CheckState.Fail,
+                $"Runtime check failed: {ex.Message}. Install vc_redist.x64.exe manually, then retry.");
+        }
+    }
 }
 
 /// <summary>Immutable result of one background scan — applied to the VM on the UI thread.</summary>
 internal sealed record ProbeOutcome(
     (CheckState State, string Detail) Os,
     (CheckState State, string Detail) Disk,
+    (CheckState State, string Detail) Runtime,
     (CheckState State, string Detail) BitLocker,
     (CheckState State, string Detail) Pioneer,
     (CheckState State, string Detail) Sql,
