@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using SuavoAgent.Setup.Verify;
 
 namespace SuavoAgent.Setup;
 
@@ -520,4 +521,26 @@ internal static class ServiceInstaller
 
         return output + error;
     }
+
+    /// <summary>
+    /// Pure classification logic — testable without real service probes.
+    /// Core/Broker/Helper absent → Fail; Watchdog absent → Warn; all present → Ok.
+    /// </summary>
+    public static GateResult ClassifyServices(bool core, bool broker, bool watchdog, bool helper)
+    {
+        if (!core) return new GateResult("Services", GateState.Fail, "Core service not running");
+        if (!broker) return new GateResult("Services", GateState.Fail, "Broker service not running");
+        if (!helper) return new GateResult("Services", GateState.Fail, "Helper process not running");
+        if (!watchdog) return new GateResult("Services", GateState.Warn, "Watchdog not running yet");
+        return new GateResult("Services", GateState.Ok, "All services running");
+    }
+
+    /// <summary>
+    /// Live gate: probes real services and the Helper process, then delegates to ClassifyServices.
+    /// </summary>
+    public static GateResult ServicesRunningGate() => ClassifyServices(
+        IsServiceRunning(CoreServiceName),
+        IsServiceRunning(BrokerServiceName),
+        IsServiceRunning(WatchdogServiceName),
+        WaitForHelperProcess(TimeSpan.FromSeconds(30)));
 }
