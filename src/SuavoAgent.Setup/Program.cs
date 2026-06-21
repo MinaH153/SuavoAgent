@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Avalonia;
 using SuavoAgent.Diagnostics;
+using SuavoAgent.Setup.Doctor;
 
 namespace SuavoAgent.Setup;
 
@@ -24,6 +25,12 @@ internal static class Program
             Dsn = Environment.GetEnvironmentVariable("SUAVO_SENTRY_DSN"),
             EnableSentry = true,
         });
+
+        if (IsDoctorMode(args))
+        {
+            AttachParentConsole();
+            return DoctorRunner.RunAsync(args, System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        }
 
         if (IsUninstallMode(args))
         {
@@ -71,6 +78,11 @@ internal static class Program
     // SuavoSetup.exe --uninstall  (the GUI Welcome screen also routes here).
     private static bool IsUninstallMode(string[] args) =>
         args.Any(a => string.Equals(a, "--uninstall", StringComparison.OrdinalIgnoreCase));
+
+    // Doctor mode: read-only health layer-trace, exits 0 (healthy) or 1 (degraded).
+    // Made internal so DoctorModeRoutingTests (via InternalsVisibleTo) can assert it.
+    internal static bool IsDoctorMode(string[] args) =>
+        args.Any(a => string.Equals(a, "--doctor", StringComparison.OrdinalIgnoreCase));
 
     // Reattach to the parent process's console when launched from PowerShell / cmd.
     // Lets fleet-deploy scripts still see phase output from a WinExe binary.
