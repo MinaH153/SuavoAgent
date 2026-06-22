@@ -284,7 +284,12 @@ public sealed class SendInputDriver
         // wrong-target click into a PHI app once a PMS process is click-allowlisted. Re-confirm the
         // resolved process still owns the foreground at click time; fail closed otherwise. (expectedPid=0
         // from legacy callers / dry tooling skips the check, preserving existing behavior.)
-        if (expectedPid > 0 && !SystemObservers.ForegroundGuard.IsPidForeground(expectedPid))
+        // Uses the UWP-aware SandboxWindowResolver (not the raw ForegroundGuard): for a Win11 UWP app the
+        // foreground HWND is the ApplicationFrameHost frame, so a naive foreground-PID compare would
+        // false-reject a legitimate Calculator click. EffectiveAppPid drills AFH→CoreWindow and returns
+        // the frame PID for classic Win32 (PioneerRx, Notepad), so this matches the resolver's proc.Id
+        // for both UWP and classic apps.
+        if (expectedPid > 0 && !SandboxWindowResolver.IsSandboxAppForeground(expectedPid))
         {
             _logger.Warning(
                 "ClickAt refused: resolved process (pid={Pid}) no longer owns the foreground at click time — failing closed (TOCTOU). {ForegroundOwner}",
