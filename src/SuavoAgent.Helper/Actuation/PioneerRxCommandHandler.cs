@@ -164,7 +164,9 @@ public sealed class PioneerRxCommandHandler
         // and never reaches the Helper today). Pass false; the driver still
         // ORs with _gate.IsDryRun. Bug-21 follow-up: extend the PioneerRx
         // DTOs and verb when the live PMS click flow actually lands.
-        return await _driver.ClickAtAsync(resolved.X, resolved.Y, dryRun: false, ct).ConfigureAwait(false);
+        // QA wave2 (agentic): pass the resolved PID so ClickAtAsync re-asserts PioneerRx still owns the
+        // foreground at click time. This is the PHI-app click path — the TOCTOU guard matters most here.
+        return await _driver.ClickAtAsync(resolved.X, resolved.Y, dryRun: false, ct, resolved.Pid).ConfigureAwait(false);
     }
 
     private async Task<ActuationResult> HandleTypeAsync(JsonElement? data, CancellationToken ct)

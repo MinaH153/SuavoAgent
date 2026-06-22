@@ -261,7 +261,7 @@ public sealed class SendInputDriver
         return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: false, evidence);
     }
 
-    public Task<ActuationResult> ClickAtAsync(int x, int y, bool dryRun, CancellationToken ct)
+    public Task<ActuationResult> ClickAtAsync(int x, int y, bool dryRun, CancellationToken ct, int expectedPid = 0)
     {
         var effectiveDryRun = dryRun || _gate.IsDryRun;
         var rejection = _gate.CheckOrReject();
@@ -276,6 +276,23 @@ public sealed class SendInputDriver
                 "ClickAt DRY-RUN: x={X} y={Y} evidence={Evidence} requestDryRun={ReqDR} gateDryRun={GateDR}",
                 x, y, evidence, dryRun, _gate.IsDryRun);
             return Task.FromResult(ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: true, evidence));
+        }
+
+        // QA wave2 (agentic) TOCTOU guard: the element was resolved inside the allowlisted process, but
+        // the window can move/close/be covered between resolve and this click. Unlike type/press, the
+        // click path had NO re-assert, so it could land at stale coordinates in whatever is now there — a
+        // wrong-target click into a PHI app once a PMS process is click-allowlisted. Re-confirm the
+        // resolved process still owns the foreground at click time; fail closed otherwise. (expectedPid=0
+        // from legacy callers / dry tooling skips the check, preserving existing behavior.)
+        if (expectedPid > 0 && !SystemObservers.ForegroundGuard.IsPidForeground(expectedPid))
+        {
+            _logger.Warning(
+                "ClickAt refused: resolved process (pid={Pid}) no longer owns the foreground at click time — failing closed (TOCTOU). {ForegroundOwner}",
+                expectedPid, WindowFocusManager.DescribeForegroundWindow());
+            return Task.FromResult(ActuationResult.Reject(
+                ActuationRejectionCodes.ForegroundNotTarget,
+                "target window lost foreground between resolve and click; refusing to click stale coordinates",
+                dryRun: false));
         }
 
         try
@@ -422,6 +439,16 @@ public sealed class SendInputDriver
         var acquired = false;
         while (sw.ElapsedMilliseconds < ForegroundAcquireTimeoutMs && !ct.IsCancellationRequested)
         {
+            // QA wave2 (agentic): honor a mid-acquire gate pause/kill. The per-key/per-chord loops
+            // already re-check the gate, but this up-to-6s foreground-acquire loop did not — so a
+            // pharmacist who grabbed focus during the acquire window got it yanked back every 150ms
+            // (the user-input pause was set but never consulted here). Abort the focus-steal instead.
+            var pausedReject = _gate.CheckOrReject();
+            if (pausedReject is not null)
+            {
+                _logger.Information("{Verb} aborted mid-foreground-acquire: gate closed (user activity / kill)", verb);
+                return pausedReject;
+            }
             if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) { acquired = true; break; }
             WindowFocusManager.ForceForeground(target.Hwnd, _logger);
             await DelayWithCancel(150, ct).ConfigureAwait(false);
