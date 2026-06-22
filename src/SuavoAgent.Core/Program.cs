@@ -364,14 +364,12 @@ try
                     System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
                     System.Security.AccessControl.PropagationFlags.None,
                     System.Security.AccessControl.AccessControlType.Allow));
-                // NetworkService needs write for Broker logs
-                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(
-                        System.Security.Principal.WellKnownSidType.NetworkServiceSid, null),
-                    System.Security.AccessControl.FileSystemRights.Modify,
-                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
-                    System.Security.AccessControl.PropagationFlags.None,
-                    System.Security.AccessControl.AccessControlType.Allow));
+                // QA Setup I-1 (HIPAA): REMOVED a NetworkService:Modify(OI)(CI) grant here. Its comment
+                // claimed "NetworkService needs write for Broker logs", but the Broker runs as LocalSystem
+                // (ServiceInstaller obj=LocalSystem) and no SuavoAgent service uses NetworkService — so it
+                // was a dead grant that gave ANY NetworkService process on the box (e.g. SQL Server) Modify
+                // on credentials.dat / state.key / state.db (plaintext PHI). LocalSystem + LocalService are
+                // already granted above; nothing legitimate needs NetworkService.
                 // The Helper runs as a de-privileged user (always in BUILTIN\Users) and must
                 // traverse the data dir (this-dir-only — NO inherited file reads: state.db is
                 // plaintext PHI and state.key is machine-DPAPI). Mirrors the installer's

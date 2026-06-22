@@ -86,7 +86,12 @@ public static class CredentialProtector
             if (!modified) return;
 
             var opts = new JsonSerializerOptions { WriteIndented = true };
-            File.WriteAllText(appSettingsPath, root.ToJsonString(opts));
+            // QA I2 (Setup): atomic write. A crash mid-WriteAllText would leave appsettings.json torn or
+            // empty → the agent restarts with no ApiKey/SQL config ("online but blind"), recoverable only
+            // by re-install. temp + Move is atomic on NTFS (mirrors DpapiCredentialStore.Write).
+            var tmp = appSettingsPath + ".tmp";
+            File.WriteAllText(tmp, root.ToJsonString(opts));
+            File.Move(tmp, appSettingsPath, overwrite: true);
             logger.LogInformation("Sealed credentials in appsettings.json with DPAPI (H-1)");
         }
         catch (Exception ex)
