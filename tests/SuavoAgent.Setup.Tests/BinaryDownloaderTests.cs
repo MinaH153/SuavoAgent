@@ -94,4 +94,25 @@ public sealed class BinaryDownloaderTests
         ];
         Assert.Equal(required, BinaryDownloader.RequiredBinaries);
     }
+
+    [Fact]
+    public void HashMatches_accepts_correct_rejects_tampered_and_is_case_insensitive()
+    {
+        // QA wave2.5: the per-binary tamper gate DownloadAndVerifyAsync uses on a fresh install.
+        var tmp = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(tmp, "the signed binary contents");
+            var realHex = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(tmp))).ToLowerInvariant();
+
+            Assert.True(BinaryDownloader.HashMatches(tmp, realHex));                      // correct hash accepted
+            Assert.True(BinaryDownloader.HashMatches(tmp, realHex.ToUpperInvariant()));   // hex case-insensitive
+            Assert.False(BinaryDownloader.HashMatches(tmp, new string('0', 64)));         // wrong hash rejected
+
+            // A tampered binary (content changed) no longer matches the original signed checksum.
+            File.WriteAllText(tmp, "the signed binary contents TAMPERED");
+            Assert.False(BinaryDownloader.HashMatches(tmp, realHex));
+        }
+        finally { File.Delete(tmp); }
+    }
 }

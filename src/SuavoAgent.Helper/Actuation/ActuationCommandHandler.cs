@@ -122,7 +122,7 @@ public sealed class ActuationCommandHandler
         }
 
         _presence?.Narrate("Clicking", req.Label);
-        return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct).ConfigureAwait(false);
+        return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct, resolved.Pid).ConfigureAwait(false);
     }
 
     private async Task<ActuationResult> HandleClickBySignatureAsync(JsonElement? data, CancellationToken ct)
@@ -162,7 +162,7 @@ public sealed class ActuationCommandHandler
         }
 
         _presence?.Narrate("Clicking", req.AutomationId);
-        return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct).ConfigureAwait(false);
+        return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct, resolved.Pid).ConfigureAwait(false);
     }
 
     private async Task<ActuationResult> HandleTypeTextAsync(JsonElement? data, CancellationToken ct)

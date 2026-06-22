@@ -17,7 +17,9 @@ namespace SuavoAgent.Helper.Actuation;
 [SupportedOSPlatform("windows")]
 public sealed class UiaSignatureResolver : IDisposable
 {
-    public sealed record ResolvedTarget(int X, int Y, string AutomationId, string ProcessName);
+    // Pid (QA wave2 agentic): the resolved process, so the click path can re-assert this process still
+    // owns the foreground at click time (TOCTOU guard). Defaulted so older constructions stay valid.
+    public sealed record ResolvedTarget(int X, int Y, string AutomationId, string ProcessName, int Pid = 0);
 
     private readonly ILogger _logger;
     private UIA2Automation? _automation;
@@ -81,7 +83,7 @@ public sealed class UiaSignatureResolver : IDisposable
 
             var cx = (int)(rect.Left + rect.Width / 2);
             var cy = (int)(rect.Top + rect.Height / 2);
-            return new ResolvedTarget(cx, cy, automationId, proc.ProcessName);
+            return new ResolvedTarget(cx, cy, automationId, proc.ProcessName, proc.Id);
         }
         catch (Exception ex)
         {
