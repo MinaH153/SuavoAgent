@@ -10,7 +10,13 @@ Source: 4 parallel adversarial reviewers — learning/moat engine, agentic loop/
 - **I-2** — `CredentialProtector.SealSecretsFile` writes atomically (temp + Move).
 - **I-3** — `ServiceCommand.InvokeRepair` requires a ZERO exit (new `RunForExitCode`), so a failed bootstrap repair no longer reads as success.
 
-**Deferred to wave 2.5** (Important, but involved or contained-today — each deserves its own task): Setup I-4 (Helper crash-relaunch backoff — touches the Broker supervision loop), Agentic click-path TOCTOU + foreground-acquire pause-recheck, Learning dead auto-rule-approval gate + replay terminal-step TOCTOU, and the test-coverage gaps (PhiTextScrubber ReDoS sentinel, OTA per-binary hash, manifest sign round-trip, SQLCipher migration on a Windows runner).
+**Wave 2.5 (branch `fix/qa-wave2.5`) — DONE:**
+- ✅ **Agentic foreground-acquire pause-recheck** — the 6s focus-acquire loop now honors a mid-acquire gate pause/kill (stops fighting a pharmacist who grabbed focus).
+- ✅ **Agentic click-path TOCTOU** — resolved PID threaded into `ClickAtAsync`, which re-asserts `IsPidForeground` before the click and fails closed; wired the **PioneerRx (PHI app) click path** too.
+- ✅ **OTA manifest verify acceptance test** — key-injectable `VerifyManifestSignature` overload + generate→sign→verify round-trip (was only testing rejection).
+- ✅ **OTA per-binary tamper-gate test** — extracted `BinaryDownloader.HashMatches` + correct/wrong/case/tamper test.
+
+**Still deferred (each deserves its own task):** Setup **I-4** (Helper crash-relaunch backoff — Broker supervision loop), **Learning** dead auto-rule-approval gate + replay terminal-step TOCTOU (moat-engine design decision: filter-at-load vs staging — too high-stakes to rush, contained today by `AutonomousOk=false`), **PhiTextScrubber ReDoS sentinel** test (the 1s rule timeout is baked into the statically-compiled rules — needs a production seam to trigger deterministically), and **SQLCipher migration on a Windows CI runner** (needs Skip→WindowsFact + a Core.Tests-on-Windows job — can't verify from macOS).
 
 ## 🔴 NEW CRITICALS (3)
 - ⬜ **W2-C1 [Setup/HIPAA] ACL lockdown silently fails → credentials world-readable** (`ServiceInstaller.cs:349-361,493-522`). `RunCmd("icacls", expectSuccess=true)` only logs (WriteInfo) on a non-zero exit instead of throwing; `LockdownDirectoryAcl`'s catch fires only if `Process.Start` itself fails. A failed icacls (rights/path) → install proceeds with the dir world-readable, then DPAPI seals `appsettings.json` → API key + SQL password written to a world-readable file. **Fix:** `RunCmd` throws on non-zero exit when `expectSuccess`; install hard-fails on ACL failure (same discipline as InstallAndStart).
