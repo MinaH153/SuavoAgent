@@ -110,6 +110,19 @@ public sealed class VerifiedSkillReplayer
 
             // 5. Settle, then confirm the action actually moved the screen (it was Met when banked). A step
             //    that produced no change means reality diverged from the verified path → STOP fail-closed.
+            //
+            //    QA learning-hardening — KNOWN GAP (deferred to harvest-resumption): PostconditionEvaluator
+            //    is v1 change-detection — it asserts the screen CHANGED, not that it changed to the EXPECTED
+            //    state. For a MIDDLE step a wrong landing is still caught next iteration by the state-match at
+            //    the top of the loop (screen.ContentHash == step[i+1].StateHash). The TERMINAL step has no
+            //    next step, so a wrong click that produces SOME change reads as Met → Completed → the skill
+            //    re-thickens on a wrong action (worst case: navigation only — auto-replay is click-family and
+            //    ReplayFirstAllowTypeSteps is OFF, so no wrong VALUE is written). The real fix is to bank a
+            //    FinalStateHash (the post-state of the last action) on VerifiedSkill and assert
+            //    after.ContentHash == skill.FinalStateHash on the terminal step (legacy skills without it fall
+            //    back to this change-detection). That requires the harvester to CAPTURE the final post-state +
+            //    a skill-schema/serialization change, so it belongs with the (currently hard-stopped) Phase-3B
+            //    harvest work where the harvest→bank→replay round-trip can be exercised end-to-end.
             var after = await SettleAsync(screen, options, ct).ConfigureAwait(false) ?? screen;
             if (PostconditionEvaluator.Evaluate(action, screen, after) != PostconditionVerdict.Met)
                 return new SkillReplayResult(SkillReplayOutcome.PostconditionFailed, completed,
