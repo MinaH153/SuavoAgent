@@ -50,6 +50,11 @@ internal sealed class InstallOrchestrator
         ConsoleUI.WriteStep("Phase 3: Downloading SuavoAgent binaries");
         ConsoleUI.WriteInfo("Stopping any running SuavoAgent services before download...");
         ServiceInstaller.StopServices();
+        // QA W2-C2: create + lock the install dir BEFORE downloading so the signed binaries + checksums
+        // don't sit world-readable (inherited Program-Files ACL) during the download. The elevated
+        // installer is an Administrator → keeps FullControl through the lockdown, so the download writes.
+        Directory.CreateDirectory(_ctx.InstallDir);
+        ServiceInstaller.LockdownDirectoryAcl(_ctx.InstallDir);
         var downloaded = await BinaryDownloader.DownloadAndVerifyAsync(
             _ctx.Config.ReleaseTag, _ctx.InstallDir);
         if (!downloaded)
@@ -140,8 +145,8 @@ internal sealed class InstallOrchestrator
             throw new InstallException("Cloud agent identity is missing. Use the dashboard bootstrap installer.");
         _ctx.MachineFingerprint ??= GetMachineFingerprint();
 
-        Directory.CreateDirectory(_ctx.InstallDir);
-        ServiceInstaller.LockdownDirectoryAcl(_ctx.InstallDir);
+        // QA W2-C2: install dir was created + ACL-locked before the download (above), so the binaries
+        // AND the credentials written below land in an already-protected dir.
         // The de-privileged Helper must read its single-file self-extracting apphost; without this
         // carve-out the install-dir lockdown makes it die pre-log and the Broker churns it (2026-06-10).
         ServiceInstaller.GrantInteractiveHelperExeAccess(_ctx.InstallDir);

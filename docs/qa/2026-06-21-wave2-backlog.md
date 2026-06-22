@@ -2,6 +2,16 @@
 
 Source: 4 parallel adversarial reviewers — learning/moat engine, agentic loop/actuation, Setup/Broker internals, build/CI + test-coverage. Strong verified-safe baseline reconfirmed (harvest PHI gate fail-closed end-to-end, EncryptedScreenStore, signed-command path, actuation type/press fail-closed, presence layer truly cosmetic, agentic loop well-bounded).
 
+## ✅ FIXED in branch `fix/qa-wave1.5-important` (all 3 Criticals + the 3 clean Setup Importants)
+- **W2-C1** — `RunCmd` gained `throwOnFailure`; `LockdownDirectoryAcl` now hard-fails the install on an icacls failure (no more world-readable credentials).
+- **W2-C2** — install dir is created + ACL-locked BEFORE the binary download, both ConsoleInstaller + InstallOrchestrator (no world-readable binary window).
+- **W2-C3** — `ci.yml` build-and-test now runs the PHI analyzer canary (`run-integration.sh`); fails if SUAVO0001 stops firing.
+- **I-1** — removed the dead `NetworkService:Modify` grant on the data dir (no PHI/credential exposure to SQL-Server-as-NetworkService).
+- **I-2** — `CredentialProtector.SealSecretsFile` writes atomically (temp + Move).
+- **I-3** — `ServiceCommand.InvokeRepair` requires a ZERO exit (new `RunForExitCode`), so a failed bootstrap repair no longer reads as success.
+
+**Deferred to wave 2.5** (Important, but involved or contained-today — each deserves its own task): Setup I-4 (Helper crash-relaunch backoff — touches the Broker supervision loop), Agentic click-path TOCTOU + foreground-acquire pause-recheck, Learning dead auto-rule-approval gate + replay terminal-step TOCTOU, and the test-coverage gaps (PhiTextScrubber ReDoS sentinel, OTA per-binary hash, manifest sign round-trip, SQLCipher migration on a Windows runner).
+
 ## 🔴 NEW CRITICALS (3)
 - ⬜ **W2-C1 [Setup/HIPAA] ACL lockdown silently fails → credentials world-readable** (`ServiceInstaller.cs:349-361,493-522`). `RunCmd("icacls", expectSuccess=true)` only logs (WriteInfo) on a non-zero exit instead of throwing; `LockdownDirectoryAcl`'s catch fires only if `Process.Start` itself fails. A failed icacls (rights/path) → install proceeds with the dir world-readable, then DPAPI seals `appsettings.json` → API key + SQL password written to a world-readable file. **Fix:** `RunCmd` throws on non-zero exit when `expectSuccess`; install hard-fails on ACL failure (same discipline as InstallAndStart).
 - ⬜ **W2-C2 [Setup] binaries downloaded into installDir BEFORE ACL lockdown** (`ConsoleInstaller.cs:112` vs `:135`; `InstallOrchestrator.cs:53` vs WriteConfig lockdown). First install: dir created with inherited Program-Files ACL (Users:ReadAndExecute) and all 4 EXEs + checksums sit world-readable for the whole (slow) download. **Fix:** create+lock the dir before download, or download to temp → verify → move after lockdown. (First-install only; upgrade is locked already.)

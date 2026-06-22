@@ -350,13 +350,19 @@ internal static class ServiceInstaller
     {
         try
         {
-            // Reset inheritance, remove all existing ACEs
-            RunCmd("icacls", $"\"{path}\" /inheritance:r /grant:r \"BUILTIN\\Administrators:(OI)(CI)F\" /grant:r \"NT AUTHORITY\\SYSTEM:(OI)(CI)F\" /grant:r \"NT AUTHORITY\\LOCAL SERVICE:(OI)(CI)M\"");
+            // Reset inheritance, remove all existing ACEs. throwOnFailure: a non-zero icacls exit must
+            // ABORT the install — proceeding would leave the dir world-readable while the DPAPI seal
+            // writes the API key + SQL password into it (QA W2-C1, HIPAA).
+            RunCmd("icacls", $"\"{path}\" /inheritance:r /grant:r \"BUILTIN\\Administrators:(OI)(CI)F\" /grant:r \"NT AUTHORITY\\SYSTEM:(OI)(CI)F\" /grant:r \"NT AUTHORITY\\LOCAL SERVICE:(OI)(CI)M\"",
+                throwOnFailure: true);
             ConsoleUI.WriteOk($"ACL locked down: {path}");
         }
         catch (Exception ex)
         {
-            ConsoleUI.WriteWarn($"ACL lockdown failed: {ex.Message}");
+            // HARD FAIL (QA W2-C1): never write secrets to an unprotected directory.
+            ConsoleUI.WriteFail($"ACL lockdown FAILED for {path}: {ex.Message}");
+            throw new InvalidOperationException(
+                $"Directory ACL lockdown failed for {path} — refusing to write credentials to an unprotected directory.", ex);
         }
     }
 
@@ -490,7 +496,10 @@ internal static class ServiceInstaller
         return RunCmd("sc.exe", args, expectSuccess);
     }
 
-    private static string RunCmd(string exe, string args, bool expectSuccess = true)
+    // expectSuccess=true logs a non-zero exit. throwOnFailure=true makes a non-zero exit (or a
+    // failed launch) THROW — use it for steps where silently proceeding is unsafe (QA W2-C1: a failed
+    // icacls lockdown that's only logged lets the DPAPI seal write secrets to a world-readable dir).
+    private static string RunCmd(string exe, string args, bool expectSuccess = true, bool throwOnFailure = false)
     {
         var psi = new ProcessStartInfo
         {
@@ -505,7 +514,7 @@ internal static class ServiceInstaller
         using var proc = Process.Start(psi);
         if (proc == null)
         {
-            if (expectSuccess)
+            if (expectSuccess || throwOnFailure)
                 throw new InvalidOperationException($"Failed to start {exe}");
             return "";
         }
@@ -514,9 +523,11 @@ internal static class ServiceInstaller
         var error = proc.StandardError.ReadToEnd();
         proc.WaitForExit(30000);
 
-        if (expectSuccess && proc.ExitCode != 0)
+        if ((expectSuccess || throwOnFailure) && proc.ExitCode != 0)
         {
             ConsoleUI.WriteInfo($"{exe} {args} -> exit {proc.ExitCode}: {error.Trim()}");
+            if (throwOnFailure)
+                throw new InvalidOperationException($"{exe} exited {proc.ExitCode}: {error.Trim()}");
         }
 
         return output + error;

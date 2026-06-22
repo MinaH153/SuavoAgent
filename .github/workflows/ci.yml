@@ -98,6 +98,13 @@ jobs:
       - name: Test
         run: dotnet test SuavoAgent.sln -c Release --no-build -v normal --logger "trx;LogFileName=test-results.trx"
 
+      # QA W2-C3: the compile-time PHI gate. Proves PhiInOutboundPayloadAnalyzer is still wired and
+      # emits SUAVO0001 — if a CodeAnalysis bump or a broken Analyzer reference silences it, PHI could
+      # ride outbound payloads with no catch. The script fails (exit 1) if SUAVO0001 is NOT emitted by
+      # the canary fixture build. The fixture is excluded from the solution, so it needs its own step.
+      - name: PHI analyzer canary (SUAVO0001 must fire)
+        run: bash tests/SuavoAgent.Analyzers.IntegrationTest/run-integration.sh
+
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()

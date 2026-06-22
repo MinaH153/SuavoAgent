@@ -64,8 +64,11 @@ public sealed class ServiceCommand : IServiceCommand
     {
         // PowerShell 5.1+ is a hard prereq for bootstrap.ps1 (enforced inside the script).
         var args = $"-NoProfile -ExecutionPolicy Bypass -File \"{bootstrapPath}\" --repair";
-        var output = RunCapture("powershell.exe", args, timeout);
-        return output is not null;
+        // QA I-3: require a ZERO exit. `RunCapture(...) is not null` returned true if powershell merely
+        // LAUNCHED — so a bootstrap.ps1 --repair that exited non-zero (Watchdog NOT re-registered) looked
+        // like success, the Broker stopped escalating, and the agent ran with no recovery supervisor.
+        // RunCapture is shared with Query/Stop which parse non-zero output, so check the exit code here.
+        return RunForExitCode("powershell.exe", args, timeout) == 0;
     }
 
     internal static ServiceState ParseState(string queryOutput)
@@ -101,6 +104,41 @@ public sealed class ServiceCommand : IServiceCommand
                 return null;
             }
             return p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // QA I-3: like RunCapture but returns the process EXIT CODE (null on launch failure / timeout /
+    // exception). Used by InvokeRepair to require a zero exit instead of "merely launched". Reads the
+    // pipes async so a chatty child can't fill a buffer and block before exit.
+    private static int? RunForExitCode(string fileName, string arguments, TimeSpan timeout)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            using var p = Process.Start(psi);
+            if (p is null) return null;
+
+            var stdout = p.StandardOutput.ReadToEndAsync();
+            var stderr = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit((int)timeout.TotalMilliseconds))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { }
+                return null;
+            }
+            try { System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { stdout, stderr }, 2000); } catch { }
+            return p.ExitCode;
         }
         catch
         {

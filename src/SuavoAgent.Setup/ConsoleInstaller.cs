@@ -109,6 +109,12 @@ internal static class ConsoleInstaller
             ConsoleUI.WriteStep("Phase 3: Downloading SuavoAgent binaries");
             ConsoleUI.WriteInfo("Stopping any running SuavoAgent services before download...");
             ServiceInstaller.StopServices();
+            // QA W2-C2: create + lock the install dir BEFORE downloading. Otherwise it's created with the
+            // inherited Program-Files ACL (Users:ReadAndExecute) and the signed binaries + checksums sit
+            // world-readable for the whole (slow) download. The elevated installer is an Administrator,
+            // which keeps FullControl through the lockdown, so the download still writes fine.
+            Directory.CreateDirectory(InstallDir);
+            ServiceInstaller.LockdownDirectoryAcl(InstallDir);
             var downloadSuccess = await BinaryDownloader.DownloadAndVerifyAsync(
                 config.ReleaseTag, InstallDir);
             if (!downloadSuccess)
@@ -129,10 +135,9 @@ internal static class ConsoleInstaller
                 WriteIndented = true,
             });
 
-            // C-4: Create dir → lockdown ACL → THEN write config (credentials never on disk unprotected)
+            // C-4 + W2-C2: the install dir was created + ACL-locked in Phase 3 (before the download), so
+            // both the binaries AND the credentials below land in an already-protected dir.
             var configPath = Path.Combine(InstallDir, "appsettings.json");
-            Directory.CreateDirectory(InstallDir);
-            ServiceInstaller.LockdownDirectoryAcl(InstallDir);
             // The de-privileged Helper must read its single-file self-extracting apphost; without this
             // carve-out the install-dir lockdown makes it die pre-log and the Broker churns it (2026-06-10).
             ServiceInstaller.GrantInteractiveHelperExeAccess(InstallDir);
