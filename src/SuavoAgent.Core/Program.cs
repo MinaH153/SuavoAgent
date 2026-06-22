@@ -652,7 +652,17 @@ try
         rules.AddRange(loader.LoadFromEmbeddedResources(
             typeof(Program).Assembly,
             "SuavoAgent.Core.Reasoning.Rules."));
-        rules.AddRange(loader.LoadFromDirectory(overrideDir, required: false));
+
+        // QA learning-hardening: gate auto-GENERATED directory rules — only operator-Approved auto-rules
+        // load (a rule with no auto_rule_approvals row is a hand-authored override and loads normally).
+        // Without this, a Pending/Shadow/Rejected auto-rule loaded + surfaced as an operator prompt
+        // identically to an Approved one. Embedded rules above are trusted and never gated.
+        var ruleApprovalDb = sp.GetRequiredService<AgentStateDb>();
+        var directoryRules = loader.LoadFromDirectory(overrideDir, required: false);
+        rules.AddRange(AutoRuleApprovalGate.AdmitApproved(
+            directoryRules,
+            id => ruleApprovalDb.GetAutoRuleApproval(id)?.Status,
+            log));
 
         var engine = new RuleEngine(rules, log);
         Log.Information("RuleEngine loaded {Count} rules across {Skills} skill(s): {SkillList}",
