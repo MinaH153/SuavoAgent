@@ -1815,7 +1815,8 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 AllowLiveActuation: false);
 
             var runner = SuavoAgent.Core.Agentic.NavigateLoopFactory.Create(
-                _serviceProvider, safetyOptions, charter, audit, deadline);
+                _serviceProvider, safetyOptions, charter, audit, deadline,
+                knownSkillsProvider: BuildKnownSkillsProvider(pharmacyId, app: string.Empty, goal: objective!, windowTitle: null));
 
             var loopOptions = new SuavoAgent.Core.Agentic.AgenticLoopOptions
             {
@@ -2021,7 +2022,8 @@ public sealed class HeartbeatWorker : ResilientHostedService
 
             var runner = SuavoAgent.Core.Agentic.NavigateLoopFactory.Create(
                 _serviceProvider, safetyOptions, charter, audit, deadline,
-                policyOptions: policyOptions, safetyOverride: exploreGate);
+                policyOptions: policyOptions, safetyOverride: exploreGate,
+                knownSkillsProvider: BuildKnownSkillsProvider(pharmacyId, app: app!, goal: objective!, windowTitle: null));
 
             var loopOptions = new SuavoAgent.Core.Agentic.AgenticLoopOptions
             {
@@ -2196,6 +2198,39 @@ public sealed class HeartbeatWorker : ResilientHostedService
         {
             _logger.LogWarning(ex, "verified-skill harvest failed run={RunId} (run unaffected)", runId);
         }
+    }
+
+    /// <summary>
+    /// MOAT Increment 3 (retrieval-as-few-shot): build the flag-gated provider that supplies the Tier-2
+    /// prompt's "known_skills" worked-examples block for one run. Returns null when
+    /// <c>Agent:SkillRetrievalFewShot</c> is OFF (default) ⇒ unchanged reasoning. The provider is invoked
+    /// lazily + cached once per run by the reasoner; it reads the banked skills for (pharmacy, app),
+    /// ranks them lexically against the live goal (NO embedder), and renders the top 1–3. Best-effort:
+    /// any fault returns null (retrieval is advisory — a failed lookup must never break a run). Banked
+    /// content is Phase-3B PHI-certified, so it is safe to surface into the prompt.
+    /// </summary>
+    private Func<string?>? BuildKnownSkillsProvider(string pharmacyId, string app, string goal, string? windowTitle)
+    {
+        if (!_options.SkillRetrievalFewShot) return null;
+        return () =>
+        {
+            try
+            {
+                var candidates = _stateDb.GetVerifiedSkillsForApp(pharmacyId, app);
+                if (candidates.Count == 0) return null;
+                var block = SuavoAgent.Core.Agentic.SkillRetrieval.BuildKnownSkillsFlag(goal, windowTitle, candidates);
+                if (!string.IsNullOrEmpty(block))
+                    _logger.LogInformation(
+                        "skill-retrieval injected pharmacy={Pharmacy} app={App} examples_chars={Len}",
+                        pharmacyId, string.IsNullOrEmpty(app) ? "(navigate)" : app, block.Length);
+                return block;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "skill-retrieval lookup failed (run unaffected)");
+                return null;
+            }
+        };
     }
 
     /// <summary>

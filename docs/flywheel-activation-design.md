@@ -201,12 +201,23 @@ SQLite SELECT on miss. No RAM delta.
 integration — sandbox loop on the box (below); plus a drift test: bank, mutate the sim's first state,
 assert loop fallback + `consecutive_failures` increments.
 
-## Increment 3 — Retrieval-as-few-shot (when the LLM IS called) — DESIGN ONLY
+## Increment 3 — Retrieval-as-few-shot (when the LLM IS called) — ✅ BUILT (`feat/flywheel-retrieval-fewshot`)
 
 **Goal:** on Tier-2 escalation, inject 1–3 nearest banked trajectories into the proposal prompt as
 worked examples — the LLM imitates its own verified history instead of re-deriving.
 
-**Wiring (exact):**
+**As built (files):** `SkillRetrieval.cs` (NEW — pure lexical ranker + bounded renderer, no embedder);
+`AgentStateDb.GetVerifiedSkillsForApp` (NEW accessor, mirrors `GetBestVerifiedSkillForTask`);
+`NavigateReasoning.BuildContext` gained a 3-arg overload threading `Flags["known_skills"]` (the 2-arg
+overload is unchanged = off); `TieredBrainReasoner` takes an optional `Func<string?>` provider, resolved
+once-per-run + cached, best-effort (fault → null); `NavigateLoopFactory.Create` passes the provider
+through to the inner brain (both the navigate + explore_sandbox sites in `HeartbeatWorker` build it,
+flag-gated); `InferencePromptBuilder` renders `known_skills` with a dedicated 600-char budget (head-kept
+— highest-scored example first). Flag `Agent:SkillRetrievalFewShot` (`AgentOptions`), **default OFF**.
+39 new tests; full Core suite 2080/0. Ranking + render are deterministic and PHI-stance-pinned. Live
+A/B (steps-to-Done, cloud-call count) is the remaining on-box validation, same as replay-first.
+
+**Wiring (exact, as designed — matches the build):**
 - New `AgentStateDb.GetVerifiedSkillsForApp(pharmacyId, app, limit)` (simple SELECT, newest/most-confirmed
   first).
 - Ranking: **lexical/structural only, no embedder** — score = token overlap between the live objective

@@ -150,6 +150,11 @@ public static class InferencePromptBuilder
     // the latest steps that matter most for the next decision (2026-06 brain upgrade).
     internal const string PriorActionsFlag = "prior_actions";
     private const int PriorActionsMaxLen = 800;
+    // known_skills is the retrieval few-shot block (Flywheel Increment 3) — banked worked examples the
+    // model imitates. Already whole-example-bounded at SkillRetrieval.MaxBlockChars (600); this matching
+    // cap is the prompt-side backstop so a future caller can't blow the Tier-2 token budget.
+    internal const string KnownSkillsFlag = SuavoAgent.Core.Agentic.SkillRetrieval.KnownSkillsFlag;
+    private const int KnownSkillsMaxLen = SuavoAgent.Core.Agentic.SkillRetrieval.MaxBlockChars;
     private const int MaxElementNameLen = 100;
     private const int MaxElements = 24;
     private const int MaxFlags = 16;
@@ -179,9 +184,16 @@ public static class InferencePromptBuilder
             .Take(MaxFlags)
             .ToDictionary(
                 kv => Truncate(kv.Key, MaxFieldLen),
-                kv => kv.Key == PriorActionsFlag
-                    ? TruncateTail(kv.Value, PriorActionsMaxLen)
-                    : Truncate(kv.Value, MaxFieldLen));
+                kv => kv.Key switch
+                {
+                    // prior_actions keeps its TAIL (latest steps matter most).
+                    PriorActionsFlag => TruncateTail(kv.Value, PriorActionsMaxLen),
+                    // known_skills (retrieval few-shot) keeps its HEAD: the block is already char-bounded
+                    // by SkillRetrieval.MaxBlockChars at whole-example boundaries, so this is a backstop —
+                    // and the highest-scored example comes first, so head-truncation drops the weakest.
+                    KnownSkillsFlag => Truncate(kv.Value, KnownSkillsMaxLen),
+                    _ => Truncate(kv.Value, MaxFieldLen),
+                });
 
         // General navigate mode: the NL objective. Null in scoped mode ⇒ omitted from the
         // JSON (WhenWritingNull) so the legacy prompt is byte-identical when unset.

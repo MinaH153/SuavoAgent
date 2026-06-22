@@ -244,6 +244,17 @@ public sealed class AgentOptions
     public bool ReplayFirstAllowTypeSteps { get; set; } = false;
 
     /// <summary>
+    /// MOAT Increment 3 — retrieval-as-few-shot (<c>Agent:SkillRetrievalFewShot</c>). When true, on a
+    /// Tier-2 LLM reasoning call the navigate loop injects the 1–3 banked verified trajectories NEAREST
+    /// (lexical overlap, NO embedder) to the live objective as worked examples in the prompt, so the
+    /// model imitates its OWN verified history. ADVISORY only — the proposal still flows through grounding
+    /// + the composite safety gate + postconditions, so it can change what's proposed but never what's
+    /// allowed; banked content is Phase-3B PHI-certified so it adds no exposure. OFF by default; safe to
+    /// flip independently of <see cref="ReplayFirst"/> (lower-risk, but builds on the same banked store).
+    /// </summary>
+    public bool SkillRetrievalFewShot { get; set; } = false;
+
+    /// <summary>
     /// Trailing window (days) over which dispensed quantity is aggregated for the savings figure.
     /// Default 90 — a realistic recurring volume per NDC.
     /// </summary>
