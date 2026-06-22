@@ -48,6 +48,32 @@ public class PackageUpdateTests
     }
 
     [Fact]
+    public void ManifestSignatureVerification_RoundTrip_AcceptsValid_RejectsTamperAndWrongKey()
+    {
+        // QA wave2.5: the real ACCEPTANCE path (generate key → sign → verify) the old test couldn't
+        // reach, via the key-injectable overload. Guards against a key-rotation / P1363 encoding bug
+        // that would make the OTA verify accept nothing and brick every agent on next heartbeat.
+        var (key, pubDer) = GenerateTestKeyPair();
+        using (key)
+        {
+            var canonical = MakeManifest().ToCanonical();
+            var sigHex = Convert.ToHexString(
+                key.SignData(Encoding.UTF8.GetBytes(canonical), HashAlgorithmName.SHA256)).ToLowerInvariant();
+
+            // ACCEPTANCE: a signature from the matching key verifies.
+            Assert.True(SelfUpdater.VerifyManifestSignature(canonical, sigHex, pubDer, _logger));
+
+            // TAMPER: the same signature over altered canonical bytes is rejected.
+            Assert.False(SelfUpdater.VerifyManifestSignature(canonical + " ", sigHex, pubDer, _logger));
+
+            // WRONG KEY: a valid signature checked against a different public key is rejected.
+            var (other, otherPubDer) = GenerateTestKeyPair();
+            using (other)
+                Assert.False(SelfUpdater.VerifyManifestSignature(canonical, sigHex, otherPubDer, _logger));
+        }
+    }
+
+    [Fact]
     public void ManifestSignatureVerification_NullSignature_Rejects()
     {
         var manifest = MakeManifest();

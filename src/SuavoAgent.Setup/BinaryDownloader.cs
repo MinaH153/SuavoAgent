@@ -90,13 +90,12 @@ internal static class BinaryDownloader
             if (!downloaded)
                 return false;
 
-            // Verify SHA-256
-            var actualHash = ComputeSha256(destPath);
-            if (!actualHash.Equals(checksums[bin], StringComparison.OrdinalIgnoreCase))
+            // Verify SHA-256 (QA wave2.5: via the testable HashMatches tamper gate)
+            if (!HashMatches(destPath, checksums[bin]))
             {
                 ConsoleUI.WriteFail($"SHA-256 mismatch for {bin}");
                 ConsoleUI.WriteInfo($"  Expected: {checksums[bin]}");
-                ConsoleUI.WriteInfo($"  Actual:   {actualHash}");
+                ConsoleUI.WriteInfo($"  Actual:   {ComputeSha256(destPath)}");
                 CleanupBinaries(installDir);
                 return false;
             }
@@ -230,6 +229,13 @@ internal static class BinaryDownloader
             return false;
         }
     }
+
+    // QA wave2.5 test seam: the exact per-binary tamper gate used by DownloadAndVerifyAsync — the
+    // downloaded file's SHA-256 must equal the signed checksum (case-insensitive hex). A regression
+    // here (wrong field, case-sensitive compare on uppercase hex) would silently accept a tampered
+    // binary on a fresh install.
+    internal static bool HashMatches(string filePath, string expectedHashHex) =>
+        ComputeSha256(filePath).Equals(expectedHashHex, StringComparison.OrdinalIgnoreCase);
 
     private static string ComputeSha256(string filePath)
     {

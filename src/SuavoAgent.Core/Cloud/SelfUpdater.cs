@@ -150,6 +150,15 @@ public static class SelfUpdater
     /// </summary>
     internal static bool VerifyManifestSignature(
         string manifestCanonical, string? signatureHex, ILogger logger)
+        => VerifyManifestSignature(manifestCanonical, signatureHex, UpdatePublicKeyDer, logger);
+
+    // Key-injectable overload (QA wave2.5 test seam): the production path above passes the embedded
+    // UpdatePublicKeyDer, so behavior is unchanged. Tests pass a generated key so the full
+    // ImportSubjectPublicKeyInfo + P1363 VerifyData round-trip is exercised on the ACCEPTANCE path —
+    // the old test could only assert a NON-matching key fails. A key-rotation / encoding regression
+    // that made the OTA verify accept nothing (brick all agents) would now be caught.
+    internal static bool VerifyManifestSignature(
+        string manifestCanonical, string? signatureHex, string publicKeyDerBase64, ILogger logger)
     {
         if (string.IsNullOrEmpty(signatureHex))
         {
@@ -160,7 +169,7 @@ public static class SelfUpdater
         try
         {
             using var ecdsa = ECDsa.Create();
-            ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(UpdatePublicKeyDer), out _);
+            ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(publicKeyDerBase64), out _);
 
             var manifestBytes = Encoding.UTF8.GetBytes(manifestCanonical);
             var signatureBytes = Convert.FromHexString(signatureHex);
