@@ -1,0 +1,7 @@
+# benchmark run artifacts — never commit logs, the GGUF model, or CSV outputs
+box/out/
+models/
+*.gguf
+__pycache__/
+*.csv
+*.out
