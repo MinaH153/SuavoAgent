@@ -2,13 +2,6 @@ using SuavoAgent.Setup.Gui.Services;
 
 namespace SuavoAgent.Setup.Gui.ViewModels;
 
-/// <summary>A US state/territory the authorizing party picks from (no more blind 2-char code).</summary>
-public sealed record UsState(string Code, string Name)
-{
-    public string Display => $"{Name} ({Code})";
-    public override string ToString() => Display;
-}
-
 internal sealed class ConsentViewModel : ViewModelBase
 {
     private readonly InstallContext _ctx;
@@ -17,33 +10,8 @@ internal sealed class ConsentViewModel : ViewModelBase
     private string _name = string.Empty;
     private string _title = string.Empty;
     private string _state = string.Empty;
-    private UsState? _selectedState;
     private bool _agreedToTerms;
     private bool _agreedToNotice;
-
-    /// <summary>50 states + DC, alphabetical — drives the state ComboBox.</summary>
-    public static readonly IReadOnlyList<UsState> AllStates = new[]
-    {
-        new UsState("AL", "Alabama"), new UsState("AK", "Alaska"), new UsState("AZ", "Arizona"),
-        new UsState("AR", "Arkansas"), new UsState("CA", "California"), new UsState("CO", "Colorado"),
-        new UsState("CT", "Connecticut"), new UsState("DE", "Delaware"), new UsState("DC", "District of Columbia"),
-        new UsState("FL", "Florida"), new UsState("GA", "Georgia"), new UsState("HI", "Hawaii"),
-        new UsState("ID", "Idaho"), new UsState("IL", "Illinois"), new UsState("IN", "Indiana"),
-        new UsState("IA", "Iowa"), new UsState("KS", "Kansas"), new UsState("KY", "Kentucky"),
-        new UsState("LA", "Louisiana"), new UsState("ME", "Maine"), new UsState("MD", "Maryland"),
-        new UsState("MA", "Massachusetts"), new UsState("MI", "Michigan"), new UsState("MN", "Minnesota"),
-        new UsState("MS", "Mississippi"), new UsState("MO", "Missouri"), new UsState("MT", "Montana"),
-        new UsState("NE", "Nebraska"), new UsState("NV", "Nevada"), new UsState("NH", "New Hampshire"),
-        new UsState("NJ", "New Jersey"), new UsState("NM", "New Mexico"), new UsState("NY", "New York"),
-        new UsState("NC", "North Carolina"), new UsState("ND", "North Dakota"), new UsState("OH", "Ohio"),
-        new UsState("OK", "Oklahoma"), new UsState("OR", "Oregon"), new UsState("PA", "Pennsylvania"),
-        new UsState("RI", "Rhode Island"), new UsState("SC", "South Carolina"), new UsState("SD", "South Dakota"),
-        new UsState("TN", "Tennessee"), new UsState("TX", "Texas"), new UsState("UT", "Utah"),
-        new UsState("VT", "Vermont"), new UsState("VA", "Virginia"), new UsState("WA", "Washington"),
-        new UsState("WV", "West Virginia"), new UsState("WI", "Wisconsin"), new UsState("WY", "Wyoming"),
-    };
-
-    public IReadOnlyList<UsState> States => AllStates;
 
     public ConsentViewModel(InstallContext ctx, Action onAgreed)
     {
@@ -71,23 +39,16 @@ internal sealed class ConsentViewModel : ViewModelBase
         set { if (SetField(ref _title, value)) AgreeCommand.RaiseCanExecuteChanged(); }
     }
 
-    /// <summary>ComboBox selection — the canonical way to set the state.</summary>
-    public UsState? SelectedState
-    {
-        get => _selectedState;
-        set
-        {
-            if (SetField(ref _selectedState, value))
-                StateCode = value?.Code ?? string.Empty;
-        }
-    }
-
+    /// <summary>The 2-letter state code typed into the State field; bound directly.
+    /// Normalized to upper-case so the notice logic and the saved receipt see a
+    /// clean code regardless of how it was typed.</summary>
     public string StateCode
     {
         get => _state;
         set
         {
-            if (SetField(ref _state, value))
+            var normalized = (value ?? string.Empty).Trim().ToUpperInvariant();
+            if (SetField(ref _state, normalized))
             {
                 AgreeCommand.RaiseCanExecuteChanged();
                 RaisePropertyChanged(nameof(RequiresEmployeeNotice));

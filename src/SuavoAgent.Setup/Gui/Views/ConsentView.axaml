@@ -117,21 +117,16 @@
                      Background="{DynamicResource SuavoSurfaceBrush}"
                      Foreground="{DynamicResource SuavoTextBrush}"
                      BorderBrush="{DynamicResource SuavoBorderBrush}"/>
-            <ComboBox Grid.Row="1" Grid.Column="2" Margin="0,8,0,0"
-                      ItemsSource="{Binding States}"
-                      SelectedItem="{Binding SelectedState, Mode=TwoWay}"
-                      PlaceholderText="State"
-                      HorizontalAlignment="Stretch"
-                      Background="{DynamicResource SuavoSurfaceBrush}"
-                      Foreground="{DynamicResource SuavoTextBrush}"
-                      BorderBrush="{DynamicResource SuavoBorderBrush}">
-                <ComboBox.ItemTemplate>
-                    <DataTemplate x:DataType="vm:UsState">
-                        <TextBlock Text="{Binding Display}"
-                                   Foreground="{DynamicResource SuavoTextBrush}"/>
-                    </DataTemplate>
-                </ComboBox.ItemTemplate>
-            </ComboBox>
+            <!-- Plain TextBox (2-letter code), styled identically to the sibling
+                 inputs above. Replaces a Fluent ComboBox whose popup ignored the
+                 Light theme variant and rendered dark-on-dark (invisible items). -->
+            <TextBox Grid.Row="1" Grid.Column="2" Margin="0,8,0,0"
+                     Text="{Binding StateCode, Mode=TwoWay}"
+                     Watermark="State (e.g. CA)"
+                     MaxLength="2"
+                     Background="{DynamicResource SuavoSurfaceBrush}"
+                     Foreground="{DynamicResource SuavoTextBrush}"
+                     BorderBrush="{DynamicResource SuavoBorderBrush}"/>
 
             <Border Grid.Row="2" Grid.ColumnSpan="3" Margin="0,10,0,0"
                     IsVisible="{Binding NoticeBannerText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
