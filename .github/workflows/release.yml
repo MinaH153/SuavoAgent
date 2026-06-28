@@ -130,7 +130,7 @@ jobs:
         run: mkdir -p "${{ github.workspace }}/release/signed"
 
       - name: Sign SuavoAgent.Core.exe
-        uses: sslcom/actions-codesigner@develop
+        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
         with:
           command: sign
           username: ${{ secrets.ES_USERNAME }}
@@ -141,7 +141,7 @@ jobs:
           output_path: ${{ github.workspace }}/release/signed
 
       - name: Sign SuavoAgent.Broker.exe
-        uses: sslcom/actions-codesigner@develop
+        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
         with:
           command: sign
           username: ${{ secrets.ES_USERNAME }}
@@ -152,7 +152,7 @@ jobs:
           output_path: ${{ github.workspace }}/release/signed
 
       - name: Sign SuavoAgent.Helper.exe
-        uses: sslcom/actions-codesigner@develop
+        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
         with:
           command: sign
           username: ${{ secrets.ES_USERNAME }}
@@ -163,7 +163,7 @@ jobs:
           output_path: ${{ github.workspace }}/release/signed
 
       - name: Sign SuavoAgent.Watchdog.exe
-        uses: sslcom/actions-codesigner@develop
+        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
         with:
           command: sign
           username: ${{ secrets.ES_USERNAME }}
@@ -174,7 +174,7 @@ jobs:
           output_path: ${{ github.workspace }}/release/signed
 
       - name: Sign SuavoSetup.exe
-        uses: sslcom/actions-codesigner@develop
+        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
         with:
           command: sign
           username: ${{ secrets.ES_USERNAME }}

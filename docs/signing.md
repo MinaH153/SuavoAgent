@@ -10,6 +10,52 @@ The release and hotfix workflows **fail closed** unless `SIGNING_ENABLED=true`
 and all four `ES_*` secrets are configured. Flip the gate only once the
 secrets are populated and a smoke tag has signed successfully.
 
+## SmartScreen reputation & certificate continuity — READ THIS
+
+**EV no longer grants instant SmartScreen trust.** Microsoft removed that
+behavior ~March 2024 ([MS Learn, updated 2026-05-04](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)).
+A valid EV signature only makes the **publisher name** show in the prompt — it
+does **not** skip the "Windows protected your PC / unrecognized app" warning.
+SmartScreen reputation now accrues **per signing certificate, over real-world
+download volume** ("hundreds of clean installs from a wide audience," several
+weeks — Microsoft's own wording). Internal testing barely counts. **A new cert
+with low volume showing the warning is EXPECTED, not a bug** — don't go hunting
+for a signing misconfiguration.
+
+**🔒 NEVER reissue or renew this certificate early.** Reputation is bound to the
+**certificate thumbprint**. Renewing/reissuing — even same org, same CA — is a
+**new publisher identity to SmartScreen and resets all accrued reputation to
+zero, with no transfer path.** The continuity of *this* cert (order
+`co-861kueeu2a3`, valid to 2027-05-15) is the reputation asset. Therefore:
+
+- Sign **every** release with this same cert. The cert is a reputation bank
+  account that only compounds while it's the same thumbprint.
+- Renew **deliberately near expiry**, accepting the reputation reset — never
+  reissue casually.
+- Never ship an unsigned binary, and never modify a binary after signing (both
+  break the trust chain / the signature).
+
+**Do NOT switch to Azure Trusted Signing to "fix" SmartScreen** — it uses the
+same reputation model (no instant trust) and switching would discard the
+reputation this cert is building. Reconsider only at a natural renewal.
+
+**Free shot:** file a WDSI software-developer submission for `SuavoSetup.exe` at
+<https://www.microsoft.com/en-us/wdsi/filesubmission> (low effort, uncertain
+payoff; re-submit per new version/hash).
+
+**Pre-sign malware scan (`malware_block`):** consider setting
+`malware_block: 'true'` on the `sslcom/actions-codesigner` steps so signing
+*refuses* on malware detection — this protects the cert from **negative**
+reputation. Not enabled here because it can block a release on a heuristic
+false-positive (installers sometimes trip these); **smoke-test on a throwaway
+tag before enabling** in `release.yml` / `hotfix.yml`.
+
+**The signing action is pinned to a commit SHA**, not `@develop`. A moving
+branch that signs your binaries is a supply-chain risk that could poison the
+cert's reputation org-wide. To update: review upstream changes, then bump the
+SHA in both `release.yml` and `hotfix.yml` (the repo publishes no release tags,
+so a SHA is the only immutable pin).
+
 ## State when this doc was written (2026-05-16)
 
 - SSL.com order `co-861kueeu2a3` — **issued + eSigner active** (Apr 21, 2026 →
