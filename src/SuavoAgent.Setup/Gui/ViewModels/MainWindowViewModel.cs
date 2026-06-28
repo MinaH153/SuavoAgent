@@ -327,14 +327,16 @@ internal sealed class MainWindowViewModel : ViewModelBase
 
     private UserControl BuildNoConfigError()
     {
-        StepLabel = "Setup not configured";
+        StepLabel = "Not connected to a pharmacy";
         return new ErrorView
         {
             DataContext = new ErrorViewModel(
-                "No setup.json found",
-                "SuavoSetup expects a setup.json file next to the installer (written by your "
-                + "pharmacy dashboard), or --pharmacy-id / --api-key command-line arguments.\n\n"
-                + "Download the configured installer from https://suavollc.com and run it again.",
+                "Let's connect this installer to your pharmacy",
+                "This installer isn't linked to a pharmacy yet.\n\n"
+                + "Download SuavoAgent from your Suavo dashboard at https://suavollc.com and run "
+                + "that installer — it connects to your pharmacy automatically.\n\n"
+                + "Already have an 8-character pairing code? Run the installer normally and enter "
+                + "it on the connect screen.",
                 onRetry: null,
                 onClose: () => _shutdown?.Invoke(1)),
         };

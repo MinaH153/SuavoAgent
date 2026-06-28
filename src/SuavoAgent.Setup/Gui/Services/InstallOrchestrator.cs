@@ -135,6 +135,9 @@ internal sealed class InstallOrchestrator
                 $"Post-install verification failed — {verifyOutcome.Summary} Details: {SetupLog.LogPath}");
         }
 
+        // Register in Add/Remove Programs so the pharmacy can uninstall from Settings → Apps.
+        ServiceInstaller.RegisterUninstallEntry(_ctx.InstallDir, _ctx.Config.ReleaseTag.TrimStart('v'));
+
         progress.Report(new PhaseEvent(Phase.Done, "Installation complete"));
     }
 
