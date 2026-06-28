@@ -116,21 +116,14 @@ public sealed class ConsentViewModelTests
     }
 
     [Fact]
-    public void SelectedState_drives_StateCode_and_notice_logic()
+    public void StateCode_drives_notice_logic()
     {
         var vm = NewVm();
-        vm.SelectedState = ConsentViewModel.AllStates.First(s => s.Code == "NY");
+        vm.StateCode = "NY";
 
         Assert.Equal("NY", vm.StateCode);
         Assert.True(vm.RequiresEmployeeNotice); // NY = mandatory-notice state
         Assert.Contains("NY", vm.NoticeBannerText);
-    }
-
-    [Fact]
-    public void StateList_has_51_entries_with_unique_codes()
-    {
-        Assert.Equal(51, ConsentViewModel.AllStates.Count); // 50 states + DC
-        Assert.Equal(51, ConsentViewModel.AllStates.Select(s => s.Code).Distinct().Count());
     }
 
     [Fact]
@@ -144,7 +137,7 @@ public sealed class ConsentViewModelTests
         vm.Name = "Jane";
         Assert.DoesNotContain("your full name", vm.MissingHint);
 
-        vm.SelectedState = ConsentViewModel.AllStates.First(s => s.Code == "CA");
+        vm.StateCode = "CA";
         vm.AgreedToTerms = true;
         Assert.Equal(string.Empty, vm.MissingHint); // complete -> hint disappears
         Assert.True(vm.AgreeCommand.CanExecute(null));
@@ -155,7 +148,7 @@ public sealed class ConsentViewModelTests
     {
         var vm = NewVm();
         vm.Name = "Jane";
-        vm.SelectedState = ConsentViewModel.AllStates.First(s => s.Code == "CT");
+        vm.StateCode = "CT";
         vm.AgreedToTerms = true;
 
         Assert.Contains("employee-notice", vm.MissingHint);

@@ -24,15 +24,13 @@ internal static class ConsoleInstaller
             var config = SetupConfig.Load(args);
             if (config == null)
             {
-                ConsoleUI.WriteFail("No configuration found.");
+                ConsoleUI.WriteFail("This installer isn't connected to a pharmacy yet.");
                 Console.WriteLine();
-                Console.WriteLine("  SuavoSetup needs a setup.json file in the same folder,");
-                Console.WriteLine("  or command-line arguments:");
-                Console.WriteLine();
-                Console.WriteLine("  SuavoSetup.exe --pharmacy-id PH123 --api-key sk_xxx");
-                Console.WriteLine();
-                Console.WriteLine("  Download the installer from your pharmacy dashboard");
-                Console.WriteLine("  at https://suavollc.com — it includes the setup.json.");
+                Console.WriteLine("  Download SuavoAgent from your Suavo dashboard at");
+                Console.WriteLine("  https://suavollc.com and run that installer — it connects");
+                Console.WriteLine("  to your pharmacy automatically. If you have an 8-character");
+                Console.WriteLine("  pairing code instead, run the installer normally and enter");
+                Console.WriteLine("  the code on the connect screen.");
                 ConsoleUI.WaitForExit();
                 return 1;
             }
@@ -182,6 +180,9 @@ internal static class ConsoleInstaller
                 return 1;
             }
             ConsoleUI.WriteOk($"Verification passed: {verifyOutcome.Summary}");
+
+            // Register in Add/Remove Programs so the pharmacy can uninstall from Settings → Apps.
+            ServiceInstaller.RegisterUninstallEntry(InstallDir, config.ReleaseTag.TrimStart('v'));
 
             ConsoleUI.CompletionSummary(
                 InstallDir, DataDir, agentId,

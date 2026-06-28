@@ -119,4 +119,20 @@ public class ServiceInstallerTests
         // is locale-independent (icacls won't mis-resolve a localized "Users" on a non-en box).
         Assert.All(grants, g => Assert.StartsWith($"{users}:", g.Grant));
     }
+
+    // ParseVersion feeds the ARP VersionMajor/Minor DWORDs. Must tolerate a leading 'v',
+    // a -rc/-suffix, and a short/garbage string without throwing.
+    [Theory]
+    [InlineData("3.77.0", 3, 77)]
+    [InlineData("v3.77.0", 3, 77)]
+    [InlineData("v3.77.0-rc1", 3, 77)]
+    [InlineData("4", 4, 0)]
+    [InlineData("", 0, 0)]
+    [InlineData("garbage", 0, 0)]
+    public void ParseVersion_extracts_major_minor(string input, int major, int minor)
+    {
+        var (m, n) = ServiceInstaller.ParseVersion(input);
+        Assert.Equal(major, m);
+        Assert.Equal(minor, n);
+    }
 }

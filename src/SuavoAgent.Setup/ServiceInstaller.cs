@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Win32;
 using SuavoAgent.Setup.Verify;
 
 namespace SuavoAgent.Setup;
@@ -202,12 +203,90 @@ internal static class ServiceInstaller
         }
         else { result.InstallDirRemoved = true; }
 
-        // Defensive registry cleanup (the installer does not normally create these, but
-        // remove them if a prior/older build did). Services were already removed above.
+        // Add/Remove Programs entry (written on install) + defensive cleanup of any older
+        // SOFTWARE\SuavoAgent key. Services were already removed above. The staged uninstaller
+        // exe lives in installDir and is removed with the dir delete above (re-exec-from-temp in
+        // UninstallInstaller means our own exe is NOT the one in installDir, so the delete is clean).
+        RemoveUninstallEntry();
         TryDeleteRegistryKeyTree(@"SOFTWARE\SuavoAgent");
 
         result.ServicesRemaining = CountRemainingServices();
         return result;
+    }
+
+    internal const string UninstallExeName = "SuavoAgent.Uninstall.exe";
+    private const string ArpKeyPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SuavoAgent";
+
+    /// <summary>
+    /// Registers SuavoAgent in Windows Add/Remove Programs so a pharmacy can uninstall from
+    /// Settings → Apps, not just the CLI. Stages a copy of the running setup exe inside the
+    /// (ACL-locked, admin-writable) install dir as a stable uninstaller — ARP runs the
+    /// UninstallString long after the Downloads copy is gone. Best-effort: a failure is logged but
+    /// NEVER fails the install (the agent runs fine; only the Settings entry would be missing).
+    /// </summary>
+    public static void RegisterUninstallEntry(string installDir, string version)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            var selfExe = Environment.ProcessPath;
+            var uninstallExe = Path.Combine(installDir, UninstallExeName);
+            if (!string.IsNullOrEmpty(selfExe) && File.Exists(selfExe))
+            {
+                try { File.Copy(selfExe, uninstallExe, overwrite: true); }
+                catch (Exception ex) { ConsoleUI.WriteWarn($"Could not stage uninstaller exe: {ex.Message}"); }
+            }
+            var uninstallString = $"\"{uninstallExe}\" --uninstall";
+
+            long sizeKb = 0;
+            try { sizeKb = new DirectoryInfo(installDir).EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length) / 1024; }
+            catch { /* EstimatedSize is cosmetic */ }
+            var (major, minor) = ParseVersion(version);
+
+            using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            using var key = baseKey.CreateSubKey(ArpKeyPath);
+            key.SetValue("DisplayName", "SuavoAgent");
+            key.SetValue("DisplayVersion", version);
+            key.SetValue("Publisher", "MKM Technologies LLC");
+            key.SetValue("InstallLocation", installDir);
+            key.SetValue("DisplayIcon", uninstallExe);
+            key.SetValue("UninstallString", uninstallString);
+            key.SetValue("QuietUninstallString", uninstallString + " --silent");
+            key.SetValue("NoModify", 1, RegistryValueKind.DWord);
+            key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+            key.SetValue("EstimatedSize", (int)Math.Min(sizeKb, int.MaxValue), RegistryValueKind.DWord);
+            key.SetValue("InstallDate", DateTime.Now.ToString("yyyyMMdd"));
+            key.SetValue("URLInfoAbout", "https://suavollc.com");
+            key.SetValue("HelpLink", "mailto:support@suavollc.com");
+            key.SetValue("VersionMajor", major, RegistryValueKind.DWord);
+            key.SetValue("VersionMinor", minor, RegistryValueKind.DWord);
+            ConsoleUI.WriteOk("Registered in Add/Remove Programs (uninstall from Settings → Apps)");
+        }
+        catch (Exception ex)
+        {
+            ConsoleUI.WriteWarn($"Could not register Add/Remove Programs entry: {ex.Message}");
+        }
+    }
+
+    /// <summary>Removes the Add/Remove Programs entry. Best-effort; tolerates a missing key.</summary>
+    private static void RemoveUninstallEntry()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            baseKey.DeleteSubKeyTree(ArpKeyPath, throwOnMissingSubKey: false);
+        }
+        catch { /* absent or insufficient rights — services + dirs already removed */ }
+    }
+
+    // "3.77.0" / "v3.77.0-rc1" -> (3, 77) for ARP VersionMajor/Minor (cosmetic DWORDs).
+    internal static (int Major, int Minor) ParseVersion(string version)
+    {
+        var parts = (version ?? "").TrimStart('v').Split('.', '-');
+        int.TryParse(parts.ElementAtOrDefault(0), out var major);
+        int.TryParse(parts.ElementAtOrDefault(1), out var minor);
+        return (major, minor);
     }
 
     /// <summary>Outcome of <see cref="Uninstall"/>, used for zero-residue verification.</summary>

@@ -11,10 +11,18 @@ internal static class UninstallInstaller
     private const string DefaultInstallDir = @"C:\Program Files\Suavo\Agent";
     private const string DefaultDataDir = @"C:\ProgramData\SuavoAgent";
 
+    private const string FromTempFlag = "--from-temp";
+
     public static Task<int> RunAsync(string[] args)
     {
         try
         {
+            // ARP launches the staged uninstaller from INSIDE the install dir, where it locks its
+            // own exe against the dir delete. Re-launch a throwaway copy from %TEMP% and exit, so the
+            // real uninstall (running from temp) can remove the whole install dir → zero residue.
+            if (TryReExecFromTemp(args))
+                return Task.FromResult(0);
+
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine();
             Console.WriteLine("  ╔═══════════════════════════════════════╗");
@@ -75,5 +83,41 @@ internal static class UninstallInstaller
             return m.Success ? Path.GetDirectoryName(m.Groups[1].Value) : null;
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// If we are the staged uninstaller (SuavoAgent.Uninstall.exe, run from inside the install dir
+    /// by Add/Remove Programs), copy ourselves to %TEMP% and relaunch there with <see cref="FromTempFlag"/>
+    /// so the copy doesn't recurse, then return true so the caller exits and releases the lock on the
+    /// install-dir exe — letting the real uninstall (from temp) delete the whole install dir. Returns
+    /// false (run in place) when launched from elsewhere, e.g. the Downloads SuavoSetup.exe. The parent
+    /// is already elevated (ARP honors the requireAdministrator manifest), so the temp child inherits
+    /// the elevated token — no second UAC.
+    /// </summary>
+    private static bool TryReExecFromTemp(string[] args)
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        if (args.Any(a => string.Equals(a, FromTempFlag, StringComparison.OrdinalIgnoreCase))) return false;
+        try
+        {
+            var self = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(self)) return false;
+            // Trigger only for the staged copy (by name), so it's robust to a custom install dir.
+            if (!string.Equals(Path.GetFileName(self), ServiceInstaller.UninstallExeName, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var tempExe = Path.Combine(Path.GetTempPath(), $"suavo-uninstall-{Guid.NewGuid():N}.exe");
+            File.Copy(self, tempExe, overwrite: true);
+
+            var psi = new System.Diagnostics.ProcessStartInfo(tempExe) { UseShellExecute = false };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+            psi.ArgumentList.Add(FromTempFlag);
+            return System.Diagnostics.Process.Start(psi) != null;
+        }
+        catch
+        {
+            // Fall through to an in-place uninstall: everything but our own exe is removed (acceptable).
+            return false;
+        }
     }
 }
