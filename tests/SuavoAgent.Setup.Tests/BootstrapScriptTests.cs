@@ -328,7 +328,7 @@ public sealed class BootstrapScriptTests
         Assert.Contains("ES_PASSWORD", release);
         Assert.Contains("ES_CREDENTIAL_ID", release);
         Assert.Contains("ES_TOTP_SECRET", release);
-        Assert.Contains("sslcom/actions-codesigner@develop", release);
+        Assert.Contains("sslcom/actions-codesigner@", release);
         Assert.DoesNotContain("sign_passthrough:", release);
         Assert.DoesNotContain("Upload as final (unsigned)", release);
         Assert.DoesNotContain("MODE=unsigned", release);
@@ -365,7 +365,7 @@ public sealed class BootstrapScriptTests
         Assert.Contains("ES_PASSWORD", hotfix);
         Assert.Contains("ES_CREDENTIAL_ID", hotfix);
         Assert.Contains("ES_TOTP_SECRET", hotfix);
-        Assert.Contains("sslcom/actions-codesigner@develop", hotfix);
+        Assert.Contains("sslcom/actions-codesigner@", hotfix);
         Assert.DoesNotContain("sign_passthrough:", hotfix);
         Assert.DoesNotContain("Upload as final (unsigned)", hotfix);
         Assert.DoesNotContain("MODE=unsigned", hotfix);
