@@ -53,13 +53,40 @@ internal sealed class MainWindowViewModel : ViewModelBase
         _ctx = ctx;
         _shutdown = shutdown;
 
-        // No config → fall into device-code pairing (the consumer self-serve
-        // path) rather than dead-ending on the no-config error. Pairing yields
-        // a SetupConfig, which we turn into an InstallContext and run the normal
-        // install flow.
-        _currentView = ctx == null
-            ? BuildDeviceCodePairing()
-            : BuildWelcome();
+        // No config → either a single-use token baked into the EXE filename by the
+        // dashboard download (SuavoSetup-<token>.exe) gets exchanged in a brief
+        // Connecting step (zero-touch), or we fall to device-code pairing. Either
+        // path yields a SetupConfig → the normal install flow.
+        _currentView = ctx != null
+            ? BuildWelcome()
+            : SetupConfig.DetectInstallTokenFromFilename() is { } installToken
+                ? BuildConnecting(installToken)
+                : BuildDeviceCodePairing();
+    }
+
+    // ── Zero-touch filename-token exchange (no setup.json, token in filename) ──
+
+    private UserControl BuildConnecting(string token)
+    {
+        StepLabel = "Connecting";
+
+        var fingerprint = MachineFingerprint.Get();
+        var version = InstallerVersion();
+        var service = new InstallTokenService(DefaultCloudUrl);
+
+        var vm = new ConnectingViewModel(
+            service,
+            token,
+            DefaultCloudUrl,
+            fingerprint,
+            Environment.MachineName,
+            version,
+            onConnected: config => OnPaired(config, fingerprint, version),
+            onFallback: () => Dispatcher.UIThread.Post(() => CurrentView = BuildDeviceCodePairing()));
+
+        var view = new ConnectingView { DataContext = vm };
+        _ = vm.StartAsync();
+        return view;
     }
 
     // ── Device-code pairing (no setup.json) ────────────────────────────────

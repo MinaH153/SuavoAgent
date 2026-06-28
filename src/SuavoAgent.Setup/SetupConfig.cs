@@ -116,4 +116,46 @@ public sealed record SetupConfig(
             LearningMode: learningMode,
             AgentId: agentId ?? "");
     }
+
+    // ── Zero-touch filename token (canonical installer path) ────────────────
+    private static readonly Regex DedupSuffix = new(@"\s\(\d+\)$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Detects a single-use install token baked into the EXE's own filename by
+    /// the authenticated dashboard download (<c>SuavoSetup-&lt;token&gt;.exe</c>).
+    /// Cheap + synchronous — NO I/O, NO network (App.OnFrameworkInitializationCompleted
+    /// calls this on the UI thread before the window shows); the actual
+    /// /api/agent/register exchange happens later, off the UI thread, in the
+    /// Connecting step. Returns the token (begins "sai_") or null. Only meaningful
+    /// when there is no setup.json / CLI config.
+    /// </summary>
+    public static string? DetectInstallTokenFromFilename()
+    {
+        try
+        {
+            var path = Environment.ProcessPath;
+            return string.IsNullOrEmpty(path)
+                ? null
+                : ParseInstallToken(Path.GetFileNameWithoutExtension(path));
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Pure parser for the EXE base name (no extension). Tolerates the browser
+    /// download dedup suffix (<c>SuavoSetup-&lt;token&gt; (1)</c>). Returns the
+    /// token when the name is <c>SuavoSetup-&lt;token&gt;</c> with a "sai_" token
+    /// of length ≥ 12; otherwise null.
+    /// </summary>
+    internal static string? ParseInstallToken(string? exeBaseName)
+    {
+        if (string.IsNullOrEmpty(exeBaseName)) return null;
+        var name = DedupSuffix.Replace(exeBaseName, "");
+        const string prefix = "SuavoSetup-";
+        if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        var token = name[prefix.Length..];
+        return token.StartsWith("sai_", StringComparison.Ordinal) && token.Length >= 12
+            ? token
+            : null;
+    }
 }
