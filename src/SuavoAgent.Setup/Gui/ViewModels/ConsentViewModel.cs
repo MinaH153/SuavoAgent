@@ -12,6 +12,7 @@ internal sealed class ConsentViewModel : ViewModelBase
     private string _state = string.Empty;
     private bool _agreedToTerms;
     private bool _agreedToNotice;
+    private string _complianceMode = "hipaa";
 
     public ConsentViewModel(InstallContext ctx, Action onAgreed)
     {
@@ -19,6 +20,30 @@ internal sealed class ConsentViewModel : ViewModelBase
         _onAgreed = onAgreed;
         AgreeCommand = new RelayCommand(Agree, CanAgree);
     }
+
+    /// <summary>
+    /// Compliance mode from the verified verticalConfig ("hipaa", "none", …).
+    /// Defaults to "hipaa" (fail-closed). Set by InstallOrchestrator before
+    /// showing the Consent step.
+    /// </summary>
+    public string ComplianceMode
+    {
+        get => _complianceMode;
+        set
+        {
+            if (SetField(ref _complianceMode, value ?? "hipaa"))
+            {
+                RaisePropertyChanged(nameof(ShowHipaaDisclosure));
+                RaisePropertyChanged(nameof(RequiresEmployeeNotice));
+                RaisePropertyChanged(nameof(MissingHint));
+                AgreeCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>Show the full HIPAA disclosure card only in HIPAA mode.</summary>
+    public bool ShowHipaaDisclosure =>
+        string.Equals(_complianceMode, "hipaa", StringComparison.OrdinalIgnoreCase);
 
     public string Name
     {
@@ -102,7 +127,9 @@ internal sealed class ConsentViewModel : ViewModelBase
         }
     }
 
-    public bool RequiresEmployeeNotice => ConsentReceiptData.RequiresMandatoryNotice(_state ?? string.Empty);
+    /// <summary>Employee notice only applies in HIPAA mode and mandatory states.</summary>
+    public bool RequiresEmployeeNotice =>
+        ShowHipaaDisclosure && ConsentReceiptData.RequiresMandatoryNotice(_state ?? string.Empty);
 
     public string NoticeBannerText
     {
@@ -139,7 +166,8 @@ internal sealed class ConsentViewModel : ViewModelBase
             BusinessState: state,
             MandatoryNoticeState: ConsentReceiptData.RequiresMandatoryNotice(state),
             EmployeeNoticeAcknowledged: _agreedToNotice || !RequiresEmployeeNotice,
-            Timestamp: DateTimeOffset.UtcNow);
+            Timestamp: DateTimeOffset.UtcNow,
+            ComplianceMode: _complianceMode);
 
         _onAgreed();
     }

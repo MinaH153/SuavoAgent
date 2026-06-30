@@ -18,7 +18,11 @@ public sealed record DeviceCodePollResult(
     string? AgentId = null,
     string? PharmacyId = null,
     string? PharmacyName = null,
-    AgentReasoningConfig? Reasoning = null)
+    AgentReasoningConfig? Reasoning = null,
+    string? VerticalConfigRaw = null,
+    VerticalConfigDto? VerticalConfig = null,
+    string? VerticalConfigSignature = null,
+    string? VerticalConfigKeyId = null)
 {
     public bool IsAuthorized => string.Equals(Status, "authorized", StringComparison.Ordinal);
     public bool IsPending => string.Equals(Status, "pending", StringComparison.Ordinal);
@@ -129,13 +133,19 @@ public sealed class DeviceCodeService : IDeviceCodeService, IDisposable
             }
         }
 
+        var vc = InstallTokenService.ParseVerticalConfigFromData(node);
+
         return new DeviceCodePollResult(
             status,
             node["apiKey"]?.GetValue<string>(),
             node["agentId"]?.GetValue<string>(),
             node["pharmacyId"]?.GetValue<string>(),
             node["pharmacyName"]?.GetValue<string>(),
-            reasoning);
+            reasoning,
+            VerticalConfigRaw: vc.Raw,
+            VerticalConfig: vc.Dto,
+            VerticalConfigSignature: vc.Signature,
+            VerticalConfigKeyId: vc.KeyId);
     }
 
     public void Dispose() => _http.Dispose();

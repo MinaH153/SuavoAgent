@@ -1,5 +1,8 @@
 using System.Net.Http;
 using System.Text.Json;
+using SuavoAgent.Core.Compliance;
+using SuavoAgent.Setup.Connectors;
+using SuavoAgent.Setup.Gui.Services;
 using SuavoAgent.Setup.Preflight;
 using SuavoAgent.Setup.Verify;
 
@@ -44,29 +47,30 @@ internal static class ConsoleInstaller
 
             ConsoleUI.Banner(config.PharmacyId, config.ReleaseTag);
 
-            // PioneerRx is an OPTIONAL connector, never an install precondition. Many
-            // pharmacies/businesses don't run it — SuavoAgent installs and runs as a general
-            // desktop agent regardless, and self-heals the PMS connection if PioneerRx appears.
-            // (Parity with the GUI installer, which already treats this as deferred.)
-            ConsoleUI.WriteStep("Phase 1: Finding PioneerRx installation");
-            var pioneer = PioneerRxDiscovery.Discover();
-            if (pioneer == null)
+            // Resolve install posture from signed verticalConfig (fail-closed to HIPAA + PioneerRx).
+            // Anti-downgrade: a verified config may not relax below this box's last-known-good.
+            var lkg = LastKnownGoodStore.TryRead(DataDir) ?? ComplianceMode.None;
+            var posture = InstallOrchestrator.ResolveInstallPosture(config, lastKnownGood: lkg);
+            var connector = SystemConnectorFactory.Select(posture.SystemConnector);
+
+            ConsoleUI.WriteStep($"Phase 1: Probing {connector.Capabilities.Label}");
+            var probe = connector.Probe();
+            if (!probe.Detected)
                 ConsoleUI.WriteWarn(
-                    "PioneerRx not detected — installing in no-PMS mode; SQL auto-config " +
-                    "deferred (the agent self-heals when PioneerRx appears).");
+                    $"{connector.Capabilities.Label} not detected — installing in no-PMS mode; " +
+                    "SQL auto-config deferred (the agent self-heals when it appears).");
             else
-                ConsoleUI.WriteOk($"PioneerRx at: {pioneer.PioneerDir}");
+                ConsoleUI.WriteOk($"{connector.Capabilities.Label} at: {probe.InstallDir}");
 
             SqlCredentialDiscovery.SqlCredentials? sqlCreds = null;
-            if (pioneer != null)
+            if (probe.Detected)
             {
                 ConsoleUI.WriteStep("Phase 2: Discovering SQL Server credentials");
-                // TryAutoDiscover, NOT Discover(): Discover() falls through to PromptManual's
-                // Console.ReadLine, which hangs a headless/fleet (--console/--silent) install.
-                sqlCreds = SqlCredentialDiscovery.TryAutoDiscover(pioneer.PioneerConfig);
+                // TryAutoDiscover via connector, not direct call: avoids Console.ReadLine hang
+                // in headless/fleet (--console/--silent) installs.
+                sqlCreds = connector.Discover(probe);
                 if (sqlCreds == null)
                 {
-                    // PioneerRx present but its SQL is undiscoverable IS a genuine misconfig.
                     ConsoleUI.FatalError(
                         "Could not discover SQL Server credentials.\n" +
                         "  Contact Suavo support for manual configuration.");
@@ -126,7 +130,8 @@ internal static class ConsoleInstaller
             ConsoleUI.WriteStep("Phase 4: Writing configuration");
             var agentId = config.AgentId;
             var fingerprint = GetMachineFingerprint();
-            var agentConfig = BuildAgentConfig(config, agentId, fingerprint, pioneer != null, sqlCreds);
+            var agentConfig = BuildAgentConfig(config, agentId, fingerprint, probe.Detected, sqlCreds);
+            InstallOrchestrator.BakeVerticalConfig((Dictionary<string, object?>)agentConfig["Agent"], posture);
 
             var configJson = JsonSerializer.Serialize(agentConfig, new JsonSerializerOptions
             {
@@ -141,6 +146,10 @@ internal static class ConsoleInstaller
             ServiceInstaller.GrantInteractiveHelperExeAccess(InstallDir);
             File.WriteAllText(configPath, configJson);
             ConsoleUI.WriteOk($"appsettings.json written to {InstallDir} (ACL applied first)");
+
+            // Persist last-known-good compliance posture (anti-downgrade floor for future
+            // installs/OTAs). LastKnownGoodStore.Write creates DataDir if needed.
+            LastKnownGoodStore.Write(DataDir, CompliancePosture.Resolve(posture.ComplianceMode));
 
             // Regenerate the Broker's integrity manifest from the just-placed binaries, BEFORE the
             // services start. Without this, an install/reinstall over an existing agent leaves a stale

@@ -18,7 +18,13 @@ public sealed record SetupConfig(
     // Not from setup.json — set by the device-code/install-context flow so the
     // installer can bake the on-device brain config (Agent:Reasoning). Null =
     // no brain config (agent installs rules-only — fail-soft).
-    [property: JsonIgnore] AgentReasoningConfig? Reasoning = null)
+    [property: JsonIgnore] AgentReasoningConfig? Reasoning = null,
+    // Vertical-config fields — never persisted to appsettings.json directly;
+    // resolved to ComplianceMode + connector during install.
+    [property: JsonIgnore] string? VerticalConfigRaw = null,
+    [property: JsonIgnore] VerticalConfigDto? VerticalConfig = null,
+    [property: JsonIgnore] string? VerticalConfigSignature = null,
+    [property: JsonIgnore] string? VerticalConfigKeyId = null)
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
