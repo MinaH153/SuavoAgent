@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Text.Json;
+using SuavoAgent.Core.Compliance;
 using SuavoAgent.Setup.Connectors;
 using SuavoAgent.Setup.Gui.Services;
 using SuavoAgent.Setup.Preflight;
@@ -47,7 +48,9 @@ internal static class ConsoleInstaller
             ConsoleUI.Banner(config.PharmacyId, config.ReleaseTag);
 
             // Resolve install posture from signed verticalConfig (fail-closed to HIPAA + PioneerRx).
-            var posture = InstallOrchestrator.ResolveInstallPosture(config);
+            // Anti-downgrade: a verified config may not relax below this box's last-known-good.
+            var lkg = LastKnownGoodStore.TryRead(DataDir) ?? ComplianceMode.None;
+            var posture = InstallOrchestrator.ResolveInstallPosture(config, lastKnownGood: lkg);
             var connector = SystemConnectorFactory.Select(posture.SystemConnector);
 
             ConsoleUI.WriteStep($"Phase 1: Probing {connector.Capabilities.Label}");
@@ -143,6 +146,10 @@ internal static class ConsoleInstaller
             ServiceInstaller.GrantInteractiveHelperExeAccess(InstallDir);
             File.WriteAllText(configPath, configJson);
             ConsoleUI.WriteOk($"appsettings.json written to {InstallDir} (ACL applied first)");
+
+            // Persist last-known-good compliance posture (anti-downgrade floor for future
+            // installs/OTAs). LastKnownGoodStore.Write creates DataDir if needed.
+            LastKnownGoodStore.Write(DataDir, CompliancePosture.Resolve(posture.ComplianceMode));
 
             // Regenerate the Broker's integrity manifest from the just-placed binaries, BEFORE the
             // services start. Without this, an install/reinstall over an existing agent leaves a stale

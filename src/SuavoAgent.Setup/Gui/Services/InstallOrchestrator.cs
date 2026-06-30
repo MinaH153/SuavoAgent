@@ -1,4 +1,5 @@
 using System.Text.Json;
+using SuavoAgent.Core.Compliance;
 using SuavoAgent.Setup.Verify;
 
 namespace SuavoAgent.Setup.Gui.Services;
@@ -159,6 +160,13 @@ internal sealed class InstallOrchestrator
             Path.Combine(_ctx.InstallDir, "appsettings.json"),
             BuildAppSettings());
 
+        // Persist the last-known-good compliance posture so a later install/OTA can't
+        // silently relax it (anti-downgrade floor). Same posture computed in BuildAppSettings.
+        var resolvedMode = ResolveInstallPosture(
+            _ctx.Config,
+            lastKnownGood: LastKnownGoodStore.TryRead(_ctx.DataDir) ?? ComplianceMode.None).ComplianceMode;
+        LastKnownGoodStore.Write(_ctx.DataDir, CompliancePosture.Resolve(resolvedMode));
+
         File.WriteAllText(
             Path.Combine(_ctx.DataDir, "consent-receipt.json"),
             _ctx.Consent!.ToJson(
@@ -220,6 +228,12 @@ internal sealed class InstallOrchestrator
         // provisioners hard-fail without ModelPath/NativeLibraryPath).
         BakeReasoning(agent, _ctx.Config.Reasoning, _ctx.DataDir);
 
+        // Vertical-config posture — parity with ConsoleInstaller (one line of truth across
+        // both install paths). Reads the box's last-known-good so a verified downgrade is
+        // refused (anti-downgrade); absent/unsigned/invalid config → HIPAA+PioneerRx default.
+        var lkg = LastKnownGoodStore.TryRead(_ctx.DataDir) ?? ComplianceMode.None;
+        BakeVerticalConfig(agent, ResolveInstallPosture(_ctx.Config, lastKnownGood: lkg));
+
         var settings = new Dictionary<string, object> { ["Agent"] = agent };
         return JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
     }
@@ -277,7 +291,8 @@ internal sealed class InstallOrchestrator
     /// Only a fully-verified config may relax the posture below HIPAA.
     /// </summary>
     internal static InstallPosture ResolveInstallPosture(
-        SetupConfig config, VerticalConfigVerifier? verifier = null)
+        SetupConfig config, VerticalConfigVerifier? verifier = null,
+        ComplianceMode lastKnownGood = ComplianceMode.None)
     {
         var vc = new ParsedVerticalConfig(
             config.VerticalConfigRaw,
@@ -289,7 +304,16 @@ internal sealed class InstallOrchestrator
         var result = verifier.Verify(vc);
 
         if (!result.IsVerified || result.Config is null)
-            return InstallPosture.HipaaDefault;  // fail-closed
+            return InstallPosture.HipaaDefault;  // fail-closed (absent/unsigned/malformed/invalid)
+
+        // Anti-downgrade (spec rule #2, TLS-style): a verified config may HOLD or RAISE
+        // strictness vs the last-known-good, never relax below it. A verified *downgrade*
+        // (e.g. a once-HIPAA box receiving a signed 'none') is refused → strict HIPAA+PioneerRx.
+        var incoming = CompliancePosture.Resolve(result.Config.ComplianceMode);
+        if (CompliancePosture.Enforce(incoming, lastKnownGood) != incoming)
+            return InstallPosture.HipaaDefault;
+        // ponytail: pci doesn't ship; lkg ∈ {none,hipaa} so HipaaDefault is the right refusal
+        // target. Add a PciDefault here only when a pci vertical ships.
 
         return new InstallPosture(
             ComplianceMode: result.Config.ComplianceMode,

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using SuavoAgent.Core.Compliance;
 using SuavoAgent.Setup;
 using SuavoAgent.Setup.Connectors;
 using SuavoAgent.Setup.Gui.Services;
@@ -70,6 +71,45 @@ public class InstallVerticalWiringTests
         Assert.Equal("none", posture.SystemConnector);
     }
 
+    // ── Anti-downgrade (spec rule #2) ────────────────────────────────────────
+
+    [Fact]
+    public void ResolvePosture_verified_downgrade_below_lkg_is_refused()
+    {
+        // A verified 'none' config on a box whose last-known-good is HIPAA → refused → HIPAA.
+        var config = SignedConfig(DefaultDto());  // complianceMode "none", verified
+        var posture = InstallOrchestrator.ResolveInstallPosture(
+            config, MakeVerifier(), lastKnownGood: ComplianceMode.Hipaa);
+        Assert.Equal("hipaa", posture.ComplianceMode);
+        Assert.Equal("pioneerrx", posture.SystemConnector);
+    }
+
+    [Fact]
+    public void ResolvePosture_verified_none_honored_when_no_prior_good()
+    {
+        var config = SignedConfig(DefaultDto());
+        var posture = InstallOrchestrator.ResolveInstallPosture(
+            config, MakeVerifier(), lastKnownGood: ComplianceMode.None);
+        Assert.Equal("none", posture.ComplianceMode);
+        Assert.Equal("none", posture.SystemConnector);
+    }
+
+    [Fact]
+    public void ResolvePosture_verified_upgrade_is_honored()
+    {
+        // Verified HIPAA on a box whose lkg is None → upgrade honored (not refused).
+        var hipaaDto = DefaultDto() with
+        {
+            ComplianceMode = "hipaa", SystemConnector = "pioneerrx", ConnectorLabel = "PioneerRx",
+            RedactionProfileId = "phi-v1",
+        };
+        var config = SignedConfig(hipaaDto);
+        var posture = InstallOrchestrator.ResolveInstallPosture(
+            config, MakeVerifier(), lastKnownGood: ComplianceMode.None);
+        Assert.Equal("hipaa", posture.ComplianceMode);
+        Assert.Equal("pioneerrx", posture.SystemConnector);
+    }
+
     // ── BakeVerticalConfig ───────────────────────────────────────────────────
 
     [Fact]
@@ -118,4 +158,20 @@ public class InstallVerticalWiringTests
         RedactionProfileId: "none",
         Framing: new VerticalFraming("SuavoAgent", "your system", "business", "License ID"),
         Compliance: new VerticalCompliance(false, "terms-v1"));
+
+    /// <summary>Build a SetupConfig carrying <paramref name="dto"/> signed by TestKey (verifies under MakeVerifier()).</summary>
+    private static SetupConfig SignedConfig(VerticalConfigDto dto)
+    {
+        var canonical = VerticalConfigVerifier.Canonicalize(dto);
+        var sig = Convert.ToBase64String(TestKey.SignData(
+            Encoding.UTF8.GetBytes(canonical),
+            HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
+        return BaseConfig() with
+        {
+            VerticalConfigRaw = canonical,
+            VerticalConfig = dto,
+            VerticalConfigSignature = sig,
+            VerticalConfigKeyId = TestKeyId,
+        };
+    }
 }
