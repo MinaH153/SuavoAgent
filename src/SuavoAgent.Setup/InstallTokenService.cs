@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 
@@ -5,7 +6,8 @@ namespace SuavoAgent.Setup;
 
 /// <summary>Pharmacy credentials returned by exchanging a filename install token.</summary>
 public sealed record InstallTokenExchangeResult(
-    string ApiKey, string AgentId, string PharmacyId, string? PharmacyName)
+    string ApiKey, string AgentId, string PharmacyId, string? PharmacyName,
+    AgentReasoningConfig? Reasoning = null)
 {
     // Never leak the key in logs/diagnostics.
     public override string ToString() =>
@@ -66,11 +68,21 @@ public sealed class InstallTokenService : IInstallTokenService, IDisposable
         var data = root["data"]?.AsObject()
                    ?? throw new InvalidOperationException("register response missing data");
 
+        // Optional on-device brain config (fail-soft: a malformed block is
+        // ignored → the agent installs rules-only). Mirrors DeviceCodeService.
+        AgentReasoningConfig? reasoning = null;
+        if (data["reasoning"] is JsonObject reasoningNode)
+        {
+            try { reasoning = reasoningNode.Deserialize<AgentReasoningConfig>(); }
+            catch (JsonException) { reasoning = null; }
+        }
+
         return new InstallTokenExchangeResult(
             data["apiKey"]?.GetValue<string>() ?? throw new InvalidOperationException("register response missing apiKey"),
             data["agentId"]?.GetValue<string>() ?? throw new InvalidOperationException("register response missing agentId"),
             data["pharmacyId"]?.GetValue<string>() ?? throw new InvalidOperationException("register response missing pharmacyId"),
-            data["pharmacyName"]?.GetValue<string>());
+            data["pharmacyName"]?.GetValue<string>(),
+            reasoning);
     }
 
     public void Dispose() => _http.Dispose();

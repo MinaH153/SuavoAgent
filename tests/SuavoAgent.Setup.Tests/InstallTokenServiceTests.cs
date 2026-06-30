@@ -42,6 +42,7 @@ public sealed class InstallTokenServiceTests
         Assert.Equal("a-1", res.AgentId);
         Assert.Equal("p-1", res.PharmacyId);
         Assert.Equal("Queen", res.PharmacyName);
+        Assert.Null(res.Reasoning);   // no reasoning block in this response → rules-only
         Assert.Equal("/api/agent/register", handler.LastPath);
         using var sent = JsonDocument.Parse(handler.LastBody!);
         Assert.Equal("sai_token123456", sent.RootElement.GetProperty("installToken").GetString());
@@ -75,6 +76,36 @@ public sealed class InstallTokenServiceTests
         using var svc = new InstallTokenService("https://suavollc.com", handler);
         await Assert.ThrowsAnyAsync<Exception>(
             () => svc.ExchangeAsync("sai_token123456", "PC-1", "fp", "3.77.0", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ExchangeAsync_WithReasoning_MapsBrainConfig()
+    {
+        var handler = new QueueHandler(Json(HttpStatusCode.OK,
+            """{"success":true,"data":{"apiKey":"k","agentId":"a","pharmacyId":"p","pharmacyName":"Q","reasoning":{"enabled":true,"modelId":"qwen3-1.7b","modelUrl":"https://x/m.gguf","modelSha256":"abc","modelSizeBytes":770,"nativeLibsUrl":"https://x/n.zip","nativeLibsSha256":"def","nativeLibsSizeBytes":99,"contextSize":4096,"maxOutputTokens":256}}}"""));
+        using var svc = new InstallTokenService("https://suavollc.com", handler);
+
+        var res = await svc.ExchangeAsync("sai_token123456", "PC", "fp", "3.77.0", CancellationToken.None);
+
+        Assert.NotNull(res.Reasoning);
+        Assert.True(res.Reasoning!.Enabled);
+        Assert.Equal("qwen3-1.7b", res.Reasoning.ModelId);
+        Assert.True(res.Reasoning.IsProvisionable);   // url + sha present on both assets
+    }
+
+    [Fact]
+    public async Task ExchangeAsync_MalformedReasoning_NullNotThrow()
+    {
+        // A reasoning block that fails to deserialize is ignored (fail-soft): the
+        // exchange still succeeds and the agent just installs rules-only.
+        var handler = new QueueHandler(Json(HttpStatusCode.OK,
+            """{"success":true,"data":{"apiKey":"k","agentId":"a","pharmacyId":"p","pharmacyName":"Q","reasoning":{"enabled":42}}}"""));
+        using var svc = new InstallTokenService("https://suavollc.com", handler);
+
+        var res = await svc.ExchangeAsync("sai_token123456", "PC", "fp", "3.77.0", CancellationToken.None);
+
+        Assert.Equal("k", res.ApiKey);
+        Assert.Null(res.Reasoning);
     }
 
     [Fact]
