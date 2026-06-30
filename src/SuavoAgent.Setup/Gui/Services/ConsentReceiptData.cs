@@ -16,7 +16,8 @@ internal sealed record ConsentReceiptData(
     string BusinessState,
     bool MandatoryNoticeState,
     bool EmployeeNoticeAcknowledged,
-    DateTimeOffset Timestamp)
+    DateTimeOffset Timestamp,
+    string ComplianceMode = "hipaa")
 {
     public static readonly IReadOnlySet<string> MandatoryNoticeStates =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "CT", "DE", "NY" };
@@ -49,7 +50,8 @@ internal sealed record ConsentReceiptData(
             machineFingerprint: machineFingerprint,
             pharmacyId: pharmacyId,
             agentId: agentId,
-            source: "gui_installer");
+            source: "gui_installer",
+            complianceMode: ComplianceMode);
 
         return JsonSerializer.Serialize(receipt, JsonOpts);
     }
@@ -72,7 +74,8 @@ internal sealed record ConsentReceiptData(
         [property: JsonPropertyName("machineFingerprint")] string machineFingerprint,
         [property: JsonPropertyName("pharmacyId")] string pharmacyId,
         [property: JsonPropertyName("agentId")] string agentId,
-        [property: JsonPropertyName("source")] string source);
+        [property: JsonPropertyName("source")] string source,
+        [property: JsonPropertyName("complianceMode")] string complianceMode);
 
     private sealed record AuthorizingParty(
         [property: JsonPropertyName("name")] string name,
