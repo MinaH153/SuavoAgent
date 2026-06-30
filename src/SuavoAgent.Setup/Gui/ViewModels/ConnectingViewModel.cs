@@ -72,7 +72,8 @@ internal sealed class ConnectingViewModel : ViewModelBase
                 CloudUrl: _cloudUrl,
                 ReleaseTag: $"v{_version}",
                 LearningMode: false,
-                AgentId: result.AgentId);
+                AgentId: result.AgentId,
+                Reasoning: result.Reasoning);
 
             StatusText = "Connected — finishing setup…";
             _onConnected(config);
