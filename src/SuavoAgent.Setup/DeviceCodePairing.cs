@@ -105,7 +105,11 @@ public sealed class DeviceCodePairing
                     ReleaseTag: "",
                     LearningMode: false,
                     AgentId: poll.AgentId ?? "",
-                    Reasoning: poll.Reasoning);
+                    Reasoning: poll.Reasoning,
+                    VerticalConfigRaw: poll.VerticalConfigRaw,
+                    VerticalConfig: poll.VerticalConfig,
+                    VerticalConfigSignature: poll.VerticalConfigSignature,
+                    VerticalConfigKeyId: poll.VerticalConfigKeyId);
                 progress?.Report(new PairingProgress(
                     created.DeviceCode, created.VerificationUrl,
                     Math.Max(0, deadlineSeconds - waited), "authorized"));

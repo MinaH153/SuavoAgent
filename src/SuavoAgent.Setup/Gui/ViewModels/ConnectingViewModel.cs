@@ -73,7 +73,11 @@ internal sealed class ConnectingViewModel : ViewModelBase
                 ReleaseTag: $"v{_version}",
                 LearningMode: false,
                 AgentId: result.AgentId,
-                Reasoning: result.Reasoning);
+                Reasoning: result.Reasoning,
+                VerticalConfigRaw: result.VerticalConfigRaw,
+                VerticalConfig: result.VerticalConfig,
+                VerticalConfigSignature: result.VerticalConfigSignature,
+                VerticalConfigKeyId: result.VerticalConfigKeyId);
 
             StatusText = "Connected — finishing setup…";
             _onConnected(config);

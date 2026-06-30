@@ -7,7 +7,11 @@ namespace SuavoAgent.Setup;
 /// <summary>Pharmacy credentials returned by exchanging a filename install token.</summary>
 public sealed record InstallTokenExchangeResult(
     string ApiKey, string AgentId, string PharmacyId, string? PharmacyName,
-    AgentReasoningConfig? Reasoning = null)
+    AgentReasoningConfig? Reasoning = null,
+    string? VerticalConfigRaw = null,
+    VerticalConfigDto? VerticalConfig = null,
+    string? VerticalConfigSignature = null,
+    string? VerticalConfigKeyId = null)
 {
     // Never leak the key in logs/diagnostics.
     public override string ToString() =>
@@ -77,13 +81,41 @@ public sealed class InstallTokenService : IInstallTokenService, IDisposable
             catch (JsonException) { reasoning = null; }
         }
 
+        var vc = ParseVerticalConfigFromData(data);
+
         return new InstallTokenExchangeResult(
             data["apiKey"]?.GetValue<string>() ?? throw new InvalidOperationException("register response missing apiKey"),
             data["agentId"]?.GetValue<string>() ?? throw new InvalidOperationException("register response missing agentId"),
             data["pharmacyId"]?.GetValue<string>() ?? throw new InvalidOperationException("register response missing pharmacyId"),
             data["pharmacyName"]?.GetValue<string>(),
-            reasoning);
+            reasoning,
+            VerticalConfigRaw: vc.Raw,
+            VerticalConfig: vc.Dto,
+            VerticalConfigSignature: vc.Signature,
+            VerticalConfigKeyId: vc.KeyId);
     }
 
     public void Dispose() => _http.Dispose();
+
+    /// <summary>
+    /// Shared fail-soft parser for the optional verticalConfig field.
+    /// Called by both the /register path (here) and the device-token path (DeviceCodeService).
+    /// Returns Raw==null when the field is absent (state a), Raw!=null+Dto==null for malformed
+    /// (state b/c boundary), and a populated Dto for a valid payload (state d).
+    /// Never throws.
+    /// </summary>
+    public static ParsedVerticalConfig ParseVerticalConfigFromData(JsonObject? data)
+    {
+        if (data is null || !data.TryGetPropertyValue("verticalConfig", out var vcNode) || vcNode is null)
+            return new ParsedVerticalConfig(null, null, null, null); // (a) absent
+
+        var raw = vcNode.ToJsonString();
+        VerticalConfigDto? dto = null;
+        try { dto = JsonSerializer.Deserialize<VerticalConfigDto>(raw); }
+        catch (JsonException) { /* (c) malformed — dto stays null */ }
+
+        var sig = data.TryGetPropertyValue("verticalConfigSignature", out var s) ? s?.GetValue<string?>() : null;
+        var keyId = data.TryGetPropertyValue("verticalConfigKeyId", out var k) ? k?.GetValue<string?>() : null;
+        return new ParsedVerticalConfig(raw, dto, sig, keyId);
+    }
 }
