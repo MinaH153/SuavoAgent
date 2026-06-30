@@ -19,3 +19,4 @@ publish-v3.11.1/
 
 # PioneerRx dress-rehearsal staging (rehearsal.ps1 output — VM-local only)
 .rehearsal-stage/
+.claude/worktrees/
