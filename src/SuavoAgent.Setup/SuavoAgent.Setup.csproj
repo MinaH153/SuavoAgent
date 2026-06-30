@@ -43,6 +43,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- RFC 8785 canonicalization for vertical-config signature verification (mirrors Diagnostics). -->
+    <PackageReference Include="JsonCanonicalizer" Version="1.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Vertical-config signing keys — embedded trust store.
+         Resource naming: vertical-config-signing-key-<key_id>.pub.pem -->
+    <EmbeddedResource Include="Resources\vertical-config-signing-key-*.pub.pem" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Avalonia" Version="11.2.0" />
     <PackageReference Include="Avalonia.Desktop" Version="11.2.0" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.0" />
