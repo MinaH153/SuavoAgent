@@ -270,9 +270,67 @@ internal sealed class InstallOrchestrator
         }
         return Environment.MachineName;
     }
+
+    /// <summary>
+    /// Resolves the install-time compliance posture from a signed verticalConfig.
+    /// Fail-closed: absent / unsigned / blocked / unknown all → HIPAA defaults.
+    /// Only a fully-verified config may relax the posture below HIPAA.
+    /// </summary>
+    internal static InstallPosture ResolveInstallPosture(
+        SetupConfig config, VerticalConfigVerifier? verifier = null)
+    {
+        var vc = new ParsedVerticalConfig(
+            config.VerticalConfigRaw,
+            config.VerticalConfig,
+            config.VerticalConfigSignature,
+            config.VerticalConfigKeyId);
+
+        verifier ??= VerticalConfigVerifier.LoadEmbeddedTrustStore();
+        var result = verifier.Verify(vc);
+
+        if (!result.IsVerified || result.Config is null)
+            return InstallPosture.HipaaDefault;  // fail-closed
+
+        return new InstallPosture(
+            ComplianceMode: result.Config.ComplianceMode,
+            SystemConnector: result.Config.SystemConnector,
+            ConnectorLabel: result.Config.ConnectorLabel,
+            RedactionProfileId: result.Config.RedactionProfileId);
+    }
+
+    /// <summary>
+    /// Bakes the resolved vertical-config posture into the Agent appsettings section.
+    /// Pure + static so it is unit-testable.
+    /// </summary>
+    internal static void BakeVerticalConfig(
+        Dictionary<string, object?> agent, InstallPosture posture)
+    {
+        agent["ComplianceMode"]    = posture.ComplianceMode;
+        agent["SystemConnector"]   = posture.SystemConnector;
+        agent["ConnectorLabel"]    = posture.ConnectorLabel;
+        agent["RedactionProfileId"] = posture.RedactionProfileId;
+    }
 }
 
 internal sealed class InstallException : Exception
 {
     public InstallException(string message) : base(message) { }
+}
+
+/// <summary>
+/// Resolved install-time posture from a verified verticalConfig.
+/// Fail-closed defaults target HIPAA + PioneerRx (back-compat with existing pharmacies).
+/// </summary>
+internal sealed record InstallPosture(
+    string ComplianceMode,
+    string SystemConnector,
+    string ConnectorLabel,
+    string RedactionProfileId)
+{
+    /// <summary>Back-compat default: HIPAA + PioneerRx connector (existing pharmacy installs).</summary>
+    internal static readonly InstallPosture HipaaDefault = new(
+        ComplianceMode: "hipaa",
+        SystemConnector: "pioneerrx",
+        ConnectorLabel: "PioneerRx",
+        RedactionProfileId: "phi-v1");
 }
