@@ -44,6 +44,12 @@ public sealed class ConfigOverrideStore
         // itself stays overridable: that is the per-box rollout switch.
         "Agent.ReplayFirstAllowTypeSteps",
         "ReplayFirstAllowTypeSteps",
+        // Vertical-config posture — must only be set by the verified verticalConfig
+        // flow at install/onboarding time. Remote override would bypass the
+        // signature-verification + anti-downgrade gate.
+        "Agent.ComplianceMode",
+        "Agent.VerticalConfig",
+        "Agent.SystemConnector",
     };
 
     private static readonly string[] BlockedPrefixes =
