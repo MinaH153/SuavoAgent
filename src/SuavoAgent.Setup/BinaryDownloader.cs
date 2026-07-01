@@ -51,7 +51,13 @@ internal static class BinaryDownloader
     /// </summary>
     public static async Task<bool> DownloadAndVerifyAsync(string releaseTag, string installDir)
     {
-        var baseUrl = $"https://github.com/{RepoOwner}/{RepoName}/releases/download/{releaseTag}";
+        // Primary: the exact pinned version. Fallback: releases/latest — covers an
+        // installer whose version was never published as a *stable* release (e.g. a
+        // version that only ever shipped as a prerelease), whose pinned URL would
+        // otherwise 404 forever. The checksums + binaries are always taken from the
+        // SAME base, so the ECDSA + SHA-256 verification stays consistent either way.
+        var pinnedUrl = $"https://github.com/{RepoOwner}/{RepoName}/releases/download/{releaseTag}";
+        var latestUrl = $"https://github.com/{RepoOwner}/{RepoName}/releases/latest/download";
 
         Directory.CreateDirectory(installDir);
 
@@ -59,8 +65,15 @@ internal static class BinaryDownloader
         http.Timeout = TimeSpan.FromMinutes(10);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("SuavoSetup/1.0");
 
-        // Step 1: Download and verify checksums
-        var checksums = await DownloadAndVerifyChecksumsAsync(http, baseUrl, installDir);
+        // Step 1: Download and verify checksums (pinned version, then latest).
+        var baseUrl = pinnedUrl;
+        var checksums = await DownloadAndVerifyChecksumsAsync(http, pinnedUrl, installDir);
+        if (checksums == null)
+        {
+            ConsoleUI.WriteInfo($"Release {releaseTag} not found — falling back to the latest published release.");
+            baseUrl = latestUrl;
+            checksums = await DownloadAndVerifyChecksumsAsync(http, latestUrl, installDir);
+        }
         if (checksums == null) return false;
 
         // Step 2: Verify all expected binaries have checksum entries
