@@ -183,7 +183,7 @@ internal sealed class DeviceCodePairingViewModel : ViewModelBase
         SecondsRemaining = p.SecondsRemaining;
         StatusText = p.Status switch
         {
-            "pending" => "Waiting for approval in your pharmacy dashboard…",
+            "pending" => "Waiting for approval in your dashboard…",
             "authorized" => "Approved!",
             _ => p.Status,
         };

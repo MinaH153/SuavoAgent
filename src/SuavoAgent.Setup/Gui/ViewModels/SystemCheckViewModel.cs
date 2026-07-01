@@ -119,8 +119,8 @@ internal sealed class SystemCheckViewModel : ViewModelBase
     /// <summary>One-line banner verdict that updates live as probes resolve.</summary>
     public string ReadinessHeadline => OsCheck.State switch
     {
-        CheckState.Fail => "This workstation can't run SuavoAgent",
-        _ when !IsReady => "Checking this workstation…",
+        CheckState.Fail => "This computer can't run SuavoAgent",
+        _ when !IsReady => "Checking this computer…",
         _ => "Ready to install",
     };
 

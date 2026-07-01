@@ -46,7 +46,7 @@ internal sealed class ConnectingViewModel : ViewModelBase
         _onFallback = onFallback;
     }
 
-    private string _statusText = "Connecting to your pharmacy…";
+    private string _statusText = "Connecting to your dashboard…";
     public string StatusText
     {
         get => _statusText;

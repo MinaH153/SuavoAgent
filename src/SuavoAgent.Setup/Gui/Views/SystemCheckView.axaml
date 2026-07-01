@@ -161,7 +161,7 @@
         <!-- ── Footer ───────────────────────────────────────────────────── -->
         <Grid Grid.Row="3" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
             <TextBlock Grid.Column="0" VerticalAlignment="Center" MaxWidth="520" TextWrapping="Wrap"
-                       Text="Everything runs locally. Nothing leaves this workstation until you approve it."
+                       Text="Everything runs locally. Nothing leaves this computer until you approve it."
                        Foreground="{DynamicResource SuavoTextSubtleBrush}" FontSize="11.5" />
             <Panel Grid.Column="1">
                 <Border Classes="ctaGlow" IsVisible="{Binding IsReady}" CornerRadius="12" Margin="-6"

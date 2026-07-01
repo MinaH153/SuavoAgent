@@ -10,11 +10,11 @@
     <Grid RowDefinitions="*,Auto,Auto,Auto,Auto,*" Margin="80,32">
 
         <StackPanel Grid.Row="1" HorizontalAlignment="Center" Spacing="10">
-            <TextBlock Text="Connect this workstation"
+            <TextBlock Text="Connect this computer"
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="28" FontWeight="Light"
                        HorizontalAlignment="Center"/>
-            <TextBlock Text="Enter this code in your Suavo dashboard to approve this PC."
+            <TextBlock Text="Enter this code in your dashboard to approve this computer."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"
                        TextAlignment="Center" TextWrapping="Wrap"

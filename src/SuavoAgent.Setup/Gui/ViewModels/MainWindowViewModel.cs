@@ -358,10 +358,10 @@ internal sealed class MainWindowViewModel : ViewModelBase
         return new ErrorView
         {
             DataContext = new ErrorViewModel(
-                "Let's connect this installer to your pharmacy",
+                "Let's connect this installer to your dashboard",
                 "This installer isn't linked to a pharmacy yet.\n\n"
-                + "Download SuavoAgent from your Suavo dashboard at https://suavollc.com and run "
-                + "that installer — it connects to your pharmacy automatically.\n\n"
+                + "Download SuavoAgent from your dashboard at https://suavollc.com and run "
+                + "that installer — it connects to your dashboard automatically.\n\n"
                 + "Already have an 8-character pairing code? Run the installer normally and enter "
                 + "it on the connect screen.",
                 onRetry: null,

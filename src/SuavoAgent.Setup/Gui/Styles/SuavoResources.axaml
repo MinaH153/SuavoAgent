@@ -2,33 +2,34 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!--
-        Suavo palette — Light Mercury.
-        Mirrors the web Light-Mercury tokens (Suavo/src/lib/tokens.ts):
-        warm cream canvas, white elevated surfaces, dark ink text, gold accent.
-        Status colors are tuned darker than the dark theme so they read on light.
-        Accent has two roles: SuavoAccent (#D4A574) for fills/buttons, and
-        SuavoAccentText (#8A4A00) for gold text/eyebrows that must stay legible on cream.
-        Animations: spring-based (added at view layer).
+        Suavo palette — Light Sapphire (2026-07-01, sub-project 1b).
+        Mirrors the web light-sapphire connect experience (Suavo/src/lib/suavoagent-theme.ts):
+        cool white canvas, white elevated surfaces, slate ink, SAPPHIRE accent — so the
+        installer app and the cloud dashboard read as ONE product (install → connect → manage).
+        Accent has two roles: SuavoAccent (#1D4ED8) for fills/buttons, and SuavoAccentText
+        (#1D4ED8) for sapphire text/eyebrows. Because sapphire is a DARK fill, label text on
+        accent fills is WHITE (SuavoAccentTextInverse) — the inverse of the old gold theme.
+        Status colors match the cloud (online/warn/offline). Animations: spring (view layer).
     -->
 
-    <Color x:Key="SuavoBackground">#F7F4EC</Color>
+    <Color x:Key="SuavoBackground">#F8FAFC</Color>
     <Color x:Key="SuavoSurface">#FFFFFF</Color>
     <Color x:Key="SuavoCard">#FFFFFF</Color>
-    <Color x:Key="SuavoBorder">#E7E2D5</Color>
+    <Color x:Key="SuavoBorder">#E2E8F0</Color>
 
-    <Color x:Key="SuavoAccent">#D4A574</Color>
-    <Color x:Key="SuavoAccentHover">#E0B685</Color>
-    <Color x:Key="SuavoAccentPressed">#B88A3A</Color>
-    <Color x:Key="SuavoAccentMuted">#EFE3CC</Color>
-    <Color x:Key="SuavoAccentText">#8A4A00</Color>
+    <Color x:Key="SuavoAccent">#1D4ED8</Color>
+    <Color x:Key="SuavoAccentHover">#2563EB</Color>
+    <Color x:Key="SuavoAccentPressed">#1E40AF</Color>
+    <Color x:Key="SuavoAccentMuted">#EFF4FF</Color>
+    <Color x:Key="SuavoAccentText">#1D4ED8</Color>
 
-    <Color x:Key="SuavoText">#141619</Color>
-    <Color x:Key="SuavoTextMuted">#4F4F49</Color>
-    <Color x:Key="SuavoTextSubtle">#8A867C</Color>
+    <Color x:Key="SuavoText">#0F172A</Color>
+    <Color x:Key="SuavoTextMuted">#475569</Color>
+    <Color x:Key="SuavoTextSubtle">#94A3B8</Color>
 
-    <Color x:Key="SuavoSuccess">#5E8A63</Color>
-    <Color x:Key="SuavoWarning">#B5791F</Color>
-    <Color x:Key="SuavoDanger">#A33A3A</Color>
+    <Color x:Key="SuavoSuccess">#16A34A</Color>
+    <Color x:Key="SuavoWarning">#EA580C</Color>
+    <Color x:Key="SuavoDanger">#DC2626</Color>
 
     <SolidColorBrush x:Key="SuavoBackgroundBrush" Color="{StaticResource SuavoBackground}" />
     <SolidColorBrush x:Key="SuavoSurfaceBrush" Color="{StaticResource SuavoSurface}" />
@@ -54,43 +55,43 @@
     <CornerRadius x:Key="SuavoRadiusLarge">14</CornerRadius>
     <CornerRadius x:Key="SuavoRadiusPill">999</CornerRadius>
 
-    <!-- Deferred / self-healing state — calm dark gold (distinct from amber warn), legible on light. -->
-    <Color x:Key="SuavoDeferred">#8A6A1E</Color>
+    <!-- Deferred / self-healing state — calm amber (distinct from the orange warn), legible on light. -->
+    <Color x:Key="SuavoDeferred">#D97706</Color>
     <SolidColorBrush x:Key="SuavoDeferredBrush" Color="{StaticResource SuavoDeferred}" />
 
-    <!-- Elevated surface for chips / pills sitting on cards — warm cream tint. -->
-    <Color x:Key="SuavoSurfaceElevated">#F4F0E6</Color>
+    <!-- Elevated surface for chips / pills sitting on cards — cool slate tint. -->
+    <Color x:Key="SuavoSurfaceElevated">#F1F5F9</Color>
     <SolidColorBrush x:Key="SuavoSurfaceElevatedBrush" Color="{StaticResource SuavoSurfaceElevated}" />
 
-    <!-- Depth gradients — premium, warm undertone (design DNA). -->
+    <!-- Depth gradients — cool sapphire undertone (matches the cloud radial canvas). -->
     <LinearGradientBrush x:Key="SuavoBackgroundGradientBrush" StartPoint="0%,0%" EndPoint="50%,100%">
-        <GradientStop Color="#FBF9F2" Offset="0" />
-        <GradientStop Color="#F2EEE3" Offset="1" />
+        <GradientStop Color="#FBFCFF" Offset="0" />
+        <GradientStop Color="#EEF3FF" Offset="1" />
     </LinearGradientBrush>
 
     <LinearGradientBrush x:Key="SuavoCardGradientBrush" StartPoint="0%,0%" EndPoint="0%,100%">
         <GradientStop Color="#FFFFFF" Offset="0" />
-        <GradientStop Color="#FBF9F3" Offset="1" />
+        <GradientStop Color="#F8FAFC" Offset="1" />
     </LinearGradientBrush>
 
     <LinearGradientBrush x:Key="SuavoAccentGradientBrush" StartPoint="0%,0%" EndPoint="100%,100%">
-        <GradientStop Color="#E6C485" Offset="0" />
-        <GradientStop Color="#D4A574" Offset="0.55" />
-        <GradientStop Color="#C2933F" Offset="1" />
+        <GradientStop Color="#2563EB" Offset="0" />
+        <GradientStop Color="#1D4ED8" Offset="0.55" />
+        <GradientStop Color="#1E40AF" Offset="1" />
     </LinearGradientBrush>
 
-    <!-- Hairline gold accent for hero rules. -->
+    <!-- Hairline sapphire accent for hero rules. -->
     <LinearGradientBrush x:Key="SuavoAccentRuleBrush" StartPoint="0%,0%" EndPoint="100%,0%">
-        <GradientStop Color="#D4A574" Offset="0" />
-        <GradientStop Color="#D4A57400" Offset="1" />
+        <GradientStop Color="#1D4ED8" Offset="0" />
+        <GradientStop Color="#1D4ED800" Offset="1" />
     </LinearGradientBrush>
 
-    <!-- Ink on gold (CTA labels sitting on SuavoAccent fills). -->
-    <Color x:Key="SuavoAccentTextInverse">#101010</Color>
+    <!-- Text on sapphire (CTA labels sitting on SuavoAccent fills) — WHITE, since sapphire is dark. -->
+    <Color x:Key="SuavoAccentTextInverse">#FFFFFF</Color>
     <SolidColorBrush x:Key="SuavoAccentTextInverseBrush" Color="{StaticResource SuavoAccentTextInverse}" />
 
-    <!-- Console/log panel — the one intentionally dark surface in the light theme. -->
-    <Color x:Key="SuavoLogBackground">#16140F</Color>
+    <!-- Console/log panel — the one intentionally dark surface, cool slate to match the cloud ink. -->
+    <Color x:Key="SuavoLogBackground">#0F172A</Color>
     <SolidColorBrush x:Key="SuavoLogBackgroundBrush" Color="{StaticResource SuavoLogBackground}" />
 
 </ResourceDictionary>

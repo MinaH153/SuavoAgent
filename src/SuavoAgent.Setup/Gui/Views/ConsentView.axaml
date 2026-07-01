@@ -147,12 +147,12 @@
             <CheckBox Classes="consent"
                       IsChecked="{Binding AgreedToTerms, Mode=TwoWay}"
                       FontSize="13"
-                      Content="I authorize SuavoAgent to monitor this workstation and accept Suavo's Terms and Privacy Policy."/>
+                      Content="I authorize SuavoAgent to monitor this computer and accept Suavo's Terms and Privacy Policy."/>
             <CheckBox Classes="consent"
                       IsChecked="{Binding AgreedToNotice, Mode=TwoWay}"
                       IsVisible="{Binding RequiresEmployeeNotice}"
                       FontSize="13"
-                      Content="I have distributed the employee notice template to all staff at this workstation."/>
+                      Content="I have distributed the employee notice template to all staff at this computer."/>
         </StackPanel>
 
         <DockPanel Grid.Row="4" LastChildFill="False">
