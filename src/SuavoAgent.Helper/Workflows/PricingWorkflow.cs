@@ -268,8 +268,16 @@ public sealed class PricingWorkflow
             itemMenu.AsMenuItem()?.Click();
             Thread.Sleep(300);
 
-            // Click "Rx Item" in the dropdown
-            var (rxItemEntry, rxRes) = resolver.FindFirst(mainWindow, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
+            // Click "Rx Item" in the opened submenu. WPF (and many native context/submenus) render the
+            // opened submenu in a POPUP — a separate top-level UIA element, NOT a descendant of the main
+            // window — so search from the DESKTOP ROOT first, then fall back to the main window. This
+            // finds "Rx Item" whether the submenu is a popup (WPF) or kept under the main window
+            // (Win32/WinForms/DevExpress). (Surfaced on the WPF sim: "Rx Item" lives in a popup, so a
+            // main-window-only search never found it and every row failed at "could not open menu".)
+            var searchRoot = mainWindow.Automation.GetDesktop();
+            var (rxItemEntry, rxRes) = resolver.FindFirst(searchRoot, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
+            if (rxItemEntry == null)
+                (rxItemEntry, rxRes) = resolver.FindFirst(mainWindow, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
             if (rxItemEntry == null) return false;
             LogIfLearned(SelectorStepId.OpenRxItem, rxRes);
 
