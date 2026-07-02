@@ -543,7 +543,10 @@ try
         var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
         IPricingJobExecutor executor = opts.PricingExecutor switch
         {
-            PricingExecutorMode.UiaFirst => sp.GetRequiredService<UiaFirstPricingJobExecutor>(),
+            // VisionFirst drives the screen identically to UiaFirst (same blind-run gate, same Helper
+            // IPC path); the difference is the Helper reads the grid by sight when vision.json is on.
+            PricingExecutorMode.UiaFirst or PricingExecutorMode.VisionFirst
+                => sp.GetRequiredService<UiaFirstPricingJobExecutor>(),
             _ => sp.GetRequiredService<SqlFirstPricingJobExecutor>(),
         };
         Log.Information(
