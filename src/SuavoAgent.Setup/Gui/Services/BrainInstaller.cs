@@ -40,6 +40,9 @@ internal static class BrainInstaller
 
         using var http = handler is null ? new HttpClient() : new HttpClient(handler);
         http.Timeout = DownloadTimeout;
+        // HuggingFace serves a ~1 KB HTML error page (not the file) without a User-Agent, which then
+        // fails the SHA check — so a UA is required for HF-direct GGUF hosting. Harmless elsewhere.
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("SuavoAgent/1.0 (+https://suavollc.com)");
 
         try
         {

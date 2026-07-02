@@ -70,6 +70,11 @@ public sealed class HttpModelProvisioner : IModelManager
             // A GGUF is GBs over a pharmacy's connection — generous timeout, streamed to disk so we
             // never hold the whole file in memory on an 8 GB box.
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(45) };
+            // HuggingFace (a primary GGUF host) returns a ~1 KB HTML error page instead of the file
+            // when there's no User-Agent — the download then fails the SHA check and the brain never
+            // provisions (observed on a live box: empty models dir, ready=false). A UA makes HF-direct
+            // model hosting work, not just GitHub. Harmless for GitHub/other hosts.
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("SuavoAgent/1.0 (+https://suavollc.com)");
             using var response = await http.GetAsync(_options.ModelUrl, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!response.IsSuccessStatusCode)
                 return (false, $"model download HTTP {(int)response.StatusCode}");
