@@ -33,15 +33,29 @@ internal static class ProcessImageInterop
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, [Out] StringBuilder lpExeName, ref uint lpdwSize);
 
-    public static string? Get(uint processId)
+    public static string? Get(uint processId) => Get(processId, out _);
+
+    /// <summary>
+    /// Same as <see cref="Get(uint)"/> but surfaces the Win32 error on failure so the
+    /// caller can LOG why the cross-token read failed (field boxes strand on silent
+    /// nulls here — the QA-C5 reject then looks causeless in the log).
+    /// </summary>
+    public static string? Get(uint processId, out int lastWin32Error)
     {
+        lastWin32Error = 0;
         var hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
-        if (hProcess == IntPtr.Zero) return null;
+        if (hProcess == IntPtr.Zero)
+        {
+            lastWin32Error = Marshal.GetLastWin32Error();
+            return null;
+        }
         try
         {
             var sb = new StringBuilder(1024);
             uint size = (uint)sb.Capacity;
-            return QueryFullProcessImageNameW(hProcess, 0, sb, ref size) ? sb.ToString() : null;
+            if (QueryFullProcessImageNameW(hProcess, 0, sb, ref size)) return sb.ToString();
+            lastWin32Error = Marshal.GetLastWin32Error();
+            return null;
         }
         finally
         {
@@ -834,7 +848,12 @@ public sealed class IpcCommandServer : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "IpcCommandServer: client SID check inconclusive for PID {Pid} — falling back to image-path check", clientPid);
+            // Warning, not Debug: on field boxes this rung failing silently is exactly how the
+            // command-pipe strand hid for four releases — the log then shows only the final
+            // C5 reject with no cause. Surface the WHY at default log level.
+            _logger.Warning(
+                "IpcCommandServer: client SID check inconclusive for PID {Pid} ({ExType}: {ExMessage}) — falling back to image-path check",
+                clientPid, ex.GetType().Name, ex.Message);
             return false;
         }
     }
@@ -878,7 +897,11 @@ public sealed class IpcCommandServer : IDisposable
             // Not a service token (or impersonation inconclusive): fall through to the image-path check.
             // QueryFullProcessImageName works across user/SYSTEM security tokens;
             // MainModule fallback for non-Windows or quirks.
-            var clientPath = ProcessImageInterop.Get(clientPid);
+            var clientPath = ProcessImageInterop.Get(clientPid, out var imageReadError);
+            if (string.IsNullOrEmpty(clientPath) && imageReadError != 0)
+                _logger.Warning(
+                    "IpcCommandServer: QueryFullProcessImageName failed for PID {Pid} (Win32 error {Err}) — trying MainModule",
+                    clientPid, imageReadError);
             if (string.IsNullOrEmpty(clientPath))
             {
                 try
