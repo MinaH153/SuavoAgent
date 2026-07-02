@@ -830,20 +830,59 @@ public sealed class IpcCommandServer : IDisposable
     private bool TryGetClientServiceSid(NamedPipeServerStream pipe, uint clientPid, out string sidLabel)
     {
         sidLabel = "";
+        // Read the client's token SID directly off the pipe's impersonation token — NOT via
+        // NamedPipeServerStream.RunAsClient. RunAsClient runs the callback under FULL
+        // impersonation, which the client must grant at TokenImpersonationLevel.Impersonation;
+        // Core connects at Identification (deliberately — granting Impersonation from SYSTEM
+        // Core to the de-privileged user Helper would let a compromised Helper act AS SYSTEM).
+        // At Identification, RunAsClient/WindowsIdentity.GetCurrent throw (observed on the box
+        // as an empty FileNotFoundException), which is the real strand cause. ImpersonateNamedPipeClient
+        // + OpenThreadToken(TOKEN_QUERY) + GetTokenInformation(TokenUser) reads the SID at
+        // Identification level (identity query is allowed there) with NO process handle — so it
+        // also sidesteps the OpenProcess ACCESS_DENIED that makes the image-path rung unusable
+        // against SYSTEM Core.
+        var impersonating = false;
+        var threadToken = IntPtr.Zero;
+        var sidBuffer = IntPtr.Zero;
         try
         {
-            SecurityIdentifier? sid = null;
-            pipe.RunAsClient(() =>
+            if (!ImpersonateNamedPipeClient(pipe.SafePipeHandle))
             {
-                using var id = WindowsIdentity.GetCurrent();
-                sid = id.User;
-            });
-            if (sid is null) return false;
+                _logger.Warning("IpcCommandServer: ImpersonateNamedPipeClient failed for PID {Pid} (Win32 {Err})",
+                    clientPid, Marshal.GetLastWin32Error());
+                return false;
+            }
+            impersonating = true;
+
+            if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, /*OpenAsSelf*/ true, out threadToken))
+            {
+                _logger.Warning("IpcCommandServer: OpenThreadToken failed for PID {Pid} (Win32 {Err})",
+                    clientPid, Marshal.GetLastWin32Error());
+                return false;
+            }
+
+            // Two-call pattern: size, then read TOKEN_USER.
+            GetTokenInformation(threadToken, TokenUserClass, IntPtr.Zero, 0, out var needed);
+            if (needed <= 0) return false;
+            sidBuffer = Marshal.AllocHGlobal(needed);
+            if (!GetTokenInformation(threadToken, TokenUserClass, sidBuffer, needed, out _))
+            {
+                _logger.Warning("IpcCommandServer: GetTokenInformation(TokenUser) failed for PID {Pid} (Win32 {Err})",
+                    clientPid, Marshal.GetLastWin32Error());
+                return false;
+            }
+
+            // TOKEN_USER = { SID_AND_ATTRIBUTES User; }; first pointer-sized field is PSID.
+            var pSid = Marshal.ReadIntPtr(sidBuffer);
+            if (pSid == IntPtr.Zero) return false;
+            var sid = new SecurityIdentifier(pSid);
             var isService =
                 sid.IsWellKnown(WellKnownSidType.LocalSystemSid)
                 || sid.IsWellKnown(WellKnownSidType.LocalServiceSid)
                 || sid.IsWellKnown(WellKnownSidType.NetworkServiceSid);
             if (isService) { sidLabel = sid.Value; return true; }
+            _logger.Warning("IpcCommandServer: client PID {Pid} token SID {Sid} is not a service identity — no SID acceptance",
+                clientPid, sid.Value);
             return false;
         }
         catch (Exception ex)
@@ -856,7 +895,45 @@ public sealed class IpcCommandServer : IDisposable
                 clientPid, ex.GetType().Name, ex.Message);
             return false;
         }
+        finally
+        {
+            if (sidBuffer != IntPtr.Zero) Marshal.FreeHGlobal(sidBuffer);
+            if (threadToken != IntPtr.Zero) CloseHandleNative(threadToken);
+            // CRITICAL: always drop impersonation before returning to the read loop.
+            if (impersonating && !RevertToSelf())
+                _logger.Error("IpcCommandServer: RevertToSelf FAILED after client SID check for PID {Pid} (Win32 {Err}) — recycling connection",
+                    clientPid, Marshal.GetLastWin32Error());
+        }
     }
+
+    private const uint TOKEN_QUERY = 0x0008;
+    private const int TokenUserClass = 1; // TOKEN_INFORMATION_CLASS.TokenUser
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ImpersonateNamedPipeClient(Microsoft.Win32.SafeHandles.SafePipeHandle hNamedPipe);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool RevertToSelf();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenThreadToken(IntPtr ThreadHandle, uint DesiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool OpenAsSelf, out IntPtr TokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(IntPtr TokenHandle, int TokenInformationClass,
+        IntPtr TokenInformation, int TokenInformationLength, out int ReturnLength);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentThread();
+
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "CloseHandle")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandleNative(IntPtr hObject);
 
     private bool VerifyClientIsCore(NamedPipeServerStream pipe)
     {
