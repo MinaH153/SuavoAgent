@@ -265,7 +265,11 @@ public sealed class PricingWorkflow
             if (itemMenu == null) return false;
             LogIfLearned(SelectorStepId.OpenItemMenu, itemRes);
 
-            itemMenu.AsMenuItem()?.Click();
+            // Open "Item" the way its UIA pattern demands, not with a raw Click(). A top-level bar item
+            // that owns a submenu exposes ExpandCollapse — Expand() unfolds the dropdown; Click() may just
+            // focus it and leave the submenu closed (this is why the WPF sim never opened the menu, and it
+            // hardens the real bar too). OpenMenuElement falls back Expand → Invoke → Click.
+            OpenMenuElement(itemMenu, expandToOpenSubmenu: true);
             Thread.Sleep(300);
 
             // Click "Rx Item" in the opened submenu. WPF (and many native context/submenus) render the
@@ -281,7 +285,9 @@ public sealed class PricingWorkflow
             if (rxItemEntry == null) return false;
             LogIfLearned(SelectorStepId.OpenRxItem, rxRes);
 
-            rxItemEntry.AsMenuItem()?.Click();
+            // "Rx Item" is a LEAF that opens the Edit Rx Item window — Invoke() fires it; expanding it
+            // would be a no-op (or open a stray submenu), so don't prefer Expand here.
+            OpenMenuElement(rxItemEntry, expandToOpenSubmenu: false);
             Thread.Sleep(300);
             return true;
         }
@@ -290,6 +296,41 @@ public sealed class PricingWorkflow
             _logger.Debug(ex, "PricingWorkflow: OpenRxItemDialog failed");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Activates a menu element by the UIA pattern it actually exposes, in order, so the menu works
+    /// across UI toolkits (Win32 / WinForms / DevExpress / WPF) whose menu items respond to different
+    /// patterns. A submenu-owning bar item ("Item") needs <c>ExpandCollapse.Expand()</c> to unfold; a
+    /// leaf entry ("Rx Item") needs <c>Invoke()</c>; some only accept a synthesized Click(). Each attempt
+    /// is guarded so an unsupported/throwing pattern falls through to the next rather than aborting.
+    /// </summary>
+    private static void OpenMenuElement(AutomationElement el, bool expandToOpenSubmenu)
+    {
+        if (expandToOpenSubmenu)
+        {
+            try
+            {
+                if (el.Patterns.ExpandCollapse.IsSupported)
+                {
+                    el.Patterns.ExpandCollapse.Pattern.Expand();
+                    return;
+                }
+            }
+            catch { /* fall through to Invoke/Click */ }
+        }
+
+        try
+        {
+            if (el.Patterns.Invoke.IsSupported)
+            {
+                el.Patterns.Invoke.Pattern.Invoke();
+                return;
+            }
+        }
+        catch { /* fall through to Click */ }
+
+        el.AsMenuItem()?.Click();
     }
 
     private Window? WaitForWindow(UIA2Automation automation, string title)
