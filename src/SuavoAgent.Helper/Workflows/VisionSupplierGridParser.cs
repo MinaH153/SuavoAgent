@@ -22,9 +22,11 @@ namespace SuavoAgent.Helper.Workflows;
 /// </summary>
 public static class VisionSupplierGridParser
 {
-    /// <summary>One parsed grid row. <see cref="CostPerUnit"/> is null when no decimal cost was read.</summary>
+    /// <summary>One parsed grid row. <see cref="CostPerUnit"/> is null when no decimal cost was read.
+    /// <see cref="HasId"/> is true when the row carries an item id (NDC/UPC) — the signature of a real
+    /// PioneerRx supplier row, used to drop the top-of-window pricing panel from the ranking.</summary>
     public readonly record struct ParsedRow(
-        string Supplier, decimal? CostPerUnit, string Status, double Confidence, int Y);
+        string Supplier, decimal? CostPerUnit, string Status, double Confidence, int Y, bool HasId = false);
 
     /// <summary>The cheapest supplier the vision read found, with the min confidence of the rows that
     /// fed the ranking (conservative) and how many usable rows were seen.</summary>
@@ -47,7 +49,13 @@ public static class VisionSupplierGridParser
     {
         var rows = ParseRows(regions);
 
-        var priced = rows.Where(r => r.CostPerUnit is > 0m).ToList();
+        // On the wide real-PioneerRx grid every supplier row carries the item's NDC/UPC id. When we see
+        // any such row, treat it as the real Supplier Catalog and drop rows WITHOUT an id — the pricing
+        // panel above the grid (AWP Source / Max AWP / NADAC / Average Received Cost …) OCRs as
+        // decimal-bearing lines that would otherwise be ranked as phantom "suppliers". A narrow grid
+        // (the sim / synthetic tests, no ids anywhere) keeps every row, preserving the original behaviour.
+        var wideGrid = rows.Any(r => r.HasId);
+        var priced = rows.Where(r => r.CostPerUnit is > 0m && (!wideGrid || r.HasId)).ToList();
         var candidates = priced
             .Where(r => !string.IsNullOrWhiteSpace(r.Supplier) && r.Confidence >= minRowConfidence)
             .Select(r => new PricingGridReader.SupplierRow(r.Supplier, r.CostPerUnit!.Value, r.Status))
@@ -123,22 +131,81 @@ public static class VisionSupplierGridParser
             if (perUnit is null || c < perUnit) perUnit = c;
         }
 
-        // supplier = leading alphabetic tokens up to (but not including) the first cost token; skip a
-        // token that is itself a status keyword so "Discontinued" never becomes the supplier name.
-        var supplierParts = new List<string>();
-        foreach (var t in tokens)
-        {
-            if (IsCostToken(t)) break;
-            if (IsStatusKeyword(t)) continue;
-            if (t.Any(char.IsLetter)) supplierParts.Add(t);
-        }
-        var supplier = string.Join(' ', supplierParts).Trim();
+        // The real PioneerRx grid puts Linked / Inventory Group / Name / NDC / UPC BEFORE the Supplier
+        // column, so a naive "leading alpha before first cost" read swallows all of them. When the row
+        // carries an id (NDC/UPC), anchor on it: the supplier is the first alphabetic run after the id
+        // columns. On a narrow grid (no id — the sim / synthetic rows) fall back to leading-alpha.
+        var hasId = tokens.Any(IsIdToken);
+        var supplier = hasId ? SupplierAfterId(tokens) : "";
+        // Fall back to leading-alpha when there is no id, or when the id-anchored read finds nothing after
+        // the id (a layout whose supplier PRECEDES the id — e.g. a narrow grid that still carries an NDC).
+        if (string.IsNullOrEmpty(supplier)) supplier = LeadingAlphaSupplier(tokens);
 
         // status = any status keyword anywhere on the row; empty when none (treated as usable upstream).
         var status = tokens.FirstOrDefault(IsStatusKeyword) ?? "";
 
-        return new ParsedRow(supplier, perUnit, status, confidence, y);
+        return new ParsedRow(supplier, perUnit, status, confidence, y, hasId);
     }
+
+    // supplier = leading alphabetic tokens up to (but not including) the first cost token; skip a token
+    // that is itself a status keyword so "Discontinued" never becomes the supplier name. (Narrow grid.)
+    private static string LeadingAlphaSupplier(List<string> tokens)
+    {
+        var parts = new List<string>();
+        foreach (var t in tokens)
+        {
+            if (IsCostToken(t)) break;
+            if (IsStatusKeyword(t)) continue;
+            if (t.Any(char.IsLetter)) parts.Add(t);
+        }
+        return string.Join(' ', parts).Trim();
+    }
+
+    // supplier = the first contiguous alphabetic run AFTER the row's id columns (NDC then UPC). Skips the
+    // id tokens and any punctuation/pipes Tesseract reads from the grid separators; the run ends at the
+    // next non-alpha token (the Supplier Item Number), a cost, or the shipping-size text. This lands on
+    // the Supplier cell and never on the drug Name (before the id) or the Manufacturer (after the item #).
+    private static string SupplierAfterId(List<string> tokens)
+    {
+        var idx = tokens.FindIndex(IsIdToken);
+        if (idx < 0) return "";
+
+        var parts = new List<string>();
+        for (var i = idx + 1; i < tokens.Count; i++)
+        {
+            var t = tokens[i];
+            if (IsCostToken(t)) break;                       // reached the numeric columns
+            var alpha = t.Any(char.IsLetter);
+            if (parts.Count == 0)
+            {
+                if (IsIdToken(t) || IsStatusKeyword(t)) continue; // skip UPC / stray status
+                if (IsShippingKeyword(t)) break;
+                if (!alpha) continue;                         // skip pipes / punctuation junk
+                parts.Add(t);
+            }
+            else
+            {
+                if (!alpha || IsStatusKeyword(t) || IsShippingKeyword(t)) break;
+                parts.Add(t);
+            }
+        }
+        return string.Join(' ', parts).Trim();
+    }
+
+    // NDC (#####-####-##, tolerant of OCR digit-count wobble) or a long unbroken digit run (UPC / item
+    // number). A price is excluded (it carries a dot); a short quantity ("500", "40") is excluded (< 7).
+    private static bool IsIdToken(string token)
+    {
+        var parts = token.Split('-');
+        if (parts.Length == 3 && parts[0].Length is >= 4 and <= 6
+            && parts.All(p => p.Length > 0 && p.All(char.IsDigit)))
+            return true;
+        return token.Length >= 7 && token.All(char.IsDigit);
+    }
+
+    private static bool IsShippingKeyword(string token) =>
+        token.Equals("Stock", StringComparison.OrdinalIgnoreCase)
+        || token.Equals("Package", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsStatusKeyword(string token) =>
         token.Contains("available", StringComparison.OrdinalIgnoreCase)
