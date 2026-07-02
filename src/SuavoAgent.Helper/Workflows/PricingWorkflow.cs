@@ -265,28 +265,34 @@ public sealed class PricingWorkflow
             if (itemMenu == null) return false;
             LogIfLearned(SelectorStepId.OpenItemMenu, itemRes);
 
-            // Open "Item" the way its UIA pattern demands, not with a raw Click(). A top-level bar item
-            // that owns a submenu exposes ExpandCollapse — Expand() unfolds the dropdown; Click() may just
-            // focus it and leave the submenu closed (this is why the WPF sim never opened the menu, and it
-            // hardens the real bar too). OpenMenuElement falls back Expand → Invoke → Click.
-            OpenMenuElement(itemMenu, expandToOpenSubmenu: true);
-            Thread.Sleep(300);
-
-            // Click "Rx Item" in the opened submenu. WPF (and many native context/submenus) render the
-            // opened submenu in a POPUP — a separate top-level UIA element, NOT a descendant of the main
-            // window — so search from the DESKTOP ROOT first, then fall back to the main window. This
-            // finds "Rx Item" whether the submenu is a popup (WPF) or kept under the main window
-            // (Win32/WinForms/DevExpress). (Surfaced on the WPF sim: "Rx Item" lives in a popup, so a
-            // main-window-only search never found it and every row failed at "could not open menu".)
+            // Open the "Item" submenu, then find "Rx Item" inside it. Rather than assume which pattern
+            // this toolkit's menu honors, try each opener and keep whichever actually makes "Rx Item"
+            // appear: menus open on ExpandCollapse (WPF ControlType.Menu), on Invoke, or only on a
+            // physical mouse click (some MenuBar automation peers) — and the real PioneerRx menu's
+            // control type is a screenshot-unanswerable unknown. (The WPF sim proved it: the stock-Menu
+            // variant opens on Expand; the MenuBar-peer variant needed the physical click. Trying all
+            // three, and stopping the moment "Rx Item" is findable, makes the workflow menu-toolkit-
+            // agnostic.) The submenu renders in a POPUP (a separate top-level UIA element), so search
+            // the DESKTOP ROOT first, then fall back to the main window.
             var searchRoot = mainWindow.Automation.GetDesktop();
-            var (rxItemEntry, rxRes) = resolver.FindFirst(searchRoot, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
-            if (rxItemEntry == null)
-                (rxItemEntry, rxRes) = resolver.FindFirst(mainWindow, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
+            AutomationElement? rxItemEntry = null;
+            for (var attempt = 0; attempt <= MenuOpeners.Length && rxItemEntry == null; attempt++)
+            {
+                // attempt 0 checks without opening (a prior hover may have left it open); 1.. after each opener.
+                if (attempt > 0)
+                {
+                    try { MenuOpeners[attempt - 1](itemMenu); } catch { /* try the next opener */ }
+                    Thread.Sleep(300);
+                }
+                var (found, res) = resolver.FindFirst(searchRoot, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
+                if (found == null)
+                    (found, res) = resolver.FindFirst(mainWindow, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
+                if (found != null) { rxItemEntry = found; LogIfLearned(SelectorStepId.OpenRxItem, res); }
+            }
             if (rxItemEntry == null) return false;
-            LogIfLearned(SelectorStepId.OpenRxItem, rxRes);
 
             // "Rx Item" is a LEAF that opens the Edit Rx Item window — Invoke() fires it; expanding it
-            // would be a no-op (or open a stray submenu), so don't prefer Expand here.
+            // would be a no-op, so don't prefer Expand here. The caller's WaitForWindow confirms it opened.
             OpenMenuElement(rxItemEntry, expandToOpenSubmenu: false);
             Thread.Sleep(300);
             return true;
@@ -297,6 +303,16 @@ public sealed class PricingWorkflow
             return false;
         }
     }
+
+    // Openers tried in order until the "Item" submenu appears — a menu may honor ExpandCollapse (WPF
+    // stock Menu), Invoke, or only a physical mouse click (some MenuBar automation peers, incl. the
+    // sim's PrxMenuBar). el.Click() is a real click at the element's center. Each call site guards throws.
+    private static readonly Action<AutomationElement>[] MenuOpeners =
+    {
+        el => { if (el.Patterns.ExpandCollapse.IsSupported) el.Patterns.ExpandCollapse.Pattern.Expand(); },
+        el => { if (el.Patterns.Invoke.IsSupported) el.Patterns.Invoke.Pattern.Invoke(); },
+        el => el.Click(),
+    };
 
     /// <summary>
     /// Activates a menu element by the UIA pattern it actually exposes, in order, so the menu works
