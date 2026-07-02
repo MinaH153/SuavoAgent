@@ -302,6 +302,15 @@ public sealed class AgentOptions
     public PricingScheduleOptions PricingSchedule { get; set; } = new();
 
     /// <summary>
+    /// Top-dispensed worklist generation — the report Nadim otherwise makes by hand (Rx Binoculars →
+    /// Transaction Search → Top-X → export). When wired, the agent runs the SQL top-N-dispensed query,
+    /// writes the Drug/Strength/NDC/Total sheet, and feeds it to the pricing loop. Column names +
+    /// generic/Rx/schedule VALUES are pharmacy-specific and confirmed on the live PMS; leave the
+    /// overrides null to let <c>TopDispensedSchemaResolver</c> discover them from the Item schema.
+    /// </summary>
+    public TopDispensedOptions TopDispensed { get; set; } = new();
+
+    /// <summary>
     /// Returns the effective pharmacy list — either the explicit Pharmacies array
     /// or a single entry synthesized from top-level fields.
     /// </summary>
@@ -329,6 +338,44 @@ public enum PricingExecutorMode
     SqlFirst,
     /// <summary>UIA-first via Helper. No SQL fallback. See <c>AgentOptions.PricingExecutor</c>.</summary>
     UiaFirst,
+}
+
+/// <summary>
+/// Config for generating the top-N-most-dispensed worklist (<see cref="AgentOptions.TopDispensed"/>).
+/// Mirrors Nadim's Rx Binoculars recipe: generics only, Rx-not-OTC, no schedule, over a window,
+/// ranked by dispensed quantity. Column names default to heuristic discovery
+/// (<c>TopDispensedSchemaResolver</c>); the *Value fields say what "generic"/"Rx"/"no schedule"
+/// equal in this install's data — confirmed on the live PMS.
+/// </summary>
+public sealed class TopDispensedOptions
+{
+    /// <summary>How many top items to emit (Nadim: 500). Default 500.</summary>
+    public int TopN { get; set; } = 500;
+
+    /// <summary>Look-back window in days for "dispensed since" (Nadim uses Jan 1 → today; a
+    /// window keeps it rolling). Default 180.</summary>
+    public int WindowDays { get; set; } = 180;
+
+    /// <summary>
+    /// RxTransaction status descriptions that count as a real dispense. REQUIRED to generate —
+    /// an empty list fails closed (never counts voids/reversals). Ground-truthed on the box; shared
+    /// intent with <see cref="AgentOptions.PricingDispensedStatusNames"/>.
+    /// </summary>
+    public List<string> DispensedStatusNames { get; set; } = new();
+
+    // --- Optional Item-column pins (null → discover) + the match values for this install ---
+    public string? DrugNameColumn { get; set; }
+    public string? StrengthColumn { get; set; }
+    public string? BrandGenericColumn { get; set; }
+    public string? RxOtcColumn { get; set; }
+    public string? ScheduleColumn { get; set; }
+
+    /// <summary>What the Brand/Generic column equals for a generic (default "Generic").</summary>
+    public string GenericValue { get; set; } = "Generic";
+    /// <summary>What the Rx/OTC column equals for a legend (Rx) drug (default "Rx").</summary>
+    public string RxValue { get; set; } = "Rx";
+    /// <summary>What the schedule column equals for "no controlled schedule" (default "0").</summary>
+    public string NoScheduleValue { get; set; } = "0";
 }
 
 /// <summary>

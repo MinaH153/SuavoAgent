@@ -37,3 +37,20 @@ public sealed record TopDispensedSpec(
     string? RxValue = null,
     string? ScheduleColumn = null,
     string? NoScheduleValue = null);
+
+/// <summary>
+/// Operator overrides for top-dispensed schema resolution. Any non-null column name pins that
+/// column (skips heuristic discovery — used when a pharmacy's Item table names are non-standard or
+/// discovery is ambiguous); the *Value fields set what "generic" / "Rx" / "no schedule" equal in
+/// this install's data (defaults: Generic / Rx / 0). All optional — an empty instance means
+/// "discover everything, use default match values".
+/// </summary>
+public sealed record TopDispensedColumnOverrides(
+    string? DrugNameColumn = null,
+    string? StrengthColumn = null,
+    string? BrandGenericColumn = null,
+    string? RxOtcColumn = null,
+    string? ScheduleColumn = null,
+    string? GenericValue = null,
+    string? RxValue = null,
+    string? NoScheduleValue = null);
