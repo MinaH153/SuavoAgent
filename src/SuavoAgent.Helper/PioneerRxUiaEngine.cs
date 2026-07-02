@@ -35,7 +35,37 @@ public sealed class PioneerRxUiaEngine : IDisposable
                 return false;
             }
 
-            _app = Application.Attach(processes[0]);
+            // Pick the first LIVE process that owns a top-level window. GetProcessesByName can return a
+            // process that has already exited or is otherwise inaccessible — a transient self-extract
+            // stub, an updater/splash helper, or a crashed instance. Accessing .Id/.MainWindowHandle on
+            // such an entry throws "No process is associated with this object", and blindly using
+            // processes[0] then fails the whole attach (and the workflow reports "main window not
+            // available" for every NDC). Skip the dead/inaccessible/windowless ones and attach to a real
+            // instance — robust on the box where PioneerRx spawns auxiliary processes.
+            Process? target = null;
+            foreach (var p in processes)
+            {
+                try
+                {
+                    if (p.HasExited) continue;
+                    if (p.MainWindowHandle == IntPtr.Zero) continue; // no top-level window (yet)
+                    target = p;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.Debug("Skipping inaccessible PioneerPharmacy process ({Type})", ex.GetType().Name);
+                }
+            }
+            if (target is null)
+            {
+                _logger.Warning(
+                    "PioneerPharmacy running ({Count} process(es)) but none is a live, windowed, accessible instance",
+                    processes.Length);
+                return false;
+            }
+
+            _app = Application.Attach(target);
             _automation = new UIA2Automation();
             _mainWindow = _app.GetMainWindow(_automation, TimeSpan.FromSeconds(5));
 
@@ -45,7 +75,7 @@ public sealed class PioneerRxUiaEngine : IDisposable
                 return false;
             }
 
-            _logger.Information("Attached to PioneerRx PID {Pid}", processes[0].Id);
+            _logger.Information("Attached to PioneerRx PID {Pid}", target.Id);
             return true;
         }
         catch (Exception ex)
