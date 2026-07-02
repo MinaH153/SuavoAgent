@@ -25,7 +25,7 @@ public sealed class PricingGridReaderTests
 
         Assert.NotNull(result);
         Assert.Equal("keysource", result!.Value.supplier);
-        Assert.Equal(3.16m, result.Value.cost);
+        Assert.Equal(3.16m, result.Value.costPerUnit);
     }
 
     [Fact]
@@ -41,7 +41,7 @@ public sealed class PricingGridReaderTests
         var result = PricingGridReader.SelectCheapest(rows);
 
         Assert.Equal("RealValueRx", result!.Value.supplier);
-        Assert.Equal(3.44m, result.Value.cost);
+        Assert.Equal(3.44m, result.Value.costPerUnit);
     }
 
     [Fact]
@@ -111,29 +111,31 @@ public sealed class PricingGridReaderTests
         => Assert.Equal(expected, PricingGridReader.LooksLikeDoNotUse(text));
 
     [Fact]
-    public void SelectCheapest_NadimOmeprazole_excludes_blank_cost_rows_that_sort_on_top()
+    public void SelectCheapest_NadimOmeprazole_ranks_by_cost_per_unit_not_pack_cost()
     {
-        // Ground truth: Nadim's live Supplier Catalog for Omeprazole Dr 40 Mg (NDC 55111-0645-01),
-        // read off his box. Two McKesson rows carry BLANK cost and render at the top of the grid;
-        // Nadim's spoken heuristic ("cheapest = the one on top") would wrongly pick one of them.
-        // The engine must exclude blank/zero costs (fail-closed) and compute the true argmin —
-        // which is Real Value Rx at $3.16 (NOT McKesson $4.95, which is a 500-count package).
+        // Ground truth: Nadim's live Supplier Catalog for Omeprazole Dr 40 Mg (NDC 55111-0645-01).
+        // The row values below are COST PER UNIT (the ranking basis — Graphify rule "argmin over
+        // Cost Per Unit, NOT Cost"). Two McKesson rows carry a blank/0 per-unit cost and render on
+        // top; the engine excludes them fail-closed. Crucially the 500-count McKesson pack has the
+        // LOWEST per-unit ($0.0099) even though its pack cost ($4.95) is far from the lowest — so
+        // ranking by per-unit (correct) picks McKesson, while ranking by raw pack cost (WRONG) would
+        // have picked Real Value Rx. This test locks in the per-unit rule.
         var rows = new[]
         {
-            new Row("Mckesson 869640", 0m, "Available"),      // blank cost, sorts on top -> excluded
-            new Row("Mckesson 340b", 0m, "Available"),        // blank cost -> excluded
-            new Row("Real Value Rx", 3.16m, "Available"),     // true cheapest by Cost
-            new Row("keysource", 3.28m, "Available"),
-            new Row("Prescription Supply", 3.44m, "Available"),
-            new Row("Anda", 3.54m, "Available"),
-            new Row("McKesson", 4.95m, "Available"),          // 500-ct package (low per-unit, high Cost)
-            new Row("Mckesson Geri", 13.89m, "Available"),
+            new Row("Mckesson 869640", 0m, "Available"),        // blank per-unit, sorts on top -> excluded
+            new Row("Mckesson 340b", 0m, "Available"),          // blank -> excluded
+            new Row("Real Value Rx", 0.0316m, "Available"),     // cheapest by PACK cost ($3.16/100) — NOT the winner
+            new Row("keysource", 0.0328m, "Available"),
+            new Row("Prescription Supply", 0.0344m, "Available"),
+            new Row("Anda", 0.0354m, "Available"),
+            new Row("McKesson", 0.0099m, "Available"),          // 500-ct pack: cheapest PER UNIT -> the winner
+            new Row("Mckesson Geri", 0.1389m, "Available"),
         };
 
         var result = PricingGridReader.SelectCheapest(rows);
 
         Assert.NotNull(result);
-        Assert.Equal("Real Value Rx", result!.Value.supplier);
-        Assert.Equal(3.16m, result.Value.cost);
+        Assert.Equal("McKesson", result!.Value.supplier);       // per-unit winner, not the pack-cost winner
+        Assert.Equal(0.0099m, result.Value.costPerUnit);
     }
 }
