@@ -87,6 +87,46 @@ public class VisionSupplierGridParserTests
     }
 
     [Fact]
+    public void Reads_supplier_and_cheapest_from_the_real_wide_pioneerrx_grid()
+    {
+        // Verbatim line-OCR of Nadim's real PioneerRx Supplier-Catalog (image (31).png, Omeprazole DR
+        // 40mg). Each row is ONE TextLine — Linked/Group/Name/NDC/UPC precede the Supplier column, and
+        // Cost/CostPerUnit/Rebate/BOH/AWP/MAC follow it — so a naive "leading alpha" read would return
+        // "Yes Rx OMEPRAZOLE ... Stock Package with" and the top-of-window pricing panel would pollute
+        // the ranking. The supplier must anchor on the item id (NDC), and the panel rows (no id) drop out.
+        // The 500-count McKesson pack ($4.95 → 0.0099/unit) wins on per-unit despite sitting at row 8,
+        // NOT the top row (Real Value Rx $3.16 / 0.0316) — the exact trap the sighted read exists to beat.
+        var regions = new List<TextRegion>
+        {
+            // top-of-window pricing panel — decimal-bearing but no id; must not be ranked as suppliers
+            Line("AWP Source: Highest AWP 7.3956", 100),
+            Line("NADAC: (per EA) 0.0504", 140),
+            Line("Average Received Cost: (per EA) 0.0118", 180),
+            // the Supplier Catalog grid
+            Line("Yes Rx OMEPRAZOLE DR CP 40... 55111-0645-01 35511164501 Mckesson 869640 1583772 1 Stock Package with 100.000... 7858.000000 0.000000 739.5600 7.3956 0.0000 0.0000 Available", 300),
+            Line("Yes Rx OMEPRAZOLE DR CP 40... 55111-0645-01 7555111064501 Real Value Rx 755511106... 1 Stock Package with 100.000... 3.1600 0.0316 3.1600 0.0316 7858.000000 0.000000 739.5600 7.3956 0.0000 0.0000 Available", 340),
+            Line("Yes Rx Omeprazole DR 40mg Ca... 55111-0645-01 keysource 117387 DR.REDDY'S LAB 1 Stock Package with 100.000... 3.2800 0.0328 3.2800 0.0328 7858.000000 0.000000 739.5600 7.3956 0.0000 0.0000 Available", 380),
+            Line("Yes Rx OMEPRAZOLE DR 40MG 55111-0645-01 355111645016 Anda 322642 DR.REDDY'S LAB 1 Stock Package with 100.000... 3.5400 0.0354 3.5400 0.0354 7858.000000 0.000000 739.5600 7.3956 0.0000 0.0000 Available", 420),
+            Line("Yes Rx OMEPRAZOLE DR CP 40... 55111-0645-01 35511164501 McKesson 1583772 1 Stock Package with 500.000... 4.9500 0.0099 4.9500 0.0099 7858.000000 0.000000 739.5600 1.4791 0.0000 0.0000 Available", 460),
+            Line("Yes Rx OMEPRAZOLE DR CP 40... 55111-0645-01 35511164501 Mckesson Geri... 1583772 1 Stock Package with 100.000... 13.8900 0.1389 13.8900 0.1389 7858.000000 0.000000 739.5600 7.3956 0.0000 0.0000 Available", 500),
+        };
+
+        var reading = VisionSupplierGridParser.ReadCheapest(regions);
+
+        Assert.NotNull(reading);
+        Assert.Equal("McKesson", reading!.Supplier);            // clean name — not the row prefix junk
+        Assert.Equal(0.0099m, reading.CostPerUnit);             // the 500-ct pack, not the top row
+
+        // The Supplier column is read cleanly on the priced grid rows, and the pricing panel is excluded.
+        var priced = VisionSupplierGridParser.ParseRows(regions).FindAll(r => r.CostPerUnit is > 0m && r.HasId);
+        Assert.Contains(priced, r => r.Supplier == "Real Value Rx");
+        Assert.Contains(priced, r => r.Supplier == "keysource");
+        Assert.Contains(priced, r => r.Supplier == "Anda");
+        Assert.DoesNotContain(priced, r => r.Supplier.Contains("OMEPRAZOLE"));   // Name never leaks in
+        Assert.DoesNotContain(priced, r => r.Supplier.Contains("DR.REDDY"));     // Manufacturer never leaks in
+    }
+
+    [Fact]
     public void Returns_null_on_empty_or_headers_only()
     {
         Assert.Null(VisionSupplierGridParser.ReadCheapest(new List<TextRegion>()));
