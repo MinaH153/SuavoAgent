@@ -252,8 +252,13 @@ public sealed class PricingWorkflow
     {
         try
         {
-            // Click "Item" in the menu bar
-            var menuBar = mainWindow.FindFirstDescendant(cf.ByControlType(ControlType.MenuBar));
+            // Click "Item" in the menu bar. Win32/WinForms/DevExpress bars report ControlType.MenuBar;
+            // a WPF-native menu reports ControlType.Menu. Try MenuBar first, then Menu, so the menu
+            // opens regardless of the vendor's UI toolkit — the real PioneerRx control type is unknown
+            // from screenshots, and this handles both. (Surfaced on the WPF PioneerRxSim: faithful runs
+            // failed every row at "Could not open Item → Rx Item menu" because only MenuBar was tried.)
+            var menuBar = mainWindow.FindFirstDescendant(cf.ByControlType(ControlType.MenuBar))
+                ?? mainWindow.FindFirstDescendant(cf.ByControlType(ControlType.Menu));
             if (menuBar == null) return false;
 
             var (itemMenu, itemRes) = resolver.FindFirst(menuBar, cf, SelectorStepId.OpenItemMenu, cf.ByName(ItemMenuName));
