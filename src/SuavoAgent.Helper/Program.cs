@@ -84,7 +84,12 @@ try
 
     using var pioneer = new PioneerRxUiaEngine(Log.Logger);
     using var ipcClient = new IpcPipeClient(pipeName, Log.Logger);
-    var pricingWorkflow = new PricingWorkflow(pioneer, Log.Logger);
+
+    // Vision-based pricing reader — reads the Pricing grid BY SIGHT (capture + OCR), vision-primary
+    // with UIA exact-verify. Null unless vision.json enables vision + Tesseract → pricing stays
+    // UIA-only (today's default). On-device only; the sighted read never leaves the box.
+    var visionPricingReader = SuavoAgent.Helper.Vision.VisionBootstrap.TryBuildPricingReader(Log.Logger);
+    var pricingWorkflow = new PricingWorkflow(pioneer, Log.Logger, visionPricingReader);
 
     // Vision pipeline — operator opt-in via ProgramData\SuavoAgent\vision.json.
     // Returns null (no vision) when disabled, which is the default.

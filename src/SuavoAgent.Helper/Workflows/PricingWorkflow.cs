@@ -24,6 +24,10 @@ public sealed class PricingWorkflow
 {
     private readonly PioneerRxUiaEngine _engine;
     private readonly ILogger _logger;
+    // Vision-primary grid reader (reads "the one on top" by sight via OCR). Null = vision off →
+    // UIA-only, exactly today's behavior. When present, the vision read drives and the UIA read
+    // verifies the exact cost (VisionExactReconciler) so a misread never writes wrong pricing.
+    private readonly VisionPricingGridReader? _visionReader;
 
     // UIA element identifiers confirmed from screenshots
     private const string ItemMenuName = "Item";
@@ -35,11 +39,14 @@ public sealed class PricingWorkflow
     // How long to wait for UI elements to appear after navigation
     private static readonly TimeSpan ElementTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan GridLoadTimeout = TimeSpan.FromSeconds(5);
+    // Bound the sighted read (capture + OCR) per NDC so a stuck OCR can't wedge a 500-item batch.
+    private static readonly TimeSpan VisionReadTimeout = TimeSpan.FromSeconds(20);
 
-    public PricingWorkflow(PioneerRxUiaEngine engine, ILogger logger)
+    public PricingWorkflow(PioneerRxUiaEngine engine, ILogger logger, VisionPricingGridReader? visionReader = null)
     {
         _engine = engine;
         _logger = logger;
+        _visionReader = visionReader;
     }
 
     /// <summary>
@@ -121,9 +128,53 @@ public sealed class PricingWorkflow
                 }
                 Observe(SelectorStepId.PricingTab, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
-                // Step 5: Read the supplier grid — find cheapest (lowest cost per unit)
-                var cheapest = ReadCheapestSupplier(editWindow, cf, out var gridFailure);
-                if (cheapest == null)
+                // Step 5: Read the supplier grid. VISION-PRIMARY (SEE "the one on top" via OCR) +
+                // EXACT-VERIFY (UIA cell value) so an OCR misread never writes a wrong cost. When
+                // vision is off this collapses to exactly today's UIA-only read.
+                var uiaCheapest = ReadCheapestSupplier(editWindow, cf, out var gridFailure);
+
+                if (_visionReader is { IsAvailable: true })
+                {
+                    VisionSupplierGridParser.VisionGridReading? visionReading = null;
+                    try
+                    {
+                        var hwnd = editWindow.Properties.NativeWindowHandle.ValueOrDefault;
+                        using var visionCts = new CancellationTokenSource(VisionReadTimeout);
+                        visionReading = _visionReader
+                            .TryReadCheapestAsync(hwnd, _engine.ProcessId, visionCts.Token)
+                            .GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warning("PricingWorkflow: vision read errored ({Type}) — using exact-only", ex.GetType().Name);
+                    }
+
+                    var decision = VisionExactReconciler.Reconcile(
+                        vision: visionReading is { } vr
+                            ? new VisionExactReconciler.Reading(vr.Supplier, vr.CostPerUnit, vr.Confidence)
+                            : null,
+                        uia: uiaCheapest is { } uc
+                            ? new VisionExactReconciler.Reading(uc.supplier, uc.costPerUnit, 1.0)
+                            : null);
+
+                    if (!decision.Accept)
+                    {
+                        Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Failed, SelectorFailureKind.GridEmpty);
+                        _logger.Warning("PricingWorkflow: NDC {Ndc} pricing read NOT confirmed: {Reason}",
+                            request.Ndc, decision.RejectReason);
+                        return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
+                            false, null, null, gridFailure ?? decision.RejectReason ?? "Pricing read not confirmed"));
+                    }
+
+                    Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Resolved, SelectorFailureKind.None);
+                    _logger.Debug("PricingWorkflow: NDC {Ndc} → {Supplier} @ {Cost}/unit (source {Src})",
+                        request.Ndc, decision.Supplier, decision.CostPerUnit, decision.Source);
+                    return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
+                        true, decision.Supplier, decision.CostPerUnit, null));
+                }
+
+                // Vision disabled → UIA-only (unchanged).
+                if (uiaCheapest == null)
                 {
                     Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Failed, SelectorFailureKind.GridEmpty,
                         ScanCandidates(editWindow, cf, ControlType.Table)
@@ -134,10 +185,10 @@ public sealed class PricingWorkflow
                 Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 _logger.Debug("PricingWorkflow: NDC {Ndc} → {Supplier} @ {Cost}/unit",
-                    request.Ndc, cheapest.Value.supplier, cheapest.Value.costPerUnit);
+                    request.Ndc, uiaCheapest.Value.supplier, uiaCheapest.Value.costPerUnit);
 
                 return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
-                    true, cheapest.Value.supplier, cheapest.Value.costPerUnit, null));
+                    true, uiaCheapest.Value.supplier, uiaCheapest.Value.costPerUnit, null));
             }
             finally
             {

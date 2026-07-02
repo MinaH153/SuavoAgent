@@ -338,6 +338,10 @@ public enum PricingExecutorMode
     SqlFirst,
     /// <summary>UIA-first via Helper. No SQL fallback. See <c>AgentOptions.PricingExecutor</c>.</summary>
     UiaFirst,
+    /// <summary>Vision-first via Helper: reads the Pricing grid BY SIGHT (screen capture + on-device
+    /// OCR) with a UIA exact-verify so a misread never writes a wrong cost. Drives the screen exactly
+    /// like <see cref="UiaFirst"/>; the sighted read activates when vision.json enables it on the box.</summary>
+    VisionFirst,
 }
 
 /// <summary>

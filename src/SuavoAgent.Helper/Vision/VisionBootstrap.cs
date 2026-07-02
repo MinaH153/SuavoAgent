@@ -65,6 +65,38 @@ public static class VisionBootstrap
     }
 
     /// <summary>
+    /// Builds the vision-based pricing reader for the PMS box. Unlike the sandbox bootstrap, this IS
+    /// allowed on a PioneerRx box — it captures ONLY the Edit-Rx-Item/Supplier-Catalog window (per
+    /// lookup, HWND-scoped) to read the cheapest supplier by sight, PHI-scrubbed, on-device. Gated on
+    /// the same vision.json opt-in (+ Tesseract enabled) as the observation pipeline. Returns null when
+    /// vision is off, OCR is off, non-Windows, or on any construction error → caller stays UIA-only.
+    /// </summary>
+    public static SuavoAgent.Helper.Workflows.VisionPricingGridReader? TryBuildPricingReader(ILogger logger)
+    {
+        try
+        {
+            var opts = LoadOptions(logger);
+            if (!opts.Enabled || !opts.Tesseract.Enabled || !OperatingSystem.IsWindows())
+            {
+                logger.Information(
+                    "Vision pricing reader disabled (visionEnabled={V}, ocrEnabled={O}) — pricing stays UIA-only",
+                    opts.Enabled, opts.Tesseract.Enabled);
+                return null;
+            }
+
+            var agentOpts = Options.Create(new AgentOptions { Vision = opts });
+            IScreenExtractor extractor = ScrubbedExtractorFactory.Create(agentOpts, logger);
+            logger.Information("Vision pricing reader ENABLED — extractor={Ext} (reads the Pricing grid by sight)", extractor.ExtractorId);
+            return new SuavoAgent.Helper.Workflows.VisionPricingGridReader(extractor, agentOpts, logger);
+        }
+        catch (Exception ex)
+        {
+            logger.Warning(ex, "VisionBootstrap.TryBuildPricingReader: failed — pricing stays UIA-only");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Sandbox-only bootstrap for WINDOW-SCOPED PrintWindow capture on a NON-PHI box.
     /// Unlike <see cref="TryBuild"/>, this does NOT require vision.json — sandbox capture is
     /// opt-in per explore_sandbox command, not via an operator config file — but it captures
