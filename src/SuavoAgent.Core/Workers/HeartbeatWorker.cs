@@ -1050,6 +1050,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "set_reasoning_config":
                     await HandleSetReasoningConfigAsync(scEl, cmd, ct);
                     break;
+                case "set_vision_config":
+                    await HandleSetVisionConfigAsync(scEl, cmd, ct);
+                    break;
                 case "restart_helper":
                     await HandleRestartHelperAsync(scEl, cmd, ct);
                     break;
@@ -1187,6 +1190,97 @@ public sealed class HeartbeatWorker : ResilientHostedService
 
             _logger.LogInformation("set_reasoning_config: wrote reasoning.json (Enabled={Enabled}) — takes effect on next restart", Bool("enabled"));
             await AckAsync(true, new { applied = true, enabled = Bool("enabled"), fields = reasoning.Select(kv => kv.Key).ToArray(), note = "restart required to activate" }, null);
+        }
+        catch (Exception ex)
+        {
+            await AckAsync(false, null, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Writes vision.json + provisions the SHA-verified Tesseract bundle into the agent's (SYSTEM-
+    /// writable) config dir, so the Helper can read the Pricing grid BY SIGHT. Runs in Core because the
+    /// interactive user session cannot write the ACL-locked %ProgramData%\SuavoAgent folder. Native
+    /// code, so the bundle is https + sha-pinned. Takes effect on the next restart.
+    /// </summary>
+    private async Task HandleSetVisionConfigAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        try
+        {
+            string? Str(string k) => dataEl.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            int? Int(string k) => dataEl.TryGetProperty(k, out var v) && v.TryGetInt32(out var n) ? n : null;
+            bool Bool(string k) => dataEl.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.True;
+
+            var enabled = Bool("enabled");
+            var tesseractEnabled = Bool("tesseractEnabled");
+            var bundleUrl = Str("bundleUrl");
+            var bundleSha256 = Str("bundleSha256");
+
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SuavoAgent");
+            var nativeLibraryPath = Str("nativeLibraryPath") ?? Path.Combine(dir, "vision");
+            var tessdataPath = Str("tessdataPath") ?? Path.Combine(nativeLibraryPath, "tessdata");
+            var language = Str("language") ?? "eng";
+            var minConfidence = Int("minConfidence") ?? 50;
+
+            // Native code MUST be https + sha-pinned (same rule as the reasoning native libs).
+            if (tesseractEnabled)
+            {
+                if (string.IsNullOrWhiteSpace(bundleUrl) || !bundleUrl!.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    await AckAsync(false, null, "bundleUrl (https) is required when tesseractEnabled=true");
+                    return;
+                }
+                if (string.IsNullOrWhiteSpace(bundleSha256))
+                {
+                    await AckAsync(false, null, "bundleSha256 is required when tesseractEnabled=true (native code must be sha-pinned)");
+                    return;
+                }
+            }
+
+            // vision.json — VisionOptions shape (VisionBootstrap.LoadOptions deserializes this).
+            var root = new System.Text.Json.Nodes.JsonObject
+            {
+                ["Enabled"] = enabled,
+                ["Tesseract"] = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["Enabled"] = tesseractEnabled,
+                    ["NativeLibraryPath"] = nativeLibraryPath,
+                    ["TessdataPath"] = tessdataPath,
+                    ["Language"] = language,
+                    ["MinConfidence"] = minConfidence,
+                },
+            };
+
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "vision.json");
+            var tmp = path + ".tmp";
+            await File.WriteAllTextAsync(tmp, root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }), ct);
+            File.Move(tmp, path, overwrite: true);
+            _logger.LogInformation("set_vision_config: wrote vision.json (Enabled={Enabled}, OCR={Ocr})", enabled, tesseractEnabled);
+
+            var provision = "skipped";
+            if (tesseractEnabled)
+            {
+                var prov = new SuavoAgent.Core.Vision.TesseractBundleProvisioner(_logger);
+                var r = await prov.ProvisionAsync(bundleUrl!, bundleSha256!, nativeLibraryPath, ct);
+                provision = r.Message;
+                if (!r.Ok)
+                {
+                    await AckAsync(false, null, $"vision.json written but Tesseract provisioning failed: {r.Message}");
+                    return;
+                }
+            }
+
+            await AckAsync(true, new { applied = true, enabled, tesseractEnabled, nativeLibraryPath, tessdataPath, provision, note = "restart required to activate" }, null);
         }
         catch (Exception ex)
         {
