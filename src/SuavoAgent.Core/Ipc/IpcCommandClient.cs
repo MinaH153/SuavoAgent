@@ -77,7 +77,15 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
         _pipe = null;
         try
         {
-            var pipe = new NamedPipeClientStream(".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            // Identification level EXPLICITLY: the Helper's primary identity proof is reading
+            // this client's token SID via RunAsClient impersonation. The parameterless overload
+            // sends no SQOS at all, leaving the impersonation ceiling to OS defaults — on field
+            // boxes that rung then comes back inconclusive and the de-privileged Helper falls
+            // through to image-path reads that ACCESS_DENY (the command-pipe strand).
+            // Identification is the least privilege that still lets the server read WHO we are.
+            var pipe = new NamedPipeClientStream(
+                ".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous,
+                System.Security.Principal.TokenImpersonationLevel.Identification);
             await pipe.ConnectAsync((int)timeout.TotalMilliseconds, ct);
             _pipe = pipe;
             _logger.LogInformation("IpcCommandClient connected to Helper on pipe {Name}", _pipeName);

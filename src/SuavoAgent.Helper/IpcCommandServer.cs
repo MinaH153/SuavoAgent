@@ -33,15 +33,29 @@ internal static class ProcessImageInterop
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, [Out] StringBuilder lpExeName, ref uint lpdwSize);
 
-    public static string? Get(uint processId)
+    public static string? Get(uint processId) => Get(processId, out _);
+
+    /// <summary>
+    /// Same as <see cref="Get(uint)"/> but surfaces the Win32 error on failure so the
+    /// caller can LOG why the cross-token read failed (field boxes strand on silent
+    /// nulls here — the QA-C5 reject then looks causeless in the log).
+    /// </summary>
+    public static string? Get(uint processId, out int lastWin32Error)
     {
+        lastWin32Error = 0;
         var hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
-        if (hProcess == IntPtr.Zero) return null;
+        if (hProcess == IntPtr.Zero)
+        {
+            lastWin32Error = Marshal.GetLastWin32Error();
+            return null;
+        }
         try
         {
             var sb = new StringBuilder(1024);
             uint size = (uint)sb.Capacity;
-            return QueryFullProcessImageNameW(hProcess, 0, sb, ref size) ? sb.ToString() : null;
+            if (QueryFullProcessImageNameW(hProcess, 0, sb, ref size)) return sb.ToString();
+            lastWin32Error = Marshal.GetLastWin32Error();
+            return null;
         }
         finally
         {
@@ -834,7 +848,38 @@ public sealed class IpcCommandServer : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "IpcCommandServer: client SID check inconclusive for PID {Pid} — falling back to image-path check", clientPid);
+            // Warning, not Debug: on field boxes this rung failing silently is exactly how the
+            // command-pipe strand hid for four releases — the log then shows only the final
+            // C5 reject with no cause. Surface the WHY at default log level.
+            _logger.Warning(
+                "IpcCommandServer: client SID check inconclusive for PID {Pid} ({ExType}: {ExMessage}) — falling back to session/image checks",
+                clientPid, ex.GetType().Name, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// True when the pipe client lives in Session 0 — the services session. Windows only
+    /// puts services (and processes spawned by them) there; a standard interactive user
+    /// cannot create a Session-0 process without admin rights, so — combined with the
+    /// SuavoAgent.Core process-name check — this is accepting evidence of the same
+    /// strength as the service-SID rung, and it needs NO process handle or impersonation
+    /// (works for the de-privileged Helper where OpenProcess/RunAsClient fail).
+    /// </summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private bool TryGetClientSessionZero(NamedPipeServerStream pipe, uint clientPid)
+    {
+        try
+        {
+            if (!GetNamedPipeClientSessionId(pipe.SafePipeHandle, out var sessionId)) return false;
+            if (sessionId == 0) return true;
+            _logger.Warning(
+                "IpcCommandServer: client PID {Pid} is in session {Session}, not the services session — no session-0 acceptance",
+                clientPid, sessionId);
+            return false;
+        }
+        catch
+        {
             return false;
         }
     }
@@ -875,10 +920,26 @@ public sealed class IpcCommandServer : IDisposable
                 return true;
             }
 
+            // Second unforgeable rung, for boxes where impersonation is inconclusive: the
+            // client's SESSION. Core is a Windows service → Session 0; a standard user
+            // cannot spawn there. Needs no process handle, so it works for the
+            // de-privileged Helper (the strand-causing case: OpenProcess → ACCESS_DENIED).
+            if (TryGetClientSessionZero(pipe, clientPid))
+            {
+                _logger.Information(
+                    "IpcCommandServer: accepting Core (PID {Pid}) — client lives in Session 0 (services session, unreachable to a standard user); ProcessName=SuavoAgent.Core verified",
+                    clientPid);
+                return true;
+            }
+
             // Not a service token (or impersonation inconclusive): fall through to the image-path check.
             // QueryFullProcessImageName works across user/SYSTEM security tokens;
             // MainModule fallback for non-Windows or quirks.
-            var clientPath = ProcessImageInterop.Get(clientPid);
+            var clientPath = ProcessImageInterop.Get(clientPid, out var imageReadError);
+            if (string.IsNullOrEmpty(clientPath) && imageReadError != 0)
+                _logger.Warning(
+                    "IpcCommandServer: QueryFullProcessImageName failed for PID {Pid} (Win32 error {Err}) — trying MainModule",
+                    clientPid, imageReadError);
             if (string.IsNullOrEmpty(clientPath))
             {
                 try
@@ -938,6 +999,11 @@ public sealed class IpcCommandServer : IDisposable
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static extern bool GetNamedPipeClientProcessId(
         Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint clientProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static extern bool GetNamedPipeClientSessionId(
+        Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint clientSessionId);
 
     public void Dispose()
     {
