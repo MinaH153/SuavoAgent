@@ -1,0 +1,79 @@
+name: pricing-rehearsal
+
+# Runs the FULL pricing chain live against the PioneerRxSim on a Windows runner and grades the
+# priced workbook — HelperInteractivePreflight -> DiscoveryClient -> UiaFirstPricingJobExecutor ->
+# PricingJobRunner -> IPC -> real SuavoAgent.Helper.exe -> PricingWorkflow -> PioneerRxUiaEngine.
+#
+# This is the autonomous "works live end-to-end" verification. A windows-latest runner has an
+# interactive desktop session, so the real Helper (launched as a normal process, matched integrity)
+# attaches to the sim and drives its UIA menu/grid — the session-0 gate that blocks the de-priv
+# service Helper on the box does not apply here. Grading (Stage 5) fails the job if the writeback is
+# wrong, so a green run means: menu opened, NDC searched, Pricing tab read, cheapest written correctly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "single sim variant (leave blank to run the default matrix)"
+        required: false
+        default: ""
+      mode:
+        description: "quick | full"
+        required: false
+        default: "quick"
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # faithful = baseline full chain; wpf-menu = the WPF menu-fidelity case the ExpandCollapse
+        # nav fix targets. A single-variant dispatch overrides both via the step's env guard below.
+        variant: [faithful, wpf-menu]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Dress rehearsal (real chain vs PioneerRxSim)
+        shell: pwsh
+        env:
+          INPUT_VARIANT: ${{ github.event.inputs.variant }}
+          INPUT_MODE: ${{ github.event.inputs.mode }}
+          MATRIX_VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Allowlist — never pass an unvalidated dispatch input to the rehearsal. Values that aren't
+          # one of these are rejected outright (defense in depth on top of the .ps1 ValidateSet).
+          $allowed = @("faithful","wpf-menu","slow-grid","glacial-grid","renamed-cost","currency-cells","virtual-depth")
+          $requested = if ($env:INPUT_VARIANT) { $env:INPUT_VARIANT } else { "" }
+          if ($requested -and ($allowed -notcontains $requested)) { throw "Unknown variant '$requested'" }
+          $mode = if ($env:INPUT_MODE -eq "full") { "full" } else { "quick" }
+          $variant = if ($requested) { $requested } else { $env:MATRIX_VARIANT }
+          # A single-variant dispatch runs only on the matching matrix leg; skip the duplicate leg.
+          if ($requested -and $requested -ne $env:MATRIX_VARIANT) {
+            Write-Host "Single-variant dispatch ($requested) — skipping matrix leg $env:MATRIX_VARIANT."
+            exit 0
+          }
+          if ($allowed -notcontains $variant) { throw "Refusing to run unknown variant '$variant'" }
+          Write-Host "Running rehearsal: variant=$variant mode=$mode"
+          pwsh tools/PioneerRxRehearsal/rehearsal.ps1 -CreatePmsMarker -Variant $variant -Mode $mode
+
+      - name: Upload rehearsal stage (priced workbook + logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal-${{ matrix.variant }}
+          path: |
+            .rehearsal-stage/**/*.xlsx
+            .rehearsal-stage/**/*.log
+            .rehearsal-stage/**/*.json
+          if-no-files-found: ignore
+          retention-days: 7
