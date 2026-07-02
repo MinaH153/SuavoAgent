@@ -20,13 +20,17 @@ His real sheet shape: 5-row preamble (title / "Better Life Pharmacy" / address /
 
 **Correctness nuance captured from his real data:** "cheapest" is ambiguous — Omeprazole `55111-0645-01` cheapest *cost* = Real Value Rx $3.16, cheapest *cost-per-unit* = McKesson $0.0099 (a 500-count pack flips the winner). Engine optimizes Cost (his stated intent) and excludes blank-cost rows fail-closed. If per-unit becomes the goal, that's a one-line switch — flagged.
 
-## What he showed but the agent does NOT yet do (roadmap)
+## Generating the top-500 (his last manual step) — now built
 
-| Capability | Source | Status |
-|---|---|---|
-| **Generate** the top-500 itself: Rx Binoculars → Transaction Search (Jan1–today, Generic, Rx-not-OTC, No Schedule) → Top-X report → export | video narration | ⚠️ not automated — Nadim does this manually to produce the input; agent consumes the sheet. Highest-value next build. |
+| Capability | Source | Status | Evidence |
+|---|---|---|---|
+| **Generate** the top-500 itself: Rx Binoculars → Transaction Search (Jan1–today, Generic, Rx-not-OTC, No Schedule) → Top-X ranked by dispensed → export | video narration + his sheet's filter header | ✅ **built (v3.83.0), SQL modality** | `SqlTopDispensedQueryBuilder` emits `TOP(@topN) SUM(DispensedQuantity)` over canary-pinned `Prescription.RxTransaction` INNER JOIN Item, filtered `DateFilled>=@windowStart AND status IN (final-fills) AND BrandGeneric=@generic [AND RxOtc][AND Schedule]`, `GROUP BY drug/strength/NDC ORDER BY SUM DESC` — his exact recipe + sheet shape. `SqlTopDispensedGenerator` executes it (fail-soft, PHI-negative); `ExcelTop500Writer` emits the sheet the pricing loop reads. Golden-tested (query 6/6, round-trip 2/2). **Last-mile (needs live PMS):** resolve Item name/generic/RxOtc/schedule column names at install + a `generate_top_dispensed` command chaining generate→price→writeback. |
+
+## Other capabilities he showed (out of current scope)
 | Name-vs-NDC search safety ("(Do Not Use)" pink rows, combo-drug HCTZ pollution) | frames | ✅ partial — `LooksLikeDoNotUse` guards the pricing path; general name-search UX not in scope |
 | Broader daily PMS work (Rx dispensing, queues/ToDo, invoice-import-failed monitoring, Recent Work Items) | system footage | ▫️ out of current scope — his manual work; candidates for future agentic coverage |
+
+## Ships (2026-07-02): MinaH153/SuavoAgent #258/#259 (connectivity), #260 (real-sheet reader), #261 (top-500 generator) → releases v3.80.0–v3.83.0.
 
 ## Connectivity & security (top-tier bar) — 2026-07-02
 - **Connectivity:** Core↔Helper command-pipe strand FIXED + proven live on the box (v3.81.0): `commandPipeConnected=true`, actuation ready/interactive. See [[project-suavoagent-ipc-strand-fixed]].
