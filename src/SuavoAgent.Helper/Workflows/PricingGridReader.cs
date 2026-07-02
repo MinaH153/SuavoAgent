@@ -17,7 +17,13 @@ namespace SuavoAgent.Helper.Workflows;
 /// </summary>
 public static class PricingGridReader
 {
-    public readonly record struct SupplierRow(string Supplier, decimal Cost, string Status);
+    /// <summary>
+    /// A Supplier Catalog row. <see cref="CostPerUnit"/> is the RANKING cost — Nadim's rule is
+    /// "cheapest = argmin over <b>Cost Per Unit</b>, NOT raw Cost" (a 500-count pack can win on
+    /// per-unit while losing on pack cost). Production feeds the grid's "Cost Per Unit" column here;
+    /// the SQL path ranks by the per-unit column too. Never populate this with raw pack Cost.
+    /// </summary>
+    public readonly record struct SupplierRow(string Supplier, decimal CostPerUnit, string Status);
 
     public static bool TryParseCost(string? text, out decimal cost) =>
         decimal.TryParse(
@@ -48,28 +54,29 @@ public static class PricingGridReader
         && text.Replace(" ", string.Empty).Contains("donotuse", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Cheapest usable supplier by Cost (ascending), skipping blank suppliers,
-    /// non-positive costs, and discontinued/unavailable rows. Returns null when
-    /// no row qualifies.
+    /// Cheapest usable supplier by <b>Cost Per Unit</b> ascending (Nadim's rule: argmin over
+    /// Cost Per Unit, NOT raw pack Cost — never trust top-row position), skipping blank suppliers,
+    /// non-positive per-unit costs, and discontinued/unavailable rows. Returns null when no row
+    /// qualifies.
     /// </summary>
-    public static (string supplier, decimal cost)? SelectCheapest(IEnumerable<SupplierRow> rows)
+    public static (string supplier, decimal costPerUnit)? SelectCheapest(IEnumerable<SupplierRow> rows)
     {
         string? bestSupplier = null;
-        decimal bestCost = decimal.MaxValue;
+        decimal bestCostPerUnit = decimal.MaxValue;
 
         foreach (var row in rows)
         {
             if (string.IsNullOrWhiteSpace(row.Supplier)) continue;
-            if (row.Cost <= 0) continue;
+            if (row.CostPerUnit <= 0) continue;
             if (!IsUsableStatus(row.Status)) continue;
 
-            if (row.Cost < bestCost)
+            if (row.CostPerUnit < bestCostPerUnit)
             {
-                bestCost = row.Cost;
+                bestCostPerUnit = row.CostPerUnit;
                 bestSupplier = row.Supplier.Trim();
             }
         }
 
-        return bestSupplier == null ? null : (bestSupplier, bestCost);
+        return bestSupplier == null ? null : (bestSupplier, bestCostPerUnit);
     }
 }

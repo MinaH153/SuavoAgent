@@ -134,10 +134,10 @@ public sealed class PricingWorkflow
                 Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
                 _logger.Debug("PricingWorkflow: NDC {Ndc} → {Supplier} @ {Cost}/unit",
-                    request.Ndc, cheapest.Value.supplier, cheapest.Value.cost);
+                    request.Ndc, cheapest.Value.supplier, cheapest.Value.costPerUnit);
 
                 return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
-                    true, cheapest.Value.supplier, cheapest.Value.cost, null));
+                    true, cheapest.Value.supplier, cheapest.Value.costPerUnit, null));
             }
             finally
             {
@@ -519,7 +519,7 @@ public sealed class PricingWorkflow
     /// fallback-to-hardcoded-ordinals path was Codex-flagged as risking wrong
     /// supplier/cost data on a UI revision (data integrity is precedence 1).
     /// </summary>
-    private (string supplier, decimal cost)? ReadCheapestSupplier(
+    private (string supplier, decimal costPerUnit)? ReadCheapestSupplier(
         Window editWindow, ConditionFactory cf, out string? failureReason)
     {
         failureReason = null;
