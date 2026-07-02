@@ -39,21 +39,28 @@ public sealed class ExcelPricingReader
             if (lastRow < 2 || lastCol < 1)
                 return ReadResult.Fail("Worksheet has no data rows");
 
-            var ndcCol = FindColumn(ws, ndcColumnHint, lastCol);
-            if (ndcCol == -1)
-                return ReadResult.Fail($"Could not find column matching '{ndcColumnHint}' in row 1");
+            // Detect the header row instead of assuming row 1. Real PioneerRx "Top 500
+            // Most Dispensed Rx Items" exports carry a title/pharmacy/address/filter preamble
+            // ABOVE the header (verified against Nadim's actual sheet: 5 preamble rows, then
+            // "# | Drug | Strength | NDC | Total Dispensed | Price"). Assuming row 1 made the
+            // reader fail-closed on his real file. Scan a bounded window for the first row that
+            // carries the NDC column; that's the header.
+            var (headerRow, ndcCol) = FindHeaderRow(ws, ndcColumnHint, lastRow, lastCol);
+            if (headerRow == -1)
+                return ReadResult.Fail(
+                    $"Could not find a header row with a column matching '{ndcColumnHint}' in the first {Math.Min(lastRow, MaxHeaderScanRows)} rows");
 
             // M1 savings: optionally capture the pharmacist's OWN current cost + dispensed volume
-            // columns if the workbook carries them. This is the most honest baseline (what he says
-            // he pays) and needs no PMS query or Vision. Absent column -> -1 -> left null (fail-soft).
+            // columns if the workbook carries them (Nadim's export has "Acquisition Cost" +
+            // "Total Dispensed"). Most honest baseline; needs no PMS query. Absent -> -1 -> null.
             var baselineCol = string.IsNullOrWhiteSpace(baselineCostColumnHint)
-                ? -1 : FindColumn(ws, baselineCostColumnHint!, lastCol);
+                ? -1 : FindColumnInRow(ws, headerRow, baselineCostColumnHint!, lastCol);
             var quantityCol = string.IsNullOrWhiteSpace(quantityColumnHint)
-                ? -1 : FindColumn(ws, quantityColumnHint!, lastCol);
+                ? -1 : FindColumnInRow(ws, headerRow, quantityColumnHint!, lastCol);
 
             var rows = new List<NdcRow>();
             var invalid = new List<InvalidNdcRow>();
-            for (int r = 2; r <= lastRow; r++)
+            for (int r = headerRow + 1; r <= lastRow; r++)
             {
                 var raw = ws.Cell(r, ndcCol).GetString()?.Trim();
                 if (string.IsNullOrEmpty(raw)) continue;
@@ -91,11 +98,31 @@ public sealed class ExcelPricingReader
         }
     }
 
-    private static int FindColumn(IXLWorksheet ws, string hint, int lastCol)
+    /// <summary>Rows to scan from the top when locating the header (covers the preamble
+    /// on real PMS exports without risking a mid-sheet false match).</summary>
+    private const int MaxHeaderScanRows = 25;
+
+    /// <summary>
+    /// The first row (within the scan window) that contains a column whose header matches
+    /// the NDC hint — that row IS the header. Returns (headerRow, ndcCol) or (-1, -1).
+    /// </summary>
+    private static (int headerRow, int ndcCol) FindHeaderRow(
+        IXLWorksheet ws, string ndcHint, int lastRow, int lastCol)
+    {
+        var scanTo = Math.Min(lastRow, MaxHeaderScanRows);
+        for (int r = 1; r <= scanTo; r++)
+        {
+            var ndcCol = FindColumnInRow(ws, r, ndcHint, lastCol);
+            if (ndcCol != -1) return (r, ndcCol);
+        }
+        return (-1, -1);
+    }
+
+    private static int FindColumnInRow(IXLWorksheet ws, int row, string hint, int lastCol)
     {
         for (int c = 1; c <= lastCol; c++)
         {
-            var header = ws.Cell(1, c).GetString()?.Trim() ?? "";
+            var header = ws.Cell(row, c).GetString()?.Trim() ?? "";
             if (header.Contains(hint, StringComparison.OrdinalIgnoreCase))
                 return c;
         }

@@ -131,6 +131,56 @@ public class ExcelPricingReaderTests : IDisposable
         Assert.All(result.Invalid, i => Assert.NotEmpty(i.Reason));
     }
 
+    [Fact]
+    public void Read_NadimRealTop500Layout_FindsHeaderPastPreamble()
+    {
+        // Ground truth: Nadim's actual "top 500 generics jan 1 to may 30.xlsx" (Better Life
+        // Pharmacy PioneerRx export). The header is NOT row 1 — a title/pharmacy/address/filter
+        // preamble sits above "# | Drug | Strength | NDC | Total Dispensed | Price".
+        // Before header-row detection this returned Fail — i.e. the engine could not read the
+        // real input at all.
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using (var wb = new XLWorkbook())
+        {
+            var ws = wb.Worksheets.Add("Sheet1");
+            ws.Cell(1, 1).Value = "Top 500 Most Dispensed Rx Items";
+            ws.Cell(2, 1).Value = "Better Life Pharmacy";
+            ws.Cell(3, 1).Value = "528 E Main St";
+            ws.Cell(4, 1).Value = "El Cajon, CA 92020-4008";
+            ws.Cell(5, 1).Value = "Dispensed Item Brand/Generic: Generic\nDispensed Item Dea Schedule: No Schedule";
+            // Header row 6 (his real columns + Acquisition Cost for the savings baseline)
+            ws.Cell(6, 1).Value = "#";
+            ws.Cell(6, 2).Value = "Drug";
+            ws.Cell(6, 3).Value = "Strength";
+            ws.Cell(6, 4).Value = "NDC";
+            ws.Cell(6, 5).Value = "Total Dispensed";
+            ws.Cell(6, 6).Value = "Acquisition Cost";
+            // His real first three rows
+            string[,] data =
+            {
+                { "1", "Fluticasone Prop 50 Mcg Spray", "50 mcg/actuation", "60505082901", "1523", "0.1625" },
+                { "2", "Omeprazole Dr 20 Mg Capsule", "20 mg", "59651000205", "1405", "0.0344" },
+                { "3", "Atorvastatin 40 Mg Tablet", "40 mg", "60505258008", "1300", "0.0500" },
+            };
+            for (int i = 0; i < data.GetLength(0); i++)
+                for (int c = 0; c < data.GetLength(1); c++)
+                    ws.Cell(7 + i, c + 1).Value = data[i, c];
+            wb.SaveAs(path);
+        }
+
+        var result = _reader.Read(path, "NDC", baselineCostColumnHint: "Acquisition Cost", quantityColumnHint: "Total Dispensed");
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(4, result.NdcColumnIndex);              // header detected at row 6, NDC is col D
+        Assert.Equal(3, result.Rows.Count);
+        Assert.Equal("60505082901", result.Rows[0].NdcNormalized);   // Fluticasone
+        Assert.Equal("59651000205", result.Rows[1].NdcNormalized);   // Omeprazole 20mg
+        Assert.Equal("60505258008", result.Rows[2].NdcNormalized);   // Atorvastatin
+        Assert.Equal(7, result.Rows[0].RowIndex);            // first data row is 7, not 2
+        Assert.Equal(0.1625m, result.Rows[0].BaselineCostPerUnit);   // Acquisition Cost mapped
+        Assert.Equal(1523m, result.Rows[0].Quantity);                // Total Dispensed mapped
+    }
+
     private string CreateExcel(IEnumerable<(string col1, string col2)> rows)
     {
         var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
