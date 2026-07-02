@@ -86,6 +86,13 @@ public sealed class PricingGridReaderTests
     [InlineData("1,234.50", true, 1234.50)]
     [InlineData("", false, 0)]
     [InlineData("n/a", false, 0)]
+    // Currency-formatted cells (DevExpress currency columns render "$3.28" / "$0.0099"). Invariant's
+    // currency symbol is "¤" not "$", so NumberStyles.Any rejected these → whole supplier batch parsed
+    // to nothing → false "no supplier rows". Must now strip the symbol and parse.
+    [InlineData("$3.28", true, 3.28)]
+    [InlineData("$0.0099", true, 0.0099)]
+    [InlineData("$1,234.50", true, 1234.50)]
+    [InlineData("$", false, 0)]
     public void TryParseCost_parses_plain_numbers(string text, bool ok, double expected)
     {
         var parsed = PricingGridReader.TryParseCost(text, out var cost);

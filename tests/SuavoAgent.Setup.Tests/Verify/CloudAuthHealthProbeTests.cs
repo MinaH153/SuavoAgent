@@ -30,4 +30,14 @@ public class CloudAuthHealthProbeTests
         var r = Run(null);
         Assert.Equal(GateState.Warn, r.State);
     }
+
+    [Fact]
+    public void Recovered_status_is_Ok_not_a_permanent_Fail()
+    {
+        // A successful credential recovery writes status:"recovered" with lastErrorKind null (the
+        // recovery client no longer leaves the triggering 401 on a success). The probe must read this
+        // as healthy — the prior code tested errKind BEFORE status and pinned the gate to Fail forever.
+        var r = Run("{\"status\":\"recovered\",\"lastSuccessAt\":\"2026-06-20T10:00:00Z\",\"lastErrorKind\":null}");
+        Assert.Equal(GateState.Ok, r.State);
+    }
 }

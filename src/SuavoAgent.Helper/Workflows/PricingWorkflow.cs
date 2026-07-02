@@ -387,39 +387,36 @@ public sealed class PricingWorkflow
         {
             try
             {
-                var candidates = editWindow.FindAllDescendants(cf.ByControlType(ControlType.Edit))
-                    .Concat(editWindow.FindAllDescendants(cf.ByControlType(ControlType.Text)));
+                // Materialize once. [C-3] NEVER verify against the Quick Search box: it still holds
+                // the NDC we just typed, so matching it is tautological. Exclude it by element
+                // IDENTITY (the exact box SearchByNdc typed into) so the exclusion holds even when
+                // PioneerRx exposes no HelpText; verify only the loaded item.
+                var texts = editWindow.FindAllDescendants(cf.ByControlType(ControlType.Edit))
+                    .Concat(editWindow.FindAllDescendants(cf.ByControlType(ControlType.Text)))
+                    .Where(el => !IsSearchBox(el, searchBoxRid))
+                    .Select(el => el.AsTextBox()?.Text ?? el.Name ?? "")
+                    .Where(t => !string.IsNullOrEmpty(t))
+                    .ToList();
 
-                foreach (var el in candidates)
+                // Do-Not-Use must be a FULL-PASS check BEFORE any NDC match. PioneerRx returns a red
+                // "(Do Not Use)" duplicate sharing the active item's NDC; the NDC lives in an Edit
+                // field (enumerated first) while the "(Do Not Use)" marker is a separate Text label.
+                // A per-element early-return on the NDC match would accept the item before the marker
+                // element is ever inspected — the exact hole this guard exists to close. Scan ALL
+                // candidates for the marker first; if any hits, refuse to price.
+                if (texts.Any(PricingGridReader.LooksLikeDoNotUse))
                 {
-                    // [C-3] NEVER verify against the Quick Search box: it still holds the NDC we
-                    // just typed, so matching it is tautological — verification "passes" for ANY
-                    // NDC even when the wrong item (or no item) loaded. That is exactly how the
-                    // previously-selected item's pricing got written as if it were this NDC's, and
-                    // it pre-empted the Do-Not-Use guard below. Exclude it by element IDENTITY (the
-                    // exact box SearchByNdc typed into) so the exclusion holds even when PioneerRx
-                    // exposes no HelpText (the resolver's own fallback path); verify only the loaded item.
-                    if (IsSearchBox(el, searchBoxRid)) continue;
+                    _logger.Warning(
+                        "PricingWorkflow: loaded item for NDC {Ndc} is marked Do Not Use — refusing to price",
+                        ndc);
+                    return false;
+                }
 
-                    var raw = el.AsTextBox()?.Text ?? el.Name ?? "";
-                    if (string.IsNullOrEmpty(raw)) continue;
-
-                    // Guard: the NDC quick-search dropdown returns a red "(Do Not
-                    // Use)" duplicate next to the green active item. If the loaded
-                    // item screen shows that marker we must NOT price it — fail so
-                    // the row gets a clear status instead of inactive pricing.
-                    if (PricingGridReader.LooksLikeDoNotUse(raw))
-                    {
-                        _logger.Warning(
-                            "PricingWorkflow: loaded item for NDC {Ndc} is marked Do Not Use — refusing to price",
-                            ndc);
-                        return false;
-                    }
-
+                foreach (var raw in texts)
+                {
                     // PioneerRx may display the NDC in any supported shape; normalize before compare
                     // to avoid false negatives on 4-4-2 / 5-3-2 layouts.
-                    var observed = NdcNormalizer.TryNormalize(raw.Trim());
-                    if (observed == normalizedNdc)
+                    if (NdcNormalizer.TryNormalize(raw.Trim()) == normalizedNdc)
                         return true;
 
                     // Fallback: substring check against digit-only form, for cases where the NDC
@@ -545,11 +542,24 @@ public sealed class PricingWorkflow
             // Virtualized DevExpress grids load rows lazily — reading once can
             // catch a partial set and miss the true cheapest. Wait until the row
             // count stops changing before reading.
-            var rows = WaitForStableRows(grid, cf);
+            var rows = WaitForStableRows(grid, cf, out var expectedRowCount);
             if (rows.Length == 0)
             {
                 _logger.Debug("PricingWorkflow: Pricing grid has no rows");
                 failureReason = "Pricing grid has no rows";
+                return null;
+            }
+
+            // Precedence-1 (data integrity): if the grid reports more logical rows than we could
+            // realize by scrolling, we're ranking a PARTIAL set and the true cheapest may be off
+            // screen. Refuse rather than write a possibly non-cheapest supplier to the operator's
+            // sheet — the row gets a clear status instead of plausible-looking wrong data.
+            if (expectedRowCount > rows.Length)
+            {
+                _logger.Warning(
+                    "PricingWorkflow: realized {Read}/{Total} pricing rows (virtualized) — refusing to rank a partial set",
+                    rows.Length, expectedRowCount);
+                failureReason = $"Pricing grid virtualized: read {rows.Length} of {expectedRowCount} supplier rows — refusing to rank a partial set";
                 return null;
             }
 
@@ -680,26 +690,67 @@ public sealed class PricingWorkflow
     /// DevExpress grids virtualize — a single read can catch a partial set and
     /// miss the true cheapest supplier.
     /// </summary>
-    private AutomationElement[] WaitForStableRows(AutomationElement grid, ConditionFactory cf)
+    private AutomationElement[] WaitForStableRows(AutomationElement grid, ConditionFactory cf, out int expectedRowCount)
     {
+        expectedRowCount = TryGetGridRowCount(grid); // -1 when the grid exposes no logical count
+
         var deadline = DateTime.UtcNow + GridLoadTimeout;
-        var rows = grid.FindAllChildren(cf.ByControlType(ControlType.DataItem));
-        var stable = 0;
+        var scroll = grid.Patterns.Scroll.PatternOrDefault;
+        bool canScroll = false;
+        try { canScroll = scroll != null && scroll.VerticallyScrollable.ValueOrDefault; } catch { }
+
+        // Accumulate realized rows across scroll positions, keyed by RuntimeId. A virtualized
+        // DevExpress/WPF grid only exposes RENDERED rows via UIA, so a single-viewport read misses
+        // off-screen rows — and the true cheapest supplier can be one of them. Scroll to the bottom
+        // in increments, unioning rows, until we've realized the logical row count (or growth stops
+        // / the load budget elapses). Without scroll support this degrades to the old stable read.
+        var byId = new Dictionary<string, AutomationElement>();
+        void Harvest()
+        {
+            int i = 0;
+            foreach (var r in grid.FindAllChildren(cf.ByControlType(ControlType.DataItem)))
+            {
+                var rid = TryGetRuntimeId(r);
+                byId[rid is { Length: > 0 } ? string.Join(",", rid) : "ord:" + i] = r;
+                i++;
+            }
+        }
+
+        Harvest();
+        int lastCount = byId.Count, stable = 0;
         while (DateTime.UtcNow < deadline)
         {
+            if (expectedRowCount > 0 && byId.Count >= expectedRowCount) break;
+
+            bool scrolled = false;
+            if (canScroll)
+            {
+                double pct = 100;
+                try { pct = scroll!.VerticalScrollPercent.ValueOrDefault; } catch { }
+                if (pct < 99.9)
+                {
+                    try { scroll!.Scroll(ScrollAmount.NoAmount, ScrollAmount.LargeIncrement); scrolled = true; } catch { }
+                }
+            }
+
             Thread.Sleep(250);
-            var next = grid.FindAllChildren(cf.ByControlType(ControlType.DataItem));
-            if (next.Length > 0 && next.Length == rows.Length)
+            Harvest();
+
+            if (byId.Count == lastCount)
             {
-                if (++stable >= 2) { rows = next; break; }
+                if (++stable >= 2 && !scrolled) break; // stopped growing and nothing left to scroll
             }
-            else
-            {
-                stable = 0;
-            }
-            rows = next;
+            else { stable = 0; lastCount = byId.Count; }
         }
-        return rows;
+        return byId.Values.ToArray();
+    }
+
+    /// <summary>Logical row count from the grid's Grid pattern, or -1 when unavailable. Used to
+    /// tell a fully-realized read from a partial (still-virtualized) one so ranking can fail closed.</summary>
+    private static int TryGetGridRowCount(AutomationElement grid)
+    {
+        try { return grid.Patterns.Grid.PatternOrDefault?.RowCount.ValueOrDefault ?? -1; }
+        catch { return -1; }
     }
 
     /// <summary>

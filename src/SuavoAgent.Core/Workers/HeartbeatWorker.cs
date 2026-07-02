@@ -774,7 +774,7 @@ public sealed class HeartbeatWorker : ResilientHostedService
             // (Helper→Core) and is structurally blind to a stranded COMMAND pipe; this block is
             // the truthful "can the agent act right now" signal the cloud composite must use.
             // Null until the first probe completes (or on agents without the readiness worker).
-            actuation = BuildActuationPayload(_actuationReadiness?.Current, _selfHealCoordinator?.Snapshot()),
+            actuation = BuildActuationPayload(_actuationReadiness?.Current, _selfHealCoordinator?.Snapshot(DateTimeOffset.UtcNow)),
         };
     }
 
@@ -1181,8 +1181,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
             var path = Path.Combine(dir, "reasoning.json");
             var tmp = path + ".tmp";
             await File.WriteAllTextAsync(tmp, root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }), ct);
-            if (File.Exists(path)) File.Delete(path);
-            File.Move(tmp, path);
+            // Atomic replace — a crash/kill in the old delete-then-move window left reasoning.json
+            // missing (the .tmp isn't read at boot), so startup silently bound default config.
+            File.Move(tmp, path, overwrite: true);
 
             _logger.LogInformation("set_reasoning_config: wrote reasoning.json (Enabled={Enabled}) — takes effect on next restart", Bool("enabled"));
             await AckAsync(true, new { applied = true, enabled = Bool("enabled"), fields = reasoning.Select(kv => kv.Key).ToArray(), note = "restart required to activate" }, null);
@@ -4224,6 +4225,15 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 reason = progress.HaltReason, // e.g. "helper_unreachable" on a halt → exact cockpit badge
             }, execution.Ok ? null : execution.Error ?? "pricing job failed — see agent logs");
         }
+        catch (Exception ex)
+        {
+            // Fire-and-forget dispatch: without this the SqlFirst executor's unguarded SQLite/workbook
+            // boundary (a `database is locked`/IO throw) would become an unobserved detached-task
+            // exception with NO failure ack — the operator's portal would hang "running" forever.
+            // Match the run_workflow handler: always ack failure.
+            _logger.LogError(ex, "run_pricing_job: unexpected failure");
+            await AckAsync(false, null, ex.Message);
+        }
         finally
         {
             _pricingJobSemaphore.Release();
@@ -4390,6 +4400,13 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     pricingStatus = progress.Status.ToString(),
                     reason = progress.HaltReason, // e.g. "helper_unreachable" on a halt → exact cockpit badge
                 }, execution.Ok ? null : execution.Error ?? "pricing job failed — see agent logs");
+            }
+            catch (Exception ex)
+            {
+                // Fire-and-forget: a throw here (SqlFirst executor's unguarded SQLite/workbook boundary)
+                // would otherwise leave the row stuck Pending with no failure ack. Always ack.
+                _logger.LogError(ex, "find_and_run_pricing_job: unexpected failure during auto-run");
+                await AckAsync(false, null, ex.Message);
             }
             finally
             {

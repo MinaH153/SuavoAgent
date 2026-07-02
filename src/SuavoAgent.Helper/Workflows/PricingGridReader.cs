@@ -25,12 +25,30 @@ public static class PricingGridReader
     /// </summary>
     public readonly record struct SupplierRow(string Supplier, decimal CostPerUnit, string Status);
 
-    public static bool TryParseCost(string? text, out decimal cost) =>
-        decimal.TryParse(
-            text ?? string.Empty,
+    public static bool TryParseCost(string? text, out decimal cost)
+    {
+        cost = 0m;
+        if (string.IsNullOrWhiteSpace(text)) return false;
+
+        // PioneerRx/DevExpress currency columns render "$3.28" / "$0.0099". InvariantCulture's
+        // currency symbol is "¤" (not "$"), so NumberStyles.Any rejects a "$"-prefixed cell and
+        // the whole supplier batch parses to nothing → false "no supplier rows". Keep only the
+        // numeric glyphs (digits, sign, decimal, thousands, accounting parens) before parsing.
+        Span<char> buf = stackalloc char[text.Length];
+        int n = 0;
+        foreach (var ch in text)
+        {
+            if (char.IsDigit(ch) || ch is '.' or ',' or '-' or '+' or '(' or ')')
+                buf[n++] = ch;
+        }
+        if (n == 0) return false;
+
+        return decimal.TryParse(
+            buf[..n],
             NumberStyles.Any,
             CultureInfo.InvariantCulture,
             out cost);
+    }
 
     /// <summary>
     /// Whether a row's Status keeps it eligible. An empty status (no Status

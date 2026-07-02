@@ -354,14 +354,26 @@ internal static class OutboundPhiGuard
                     case OutboundDecision.OperationalSafe:
                         return null;
 
-                    // Geographic field (Safe-Harbor identifier) OR a string that only passes the
-                    // legacy <=96-char charset without matching a known operational token shape
-                    // (the packed-identifier hole, e.g. "DOE-JOHN-1990"). Today both are allowed;
-                    // STRICT mode blocks them (positive allow-list). SHADOW mode preserves today's
-                    // behavior but logs the would-block so false-positives are measured on a real
-                    // pilot before enforcement. Field name only — never the value.
+                    // Geographic field (Safe-Harbor identifier) — allowed today, STRICT blocks it,
+                    // SHADOW logs the would-block. Field name only; geo values match no enforced
+                    // denylist rule so a value scan wouldn't help.
                     case OutboundDecision.GeographicExempt:
+                        if (strict)
+                            return propertyName ?? "(root)";
+                        Serilog.Log.Warning(
+                            "OutboundPhiGuard shadow: geographic field {Field} would be BLOCKED under "
+                            + "StrictOutboundTokenAllowlist. No value logged — review before enabling strict.",
+                            propertyName ?? "(root)");
+                        return null;
+
+                    // Charset-clean but NOT a non-PHI token shape (a packed identifier like
+                    // "DOE-JOHN-1990", a bare DOB "1990-01-15", an SSN "123-45-6789", a 10-digit
+                    // phone). ALWAYS run the enforced ContainsPhi value scan — the previous code
+                    // let these bypass it and leak PHI under a benign field name (HIPAA). The strict
+                    // token allow-list still applies ON TOP for non-PHI unrecognized tokens.
                     case OutboundDecision.UnrecognizedToken:
+                        if (PhiScrubber.ContainsPhi(value))
+                            return propertyName ?? "(root)";
                         if (strict)
                             return propertyName ?? "(root)";
                         Serilog.Log.Warning(
@@ -449,12 +461,15 @@ internal static class OutboundPhiGuard
     // arrive under operational field names (status/outcome/severity/classification/mode…) and
     // are exempted by NAME instead. Tune this via the shadow would-block logs before enabling
     // StrictOutboundTokenAllowlist.
+    // NON-PHI token shapes ONLY — these skip the value scan because no PHI identifier can hide in
+    // them. The hyphenated-NDC (\d{1,5}-\d{1,4}-\d{1,2}) and long-numeric (\d{6,}) shapes were
+    // REMOVED: NDC collides with a bare DOB (1990-01-15 is 4-2-2) and long-numeric collides with
+    // MRN / SSN-without-dashes / 10-digit phone. Anything charset-clean that isn't one of these
+    // now falls to the enforced ContainsPhi value scan (see the UnrecognizedToken case).
     private static readonly Regex KnownOperationalToken = new(
         @"^(?:" +
         @"[0-9a-fA-F]{16,128}" +                                                 // hex hash / digest
         @"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" + // uuid
-        @"|\d{1,5}-\d{1,4}-\d{1,2}" +                                            // hyphenated NDC (5-4-2 family)
-        @"|\d{6,}" +                                                             // long numeric id (>=6; excludes 5-digit zip)
         @"|v?\d+\.\d+(?:\.\d+)?(?:[-.][0-9A-Za-z]+)*" +                          // semver / version
         @"|[a-z][a-z0-9]*(?:_[a-z0-9]+)+" +                                      // snake_case enum (sql_first, rx_delivery_queue)
         @")$",

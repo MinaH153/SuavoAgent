@@ -188,7 +188,11 @@ public sealed class CloudAuthRecoveryCoordinator
     private readonly IHostApplicationLifetime? _lifetime;
     private readonly ILogger<CloudAuthRecoveryCoordinator> _logger;
     private readonly string _healthPath;
-    private bool _attempted;
+    // 0 = no attempt in flight, 1 = one claimed. Interlocked, not a plain bool: ConfigSync and
+    // Heartbeat share this singleton and can hit the same 401 concurrently — the CAS lets exactly
+    // one proceed (no double key-rotation / double restart). Reset to 0 on TRANSIENT failure so a
+    // later 401 can retry; a SUCCESSFUL recovery restarts the process, so the latch value is moot.
+    private int _attempted;
 
     public CloudAuthRecoveryCoordinator(
         IAgentCredentialRecoveryClient? client,
@@ -204,10 +208,14 @@ public sealed class CloudAuthRecoveryCoordinator
 
     public async Task<bool> TryRecoverAfterAuthFailureAsync(Exception ex, CancellationToken ct)
     {
-        if (!IsRecoverableAgentNotFound(ex) || _attempted)
+        if (!IsRecoverableAgentNotFound(ex))
             return false;
 
-        _attempted = true;
+        // Atomically claim the single in-flight recovery. A loser (the other worker on the same
+        // 401) returns without double-rotating the key.
+        if (Interlocked.CompareExchange(ref _attempted, 1, 0) != 0)
+            return false;
+
         if (_client is null)
         {
             WriteHealth(
@@ -230,6 +238,9 @@ public sealed class CloudAuthRecoveryCoordinator
                 recoveryOutcome: result.Outcome,
                 restartRequested: false);
             _logger.LogWarning("Cloud credential recovery did not complete: {Outcome}", result.Outcome);
+            // Transient failure (5xx / network throw): release the latch so the next 401 retries
+            // instead of being short-circuited for the whole process lifetime.
+            Interlocked.Exchange(ref _attempted, 0);
             return false;
         }
 
@@ -266,7 +277,10 @@ public sealed class CloudAuthRecoveryCoordinator
                 now,
                 status == "recovered" ? now : null,
                 status == "recovered" ? 0 : 1,
-                AuthFailureKind(ex),
+                // Don't leave the triggering 401 as lastErrorKind on a SUCCESSFUL recovery — the
+                // health probe tests errKind for "401" BEFORE status, so a stale kind would pin the
+                // gate to Fail permanently even though auth is now healthy.
+                status == "recovered" ? null : AuthFailureKind(ex),
                 recoveryAttempted,
                 recoveryOutcome,
                 restartRequested);

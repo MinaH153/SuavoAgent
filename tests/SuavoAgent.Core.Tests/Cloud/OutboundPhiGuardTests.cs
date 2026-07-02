@@ -105,6 +105,37 @@ public sealed class OutboundPhiGuardTests
             () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options));
     }
 
+    [Theory]
+    [InlineData("1990-01-15")]   // BARE ISO date-of-birth — was misclassified as an NDC token shape
+    [InlineData("123-45-6789")]  // BARE SSN — was matched by the long-numeric operational shape
+    public void Blocks_a_bare_charset_clean_phi_token_under_a_benign_field(string phi)
+    {
+        // These are single, charset-clean values (no surrounding words) that formerly classified as
+        // OperationalSafe via the NDC (\d-\d-\d) / long-numeric (\d{6,}) token shapes and bypassed the
+        // ContainsPhi value scan entirely — a DOB/SSN egress under a benign field name. The guard must
+        // now block them by VALUE, not just by field name.
+        var body = $@"{{ ""freeNote"":""{phi}"" }}";
+
+        Assert.Throws<InvalidOperationException>(
+            () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options));
+    }
+
+    [Fact]
+    public void Still_allows_a_genuine_operational_token_after_narrowing_the_allowlist()
+    {
+        // The narrowing must not over-block real control-plane tokens: a hex fingerprint, a uuid,
+        // a semver, and a snake_case enum are still operational-safe.
+        var body = @"{
+            ""fingerprint"":""a3f29c5e8842d10b4f7c9e2a"",
+            ""commandId"":""3f2504e0-4f89-41d3-9a0c-0305e82c3301"",
+            ""version"":""3.81.0"",
+            ""reason"":""helper_unreachable""
+        }";
+
+        Assert.Null(Record.Exception(
+            () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options)));
+    }
+
     [Fact]
     public void Allows_a_pre_serialized_json_blob_field_with_embedded_timestamps()
     {

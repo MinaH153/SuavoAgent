@@ -207,7 +207,11 @@ public sealed class ActuationReadinessProbe
                 LastProbeAttemptAtUtc: now,
                 SkippedReason: skipReason,
                 ConsecutiveStrandFailures: 0)
-            : prev with { LastProbeAttemptAtUtc = now, SkippedReason = skipReason };
+            // Both skip reasons (SkipPipeBusy / SkipProbeTimeoutBusy) mean the pipe is BUSY — i.e.
+            // a live round-trip is holding it, so it is demonstrably WORKING. Reset the strand streak
+            // (same rationale the conclusive path uses): carrying it through busy skips lets the
+            // composite falsely report unhealthy in the recovery window while the pipe is in active use.
+            : prev with { LastProbeAttemptAtUtc = now, SkippedReason = skipReason, ConsecutiveStrandFailures = 0 };
 
     private void LogTransition(ActuationReadinessSnapshot? prev, ActuationReadinessSnapshot next)
     {

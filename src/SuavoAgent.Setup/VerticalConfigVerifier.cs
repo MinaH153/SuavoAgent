@@ -132,9 +132,17 @@ internal sealed class VerticalConfigVerifier
         var canonical = Canonicalize(vc.Dto);
         var data = Encoding.UTF8.GetBytes(canonical);
 
-        return key.VerifyData(data, sigBytes, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence)
-            ? new VerticalVerificationResult(VerticalVerificationOutcome.Verified, null, vc.Dto)
-            : new VerticalVerificationResult(VerticalVerificationOutcome.Blocked, "bad_signature");
+        if (!key.VerifyData(data, sigBytes, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence))
+            return new VerticalVerificationResult(VerticalVerificationOutcome.Blocked, "bad_signature");
+
+        // Signature is good, but a validly-signed payload can still be SEMANTICALLY invalid
+        // (unknown complianceMode/connector). Apply the DTO's own IsValid gate — otherwise garbage
+        // gets baked verbatim into the install posture. Defense in depth over CompliancePosture's
+        // fail-closed default.
+        if (!vc.Dto.IsValid)
+            return new VerticalVerificationResult(VerticalVerificationOutcome.Blocked, "invalid_dto");
+
+        return new VerticalVerificationResult(VerticalVerificationOutcome.Verified, null, vc.Dto);
     }
 
     /// <summary>RFC 8785 canonicalize a <see cref="VerticalConfigDto"/>.</summary>

@@ -53,8 +53,14 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
     private DateTime _lastUse = DateTime.MinValue;
     private int _activeInferences;
     private CancellationTokenSource? _idleWatcherCts;
+    private int _consecutiveLoadFailures;
 
     public string ModelId => _options.ModelId;
+
+    /// <summary>True once the weights have failed to LOAD on consecutive attempts (corrupt/incompatible
+    /// GGUF, OOM). Lets the deferred wrapper report Failed instead of a false Ready when assets are on
+    /// disk but the engine can't actually run. Cleared by any successful load.</summary>
+    public bool LoadHasFailed => Volatile.Read(ref _consecutiveLoadFailures) >= 2;
 
     /// <summary>
     /// IsReady = "configured and verified" not "currently resident in RAM".
@@ -436,6 +442,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         if (!File.Exists(_modelPath))
         {
             _logger.LogError("LLamaLocalInference: model file vanished at {Path}", _modelPath);
+            Interlocked.Increment(ref _consecutiveLoadFailures);
             return false;
         }
 
@@ -504,6 +511,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
 
             _weights = await LLamaWeights.LoadFromFileAsync(parameters, ct);
             _executor = new StatelessExecutor(_weights, parameters);
+            Interlocked.Exchange(ref _consecutiveLoadFailures, 0);
 
             sw.Stop();
             _logger.LogInformation(
@@ -522,6 +530,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
             _weights?.Dispose();
             _weights = null;
             _executor = null;
+            Interlocked.Increment(ref _consecutiveLoadFailures);
             return false;
         }
     }

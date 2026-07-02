@@ -39,7 +39,8 @@ public sealed class ExcelPricingWriter
         string supplierColumnHeader = PricingJobDefaults.SupplierColumn,
         string costColumnHeader = PricingJobDefaults.CostColumn,
         string statusColumnHeader = DefaultStatusHeader,
-        WriteMode mode = WriteMode.Sibling)
+        WriteMode mode = WriteMode.Sibling,
+        int headerRow = 1)
     {
         if (!File.Exists(sourcePath))
         {
@@ -71,9 +72,9 @@ public sealed class ExcelPricingWriter
                 return WriteResult.Fail("No worksheet in source");
             }
 
-            var supplierCol = FindOrCreateColumn(ws, supplierColumnHeader);
-            var costCol = FindOrCreateColumn(ws, costColumnHeader);
-            var statusCol = FindOrCreateColumn(ws, statusColumnHeader);
+            var supplierCol = FindOrCreateColumn(ws, supplierColumnHeader, headerRow);
+            var costCol = FindOrCreateColumn(ws, costColumnHeader, headerRow);
+            var statusCol = FindOrCreateColumn(ws, statusColumnHeader, headerRow);
 
             int okCount = 0, failCount = 0;
             foreach (var r in results)
@@ -165,16 +166,16 @@ public sealed class ExcelPricingWriter
         }
     }
 
-    private static int FindOrCreateColumn(IXLWorksheet ws, string header)
+    private static int FindOrCreateColumn(IXLWorksheet ws, string header, int headerRow)
     {
         var lastCol = ws.LastColumnUsed()?.ColumnNumber() ?? 0;
         for (int c = 1; c <= lastCol; c++)
         {
-            if (string.Equals(ws.Cell(1, c).GetString()?.Trim(), header, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(ws.Cell(headerRow, c).GetString()?.Trim(), header, StringComparison.OrdinalIgnoreCase))
                 return c;
         }
         var newCol = lastCol + 1;
-        ws.Cell(1, newCol).Value = header;
+        ws.Cell(headerRow, newCol).Value = header;
         return newCol;
     }
 

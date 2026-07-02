@@ -14,7 +14,7 @@ namespace SuavoAgent.Core.Reasoning;
 ///
 /// Fail-soft throughout: nothing here can block the agent or hinder PioneerRx.
 /// </summary>
-public sealed class DeferredLocalInference : ILocalInference
+public sealed class DeferredLocalInference : ILocalInference, IAsyncDisposable
 {
     private readonly IOptions<AgentOptions> _agentOptions;
     private readonly ReasoningOptions _options;
@@ -55,7 +55,7 @@ public sealed class DeferredLocalInference : ILocalInference
     // command) gate on IsReady BEFORE invoking, and _inner is constructed lazily INSIDE the first
     // invocation. Reporting ready on assets-present is what lets that first call through to build +
     // load the engine; reporting only on _inner!=null would deadlock (never invoked → never built).
-    public bool IsReady => _inner is not null || AssetsPresent();
+    public bool IsReady => _inner is { LoadHasFailed: false } || (_inner is null && AssetsPresent());
 
     private bool AssetsPresent() =>
         _nativeProvisioner.DllsPresent()
@@ -68,7 +68,8 @@ public sealed class DeferredLocalInference : ILocalInference
     {
         get
         {
-            if (_inner is not null) return BrainProvisioningState.Ready;
+            if (_inner is not null)
+                return _inner.LoadHasFailed ? BrainProvisioningState.Failed : BrainProvisioningState.Ready;
             if (string.IsNullOrWhiteSpace(_options.ModelPath)) return BrainProvisioningState.Off;
             if (!_nativeProvisioner.DllsPresent()) return BrainProvisioningState.DownloadingLibs;
             if (File.Exists(_options.ModelPath)) return BrainProvisioningState.Ready;
@@ -131,6 +132,14 @@ public sealed class DeferredLocalInference : ILocalInference
             }
             if (string.IsNullOrWhiteSpace(_options.ModelPath) || !File.Exists(_options.ModelPath))
             {
+                // Re-kick the model provisioner. A transient first-boot download failure otherwise
+                // leaves the GGUF unprovisioned until a full process restart (the provisioner's
+                // once-per-process latch never re-fires and VerifyAsync is called only at ctor).
+                // Mirrors the native-libs re-kick above; fire-and-forget, fail-soft.
+                _ = Task.Run(async () =>
+                {
+                    try { await _modelManager.VerifyAsync(CancellationToken.None); } catch { /* fail-soft */ }
+                });
                 return null; // model still downloading
             }
 
@@ -147,5 +156,13 @@ public sealed class DeferredLocalInference : ILocalInference
         {
             _lock.Release();
         }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        var inner = _inner;
+        if (inner is not null)
+            await inner.DisposeAsync().ConfigureAwait(false);
+        _lock.Dispose();
     }
 }

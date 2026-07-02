@@ -44,7 +44,14 @@ public sealed class HttpModelProvisioner : IModelManager
             // rules-only. Fail-soft by construction.
             if (Interlocked.CompareExchange(ref _downloadStarted, 1, 0) == 0)
             {
-                _ = Task.Run(() => TryDownloadAsync(CancellationToken.None));
+                _ = Task.Run(async () =>
+                {
+                    var (ok, _) = await TryDownloadAsync(CancellationToken.None);
+                    // Release the once-per-process latch on failure so a later VerifyAsync re-call
+                    // (the deferred wrapper re-kicks it) starts a fresh download instead of the brain
+                    // staying off until a full process restart.
+                    if (!ok) Interlocked.Exchange(ref _downloadStarted, 0);
+                });
                 return new ModelVerificationResult(false, _options.ModelPath, null,
                     "model auto-provisioning in background — activates on next restart");
             }

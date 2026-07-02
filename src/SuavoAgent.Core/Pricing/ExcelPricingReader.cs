@@ -89,7 +89,7 @@ public sealed class ExcelPricingReader
                     invalid.Count,
                     string.Join("; ", invalid.Take(5).Select(i => $"row {i.RowIndex}='{i.NdcRaw}' ({i.Reason})")));
 
-            return ReadResult.Ok(rows, invalid, ndcCol);
+            return ReadResult.Ok(rows, invalid, ndcCol, headerRow);
         }
         catch (Exception ex)
         {
@@ -161,9 +161,12 @@ public sealed class ReadResult
     public IReadOnlyList<NdcRow> Rows { get; private init; } = [];
     public IReadOnlyList<InvalidNdcRow> Invalid { get; private init; } = [];
     public int NdcColumnIndex { get; private init; }
+    /// <summary>1-based row the headers live on (past any preamble). The writer places its
+    /// Best Supplier/Cost/Status headers on THIS row so they align with the data columns.</summary>
+    public int HeaderRowIndex { get; private init; } = 1;
 
-    public static ReadResult Ok(List<NdcRow> rows, List<InvalidNdcRow> invalid, int ndcCol) =>
-        new() { Success = true, Rows = rows, Invalid = invalid, NdcColumnIndex = ndcCol };
+    public static ReadResult Ok(List<NdcRow> rows, List<InvalidNdcRow> invalid, int ndcCol, int headerRow) =>
+        new() { Success = true, Rows = rows, Invalid = invalid, NdcColumnIndex = ndcCol, HeaderRowIndex = headerRow };
 
     public static ReadResult Fail(string error) =>
         new() { Success = false, Error = error };

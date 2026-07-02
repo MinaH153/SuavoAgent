@@ -88,10 +88,14 @@ public sealed class HelperSelfHealCoordinator
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
-    public SelfHealState Snapshot()
+    public SelfHealState Snapshot(DateTimeOffset now)
     {
         lock (_gate)
         {
+            // Prune BEFORE counting — otherwise a run of only-skipped probes (Consider, the sole
+            // other pruner, isn't called while probes are skipped) reports stale attemptsInWindow /
+            // exhausted=true to the cloud long after the window elapsed. Match what Decide() sees.
+            _attempts = HelperSelfHealPolicy.Prune(_attempts, now);
             return new SelfHealState(
                 _attempts.Count > 0 ? _attempts.Max() : null,
                 _attempts.Count,

@@ -37,7 +37,8 @@ public sealed class CloudAuthHealthProbe
                 (errKind.Contains("401", StringComparison.OrdinalIgnoreCase) ||
                  errKind.Contains("agent_not_found", StringComparison.OrdinalIgnoreCase)))
                 return new GateResult("Cloud auth", GateState.Fail, $"Cloud auth failing: {errKind}");
-            if (string.Equals(status, "ok", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(status, "ok", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "recovered", StringComparison.OrdinalIgnoreCase))
                 return new GateResult("Cloud auth", GateState.Ok, "Cloud auth healthy");
             return new GateResult("Cloud auth", GateState.Warn, $"Cloud auth status: {status ?? "unknown"}");
         }
