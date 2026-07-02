@@ -1280,7 +1280,15 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 }
             }
 
-            await AckAsync(true, new { applied = true, enabled, tesseractEnabled, nativeLibraryPath, tessdataPath, provision, note = "restart required to activate" }, null);
+            // Grant the de-priv Helper (BUILTIN\Users) READ on vision.json + the vision dir. Core wrote
+            // them into the SYSTEM-locked ProgramData folder, so without this the Helper (interactive
+            // user) can't read vision.json and silently stays vision-off.
+            var aclOk = SuavoAgent.Core.Vision.VisionAssetsAclGrant.Apply(
+                path, nativeLibraryPath, m => _logger.LogInformation("set_vision_config acl: {Msg}", m));
+            if (enabled && !aclOk)
+                _logger.LogWarning("set_vision_config: Helper read-grant did not fully succeed — the Helper may not read vision.json");
+
+            await AckAsync(true, new { applied = true, enabled, tesseractEnabled, nativeLibraryPath, tessdataPath, provision, aclGranted = aclOk, note = "restart required to activate" }, null);
         }
         catch (Exception ex)
         {
