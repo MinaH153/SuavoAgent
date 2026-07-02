@@ -109,4 +109,31 @@ public sealed class PricingGridReaderTests
     [InlineData("", false)]
     public void LooksLikeDoNotUse_detects_marker(string text, bool expected)
         => Assert.Equal(expected, PricingGridReader.LooksLikeDoNotUse(text));
+
+    [Fact]
+    public void SelectCheapest_NadimOmeprazole_excludes_blank_cost_rows_that_sort_on_top()
+    {
+        // Ground truth: Nadim's live Supplier Catalog for Omeprazole Dr 40 Mg (NDC 55111-0645-01),
+        // read off his box. Two McKesson rows carry BLANK cost and render at the top of the grid;
+        // Nadim's spoken heuristic ("cheapest = the one on top") would wrongly pick one of them.
+        // The engine must exclude blank/zero costs (fail-closed) and compute the true argmin —
+        // which is Real Value Rx at $3.16 (NOT McKesson $4.95, which is a 500-count package).
+        var rows = new[]
+        {
+            new Row("Mckesson 869640", 0m, "Available"),      // blank cost, sorts on top -> excluded
+            new Row("Mckesson 340b", 0m, "Available"),        // blank cost -> excluded
+            new Row("Real Value Rx", 3.16m, "Available"),     // true cheapest by Cost
+            new Row("keysource", 3.28m, "Available"),
+            new Row("Prescription Supply", 3.44m, "Available"),
+            new Row("Anda", 3.54m, "Available"),
+            new Row("McKesson", 4.95m, "Available"),          // 500-ct package (low per-unit, high Cost)
+            new Row("Mckesson Geri", 13.89m, "Available"),
+        };
+
+        var result = PricingGridReader.SelectCheapest(rows);
+
+        Assert.NotNull(result);
+        Assert.Equal("Real Value Rx", result!.Value.supplier);
+        Assert.Equal(3.16m, result.Value.cost);
+    }
 }
