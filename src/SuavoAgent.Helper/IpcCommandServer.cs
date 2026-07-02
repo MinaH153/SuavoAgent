@@ -852,34 +852,8 @@ public sealed class IpcCommandServer : IDisposable
             // command-pipe strand hid for four releases — the log then shows only the final
             // C5 reject with no cause. Surface the WHY at default log level.
             _logger.Warning(
-                "IpcCommandServer: client SID check inconclusive for PID {Pid} ({ExType}: {ExMessage}) — falling back to session/image checks",
+                "IpcCommandServer: client SID check inconclusive for PID {Pid} ({ExType}: {ExMessage}) — falling back to image-path check",
                 clientPid, ex.GetType().Name, ex.Message);
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// True when the pipe client lives in Session 0 — the services session. Windows only
-    /// puts services (and processes spawned by them) there; a standard interactive user
-    /// cannot create a Session-0 process without admin rights, so — combined with the
-    /// SuavoAgent.Core process-name check — this is accepting evidence of the same
-    /// strength as the service-SID rung, and it needs NO process handle or impersonation
-    /// (works for the de-privileged Helper where OpenProcess/RunAsClient fail).
-    /// </summary>
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private bool TryGetClientSessionZero(NamedPipeServerStream pipe, uint clientPid)
-    {
-        try
-        {
-            if (!GetNamedPipeClientSessionId(pipe.SafePipeHandle, out var sessionId)) return false;
-            if (sessionId == 0) return true;
-            _logger.Warning(
-                "IpcCommandServer: client PID {Pid} is in session {Session}, not the services session — no session-0 acceptance",
-                clientPid, sessionId);
-            return false;
-        }
-        catch
-        {
             return false;
         }
     }
@@ -917,18 +891,6 @@ public sealed class IpcCommandServer : IDisposable
                 _logger.Information(
                     "IpcCommandServer: accepting Core (PID {Pid}) — client token is service SID {Sid}; ProcessName=SuavoAgent.Core verified (unforgeable by an interactive user)",
                     clientPid, serviceSidLabel);
-                return true;
-            }
-
-            // Second unforgeable rung, for boxes where impersonation is inconclusive: the
-            // client's SESSION. Core is a Windows service → Session 0; a standard user
-            // cannot spawn there. Needs no process handle, so it works for the
-            // de-privileged Helper (the strand-causing case: OpenProcess → ACCESS_DENIED).
-            if (TryGetClientSessionZero(pipe, clientPid))
-            {
-                _logger.Information(
-                    "IpcCommandServer: accepting Core (PID {Pid}) — client lives in Session 0 (services session, unreachable to a standard user); ProcessName=SuavoAgent.Core verified",
-                    clientPid);
                 return true;
             }
 
@@ -999,11 +961,6 @@ public sealed class IpcCommandServer : IDisposable
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static extern bool GetNamedPipeClientProcessId(
         Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint clientProcessId);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static extern bool GetNamedPipeClientSessionId(
-        Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint clientSessionId);
 
     public void Dispose()
     {
