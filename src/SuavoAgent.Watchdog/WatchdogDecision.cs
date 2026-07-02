@@ -23,7 +23,11 @@ public sealed record ServiceLedger(
     DateTimeOffset? UnhealthySince,
     DateTimeOffset? LastRestartAttemptAt,
     int ConsecutiveRestartFailures,
-    int RepairInvocations)
+    int RepairInvocations,
+    // True after a restart the SCM ACCEPTED (START_PENDING) but whose liveness we haven't confirmed.
+    // The next tick counts it as a failure if the service still isn't Running — SCM "accepted" is not
+    // proof the process stayed up, so a crash-loop (accept → die → accept …) is caught here.
+    bool RestartPendingLiveness = false)
 {
     public static ServiceLedger Initial(string name, DateTimeOffset now) =>
         new(name, ServiceState.Unknown, now, null, null, 0, 0);
@@ -62,8 +66,9 @@ public sealed class WatchdogDecisionEngine
 
         if (observed == ServiceState.Running)
         {
-            // Healthy observation → reset failure counter (repair counter persists).
-            next = next with { ConsecutiveRestartFailures = 0 };
+            // Healthy observation → reset failure counter + clear any pending-liveness attempt (it
+            // succeeded) so a later crash isn't blamed on the now-confirmed restart. Repair counter persists.
+            next = next with { ConsecutiveRestartFailures = 0, RestartPendingLiveness = false, LastRestartAttemptAt = null };
             return (new(DecisionAction.DoNothing, "running"), next);
         }
 
@@ -94,20 +99,32 @@ public sealed class WatchdogDecisionEngine
         }
 
         // Stopped / StopPending / Unknown — unhealthy.
+        // A prior restart the SCM ACCEPTED (START_PENDING) that has NOT reached Running is a crash-loop
+        // failure. Count it once and clear the flag — the SCM "accepted" return never reflected liveness,
+        // so without this the counter stayed 0 forever and EscalateRepair was unreachable. (A REJECTED
+        // start is already counted by the worker via RecordRestartResult(false), so it never sets this flag.)
+        var failures = ledger.ConsecutiveRestartFailures;
+        if (ledger.RestartPendingLiveness)
+        {
+            failures += 1;
+            next = next with { ConsecutiveRestartFailures = failures, RestartPendingLiveness = false };
+        }
+
         if (unhealthySince is not null && now - unhealthySince < UnhealthyGrace)
         {
             return (new(DecisionAction.DoNothing, $"unhealthy < grace ({UnhealthyGrace.TotalMinutes}m)"), next);
         }
 
-        if (ledger.ConsecutiveRestartFailures >= EscalateAfterConsecutiveFailures)
+        if (failures >= EscalateAfterConsecutiveFailures)
         {
             return (new(DecisionAction.EscalateRepair,
-                    $"{ledger.ConsecutiveRestartFailures} consecutive restart failures"),
+                    $"{failures} consecutive restart failures"),
                 next with
                 {
                     LastRestartAttemptAt = now,
                     RepairInvocations = ledger.RepairInvocations + 1,
-                    ConsecutiveRestartFailures = 0
+                    ConsecutiveRestartFailures = 0,
+                    RestartPendingLiveness = false
                 });
         }
 

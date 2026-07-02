@@ -239,7 +239,8 @@ public sealed class PricingJobRunner
         // This avoids the Codex-flagged "file locked by Excel.exe" failure mode where 499 rows
         // succeed and the final File.Move throws an IOException.
         var allResults = _db.GetPricingResults(spec.JobId);
-        var write = _writer.Write(spec.ExcelPath, allResults, spec.SupplierColumn, spec.CostColumn);
+        var write = _writer.Write(spec.ExcelPath, allResults, spec.SupplierColumn, spec.CostColumn,
+            headerRow: readResult.HeaderRowIndex);
 
         var finalStatus = write.Success ? PricingJobStatus.Completed : PricingJobStatus.Failed;
         _db.UpsertPricingJob(spec, finalStatus, totalItems, completed, failed);

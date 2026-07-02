@@ -15,27 +15,17 @@ public sealed class AgentStateDb : IDisposable
 {
     private readonly SqliteConnection _conn;
 
-    // Codex 2026-04-26 P1.1 — guards every audit-chain mutation. Read-prev-hash +
-    // compute-new-hash + INSERT must execute as one atomic step or two writers can
-    // see the same prev_hash and produce a chain whose stored prev_hash diverges
-    // from the chain's actual tail. SqliteConnection is not thread-safe across
-    // commands either, so this lock also protects the shared connection.
-    private readonly object _auditWriteLock = new();
-
-    // Guards every edge_conductance read/write. The navigate/explore run (HeartbeatWorker Task.Run)
-    // and the PhysarumEvaporationWorker timer can hit these rows concurrently on the single
-    // non-thread-safe SqliteConnection (busy_timeout is a mitigation, not a guarantee). Separate from
-    // _auditWriteLock so edge traffic never contends with the audit chain.
-    private readonly object _edgeConductanceLock = new();
-
-    // Guards verified_skills read/writes. Post-run harvest (HeartbeatWorker Task.Run) is the only writer
-    // and is already serialized by the navigation semaphore, but the lock keeps the single SqliteConnection
-    // safe against any concurrent reader. KNOWN DEBT (Codex 2026-06-08 Q2): per-feature locks
-    // (_auditWriteLock / _edgeConductanceLock / _verifiedSkillLock) don't serialize against the UNLOCKED
-    // pricing-path methods on the SAME connection, so a navigate/explore post-run write can race a
-    // concurrent pricing run client-side. The new write is best-effort (HeartbeatWorker catches), so it
-    // degrades safely; the real fix is one connection-wide lock — a separate, careful refactor.
-    private readonly object _verifiedSkillLock = new();
+    // ONE connection-wide lock. SqliteConnection is not thread-safe across commands, so EVERY access
+    // to _conn must serialize on the same monitor. Formerly three per-feature locks (audit / edge /
+    // verified-skill) that did NOT serialize against the UNLOCKED pricing/nonce/task-autonomy methods
+    // — a pricing run (HeartbeatWorker Task.Run) could race a concurrent navigate/explore write on the
+    // same connection (Codex 2026-06-08 Q2 debt). The three names below now alias this one lock; the
+    // hot-path read/write methods take it too. Monitor is re-entrant per-thread, so nested locked
+    // calls are safe. Cost is a little more contention; SQLite writes are sub-ms.
+    private readonly object _connLock = new();
+    private readonly object _auditWriteLock;
+    private readonly object _edgeConductanceLock;
+    private readonly object _verifiedSkillLock;
 
     public AgentStateDb(string dbPath, string? password = null)
     {
@@ -48,6 +38,8 @@ public sealed class AgentStateDb : IDisposable
         };
         if (!string.IsNullOrEmpty(password))
             builder.Password = password;
+
+        _auditWriteLock = _edgeConductanceLock = _verifiedSkillLock = _connLock;
 
         var connStr = builder.ToString();
         _conn = new SqliteConnection(connStr);
@@ -1548,6 +1540,8 @@ public sealed class AgentStateDb : IDisposable
 
     public bool TryRecordNonce(string nonce)
     {
+        lock (_connLock)
+        {
         try
         {
             using var cmd = _conn.CreateCommand();
@@ -1557,15 +1551,25 @@ public sealed class AgentStateDb : IDisposable
             cmd.ExecuteNonQuery();
             return true;
         }
-        catch { return false; }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 19) // SQLITE_CONSTRAINT = genuine PK duplicate
+        {
+            return false; // nonce already recorded → real replay
+        }
+        // Any OTHER failure (disk full, transient concurrent-connection error) must NOT be
+        // misclassified as a replay — that would silently drop a cryptographically-valid command.
+        // Let it surface; the caller logs it and the command is re-delivered on the next heartbeat.
+        }
     }
 
     public void PruneOldNonces(TimeSpan maxAge)
     {
+        lock (_connLock)
+        {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "DELETE FROM command_nonces WHERE received_at < @cutoff";
         cmd.Parameters.AddWithValue("@cutoff", DateTimeOffset.UtcNow.Subtract(maxAge).ToString("o"));
         cmd.ExecuteNonQuery();
+        }
     }
 
     // ── Learning Session CRUD ──
@@ -4100,6 +4104,8 @@ public sealed class AgentStateDb : IDisposable
 
     public void UpsertPricingJob(PricingJobSpec spec, string status, int total, int completed, int failed)
     {
+        lock (_connLock)
+        {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             INSERT INTO pricing_jobs (job_id, excel_path, ndc_column, supplier_column, cost_column,
@@ -4122,10 +4128,13 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@completed", completed);
         cmd.Parameters.AddWithValue("@failed", failed);
         cmd.ExecuteNonQuery();
+        }
     }
 
     public void SavePricingResult(SupplierPriceResult result)
     {
+        lock (_connLock)
+        {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             INSERT OR REPLACE INTO pricing_results
@@ -4146,10 +4155,13 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@error", (object?)result.ErrorMessage ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@observations", (object?)observationsJson ?? DBNull.Value);
         cmd.ExecuteNonQuery();
+        }
     }
 
     public List<SupplierPriceResult> GetPricingResults(string jobId)
     {
+        lock (_connLock)
+        {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit, baseline_cost_per_unit, quantity, error_message, observations_json FROM pricing_results WHERE job_id = @job ORDER BY row_index";
         cmd.Parameters.AddWithValue("@job", jobId);
@@ -4172,10 +4184,13 @@ public sealed class AgentStateDb : IDisposable
                 Quantity: reader.IsDBNull(7) ? null : (decimal)reader.GetDouble(7)));
         }
         return results;
+        }
     }
 
     public HashSet<int> GetCompletedPricingRows(string jobId)
     {
+        lock (_connLock)
+        {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "SELECT row_index FROM pricing_results WHERE job_id = @job";
         cmd.Parameters.AddWithValue("@job", jobId);
@@ -4183,6 +4198,7 @@ public sealed class AgentStateDb : IDisposable
         var rows = new HashSet<int>();
         while (reader.Read()) rows.Add(reader.GetInt32(0));
         return rows;
+        }
     }
 
     // ── M3 task-autonomy ledger ──
@@ -4191,6 +4207,8 @@ public sealed class AgentStateDb : IDisposable
     public (int ConsecutiveClean, int TotalRuns, string? LastOutcome) GetTaskAutonomyRaw(
         string taskKey, string pharmacyId)
     {
+        lock (_connLock)
+        {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText =
             "SELECT consecutive_clean, total_runs, last_outcome FROM task_autonomy WHERE task_key = @t AND pharmacy_id = @p";
@@ -4202,11 +4220,14 @@ public sealed class AgentStateDb : IDisposable
             reader.GetInt32(0),
             reader.GetInt32(1),
             reader.IsDBNull(2) ? null : reader.GetString(2));
+        }
     }
 
     public void UpsertTaskAutonomy(
         string taskKey, string pharmacyId, int consecutiveClean, int totalRuns, string? lastOutcome)
     {
+        lock (_connLock)
+        {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             INSERT INTO task_autonomy (task_key, pharmacy_id, consecutive_clean, total_runs, last_outcome, updated_at)
@@ -4220,6 +4241,7 @@ public sealed class AgentStateDb : IDisposable
         cmd.Parameters.AddWithValue("@n", totalRuns);
         cmd.Parameters.AddWithValue("@o", (object?)lastOutcome ?? DBNull.Value);
         cmd.ExecuteNonQuery();
+        }
     }
 
     // ── Physarum edge-conductance store (durable slime-mold exploration memory) ──

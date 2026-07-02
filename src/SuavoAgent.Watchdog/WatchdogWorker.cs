@@ -179,14 +179,19 @@ public sealed class WatchdogWorker : BackgroundService
                     _logger.LogWarning("Restarting {Service} — unhealthy_since={Since}", svc, ledger.UnhealthySince);
                     var ok = _command.Start(svc, _options.StartTimeout);
                     restartAccepted = ok;
-                    next = _engine.RecordRestartResult(next, ok);
                     if (ok)
                     {
-                        _logger.LogInformation("Restart of {Service} accepted by SCM", svc);
+                        // SCM ACCEPTED (START_PENDING) — NOT proof the process stayed up. Mark pending;
+                        // the next tick's Decide counts it as a failure if the service still isn't
+                        // Running, so a crash-loop (accept → die → accept …) actually escalates to repair.
+                        next = next with { RestartPendingLiveness = true };
+                        _logger.LogInformation("Restart of {Service} accepted by SCM — awaiting liveness", svc);
                     }
                     else
                     {
-                        _logger.LogError("Restart of {Service} failed (consecutive_failures={Count})",
+                        // SCM refused the start outright — a hard failure, count immediately.
+                        next = _engine.RecordRestartResult(next, succeeded: false);
+                        _logger.LogError("Restart of {Service} rejected by SCM (consecutive_failures={Count})",
                             svc, next.ConsecutiveRestartFailures);
                     }
                     break;

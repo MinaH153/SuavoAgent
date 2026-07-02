@@ -236,6 +236,14 @@ internal static class BinaryDownloader
 
             return true;
         }
+        catch (HttpRequestException ex) when (IsTransientHttpFailure(ex))
+        {
+            // Let transient failures (5xx / connection reset) propagate so RetryTransientAsync can
+            // retry — swallowing them here (returning false) made the retry wrapper dead code, so a
+            // single blip aborted the whole install with zero retries.
+            ConsoleUI.WriteInfo($"  {label} transient failure: {ex.Message}");
+            throw;
+        }
         catch (Exception ex)
         {
             ConsoleUI.WriteFail($"Download failed for {label}: {ex.Message}");

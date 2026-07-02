@@ -92,8 +92,11 @@ public sealed class DmvQueryObserver : ILearningObserver
                 _lastClockCalibration = now;
             }
 
-            await PollDmvAsync(sessionId);
-            _lastPoll = now;
+            // Only advance the cutoff when the poll SUCCEEDS. A failed poll that still advanced
+            // _lastPoll would move the next cutoff past the outage window, permanently skipping every
+            // query executed during the failure (last_execution_time only surfaces the most recent).
+            if (await PollDmvAsync(sessionId))
+                _lastPoll = now;
 
             await Task.Delay(PollInterval, ct).ConfigureAwait(false);
         }
@@ -112,7 +115,7 @@ public sealed class DmvQueryObserver : ILearningObserver
 
     // ── DMV polling ──
 
-    private async Task PollDmvAsync(string sessionId)
+    private async Task<bool> PollDmvAsync(string sessionId)
     {
         try
         {
@@ -155,10 +158,12 @@ public sealed class DmvQueryObserver : ILearningObserver
             }
 
             _lastActivity = DateTimeOffset.UtcNow;
+            return true;
         }
         catch (Exception ex) when (!IsTransient(ex))
         {
             _logger.LogWarning(ex, "DmvQueryObserver: DMV poll failed for session {Session}", sessionId);
+            return false;
         }
     }
 

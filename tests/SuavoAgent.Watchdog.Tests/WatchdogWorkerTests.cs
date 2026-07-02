@@ -219,6 +219,38 @@ public class WatchdogWorkerTests
     }
 
     [Fact]
+    public void Tick_AcceptedRestartsButServiceNeverRuns_EscalatesRepair()
+    {
+        // Crash-loop: the SCM ACCEPTS every start (START_PENDING) but the process dies immediately,
+        // so it's always observed Stopped. The old code reset the failure counter on SCM-accept, so
+        // the escalation gate was unreachable and it looped forever. Now each accepted-but-not-live
+        // restart is counted as a failure on the next tick → repair escalates after 3 cycles.
+        var cmd = new FakeCommand { StartOutcome = _ => true }; // SCM always accepts
+        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(Enumerable.Repeat(ServiceState.Stopped, 12));
+        var bootstrap = Path.Combine(Path.GetTempPath(), $"bootstrap-{Guid.NewGuid():N}.ps1");
+        File.WriteAllText(bootstrap, "# stub");
+        try
+        {
+            var worker = MakeWorker(cmd, bootstrap);
+            SeedLedgers(worker);
+
+            var now = DateTimeOffset.UtcNow;
+            worker.TickOnce(now);                               // mark unhealthy
+            worker.TickOnce(now.AddMinutes(6));                 // attempt 1 (accepted, pending liveness)
+            worker.TickOnce(now.AddMinutes(6).AddSeconds(61));  // count fail 1 → attempt 2
+            worker.TickOnce(now.AddMinutes(6).AddSeconds(122)); // count fail 2 → attempt 3
+            worker.TickOnce(now.AddMinutes(6).AddSeconds(183)); // count fail 3 → escalate
+
+            Assert.Equal(3, cmd.StartCalls.Count);
+            Assert.Single(cmd.RepairCalls);
+        }
+        finally
+        {
+            File.Delete(bootstrap);
+        }
+    }
+
+    [Fact]
     public void Tick_NotInstalled_EscalatesRepairImmediately()
     {
         var cmd = new FakeCommand();

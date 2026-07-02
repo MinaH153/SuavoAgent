@@ -119,7 +119,7 @@ public class HelperSelfHealTests
         Assert.Contains("ping_unanswered", sentinel.Reason);
         Assert.Single(audits);
 
-        var state = c.Snapshot();
+        var state = c.Snapshot(T0);
         Assert.Equal(T0, state.LastAttemptAtUtc);
         Assert.Equal(1, state.AttemptsInWindow);
         Assert.False(state.Exhausted);
@@ -152,7 +152,7 @@ public class HelperSelfHealTests
         }
 
         Assert.False(c.Consider(Strand(99), t).Trigger);
-        Assert.True(c.Snapshot().Exhausted);
+        Assert.True(c.Snapshot(t).Exhausted);
 
         // The rolling window re-opens capacity once old attempts age out.
         Assert.True(c.Consider(Strand(99), T0.AddHours(25)).Trigger);
@@ -172,6 +172,6 @@ public class HelperSelfHealTests
         Assert.False(d.Trigger);
         Assert.Equal("sentinel_write_failed", d.Reason);
         Assert.Equal(1, calls);
-        Assert.Equal(0, c.Snapshot().AttemptsInWindow); // retries next cycle, not burned
+        Assert.Equal(0, c.Snapshot(T0).AttemptsInWindow); // retries next cycle, not burned
     }
 }

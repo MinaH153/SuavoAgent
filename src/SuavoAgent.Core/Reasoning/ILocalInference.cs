@@ -61,4 +61,7 @@ public enum BrainProvisioningState
     DownloadingModel,
     Verifying,
     Ready,
+    /// <summary>Assets are on disk but the engine repeatedly fails to LOAD them (corrupt/incompatible
+    /// GGUF, OOM). Distinct from Off so the dashboard shows the true state instead of a false Ready.</summary>
+    Failed,
 }

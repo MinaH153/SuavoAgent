@@ -147,11 +147,24 @@ public sealed class ScWatchdogServiceProbe : IWatchdogServiceProbe
     public bool InvokeBootstrapRepair(string bootstrapPath, TimeSpan timeout)
     {
         // PowerShell 5.1+ is a hard prereq for bootstrap.ps1 (enforced inside the script).
+        // A launch that returns non-zero means re-registration FAILED — treating a launch as
+        // success (the old `is not null` check) latches the escalation as "repaired" so it never
+        // retries and the agent stays helper-down while the log claims success. Mirror the Watchdog
+        // fix (ServiceCommand.RunForExitCode == 0): only exit 0 counts as a successful repair.
         var args = $"-NoProfile -ExecutionPolicy Bypass -File \"{bootstrapPath}\" --repair";
-        return RunCapture("powershell.exe", args, timeout) is not null;
+        return Run("powershell.exe", args, timeout).exitCode == 0;
     }
 
-    private static string? RunCapture(string fileName, string arguments, TimeSpan timeout)
+    private static string? RunCapture(string fileName, string arguments, TimeSpan timeout) =>
+        Run(fileName, arguments, timeout).output;
+
+    /// <summary>
+    /// Runs a child and returns its exit code + combined output. Stdout/stderr are drained on
+    /// background reads STARTED BEFORE WaitForExit — otherwise a child that fills its ~64 KB pipe
+    /// buffer (a chatty bootstrap --repair) blocks on write and never exits, wedging us for the full
+    /// timeout. exitCode is a non-zero sentinel (-1) on start failure / timeout / exception.
+    /// </summary>
+    private static (int exitCode, string? output) Run(string fileName, string arguments, TimeSpan timeout)
     {
         try
         {
@@ -165,17 +178,24 @@ public sealed class ScWatchdogServiceProbe : IWatchdogServiceProbe
                 CreateNoWindow = true,
             };
             using var p = Process.Start(psi);
-            if (p is null) return null;
+            if (p is null) return (-1, null);
+
+            var stdout = p.StandardOutput.ReadToEndAsync();
+            var stderr = p.StandardError.ReadToEndAsync();
             if (!p.WaitForExit((int)timeout.TotalMilliseconds))
             {
                 try { p.Kill(entireProcessTree: true); } catch { }
-                return null;
+                return (-1, null);
             }
-            return p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+            // Child has exited; the drain tasks complete promptly. Bound the join so a stuck pipe
+            // can't hang us past the deadline.
+            var joined = Task.WhenAll(stdout, stderr).Wait(TimeSpan.FromSeconds(5));
+            var output = joined ? (stdout.Result + stderr.Result) : string.Empty;
+            return (p.ExitCode, output);
         }
         catch
         {
-            return null;
+            return (-1, null);
         }
     }
 }
