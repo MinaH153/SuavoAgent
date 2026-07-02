@@ -252,23 +252,42 @@ public sealed class PricingWorkflow
     {
         try
         {
-            // Click "Item" in the menu bar
-            var menuBar = mainWindow.FindFirstDescendant(cf.ByControlType(ControlType.MenuBar));
+            // Click "Item" in the menu bar. Win32/WinForms/DevExpress bars report ControlType.MenuBar;
+            // a WPF-native menu reports ControlType.Menu. Try MenuBar first, then Menu, so the menu
+            // opens regardless of the vendor's UI toolkit — the real PioneerRx control type is unknown
+            // from screenshots, and this handles both. (Surfaced on the WPF PioneerRxSim: faithful runs
+            // failed every row at "Could not open Item → Rx Item menu" because only MenuBar was tried.)
+            var menuBar = mainWindow.FindFirstDescendant(cf.ByControlType(ControlType.MenuBar))
+                ?? mainWindow.FindFirstDescendant(cf.ByControlType(ControlType.Menu));
             if (menuBar == null) return false;
 
             var (itemMenu, itemRes) = resolver.FindFirst(menuBar, cf, SelectorStepId.OpenItemMenu, cf.ByName(ItemMenuName));
             if (itemMenu == null) return false;
             LogIfLearned(SelectorStepId.OpenItemMenu, itemRes);
 
-            itemMenu.AsMenuItem()?.Click();
+            // Open "Item" the way its UIA pattern demands, not with a raw Click(). A top-level bar item
+            // that owns a submenu exposes ExpandCollapse — Expand() unfolds the dropdown; Click() may just
+            // focus it and leave the submenu closed (this is why the WPF sim never opened the menu, and it
+            // hardens the real bar too). OpenMenuElement falls back Expand → Invoke → Click.
+            OpenMenuElement(itemMenu, expandToOpenSubmenu: true);
             Thread.Sleep(300);
 
-            // Click "Rx Item" in the dropdown
-            var (rxItemEntry, rxRes) = resolver.FindFirst(mainWindow, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
+            // Click "Rx Item" in the opened submenu. WPF (and many native context/submenus) render the
+            // opened submenu in a POPUP — a separate top-level UIA element, NOT a descendant of the main
+            // window — so search from the DESKTOP ROOT first, then fall back to the main window. This
+            // finds "Rx Item" whether the submenu is a popup (WPF) or kept under the main window
+            // (Win32/WinForms/DevExpress). (Surfaced on the WPF sim: "Rx Item" lives in a popup, so a
+            // main-window-only search never found it and every row failed at "could not open menu".)
+            var searchRoot = mainWindow.Automation.GetDesktop();
+            var (rxItemEntry, rxRes) = resolver.FindFirst(searchRoot, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
+            if (rxItemEntry == null)
+                (rxItemEntry, rxRes) = resolver.FindFirst(mainWindow, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
             if (rxItemEntry == null) return false;
             LogIfLearned(SelectorStepId.OpenRxItem, rxRes);
 
-            rxItemEntry.AsMenuItem()?.Click();
+            // "Rx Item" is a LEAF that opens the Edit Rx Item window — Invoke() fires it; expanding it
+            // would be a no-op (or open a stray submenu), so don't prefer Expand here.
+            OpenMenuElement(rxItemEntry, expandToOpenSubmenu: false);
             Thread.Sleep(300);
             return true;
         }
@@ -277,6 +296,41 @@ public sealed class PricingWorkflow
             _logger.Debug(ex, "PricingWorkflow: OpenRxItemDialog failed");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Activates a menu element by the UIA pattern it actually exposes, in order, so the menu works
+    /// across UI toolkits (Win32 / WinForms / DevExpress / WPF) whose menu items respond to different
+    /// patterns. A submenu-owning bar item ("Item") needs <c>ExpandCollapse.Expand()</c> to unfold; a
+    /// leaf entry ("Rx Item") needs <c>Invoke()</c>; some only accept a synthesized Click(). Each attempt
+    /// is guarded so an unsupported/throwing pattern falls through to the next rather than aborting.
+    /// </summary>
+    private static void OpenMenuElement(AutomationElement el, bool expandToOpenSubmenu)
+    {
+        if (expandToOpenSubmenu)
+        {
+            try
+            {
+                if (el.Patterns.ExpandCollapse.IsSupported)
+                {
+                    el.Patterns.ExpandCollapse.Pattern.Expand();
+                    return;
+                }
+            }
+            catch { /* fall through to Invoke/Click */ }
+        }
+
+        try
+        {
+            if (el.Patterns.Invoke.IsSupported)
+            {
+                el.Patterns.Invoke.Pattern.Invoke();
+                return;
+            }
+        }
+        catch { /* fall through to Click */ }
+
+        el.AsMenuItem()?.Click();
     }
 
     private Window? WaitForWindow(UIA2Automation automation, string title)
