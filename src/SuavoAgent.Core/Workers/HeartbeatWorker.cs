@@ -364,6 +364,28 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     : _stateDb.GetLearnedRoutineCount(learningSessionId);
                 var workflowTemplateCount = _stateDb.GetWorkflowTemplateCount(_options.TemplateLearning.SkillId);
 
+                // FSD learning-screen telemetry — the phase + confidence signals that let the pharmacy
+                // dashboard render the "what SuavoAgent has learned about this station" surface (observe→learn
+                // made VISIBLE): phase (discovery→pattern→model→approved→active), when it entered that phase
+                // (observed-since), and the supervised assist tallies (confirmed vs corrected = confidence to
+                // assist). Best-effort: a learning-state read must NEVER break the heartbeat critical path.
+                string? learningPhase = null, phaseChangedAtIso = null;
+                int supervisedSuccessCount = 0, supervisedCorrectionCount = 0;
+                if (learningSessionId is not null)
+                {
+                    try
+                    {
+                        if (_stateDb.GetLearningSession(learningSessionId) is { } ls)
+                        {
+                            learningPhase = ls.Phase;
+                            supervisedSuccessCount = ls.SupervisedSuccessCount;
+                            supervisedCorrectionCount = ls.SupervisedCorrectionCount;
+                            phaseChangedAtIso = _stateDb.GetPhaseChangedAt(learningSessionId).ToString("o");
+                        }
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "learning-phase telemetry read failed (heartbeat unaffected)"); }
+                }
+
                 // v3.12.1.1 — upload local auto-rule approval state so the
                 // pharmacy portal UI (MKM #44) can render real rows. Cloud
                 // upserts on (pharmacy_id, rule_id); retired/deleted local
@@ -457,6 +479,11 @@ public sealed class HeartbeatWorker : ResilientHostedService
                         interactionEventCount = interactionEventCount,
                         learnedRoutineCount = learnedRoutineCount,
                         workflowTemplateCount = workflowTemplateCount,
+                        // FSD learning-screen fields (see telemetry computation above).
+                        phase = learningPhase,
+                        phaseChangedAt = phaseChangedAtIso,
+                        supervisedSuccessCount = supervisedSuccessCount,
+                        supervisedCorrectionCount = supervisedCorrectionCount,
                     },
                     autoExecution = new
                     {
