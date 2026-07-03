@@ -1020,6 +1020,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "navigate_app":
                     _ = Task.Run(() => HandleNavigateAppAsync(scEl, cmd, ct), ct);
                     break;
+                case "navigate_pricing":
+                    _ = Task.Run(() => HandleNavigatePricingAsync(scEl, cmd, ct), ct);
+                    break;
                 case "replay_template":
                     _ = Task.Run(() => HandleReplayTemplateAsync(scEl, cmd, ct), ct);
                     break;
@@ -2030,6 +2033,58 @@ public sealed class HeartbeatWorker : ResilientHostedService
         {
             _navigationSemaphore.Release();
         }
+    }
+
+    /// <summary>
+    /// navigate_pricing — wire the reasoning NAVIGATOR to drive the pricing navigation for an NDC. Builds
+    /// the pricing objective (<see cref="SuavoAgent.Core.Pricing.PricingNavObjective"/>) and runs it through
+    /// the SAME navigate loop (perceive→reason→act, replay-first, edge-reinforcement, skill-banking) as
+    /// navigate_app — so the on-device brain REASONS its way to the Supplier-Catalog grid on whatever
+    /// PioneerRx version is on screen, instead of firing the hardcoded PricingWorkflow selectors. The
+    /// money-critical grid READ stays deterministic (the separate pricing-lookup path owns the actual
+    /// cost); the navigator only gets us to the grid. Delegates to <see cref="HandleNavigateAppAsync"/> so
+    /// there is ONE navigate implementation — no duplicated loop / harvest / safety-gate logic. Same
+    /// fail-safe posture (dry-run unless dryRun=false is sent explicitly).
+    /// </summary>
+    private async Task HandleNavigatePricingAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        // ValueKind-guard every read: JsonElement.GetString/TryGetInt32 THROW on a wrong-kind value (a
+        // signed-but-malformed payload, e.g. commandId as a JSON number), and this handler runs in a
+        // fire-and-forget Task.Run — an unobserved throw would drop the command with no ACK (cloud sees
+        // only a timeout). Guarded reads instead ack malformed_navigate_pricing_payload.
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) && cid.ValueKind == JsonValueKind.String
+            ? cid.GetString() : null;
+
+        var ndc = dataEl.TryGetProperty("ndc", out var n) && n.ValueKind == JsonValueKind.String
+            ? n.GetString() : null;
+        if (!SuavoAgent.Core.Pricing.PricingNavObjective.IsPlausibleNdc(ndc))
+        {
+            if (!string.IsNullOrEmpty(commandId) && _cloudClient != null)
+                await _cloudClient.AckCommandAsync(commandId, false, null, "malformed_navigate_pricing_payload", ct)
+                    .ConfigureAwait(false);
+            return;
+        }
+
+        // Compose the navigate_app payload from the pricing objective; carry the optional nav knobs so the
+        // operator can still tune steps/deadline/dryRun. Then delegate — one navigate implementation.
+        var navData = new Dictionary<string, object?>
+        {
+            ["commandId"] = commandId,
+            ["objective"] = SuavoAgent.Core.Pricing.PricingNavObjective.Build(ndc!),
+            ["taskKey"] = SuavoAgent.Core.Pricing.PricingNavObjective.TaskKey,
+        };
+        if (dataEl.TryGetProperty("runId", out var ridEl) && ridEl.ValueKind == JsonValueKind.String)
+            navData["runId"] = ridEl.GetString();
+        if (dataEl.TryGetProperty("maxSteps", out var msEl) && msEl.ValueKind == JsonValueKind.Number && msEl.TryGetInt32(out var msv))
+            navData["maxSteps"] = msv;
+        if (dataEl.TryGetProperty("deadlineSeconds", out var dsEl) && dsEl.ValueKind == JsonValueKind.Number && dsEl.TryGetInt32(out var dsv))
+            navData["deadlineSeconds"] = dsv;
+        if (dataEl.TryGetProperty("dryRun", out var drEl) && drEl.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            navData["dryRun"] = drEl.ValueKind == JsonValueKind.True;
+
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(new { data = navData }));
+        await HandleNavigateAppAsync(doc.RootElement, cmd, ct).ConfigureAwait(false);
     }
 
     /// <summary>
