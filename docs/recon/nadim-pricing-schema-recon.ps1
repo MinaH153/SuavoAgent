@@ -84,6 +84,86 @@ FROM sys.tables t
 JOIN sys.schemas s ON s.schema_id = t.schema_id
 WHERE t.name LIKE '%Supplier%' OR t.name LIKE '%Vendor%'
 ORDER BY 1;
+"@ },
+
+    # ============================================================================================
+    # B0 EXTENSION (see B0-pioneerrx-cost-and-reimbursement-sql-recon.md).
+    # PRIORITY: Feature A cost path FIRST — "is Cost Per Unit SQL-reachable per NDC?" decides whether
+    # pricing's accuracy ceiling is SQL (deterministic) or UIA (DevExpress/virtualization risk).
+    # Then Feature B reimbursement path. All READ-ONLY, schema/structure only (no patient/claim rows).
+    # ============================================================================================
+
+    # --- Feature A (PRIORITY): cost-per-unit + status reachability ---
+    @{ Name = "A_cost_catalog_tables"; Sql = @"
+SELECT s.name + '.' + t.name AS qualified_name
+FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE t.name LIKE '%Supplier%' OR t.name LIKE '%Vendor%'
+   OR t.name LIKE '%ItemCost%' OR t.name LIKE '%Catalog%'
+   OR t.name LIKE '%Cost%'     OR t.name LIKE '%Pricing%'
+   OR t.name LIKE '%Acquisition%'
+ORDER BY 1;
+"@ },
+    @{ Name = "A_cost_status_columns"; Sql = @"
+SELECT s.name AS schema_name, t.name AS table_name,
+       c.name AS column_name, tp.name AS data_type, c.is_nullable
+FROM sys.columns c
+JOIN sys.tables t  ON t.object_id = c.object_id
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+JOIN sys.types tp  ON tp.user_type_id = c.user_type_id
+WHERE c.name LIKE '%CostPerUnit%' OR c.name LIKE '%UnitCost%'
+   OR c.name LIKE '%Cost%'        OR c.name LIKE '%Price%'
+   OR c.name LIKE '%Discontinued%'OR c.name LIKE '%Available%'
+   OR c.name LIKE '%Status%'
+ORDER BY t.name, c.column_id;
+"@ },
+    @{ Name = "A_join_key_columns"; Sql = @"
+SELECT s.name AS schema_name, t.name AS table_name, c.name AS column_name, tp.name AS data_type
+FROM sys.columns c
+JOIN sys.tables t  ON t.object_id = c.object_id
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+JOIN sys.types tp  ON tp.user_type_id = c.user_type_id
+WHERE c.name IN ('NDC','ItemID','ItemNumber','SupplierID','VendorID','SupplierItemNumber')
+ORDER BY t.name, c.name;
+"@ },
+    # NOTE: A_cost_proof (the headline query — supplier rows + cost_per_unit for a real NDC) needs the
+    # real table/column names from the three queries above. Run it by hand from the B0 doc TEMPLATE once
+    # those are known; it can't be templated blind without risking a bad object reference.
+
+    # --- Feature B (SECOND): reimbursement / preferred-item / drug-group reachability ---
+    @{ Name = "B_thirdparty_pricing_tables"; Sql = @"
+SELECT s.name + '.' + t.name AS qualified_name
+FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE t.name LIKE '%ThirdParty%' OR t.name LIKE '%Plan%'   OR t.name LIKE '%Payer%'
+   OR t.name LIKE '%MAC%'        OR t.name LIKE '%Reimburs%'OR t.name LIKE '%Contract%'
+   OR t.name LIKE '%Insurance%'  OR t.name LIKE '%Claim%'   OR t.name LIKE '%Adjudicat%'
+ORDER BY 1;
+"@ },
+    @{ Name = "B_reimbursement_preferred_columns"; Sql = @"
+SELECT s.name AS schema_name, t.name AS table_name, c.name AS column_name, tp.name AS data_type
+FROM sys.columns c
+JOIN sys.tables t  ON t.object_id = c.object_id
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+JOIN sys.types tp  ON tp.user_type_id = c.user_type_id
+WHERE c.name LIKE '%Reimburs%' OR c.name LIKE '%Paid%'      OR c.name LIKE '%Allowed%'
+   OR c.name LIKE '%MAC%'       OR c.name LIKE '%Preferred%' OR c.name LIKE '%PlanID%'
+   OR c.name LIKE '%PayerID%'
+ORDER BY t.name, c.column_id;
+"@ },
+    @{ Name = "B_preferred_item_tables"; Sql = @"
+SELECT s.name + '.' + t.name AS qualified_name
+FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE t.name LIKE '%Preferred%' OR (t.name LIKE '%Plan%' AND t.name LIKE '%Item%')
+ORDER BY 1;
+"@ },
+    @{ Name = "B_drug_group_columns"; Sql = @"
+SELECT s.name AS schema_name, t.name AS table_name, c.name AS column_name, tp.name AS data_type
+FROM sys.columns c
+JOIN sys.tables t  ON t.object_id = c.object_id
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+JOIN sys.types tp  ON tp.user_type_id = c.user_type_id
+WHERE c.name LIKE '%Equivalent%' OR c.name LIKE '%GenericCode%' OR c.name LIKE '%DrugGroup%'
+   OR c.name LIKE '%GPI%'        OR c.name LIKE '%TherapeuticClass%'
+ORDER BY t.name, c.column_id;
 "@ }
 )
 
