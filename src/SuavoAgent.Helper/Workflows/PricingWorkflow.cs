@@ -910,10 +910,17 @@ public sealed class PricingWorkflow
 
             if (byId.Count == lastCount)
             {
-                if (++stable >= 2 && !scrolled) break; // stopped growing and nothing left to scroll
+                // A lazily-loaded DevExpress/WPF grid materializes rows in TIMED BATCHES (the true
+                // cheapest can be in a LATER batch — the sim proves this with a winner in the 2nd
+                // batch at ~850ms). Breaking after ~500ms of stability caught only batch 1 and mis-
+                // ranked. Require a longer no-growth window (~1.75s) so a late batch has time to land
+                // before we conclude the set is complete. Still bounded by GridLoadTimeout.
+                if (++stable >= 7 && !scrolled) break; // stopped growing and nothing left to scroll
             }
             else { stable = 0; lastCount = byId.Count; }
         }
+        _logger.Warning("WaitForStableRows: harvested {Count} rows (canScroll={Scroll}, expectedCount={Expected})",
+            byId.Count, canScroll, expectedRowCount);
         return byId.Values.ToArray();
     }
 
