@@ -531,7 +531,7 @@ public sealed class PricingWorkflow
                 var texts = editWindow.FindAllDescendants(cf.ByControlType(ControlType.Edit))
                     .Concat(editWindow.FindAllDescendants(cf.ByControlType(ControlType.Text)))
                     .Where(el => !IsSearchBox(el, searchBoxRid))
-                    .Select(el => el.AsTextBox()?.Text ?? el.Name ?? "")
+                    .Select(SafeText)
                     .Where(t => !string.IsNullOrEmpty(t))
                     .ToList();
                 lastSeen = texts;
@@ -579,6 +579,28 @@ public sealed class PricingWorkflow
         _logger.Warning("PricingWorkflow: NDC {Ndc} not found after {Timeout}s — matched-texts=[{Seen}] fullTree=[{Dump}]",
             ndc, ElementTimeout.TotalSeconds, string.Join(" | ", lastSeen.Take(10)), dump);
         return false;
+    }
+
+    /// <summary>
+    /// Reads an element's text WITHOUT throwing. <c>el.AsTextBox().Text</c> reaches the Value pattern,
+    /// which THROWS on a plain Text/Label control that doesn't implement it — and that exception,
+    /// caught by the scan's try/catch, aborted the ENTIRE <see cref="VerifyLoadedNdc"/> pass before it
+    /// could match (the loaded item's NDC lives in a Text label, e.g. PioneerRx's "NDC: 00093-5056-98").
+    /// Prefer the Value pattern only when supported; otherwise use the element Name (a Text control's
+    /// Name IS its rendered text). Never throws, so one unreadable control can't sink the whole scan.
+    /// </summary>
+    private static string SafeText(AutomationElement el)
+    {
+        try
+        {
+            if (el.Patterns.Value.IsSupported)
+            {
+                var v = el.Patterns.Value.Pattern.Value;
+                if (!string.IsNullOrEmpty(v)) return v;
+            }
+        }
+        catch { /* Value not really available — fall back to Name */ }
+        return el.Name ?? "";
     }
 
     /// <summary>
