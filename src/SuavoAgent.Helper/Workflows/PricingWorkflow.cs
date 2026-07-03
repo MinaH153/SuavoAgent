@@ -263,9 +263,18 @@ public sealed class PricingWorkflow
             if (menuBar == null) return false;
 
             var (itemMenu, itemRes) = resolver.FindFirst(menuBar, cf, SelectorStepId.OpenItemMenu, cf.ByName(ItemMenuName));
-            _logger.Debug("OpenRxItemDialog: itemMenu '{Name}' found={Found} patterns=[{Patterns}]",
-                ItemMenuName, itemMenu != null,
-                itemMenu is null ? "" : string.Join(",", itemMenu.GetSupportedPatterns().Select(p => p.ToString())));
+            if (itemMenu == null)
+            {
+                // The bar's automation peer may not expose its MenuItem children as walkable descendants
+                // of the bar element. Search the whole window for the "Item" MenuItem by name — robust to
+                // odd menu nesting. The count+names log tells us whether the items are in the tree at all.
+                var windowMenuItems = mainWindow.FindAllDescendants(cf.ByControlType(ControlType.MenuItem));
+                _logger.Debug("OpenRxItemDialog: bar-scope miss; window MenuItems={Count} names=[{Names}]",
+                    windowMenuItems.Length, string.Join(",", windowMenuItems.Select(m => m.Name)));
+                itemMenu = windowMenuItems.FirstOrDefault(
+                    m => string.Equals(m.Name, ItemMenuName, StringComparison.OrdinalIgnoreCase));
+            }
+            _logger.Debug("OpenRxItemDialog: itemMenu '{Name}' found={Found}", ItemMenuName, itemMenu != null);
             if (itemMenu == null) return false;
             LogIfLearned(SelectorStepId.OpenItemMenu, itemRes);
 
