@@ -568,8 +568,16 @@ public sealed class PricingWorkflow
             Thread.Sleep(300);
         }
 
-        _logger.Warning("PricingWorkflow: NDC {Ndc} not found in loaded item after {Timeout}s — Edit window showed [{Seen}]",
-            ndc, ElementTimeout.TotalSeconds, string.Join(" | ", lastSeen.Take(20)));
+        string dump;
+        try
+        {
+            dump = string.Join(" | ", editWindow.FindAllDescendants()
+                .Select(e => $"{e.ControlType}:{(e.Name ?? "").Trim()}")
+                .Where(s => s.Length > 2).Take(30));
+        }
+        catch (Exception ex) { dump = $"(tree dump failed: {ex.GetType().Name})"; }
+        _logger.Warning("PricingWorkflow: NDC {Ndc} not found after {Timeout}s — matched-texts=[{Seen}] fullTree=[{Dump}]",
+            ndc, ElementTimeout.TotalSeconds, string.Join(" | ", lastSeen.Take(10)), dump);
         return false;
     }
 
