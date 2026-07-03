@@ -518,6 +518,7 @@ public sealed class PricingWorkflow
         // query) can't pass — by identity, not HelpText, so it holds with no HelpText.
         var searchBoxRid = TryGetRuntimeId(searchBox);
 
+        var lastSeen = new List<string>();
         var deadline = DateTime.UtcNow + ElementTimeout;
         while (DateTime.UtcNow < deadline)
         {
@@ -533,6 +534,7 @@ public sealed class PricingWorkflow
                     .Select(el => el.AsTextBox()?.Text ?? el.Name ?? "")
                     .Where(t => !string.IsNullOrEmpty(t))
                     .ToList();
+                lastSeen = texts;
 
                 // Do-Not-Use must be a FULL-PASS check BEFORE any NDC match. PioneerRx returns a red
                 // "(Do Not Use)" duplicate sharing the active item's NDC; the NDC lives in an Edit
@@ -566,8 +568,8 @@ public sealed class PricingWorkflow
             Thread.Sleep(300);
         }
 
-        _logger.Warning("PricingWorkflow: NDC {Ndc} not found in loaded item after {Timeout}s",
-            ndc, ElementTimeout.TotalSeconds);
+        _logger.Warning("PricingWorkflow: NDC {Ndc} not found in loaded item after {Timeout}s — Edit window showed [{Seen}]",
+            ndc, ElementTimeout.TotalSeconds, string.Join(" | ", lastSeen.Take(20)));
         return false;
     }
 
