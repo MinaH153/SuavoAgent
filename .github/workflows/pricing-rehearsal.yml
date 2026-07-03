@@ -21,6 +21,10 @@ on:
         description: "quick | full"
         required: false
         default: "quick"
+      debug:
+        description: "SUAVO_DEBUG=1 (verbose Helper log; slows UIA on the runner — off by default)"
+        required: false
+        default: "0"
 
 permissions:
   contents: read
@@ -48,7 +52,10 @@ jobs:
           INPUT_VARIANT: ${{ github.event.inputs.variant }}
           INPUT_MODE: ${{ github.event.inputs.mode }}
           MATRIX_VARIANT: ${{ matrix.variant }}
-          SUAVO_DEBUG: "1"
+          # Off by default: Debug-level logging on every UIA op measurably slows the Helper on a shared
+          # runner and pushes NDC-search / grid-read past their timeouts (observed: clean runs turned to
+          # TimeoutException / NO_MATCH). Opt in via the debug input only when diagnosing.
+          SUAVO_DEBUG: ${{ github.event.inputs.debug == '1' && '1' || '0' }}
         run: |
           $ErrorActionPreference = "Stop"
           # Allowlist — never pass an unvalidated dispatch input to the rehearsal. Values that aren't
