@@ -1053,6 +1053,9 @@ public sealed class HeartbeatWorker : ResilientHostedService
                 case "replay_template":
                     _ = Task.Run(() => HandleReplayTemplateAsync(scEl, cmd, ct), ct);
                     break;
+                case "run_learned_template":
+                    _ = Task.Run(() => HandleRunLearnedTemplateAsync(scEl, cmd, ct), ct);
+                    break;
                 case "explore_sandbox":
                     _ = Task.Run(() => HandleSandboxExploreAsync(scEl, cmd, ct), ct);
                     break;
@@ -2769,6 +2772,168 @@ public sealed class HeartbeatWorker : ResilientHostedService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "replay_template execution exception");
+            await AckAsync(false, null, ex.Message);
+        }
+        finally
+        {
+            _navigationSemaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// run_learned_template — FSD "autopilot engage": deterministically execute an operator-APPROVED learned
+    /// <see cref="SuavoAgent.Contracts.Learning.WorkflowTemplate"/> by replaying its CLICK-family steps through
+    /// the same fail-closed perceiver / safety / actuator seam via
+    /// <see cref="SuavoAgent.Core.Agentic.Replication.GatedTemplateExecutor"/>. Distinct from replay_template
+    /// (the internal harvest path) by four fail-closed gates: the template must exist + be active; its auto-rule
+    /// approval must be <c>Approved</c> (never Pending / Shadow / Rejected / missing); any Type / PressKey /
+    /// writeback step refuses the WHOLE template (v1 click-only); and every click still passes the per-action
+    /// safety gate (a dry-run verdict STOPS — it never actuates). Shares the navigation semaphore + the
+    /// abort_navigation cancellation seam. Ack is STRUCTURAL ONLY (outcome + counts + template-id prefix, no PHI).
+    /// </summary>
+    private async Task HandleRunLearnedTemplateAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
+    {
+        var dataEl = scEl.TryGetProperty("data", out var d) ? d : scEl;
+        var commandId = dataEl.TryGetProperty("commandId", out var cid) && cid.ValueKind == JsonValueKind.String
+            ? cid.GetString() : null;
+
+        async Task AckAsync(bool ok, object? result, string? err)
+        {
+            if (string.IsNullOrEmpty(commandId) || _cloudClient == null) return;
+            await _cloudClient.AckCommandAsync(commandId, ok, result, err, ct);
+        }
+
+        // 1. templateId is required (ValueKind-guarded like navigate_pricing).
+        var templateId = dataEl.TryGetProperty("templateId", out var tid) && tid.ValueKind == JsonValueKind.String
+            ? tid.GetString() : null;
+        if (string.IsNullOrWhiteSpace(templateId))
+        {
+            await AckAsync(false, null, "malformed_run_learned_template");
+            return;
+        }
+
+        // 2. Load the template locally (no egress); missing OR retired ⇒ not found (fail-closed).
+        var row = _stateDb.GetWorkflowTemplate(templateId);
+        if (row is null || row.RetiredAt is not null)
+        {
+            await AckAsync(false, null, "template_not_found");
+            return;
+        }
+
+        // 3. APPROVAL GATE (fail-closed): the auto-rule for this template MUST be Approved. Rule id follows
+        //    TemplateRuleGenerator's convention exactly: auto.<skillId>.<templateId[:12]> (clamped for short ids).
+        //    Missing / Pending / Shadow / Rejected all refuse — an operator approval is the only key that turns.
+        var idSuffix = templateId.Length >= 12 ? templateId[..12] : templateId;
+        var ruleId = $"auto.{row.SkillId}.{idSuffix}";
+        var approval = _stateDb.GetAutoRuleApproval(ruleId);
+        if (approval is null || approval.Status != SuavoAgent.Core.State.AgentStateDb.AutoRuleStatus.Approved)
+        {
+            var status = approval?.Status.ToString() ?? "none";
+            await AckAsync(false, null, $"template_not_approved:{status}");
+            return;
+        }
+
+        var runId = dataEl.TryGetProperty("runId", out var rid) && rid.ValueKind == JsonValueKind.String
+            && rid.GetString() is { Length: > 0 } r ? r : Guid.NewGuid().ToString("n");
+        var deadlineSeconds = dataEl.TryGetProperty("deadlineSeconds", out var ds) && ds.TryGetInt32(out var dsv) ? dsv : 120;
+
+        // 4. One actuating run at a time — share the navigation semaphore with navigate/replay.
+        if (!await _navigationSemaphore.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            await AckAsync(false, null, "navigation_already_running");
+            return;
+        }
+
+        try
+        {
+            SuavoAgent.Contracts.Learning.WorkflowTemplate template;
+            try
+            {
+                template = SuavoAgent.Core.Learning.TemplateRuleGenerator.Rehydrate(row);
+            }
+            catch (Exception)
+            {
+                await AckAsync(false, null, "template_unreadable");
+                return;
+            }
+
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: runId,
+                EventType: "run_learned_template_received",
+                FromState: "queued",
+                ToState: "starting",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: $"run approved template={idSuffix} skill={row.SkillId} steps={template.Steps.Count}"));
+
+            var charter = _serviceProvider.GetService<MissionCharter>() ?? BuildEphemeralCharter();
+            var audit = _serviceProvider.GetService<SuavoAgent.Core.Audit.AuditChain>()
+                ?? new SuavoAgent.Core.Audit.AuditChain();
+            var pharmacyId = _options.PharmacyId ?? charter.PharmacyId;
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(deadlineSeconds);
+
+            // Reuse the SAME gate policy as replay_template — no parallel gate, no bypass. The approval gate
+            // above is the operator's autopilot-engage key; the per-action autonomy gate still runs per step.
+            var safetyOptions = new SuavoAgent.Core.Agentic.Adapters.NavigateSafetyOptions(
+                EnableTaskAutonomy: _options.EnableTaskAutonomy,
+                LivePms: false,
+                ExecutorMode: _options.PricingExecutor,
+                AllowLiveActuation: false);
+
+            var executor = SuavoAgent.Core.Agentic.Replication.ReplayFactory.CreateExecutor(
+                _serviceProvider, safetyOptions, charter, audit, deadline);
+
+            // Operator explicitly approved + commanded ⇒ DryRun=false. Each step still needs a hard Allow from
+            // GateAction to actuate (AllowDryRun ⇒ STOP), so the approval never bypasses the autonomy gate.
+            var baseContext = new SuavoAgent.Core.Agentic.ActuationContext(pharmacyId, row.SkillId, DryRun: false);
+            var objective = new SuavoAgent.Core.Agentic.AgentObjective($"run:{idSuffix}", row.SkillId, pharmacyId);
+            var options = new SuavoAgent.Core.Agentic.Replication.TemplateReplayOptions();
+
+            using var navCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            lock (_activeNavigationLock)
+            {
+                _activeNavigationCts = navCts;
+                _activeNavigationRunId = runId;
+            }
+
+            SuavoAgent.Core.Agentic.Replication.GatedReplayResult result;
+            try
+            {
+                result = await executor.ExecuteAsync(template, objective, baseContext, options, navCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_activeNavigationLock)
+                {
+                    _activeNavigationCts = null;
+                    _activeNavigationRunId = null;
+                }
+            }
+
+            _logger.LogInformation(
+                "run_learned_template run={RunId} template={Tid} outcome={Outcome} steps={Steps} failedOrdinal={Ord}",
+                runId, idSuffix, result.Outcome, result.StepsCompleted, result.FailedOrdinal);
+
+            await AckAsync(
+                ok: result.Outcome == SuavoAgent.Core.Agentic.Replication.GatedReplayOutcome.Completed,
+                result: new
+                {
+                    run_id = runId,
+                    template = idSuffix,
+                    outcome = result.Outcome.ToString(),
+                    steps_completed = result.StepsCompleted,
+                    failed_ordinal = result.FailedOrdinal,
+                    detail = result.Detail,
+                },
+                err: result.Outcome == SuavoAgent.Core.Agentic.Replication.GatedReplayOutcome.Completed ? null : result.Outcome.ToString());
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "run_learned_template execution exception");
             await AckAsync(false, null, ex.Message);
         }
         finally

@@ -42,4 +42,35 @@ public static class ReplayFactory
 
         return new TemplateReplayer(perceiver, actuator, safety);
     }
+
+    /// <summary>
+    /// Composition root for the operator-approved FSD-engage path (<c>run_learned_template</c>): wires
+    /// <see cref="GatedTemplateExecutor"/> to the SAME production perceiver / actuator / safety adapters as
+    /// <see cref="Create"/> — same gate policy, no bypass, no parallel gate. The only difference from
+    /// <see cref="Create"/> is the executor on top (click-family only, preflight + entry/drift/ExpectedAfter
+    /// verify, dry-run-is-a-STOP). Same v1 synthetic-gate-state caveat (Helper CheckOrReject authoritative).
+    /// </summary>
+    public static GatedTemplateExecutor CreateExecutor(
+        IServiceProvider services,
+        NavigateSafetyOptions safetyOptions,
+        MissionCharter charter,
+        AuditChain audit,
+        DateTimeOffset deadlineUtc)
+    {
+        var perceiver = new HelperPerceiver(services.GetRequiredService<IIpcCommandClient>());
+
+        var safety = new CompositeSafetyGate(
+            gateState: () => new ActuationGateState(
+                Enabled: true, DryRun: false, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null),
+            ledger: services.GetRequiredService<TaskAutonomyLedger>(),
+            options: safetyOptions);
+
+        var actuator = new VerbActuator(
+            services.GetRequiredService<VerbRegistry>(),
+            services.GetRequiredService<VerbDispatcher>(),
+            services,
+            envelope: _ => new ActuationEnvelope(charter, audit, Guid.NewGuid().ToString("n"), deadlineUtc));
+
+        return new GatedTemplateExecutor(perceiver, actuator, safety);
+    }
 }
