@@ -2690,6 +2690,27 @@ public sealed class HeartbeatWorker : ResilientHostedService
         var deadlineSeconds = dataEl.TryGetProperty("deadlineSeconds", out var ds) && ds.TryGetInt32(out var dsv) ? dsv : 120;
         var dryRun = !(dataEl.TryGetProperty("dryRun", out var dr) && dr.ValueKind == JsonValueKind.False);
 
+        // Hardening — LIVE actuation of a replayed template requires an APPROVED auto-rule. An unapproved
+        // (Pending / Shadow / Rejected / none) template may still be replayed for VERIFICATION, but only in
+        // DRY-RUN, so an operator can't push an arbitrary/unapproved inline template for live execution.
+        // Mirrors run_learned_template's approval gate (same ruleId format). Fail-safe: forces dry-run, never
+        // breaks a legitimate approved replay. (The fully-gated, click-only, DB-loaded path is
+        // run_learned_template + GatedTemplateExecutor; this only closes the live-exec-of-unapproved gap on
+        // the legacy replay_template surface.)
+        if (!dryRun && !string.IsNullOrWhiteSpace(template.TemplateId))
+        {
+            var tid = template.TemplateId!;
+            var ruleId = $"auto.{template.SkillId}.{(tid.Length >= 12 ? tid[..12] : tid)}";
+            var approval = _stateDb.GetAutoRuleApproval(ruleId);
+            if (approval?.Status != AgentStateDb.AutoRuleStatus.Approved)
+            {
+                _logger.LogWarning(
+                    "replay_template: forcing dry-run — template {TemplateId} is not Approved (status={Status}); live actuation requires operator approval",
+                    tid, approval?.Status.ToString() ?? "none");
+                dryRun = true;
+            }
+        }
+
         // Share the navigation semaphore: replay and navigate both actuate, so never concurrently.
         if (!await _navigationSemaphore.WaitAsync(0, ct).ConfigureAwait(false))
         {
