@@ -764,6 +764,10 @@ public sealed class PricingWorkflow
                 parsed.Add(new PricingGridReader.SupplierRow(supplierText, cost, statusText));
             }
 
+            _logger.Warning("ReadCheapest DIAG: {GridRows} grid rows → {Parsed} parsed: [{Detail}]",
+                rows.Length, parsed.Count,
+                string.Join(" | ", parsed.Select(p => $"{p.Supplier}={p.CostPerUnit}/{p.Status}")));
+
             // Cheapest = min Cost across ALL usable rows (sort is user-toggleable;
             // never trust row 1) — discontinued/unavailable rows excluded.
             var cheapest = PricingGridReader.SelectCheapest(parsed);
