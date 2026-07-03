@@ -94,3 +94,35 @@ public interface IPreferredNdcDataSource
 {
     Task<PreferredNdcReadResult> ReadCandidatesAsync(PreferredNdcRequest request, CancellationToken ct);
 }
+
+/// <summary>
+/// B3 — one line of the READ-ONLY report Nadim asked for ("run me a report and I'll do it manually"):
+/// for a (medication, plan), the most-profitable NDC the agent found and the numbers behind it, so the
+/// pharmacist can set it as the PioneerRx preferred item by hand. <c>Status</c> is explicit — "OK",
+/// "NO_DATA" (reader found nothing), "NO_ELIGIBLE" (candidates present but none had a usable cost +
+/// reimbursement → fail-closed, no guess), or "ERROR:{why}". The dollar fields are null unless Status=OK.
+/// <c>Basis</c> carries the honesty framing (a live contract/MAC rate vs. an estimate from paid claims).
+/// </summary>
+public record PreferredNdcReportRow(
+    string DrugGroupKey,
+    string PlanId,
+    string Status,
+    string? PreferredNdc,
+    string? Manufacturer,
+    decimal? AcquisitionCost,
+    decimal? Reimbursement,
+    decimal? Profit,
+    decimal? DeltaOverRunnerUp,
+    ReimbursementBasis Basis,
+    int CandidatesConsidered);
+
+/// <summary>Explicit report statuses — a wrong preferred-NDC steers every future fill of that drug+plan
+/// to a worse margin, so a row is only "OK" when a real winner was found; every other outcome is a named
+/// non-price marker, never a guessed number.</summary>
+public static class PreferredNdcStatus
+{
+    public const string Ok = "OK";
+    public const string NoData = "NO_DATA";
+    public const string NoEligible = "NO_ELIGIBLE";
+    public static string Error(string why) => $"ERROR:{why}";
+}
