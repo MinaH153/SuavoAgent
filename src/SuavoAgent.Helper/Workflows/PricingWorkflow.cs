@@ -36,9 +36,13 @@ public sealed class PricingWorkflow
     private const string PricingTabName = "Pricing";
     private const string EditRxItemWindowTitle = "Edit Rx Item";
 
-    // How long to wait for UI elements to appear after navigation
-    private static readonly TimeSpan ElementTimeout = TimeSpan.FromSeconds(8);
-    private static readonly TimeSpan GridLoadTimeout = TimeSpan.FromSeconds(5);
+    // How long to wait for UI elements to appear after navigation. Sized for a LOADED box: PioneerRx
+    // under real dispensing load (or a slow VM) can take >8s to open the Edit window / load an item
+    // after an NDC search — an 8s cap timed out those rows and mislabeled them NO_MATCH. These are
+    // upper bounds on the happy path (elements normally resolve in <2s); a genuinely missing item still
+    // fails fast via the value checks, not by burning the whole window.
+    private static readonly TimeSpan ElementTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan GridLoadTimeout = TimeSpan.FromSeconds(10);
     // Bound the sighted read (capture + OCR) per NDC so a stuck OCR can't wedge a 500-item batch.
     private static readonly TimeSpan VisionReadTimeout = TimeSpan.FromSeconds(20);
 
@@ -289,20 +293,16 @@ public sealed class PricingWorkflow
             // the DESKTOP ROOT first, then fall back to the main window.
             var searchRoot = mainWindow.Automation.GetDesktop();
             AutomationElement? rxItemEntry = null;
-            for (var attempt = 0; attempt <= MenuOpeners.Length && rxItemEntry == null; attempt++)
+            for (var i = 0; i < MenuOpeners.Length; i++)
             {
-                // attempt 0 checks without opening (a prior hover may have left it open); 1.. after each opener.
-                if (attempt > 0)
-                {
-                    try { MenuOpeners[attempt - 1](itemMenu); } catch { /* try the next opener */ }
-                    Thread.Sleep(300);
-                }
+                try { MenuOpeners[i](itemMenu); } catch { /* try the next opener */ }
+                Thread.Sleep(300);
                 var (found, res) = resolver.FindFirst(searchRoot, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
                 if (found == null)
                     (found, res) = resolver.FindFirst(mainWindow, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
-                _logger.Debug("OpenRxItemDialog: attempt {Attempt}/{Max} → rxItem found={Found}",
-                    attempt, MenuOpeners.Length, found != null);
-                if (found != null) { rxItemEntry = found; LogIfLearned(SelectorStepId.OpenRxItem, res); }
+                _logger.Debug("OpenRxItemDialog: opener {N}/{Max} → rxItem found={Found}",
+                    i + 1, MenuOpeners.Length, found != null);
+                if (found != null) { rxItemEntry = found; LogIfLearned(SelectorStepId.OpenRxItem, res); break; }
             }
             if (rxItemEntry == null) return false;
 
