@@ -259,9 +259,13 @@ public sealed class PricingWorkflow
             // failed every row at "Could not open Item → Rx Item menu" because only MenuBar was tried.)
             var menuBar = mainWindow.FindFirstDescendant(cf.ByControlType(ControlType.MenuBar))
                 ?? mainWindow.FindFirstDescendant(cf.ByControlType(ControlType.Menu));
+            _logger.Debug("OpenRxItemDialog: menuBar found={Found} ct={Ct}", menuBar != null, menuBar?.ControlType);
             if (menuBar == null) return false;
 
             var (itemMenu, itemRes) = resolver.FindFirst(menuBar, cf, SelectorStepId.OpenItemMenu, cf.ByName(ItemMenuName));
+            _logger.Debug("OpenRxItemDialog: itemMenu '{Name}' found={Found} patterns=[{Patterns}]",
+                ItemMenuName, itemMenu != null,
+                itemMenu is null ? "" : string.Join(",", itemMenu.GetSupportedPatterns().Select(p => p.ToString())));
             if (itemMenu == null) return false;
             LogIfLearned(SelectorStepId.OpenItemMenu, itemRes);
 
@@ -287,6 +291,8 @@ public sealed class PricingWorkflow
                 var (found, res) = resolver.FindFirst(searchRoot, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
                 if (found == null)
                     (found, res) = resolver.FindFirst(mainWindow, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
+                _logger.Debug("OpenRxItemDialog: attempt {Attempt}/{Max} → rxItem found={Found}",
+                    attempt, MenuOpeners.Length, found != null);
                 if (found != null) { rxItemEntry = found; LogIfLearned(SelectorStepId.OpenRxItem, res); }
             }
             if (rxItemEntry == null) return false;
