@@ -882,6 +882,12 @@ public sealed class PricingWorkflow
             }
         }
 
+        // Quiet settle: let a lazily-loaded grid finish materializing its rows BEFORE we start hammering
+        // it with UIA queries. A DevExpress/WPF grid loads rows on ITS OWN UI thread; our rapid cross-
+        // process FindAllChildren calls can starve that thread so late-loading rows never appear during
+        // the read — and the true cheapest supplier can be one of them (money-safety). A brief UIA-free
+        // pause lets the grid's own loading complete first; the loop below then confirms stability.
+        Thread.Sleep(900);
         Harvest();
         int lastCount = byId.Count, stable = 0;
         while (DateTime.UtcNow < deadline)
@@ -899,7 +905,7 @@ public sealed class PricingWorkflow
                 }
             }
 
-            Thread.Sleep(250);
+            Thread.Sleep(500);
             Harvest();
 
             if (byId.Count == lastCount)
@@ -909,7 +915,7 @@ public sealed class PricingWorkflow
                 // batch at ~850ms). Breaking after ~500ms of stability caught only batch 1 and mis-
                 // ranked. Require a longer no-growth window (~1.75s) so a late batch has time to land
                 // before we conclude the set is complete. Still bounded by GridLoadTimeout.
-                if (++stable >= 7 && !scrolled) break; // stopped growing and nothing left to scroll
+                if (++stable >= 3 && !scrolled) break; // stopped growing and nothing left to scroll
             }
             else { stable = 0; lastCount = byId.Count; }
         }
