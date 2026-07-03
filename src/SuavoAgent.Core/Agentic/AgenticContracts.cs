@@ -83,7 +83,25 @@ public enum NextActionKind
     Done,
     /// <summary>Hand off to a human — stop, escalate.</summary>
     Escalate,
+    /// <summary>
+    /// TERMINAL, NON-EXECUTING assist offer: a high-confidence LEARNED template the agent has observed
+    /// enough to propose to the operator. Like Done/Escalate it stops the loop and NEVER reaches the
+    /// actuator — the offer is surfaced for human confirmation elsewhere, never auto-run.
+    /// </summary>
+    Assist,
 }
+
+/// <summary>
+/// A PHI-safe, NON-EXECUTING assist offer — a high-confidence learned <c>WorkflowTemplate</c> the agent
+/// has observed often enough to propose ("watched you do this Nx, C% confident — want me to?"). Carried by
+/// a terminal <see cref="NextActionKind.Assist"/> action; the agent NEVER executes it. <see cref="StepsSummary"/>
+/// is STRUCTURAL ONLY (step kind + control-type counts) — never element Name/Value text.
+/// </summary>
+public sealed record LearnedTemplateOffer(
+    string TemplateId,
+    double Confidence,
+    int ObservationCount,
+    IReadOnlyList<string> StepsSummary);
 
 /// <summary>
 /// Exactly one grounded action the orchestrator may execute this step (or a
@@ -95,7 +113,8 @@ public sealed record NextAction(
     NextActionKind Kind,
     string? Verb = null,
     IReadOnlyDictionary<string, object?>? Parameters = null,
-    string? Rationale = null)
+    string? Rationale = null,
+    LearnedTemplateOffer? Offer = null)
 {
     public static readonly NextAction Done = new(NextActionKind.Done);
 
@@ -103,6 +122,11 @@ public sealed record NextAction(
 
     public static NextAction Act(string verb, IReadOnlyDictionary<string, object?>? parameters = null, string? rationale = null)
         => new(NextActionKind.Act, verb, parameters, rationale);
+
+    /// <summary>A terminal, NON-EXECUTING assist offer (see <see cref="NextActionKind.Assist"/>). Carries no
+    /// Verb/Parameters, so the loop's act path is never reached for it.</summary>
+    public static NextAction Assist(LearnedTemplateOffer offer, string? rationale = null)
+        => new(NextActionKind.Assist, Rationale: rationale, Offer: offer);
 
     /// <summary>
     /// Stable identity used for no-progress detection: verb + ordered params.
@@ -195,10 +219,13 @@ public sealed record WorkingMemory(
     int PerceiveNullStrikes);
 
 /// <summary>Final outcome of a navigate_app run.</summary>
+/// <param name="AssistedTemplate">Set ONLY when the run terminated on a terminal <see cref="NextActionKind.Assist"/>
+/// offer — the NON-EXECUTING learned-template proposal surfaced to the operator. Null on every other path.</param>
 public sealed record AgenticLoopResult(
     TerminationReason Termination,
     int StepCount,
     int CloudCallsUsed,
     bool EscalationEmitted,
     string? Detail,
-    WorkingMemory FinalMemory);
+    WorkingMemory FinalMemory,
+    LearnedTemplateOffer? AssistedTemplate = null);

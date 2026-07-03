@@ -135,7 +135,13 @@ public sealed class TemplateRuleGenerator
         return count;
     }
 
-    private static WorkflowTemplate Rehydrate(AgentStateDb.WorkflowTemplateRow row)
+    /// <summary>
+    /// Rebuilds a <see cref="WorkflowTemplate"/> from a stored row. Tolerates camelCase (extractor
+    /// output) and PascalCase (seed clients). Public so the observe→assist lookup
+    /// (<see cref="AgentStateDb.FindActiveTemplateByScreenSignatures"/>) shares the exact same
+    /// deserialization instead of duplicating the JSON options.
+    /// </summary>
+    public static WorkflowTemplate Rehydrate(AgentStateDb.WorkflowTemplateRow row)
     {
         // Tolerate camelCase (extractor output) and PascalCase (seed clients)
         // so both local extraction and cross-pharmacy seed ingress rehydrate

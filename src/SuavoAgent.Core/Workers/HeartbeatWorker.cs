@@ -2047,6 +2047,16 @@ public sealed class HeartbeatWorker : ResilientHostedService
                     steps = result.StepCount,
                     escalated = result.EscalationEmitted,
                     detail = result.Detail,
+                    // Observe→assist bridge: a NON-EXECUTING learned-template offer for the presence layer to
+                    // render (purple-cursor "want me to?"). Null unless the run terminated on a terminal Assist.
+                    // steps_summary is STRUCTURAL ONLY (kinds + control-type counts) — no raw element text.
+                    assisted_template = result.AssistedTemplate is { } at ? new
+                    {
+                        template_id = at.TemplateId,
+                        confidence = at.Confidence,
+                        observation_count = at.ObservationCount,
+                        steps_summary = at.StepsSummary,
+                    } : null,
                 },
                 err: result.Termination == SuavoAgent.Core.Agentic.TerminationReason.Done ? null : result.Termination.ToString());
         }

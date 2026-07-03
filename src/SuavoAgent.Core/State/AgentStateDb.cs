@@ -2764,6 +2764,67 @@ public sealed class AgentStateDb : IDisposable
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Observe→assist bridge lookup: returns the single active (retired_at IS NULL) template whose ENTRY
+    /// step (Steps[0].ExpectedVisible) structurally matches the current perceived screen, or null.
+    ///
+    /// SCREEN KEY: <see cref="PerceivedScreen.Signatures"/> ("controlType|automationId") matched against the
+    /// template's entry <see cref="ElementSignature"/>s via <see cref="ElementSignature.MatchesStructurally"/>
+    /// + MinElementsRequired — the SAME predicate the rule engine applies to a template's When
+    /// fingerprints. We deliberately do NOT compare the stored <c>screen_signature</c> SHA: that hash is
+    /// SHA-256 over the 3-part CanonicalRepr of the entry subset and is not reconstructible from a live
+    /// perceived screen (className is dropped on the wire; the perceived set is the full screen, not the
+    /// entry subset), so an equality lookup could NEVER match. Structural subset match is the real key.
+    ///
+    /// Skill scope: NOT filtered by skill_id — the navigate loop's skillId is the synthetic "navigate",
+    /// whereas templates carry their extraction skillId, so a skill filter would never match. The matched
+    /// template's own SkillId is used by the caller to derive the approval rule id.
+    ///
+    /// Fail-closed: empty/parseless perceived set → null; 0 matches → null; &gt;1 matches (ambiguous) → null;
+    /// a single unrehydratable row is skipped (never throws to the caller).
+    /// </summary>
+    public WorkflowTemplate? FindActiveTemplateByScreenSignatures(IReadOnlyList<string> perceivedSignatures)
+    {
+        if (perceivedSignatures is null || perceivedSignatures.Count == 0) return null;
+
+        // Parse "controlType|automationId" → match atoms. className is unknown on the wire (null), which
+        // ElementSignature treats as null-tolerant, so a template that DOES carry a className still matches.
+        var perceived = new List<ElementSignature>(perceivedSignatures.Count);
+        foreach (var s in perceivedSignatures)
+        {
+            var parts = s.Split('|');
+            if (parts.Length < 2 || string.IsNullOrWhiteSpace(parts[0]) || string.IsNullOrWhiteSpace(parts[1]))
+                continue;
+            try { perceived.Add(new ElementSignature(parts[0], parts[1], null)); }
+            catch (ArgumentException) { /* malformed atom — skip */ }
+        }
+        if (perceived.Count == 0) return null;
+
+        // ponytail: linear scan over active templates (few per box); index later only if it ever matters.
+        WorkflowTemplate? match = null;
+        foreach (var row in GetActiveWorkflowTemplates())
+        {
+            WorkflowTemplate template;
+            try { template = TemplateRuleGenerator.Rehydrate(row); }
+            catch (Exception) { continue; } // fail-closed on a single bad row
+            if (template.Steps.Count == 0) continue;
+            if (!EntryScreenMatches(template.Steps[0], perceived)) continue;
+
+            if (match is not null) return null; // ambiguous → fail-closed
+            match = template;
+        }
+        return match;
+    }
+
+    private static bool EntryScreenMatches(TemplateStep entry, IReadOnlyList<ElementSignature> perceived)
+    {
+        var hits = 0;
+        foreach (var expected in entry.ExpectedVisible)
+            if (perceived.Any(p => expected.MatchesStructurally(p)))
+                hits++;
+        return hits >= entry.MinElementsRequired;
+    }
+
     // --- M2b: learned selector patches (applied by the seed pipeline; read by the resolver) ---
 
     public void UpsertSelectorPatch(SelectorPatch patch, string appliedAt) =>
