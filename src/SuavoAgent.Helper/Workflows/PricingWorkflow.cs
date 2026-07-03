@@ -568,16 +568,10 @@ public sealed class PricingWorkflow
             Thread.Sleep(300);
         }
 
-        string dump;
-        try
-        {
-            dump = string.Join(" | ", editWindow.FindAllDescendants()
-                .Select(e => $"{e.ControlType}:{(e.Name ?? "").Trim()}")
-                .Where(s => s.Length > 2).Take(30));
-        }
-        catch (Exception ex) { dump = $"(tree dump failed: {ex.GetType().Name})"; }
-        _logger.Warning("PricingWorkflow: NDC {Ndc} not found after {Timeout}s — matched-texts=[{Seen}] fullTree=[{Dump}]",
-            ndc, ElementTimeout.TotalSeconds, string.Join(" | ", lastSeen.Take(10)), dump);
+        _logger.Warning("PricingWorkflow: NDC {Ndc} not found in loaded item after {Timeout}s",
+            ndc, ElementTimeout.TotalSeconds);
+        _logger.Debug("PricingWorkflow: verify miss for {Ndc} — Edit window texts=[{Seen}]",
+            ndc, string.Join(" | ", lastSeen.Take(15)));
         return false;
     }
 
@@ -764,7 +758,7 @@ public sealed class PricingWorkflow
                 parsed.Add(new PricingGridReader.SupplierRow(supplierText, cost, statusText));
             }
 
-            _logger.Warning("ReadCheapest DIAG: {GridRows} grid rows → {Parsed} parsed: [{Detail}]",
+            _logger.Debug("ReadCheapest: {GridRows} grid rows → {Parsed} usable: [{Detail}]",
                 rows.Length, parsed.Count,
                 string.Join(" | ", parsed.Select(p => $"{p.Supplier}={p.CostPerUnit}/{p.Status}")));
 
@@ -919,7 +913,7 @@ public sealed class PricingWorkflow
             }
             else { stable = 0; lastCount = byId.Count; }
         }
-        _logger.Warning("WaitForStableRows: harvested {Count} rows (canScroll={Scroll}, expectedCount={Expected})",
+        _logger.Debug("WaitForStableRows: harvested {Count} rows (canScroll={Scroll}, expectedCount={Expected})",
             byId.Count, canScroll, expectedRowCount);
         return byId.Values.ToArray();
     }
