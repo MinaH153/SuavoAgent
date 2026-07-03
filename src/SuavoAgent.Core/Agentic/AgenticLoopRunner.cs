@@ -95,6 +95,10 @@ public sealed class AgenticLoopRunner : IAgenticLoopRunner
                 var action = reason.Action;
                 if (action.Kind == NextActionKind.Done)
                     return Terminate(TerminationReason.Done, memory, budget, escalate: false);
+                // Assist is a TERMINAL, NON-EXECUTING offer: stop here (a special escalation) and carry the
+                // learned-template proposal out. Returns BEFORE the gate/act path — the actuator is NEVER called.
+                if (action.Kind == NextActionKind.Assist)
+                    return Terminate(TerminationReason.Escalated, memory, budget, escalate: true, "assist_offer", action.Offer);
                 if (action.Kind == NextActionKind.Escalate)
                     return Terminate(TerminationReason.Escalated, memory, budget, escalate: true, action.Rationale);
 
@@ -184,6 +188,7 @@ public sealed class AgenticLoopRunner : IAgenticLoopRunner
     }
 
     private static AgenticLoopResult Terminate(
-        TerminationReason reason, WorkingMemory memory, LoopBudget budget, bool escalate, string? detail = null)
-        => new(reason, budget.StepsUsed, budget.CloudUsed, escalate, detail, memory);
+        TerminationReason reason, WorkingMemory memory, LoopBudget budget, bool escalate, string? detail = null,
+        LearnedTemplateOffer? assisted = null)
+        => new(reason, budget.StepsUsed, budget.CloudUsed, escalate, detail, memory, assisted);
 }

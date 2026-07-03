@@ -46,7 +46,10 @@ public static class NavigateLoopFactory
             services.GetRequiredService<ILocalInference>(),
             services.GetRequiredService<ActionVerifier>(),
             services.GetRequiredService<ICloudReasoning>(),
-            services.GetRequiredService<ILogger<TieredBrain>>());
+            services.GetRequiredService<ILogger<TieredBrain>>(),
+            // Local state for the observe→assist bridge: a high-confidence learned template becomes a
+            // terminal, NON-EXECUTING operator offer before the brain reasons. Read-only, no egress.
+            stateDb: services.GetRequiredService<SuavoAgent.Core.State.AgentStateDb>());
 
         // EXPLORE mode (explore_sandbox only): decorate the brain with the Physarum frontier explorer so
         // verified-thickened (state→action) tubes drive selection. policyOptions is non-null ONLY for
