@@ -516,7 +516,7 @@ public sealed class PricingWorkflow
         // Identity of the Quick Search box we typed into, read once. VerifyLoadedNdc
         // excludes that exact element so the tautology (matching the box's own echoed
         // query) can't pass — by identity, not HelpText, so it holds with no HelpText.
-        var searchBoxRid = TryGetRuntimeId(searchBox);
+        var searchBoxRid = UiaGridReader.TryGetRuntimeId(searchBox);
 
         var lastSeen = new List<string>();
         var deadline = DateTime.UtcNow + ElementTimeout;
@@ -614,20 +614,13 @@ public sealed class PricingWorkflow
     {
         if (searchBoxRid is { Length: > 0 })
         {
-            var rid = TryGetRuntimeId(el);
+            var rid = UiaGridReader.TryGetRuntimeId(el);
             if (rid != null) return RuntimeIdEquals(rid, searchBoxRid);
             // RuntimeId unreadable on this candidate — fall through to the HelpText marker.
         }
         return IsQuickSearchField(el);
     }
 
-    /// <summary>RuntimeId of <paramref name="el"/>, or null if unavailable or the read throws.</summary>
-    private static int[]? TryGetRuntimeId(AutomationElement? el)
-    {
-        if (el == null) return null;
-        try { return el.Properties.RuntimeId.ValueOrDefault; }
-        catch { return null; }
-    }
 
     private static bool RuntimeIdEquals(int[] a, int[] b) => a.SequenceEqual(b);
 
@@ -678,22 +671,26 @@ public sealed class PricingWorkflow
     /// fallback-to-hardcoded-ordinals path was Codex-flagged as risking wrong
     /// supplier/cost data on a UI revision (data integrity is precedence 1).
     /// </summary>
+    // Pricing grid columns, resolved by header name (fail closed if a required one is missing/renamed).
+    private static readonly UiaGridReader.ColumnSpec[] PricingColumns =
+    {
+        new("supplier", new[] { "Supplier" }, Required: true),
+        new("cost", new[] { "Cost Per Unit", "Cost (per unit)" }, Required: true),
+        new("status", new[] { "Status" }, Required: false),
+    };
+
     private (string supplier, decimal costPerUnit)? ReadCheapestSupplier(
         Window editWindow, ConditionFactory cf, out string? failureReason)
     {
         failureReason = null;
         try
         {
-            var deadline = DateTime.UtcNow + GridLoadTimeout;
-            AutomationElement? grid = null;
-            while (DateTime.UtcNow < deadline)
-            {
-                grid = editWindow.FindFirstDescendant(cf.ByControlType(ControlType.Table))
-                    ?? editWindow.FindFirstDescendant(cf.ByControlType(ControlType.DataGrid));
-                if (grid != null) break;
-                Thread.Sleep(200);
-            }
+            // Shared, virtualization-safe grid read (extracted to UiaGridReader so every grid feature
+            // uses the exact primitives the pricing rehearsal proved live). Pricing keeps only its own
+            // judgment: which columns it needs + the argmin-cost ranking below.
+            var reader = new UiaGridReader(_logger, GridLoadTimeout);
 
+            var grid = reader.FindGrid(editWindow, cf);
             if (grid == null)
             {
                 _logger.Debug("PricingWorkflow: no DataGrid found on Pricing tab");
@@ -701,10 +698,7 @@ public sealed class PricingWorkflow
                 return null;
             }
 
-            // Virtualized DevExpress grids load rows lazily — reading once can
-            // catch a partial set and miss the true cheapest. Wait until the row
-            // count stops changing before reading.
-            var rows = WaitForStableRows(grid, cf, out var expectedRowCount);
+            var rows = reader.WaitForStableRows(grid, cf, out var expectedRowCount);
             if (rows.Length == 0)
             {
                 _logger.Debug("PricingWorkflow: Pricing grid has no rows");
@@ -712,10 +706,9 @@ public sealed class PricingWorkflow
                 return null;
             }
 
-            // Precedence-1 (data integrity): if the grid reports more logical rows than we could
-            // realize by scrolling, we're ranking a PARTIAL set and the true cheapest may be off
-            // screen. Refuse rather than write a possibly non-cheapest supplier to the operator's
-            // sheet — the row gets a clear status instead of plausible-looking wrong data.
+            // Precedence-1 (data integrity): if the grid reports more logical rows than we could realize
+            // by scrolling, we're ranking a PARTIAL set and the true cheapest may be off screen. Refuse
+            // rather than write a possibly non-cheapest supplier to the operator's sheet.
             if (expectedRowCount > rows.Length)
             {
                 _logger.Warning(
@@ -725,34 +718,28 @@ public sealed class PricingWorkflow
                 return null;
             }
 
-            var cols = ResolvePricingColumns(grid, cf);
+            var cols = reader.ResolveColumns(grid, cf, PricingColumns);
             if (cols is null)
             {
-                // Fail-fast (Codex review): the schema didn't resolve, so we
-                // cannot safely read cells by ordinal without risking a wrong-
-                // column write back to the operator's Excel. Surface a clear
-                // failure reason so the row's Status cell explains the miss.
+                // Schema didn't resolve → don't read by ordinal (would write wrong cells). Typed failure.
                 failureReason = "Pricing grid schema not recognized — Supplier/Cost columns missing or renamed";
                 return null;
             }
-            var (supplierIdx, costIdx, statusIdx) = cols.Value;
+            int supplierIdx = cols["supplier"], costIdx = cols["cost"];
+            int statusIdx = cols.TryGetValue("status", out var si) ? si : -1;
 
             var parsed = new List<PricingGridReader.SupplierRow>(rows.Length);
             foreach (var row in rows)
             {
-                var cells = row.FindAllChildren(cf.ByControlType(ControlType.Custom))
-                    .Concat(row.FindAllChildren(cf.ByControlType(ControlType.DataItem)))
-                    .ToArray();
+                var cells = UiaGridReader.RowCells(row, cf);
 
                 var needed = Math.Max(supplierIdx, Math.Max(costIdx, statusIdx));
                 if (cells.Length <= needed) continue;
 
-                // Read FULL cell text (Value / LegacyIAccessible pattern), not the
-                // rendered Name — supplier names truncate in the grid
-                // ("Mckesson Geri…") and a truncated name would be written back.
-                var supplierText = GetCellText(cells[supplierIdx]);
-                var costText = GetCellText(cells[costIdx]);
-                var statusText = statusIdx >= 0 ? GetCellText(cells[statusIdx]) : "";
+                // FULL cell text (Value / LegacyIAccessible), not the truncated Name.
+                var supplierText = UiaGridReader.GetCellText(cells[supplierIdx]);
+                var costText = UiaGridReader.GetCellText(cells[costIdx]);
+                var statusText = statusIdx >= 0 ? UiaGridReader.GetCellText(cells[statusIdx]) : "";
 
                 if (!PricingGridReader.TryParseCost(costText, out var cost)) continue;
                 parsed.Add(new PricingGridReader.SupplierRow(supplierText, cost, statusText));
@@ -780,183 +767,9 @@ public sealed class PricingWorkflow
         }
     }
 
-    /// <summary>
-    /// Resolves the Supplier and Cost Per Unit column indices by header name.
-    /// WPF DataGrid exposes headers as Header/HeaderItem control types.
-    ///
-    /// Codex review (2026-05-18) flagged the prior fallback-to-hardcoded-ordinals
-    /// behavior: if PioneerRx ships a UI revision that reorders or renames the
-    /// pricing grid columns, hardcoded ordinals (5, 10) would silently write
-    /// the wrong cell values back to the operator's Excel sheet — a correctness
-    /// bug masquerading as success. Pricing data integrity is precedence 1 here.
-    ///
-    /// Now: header miss returns null. Caller treats null as a typed failure
-    /// ("Pricing grid schema not recognized") so the row gets a clear error in
-    /// the Excel output instead of plausible-looking wrong data.
-    /// </summary>
-    private (int supplierIdx, int costIdx, int statusIdx)? ResolvePricingColumns(AutomationElement grid, ConditionFactory cf)
-    {
-        try
-        {
-            // Look for a Header descendant (WPF DataGrid exposes column headers as Header control)
-            var header = grid.FindFirstDescendant(cf.ByControlType(ControlType.Header));
-            if (header == null)
-            {
-                _logger.Warning("PricingWorkflow: no Header found in grid — failing closed (no ordinal fallback)");
-                return null;
-            }
 
-            var headerCells = header.FindAllDescendants(cf.ByControlType(ControlType.HeaderItem));
-            if (headerCells.Length == 0)
-            {
-                _logger.Warning("PricingWorkflow: Header has no HeaderItems — failing closed (no ordinal fallback)");
-                return null;
-            }
 
-            // statusIdx is OPTIONAL — when present we honor "Include Discontinued
-            // = No" defensively by skipping discontinued/unavailable rows even if
-            // the grid's own filter bar wasn't pinned. Absence (-1) is fine.
-            int supplierIdx = -1, costIdx = -1, statusIdx = -1;
-            for (int i = 0; i < headerCells.Length; i++)
-            {
-                var name = headerCells[i].Name?.Trim() ?? "";
-                if (supplierIdx == -1 && name.Equals("Supplier", StringComparison.OrdinalIgnoreCase))
-                    supplierIdx = i;
-                else if (costIdx == -1 &&
-                         (name.Equals("Cost Per Unit", StringComparison.OrdinalIgnoreCase) ||
-                          name.Equals("Cost (per unit)", StringComparison.OrdinalIgnoreCase)))
-                    costIdx = i;
-                else if (statusIdx == -1 && name.Equals("Status", StringComparison.OrdinalIgnoreCase))
-                    statusIdx = i;
-            }
 
-            if (supplierIdx == -1 || costIdx == -1)
-            {
-                _logger.Warning(
-                    "PricingWorkflow: could not resolve Supplier/Cost columns by header name " +
-                    "(Supplier={Sup}, Cost={Cost}) — failing closed (no ordinal fallback)",
-                    supplierIdx, costIdx);
-                return null;
-            }
-
-            _logger.Debug("PricingWorkflow: resolved columns — Supplier=col {Sup}, Cost Per Unit=col {Cost}, Status=col {Status}",
-                supplierIdx, costIdx, statusIdx);
-            return (supplierIdx, costIdx, statusIdx);
-        }
-        catch (Exception ex)
-        {
-            _logger.Warning(ex, "PricingWorkflow: column resolution error — failing closed (no ordinal fallback)");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Polls the grid's row count until it stabilizes (two consecutive equal,
-    /// non-zero reads) or the load timeout elapses, then returns the rows.
-    /// DevExpress grids virtualize — a single read can catch a partial set and
-    /// miss the true cheapest supplier.
-    /// </summary>
-    private AutomationElement[] WaitForStableRows(AutomationElement grid, ConditionFactory cf, out int expectedRowCount)
-    {
-        expectedRowCount = TryGetGridRowCount(grid); // -1 when the grid exposes no logical count
-
-        var deadline = DateTime.UtcNow + GridLoadTimeout;
-        var scroll = grid.Patterns.Scroll.PatternOrDefault;
-        bool canScroll = false;
-        try { canScroll = scroll != null && scroll.VerticallyScrollable.ValueOrDefault; } catch { }
-
-        // Accumulate realized rows across scroll positions, keyed by RuntimeId. A virtualized
-        // DevExpress/WPF grid only exposes RENDERED rows via UIA, so a single-viewport read misses
-        // off-screen rows — and the true cheapest supplier can be one of them. Scroll to the bottom
-        // in increments, unioning rows, until we've realized the logical row count (or growth stops
-        // / the load budget elapses). Without scroll support this degrades to the old stable read.
-        var byId = new Dictionary<string, AutomationElement>();
-        void Harvest()
-        {
-            int i = 0;
-            foreach (var r in grid.FindAllChildren(cf.ByControlType(ControlType.DataItem)))
-            {
-                var rid = TryGetRuntimeId(r);
-                byId[rid is { Length: > 0 } ? string.Join(",", rid) : "ord:" + i] = r;
-                i++;
-            }
-        }
-
-        // Quiet settle: let a lazily-loaded grid finish materializing its rows BEFORE we start hammering
-        // it with UIA queries. A DevExpress/WPF grid loads rows on ITS OWN UI thread; our rapid cross-
-        // process FindAllChildren calls can starve that thread so late-loading rows never appear during
-        // the read — and the true cheapest supplier can be one of them (money-safety). A brief UIA-free
-        // pause lets the grid's own loading complete first; the loop below then confirms stability.
-        Thread.Sleep(900);
-        Harvest();
-        int lastCount = byId.Count, stable = 0;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (expectedRowCount > 0 && byId.Count >= expectedRowCount) break;
-
-            bool scrolled = false;
-            if (canScroll)
-            {
-                double pct = 100;
-                try { pct = scroll!.VerticalScrollPercent.ValueOrDefault; } catch { }
-                if (pct < 99.9)
-                {
-                    try { scroll!.Scroll(ScrollAmount.NoAmount, ScrollAmount.LargeIncrement); scrolled = true; } catch { }
-                }
-            }
-
-            Thread.Sleep(500);
-            Harvest();
-
-            if (byId.Count == lastCount)
-            {
-                // A lazily-loaded DevExpress/WPF grid materializes rows in TIMED BATCHES (the true
-                // cheapest can be in a LATER batch — the sim proves this with a winner in the 2nd
-                // batch at ~850ms). Breaking after ~500ms of stability caught only batch 1 and mis-
-                // ranked. Require a longer no-growth window (~1.75s) so a late batch has time to land
-                // before we conclude the set is complete. Still bounded by GridLoadTimeout.
-                if (++stable >= 3 && !scrolled) break; // stopped growing and nothing left to scroll
-            }
-            else { stable = 0; lastCount = byId.Count; }
-        }
-        _logger.Debug("WaitForStableRows: harvested {Count} rows (canScroll={Scroll}, expectedCount={Expected})",
-            byId.Count, canScroll, expectedRowCount);
-        return byId.Values.ToArray();
-    }
-
-    /// <summary>Logical row count from the grid's Grid pattern, or -1 when unavailable. Used to
-    /// tell a fully-realized read from a partial (still-virtualized) one so ranking can fail closed.</summary>
-    private static int TryGetGridRowCount(AutomationElement grid)
-    {
-        try { return grid.Patterns.Grid.PatternOrDefault?.RowCount.ValueOrDefault ?? -1; }
-        catch { return -1; }
-    }
-
-    /// <summary>
-    /// Reads a cell's FULL value rather than its rendered Name. Grid cells
-    /// truncate long text in the Name property ("Mckesson Geri…"); the
-    /// ValuePattern / LegacyIAccessible value carries the complete string.
-    /// Falls back to Name (the prior behavior) when no value pattern exists.
-    /// </summary>
-    private static string GetCellText(AutomationElement el)
-    {
-        try
-        {
-            var text = el.AsTextBox()?.Text;
-            if (!string.IsNullOrWhiteSpace(text)) return text.Trim();
-        }
-        catch { /* not a value-bearing element */ }
-
-        try
-        {
-            var legacy = el.Patterns.LegacyIAccessible.PatternOrDefault;
-            var v = legacy?.Value?.ValueOrDefault;
-            if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
-        }
-        catch { /* legacy pattern unsupported */ }
-
-        return el.Name?.Trim() ?? "";
-    }
 
     private void TryCloseEditWindow(Window editWindow, ConditionFactory cf)
     {
