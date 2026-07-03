@@ -35,48 +35,46 @@ public sealed class PioneerRxUiaEngine : IDisposable
                 return false;
             }
 
-            // Pick the first LIVE process that owns a top-level window. GetProcessesByName can return a
-            // process that has already exited or is otherwise inaccessible — a transient self-extract
-            // stub, an updater/splash helper, or a crashed instance. Accessing .Id/.MainWindowHandle on
-            // such an entry throws "No process is associated with this object", and blindly using
-            // processes[0] then fails the whole attach (and the workflow reports "main window not
-            // available" for every NDC). Skip the dead/inaccessible/windowless ones and attach to a real
-            // instance — robust on the box where PioneerRx spawns auxiliary processes.
-            Process? target = null;
+            // Bind to the first LIVE process that yields a UIA main window. GetProcessesByName can return
+            // an exited/inaccessible entry (a transient self-extract stub, an updater/splash helper, or a
+            // crashed instance) — skip those. But do NOT pre-filter on Win32 Process.MainWindowHandle:
+            // for a large WPF/DevExpress app (PioneerRx) and especially DURING LOAD, that handle is
+            // frequently IntPtr.Zero even though the window exists and IS attachable via UIA. Filtering on
+            // it rejected a perfectly good instance ("none is a live, windowed, accessible instance") and
+            // wedged the whole run with repeated attach failures. Let UIA GetMainWindow be the real
+            // "does this instance have a usable window?" test — it succeeds where MainWindowHandle is 0.
             foreach (var p in processes)
             {
                 try
                 {
                     if (p.HasExited) continue;
-                    if (p.MainWindowHandle == IntPtr.Zero) continue; // no top-level window (yet)
-                    target = p;
-                    break;
+
+                    var app = Application.Attach(p);
+                    var automation = new UIA2Automation();
+                    var window = app.GetMainWindow(automation, TimeSpan.FromSeconds(3));
+                    if (window != null)
+                    {
+                        _app = app;
+                        _automation = automation;
+                        _mainWindow = window;
+                        _logger.Information("Attached to PioneerRx PID {Pid}", p.Id);
+                        return true;
+                    }
+
+                    // This instance has no UIA window (yet) — release and try the next.
+                    automation.Dispose();
+                    app.Dispose();
                 }
                 catch (Exception ex)
                 {
-                    _logger.Debug("Skipping inaccessible PioneerPharmacy process ({Type})", ex.GetType().Name);
+                    _logger.Debug("Skipping PioneerPharmacy process ({Type})", ex.GetType().Name);
                 }
             }
-            if (target is null)
-            {
-                _logger.Warning(
-                    "PioneerPharmacy running ({Count} process(es)) but none is a live, windowed, accessible instance",
-                    processes.Length);
-                return false;
-            }
 
-            _app = Application.Attach(target);
-            _automation = new UIA2Automation();
-            _mainWindow = _app.GetMainWindow(_automation, TimeSpan.FromSeconds(5));
-
-            if (_mainWindow == null)
-            {
-                _logger.Warning("Could not get PioneerRx main window");
-                return false;
-            }
-
-            _logger.Information("Attached to PioneerRx PID {Pid}", target.Id);
-            return true;
+            _logger.Warning(
+                "PioneerPharmacy running ({Count} process(es)) but none yielded a UIA main window",
+                processes.Length);
+            return false;
         }
         catch (Exception ex)
         {
