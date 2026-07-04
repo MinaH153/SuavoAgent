@@ -66,6 +66,30 @@ weaken them. Run `-Reps 6` to clear `MinFrequency` with margin.
 
 ## Running it
 
+### Prerequisite — the Helper must actually attach (sim boxes)
+
+The moat's interaction observer only wires up **inside the Helper's PMS attach loop**, and
+that loop is gated on `PioneerRxInstallDetector` — a *real* PioneerRx install (path or
+registry), never process presence. A bare **sim box** (Queen) runs `PioneerPharmacy.exe`
+from a rehearsal dir and satisfies neither, so the Helper logs *"PioneerRx not installed —
+skipping attach polling"* and **never subscribes the interaction observer**. Result:
+`interactionEventCount` is frozen and **Observe scores 0 no matter how well you drive the
+sim** (found the hard way on the first on-box run, 2026-07-04 — three clean 6/6 driver runs,
+all Observe 0/100, `behavioralEventCount` crept up only because the *system* observers run
+unconditionally).
+
+Fix (eval/CI boxes only): set the machine env var `SUAVOAGENT_FORCE_PMS_ATTACH=1` **before
+the Helper starts**, then bounce the Helper so it re-reads it:
+
+```powershell
+[Environment]::SetEnvironmentVariable('SUAVOAGENT_FORCE_PMS_ATTACH','1','Machine')
+Restart-Service SuavoAgent.Broker   # relaunches the Helper, which now enters the attach loop
+```
+
+Requires a Helper build that has `PioneerRxInstallDetector.ShouldPollForPms` (this PR). Do
+**not** set it on a real pharmacy box — there `IsInstalled()` is already true. Confirm it took
+by re-running `--baseline` while driving: `interactionEventCount` must move.
+
 **On the box** (Windows, live agent installed + `LearningMode=true`, console session):
 
 ```powershell

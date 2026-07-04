@@ -24,6 +24,19 @@ namespace SuavoAgent.Helper;
 [System.Runtime.Versioning.SupportedOSPlatform("windows")]
 internal static class PioneerRxInstallDetector
 {
+    /// <summary>
+    /// Eval/CI seam. A bare sim box (e.g. Queen) runs PioneerPharmacy.exe from a
+    /// rehearsal dir and satisfies neither <see cref="KnownPaths"/> nor
+    /// <see cref="RegistryKeys"/>, so <see cref="IsInstalled"/> is false and the
+    /// Helper skips the whole UIA attach loop — the interaction observer never
+    /// subscribes and the FSD eval's Observe stage is structurally 0. Setting this
+    /// machine env var to "1" forces the attach loop so the live moat can be graded
+    /// against the sim (attach itself still matches by process name, unchanged).
+    /// OFF by default; NEVER set on a real pharmacy box — there IsInstalled() is
+    /// already true and this would be a redundant no-op anyway.
+    /// </summary>
+    internal const string ForceAttachEnvVar = "SUAVOAGENT_FORCE_PMS_ATTACH";
+
     private static readonly string[] KnownPaths =
     [
         @"C:\Program Files (x86)\New Tech Computer Systems\PioneerRx",
@@ -44,6 +57,26 @@ internal static class PioneerRxInstallDetector
     /// (fail-open) so a registry permissions hiccup doesn't accidentally
     /// suppress polling on a real PMS box.
     /// </summary>
+    /// <summary>
+    /// Whether the Helper should enter the PMS attach-polling loop. True if the
+    /// eval/CI override (<see cref="ForceAttachEnvVar"/>=1) is set, otherwise
+    /// delegates to <see cref="IsInstalled"/>. Program.cs gates the attach loop on
+    /// THIS, not IsInstalled directly, so a sim/eval box can observe without a real
+    /// PioneerRx footprint. IsInstalled stays a pure "is the PMS on disk/registry?".
+    /// </summary>
+    public static bool ShouldPollForPms(ILogger logger)
+    {
+        if (string.Equals(
+                Environment.GetEnvironmentVariable(ForceAttachEnvVar), "1", StringComparison.Ordinal))
+        {
+            logger.Information(
+                "PMS attach forced via {Var}=1 (eval/CI override) — entering attach polling despite no detected install",
+                ForceAttachEnvVar);
+            return true;
+        }
+        return IsInstalled(logger);
+    }
+
     public static bool IsInstalled(ILogger logger)
     {
         try
