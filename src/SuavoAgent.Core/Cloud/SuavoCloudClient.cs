@@ -485,7 +485,7 @@ internal static class OutboundPhiGuard
              propertyName.Contains("timestamp", StringComparison.OrdinalIgnoreCase) ||
              propertyName.Contains("capturedat", StringComparison.OrdinalIgnoreCase) ||
              propertyName.Contains("syncedat", StringComparison.OrdinalIgnoreCase) ||
-             propertyName is "ndc" or "evidenceid" or "scanwindowid" or "schemaversion" or "schemasignature" or
+             propertyName is "ndc" or "evidenceid" or "scanwindowid" or "sessionid" or "schemaversion" or "schemasignature" or
                  "pms" or "pmsversion" or "status" or "outcome" or "severity" or "source" or "sourcedetail" or
                  "classification" or "priority" or "temperaturerequirement"))
         {

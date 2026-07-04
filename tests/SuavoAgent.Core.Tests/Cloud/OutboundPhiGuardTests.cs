@@ -78,6 +78,39 @@ public sealed class OutboundPhiGuardTests
     }
 
     [Fact]
+    public void Allows_a_learning_session_id_on_the_heartbeat()
+    {
+        // The moat regression: LearningWorker mints sessionId = "learn-{agentId}-{yyyyMMddHHmmss}".
+        // The 14-digit timestamp run contains a 10-digit substring that the Phone value-rule matches,
+        // so once learning turned on EVERY heartbeat was hard-blocked (agent went offline). sessionId
+        // is a machine-generated operational token — exempt by NAME (like evidenceid/scanwindowid),
+        // never by weakening the Phone value pattern (see the companion test below).
+        var body = @"{
+            ""agentId"":""a1b2c3"",
+            ""status"":""online"",
+            ""templateLearning"":{
+                ""enabled"":true,
+                ""phase"":""discovery"",
+                ""sessionId"":""learn-8dc472b9a1b2c3d4-20260704004322""
+            }
+        }";
+
+        Assert.Null(Record.Exception(
+            () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options)));
+    }
+
+    [Fact]
+    public void Still_blocks_the_same_ten_digit_run_under_a_non_exempt_field()
+    {
+        // Proves the sessionId fix is a NAME exemption, not a neutered Phone rule: the identical
+        // 10-digit run under a free-form field name must still block (phone/PHI egress protection).
+        var body = @"{ ""freeNote"":""2026070400"" }";
+
+        Assert.Throws<InvalidOperationException>(
+            () => OutboundPhiGuard.AssertAllowed("/api/agent/heartbeat", body, Options));
+    }
+
+    [Fact]
     public void Allows_utc_iso_timestamps_with_a_positive_offset()
     {
         // The exact field that was blocking every heartbeat: canary.lastVerifiedAt is
