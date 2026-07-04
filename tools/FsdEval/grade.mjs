@@ -63,7 +63,7 @@ if (args.baseline) {
 }
 
 if (!args.run) { console.error("--run <manifest.json> required to score"); process.exit(64); }
-const run = JSON.parse(fs.readFileSync(args.run, "utf8"));
+const run = JSON.parse(fs.readFileSync(args.run, "utf8").replace(/^﻿/, "")); // PS 5.1 Set-Content utf8 writes a BOM
 const baseline = fs.existsSync(BASELINE_FILE) ? JSON.parse(fs.readFileSync(BASELINE_FILE, "utf8")) : run.baseline;
 if (!baseline) console.warn("[warn] no baseline (run --baseline before driving) — Observe Δ assumes baseline interactions=0");
 const base = baseline || { interactions: 0, routines: 0, templates: 0 };

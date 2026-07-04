@@ -127,7 +127,9 @@ for ($i = 1; $i -le $Reps; $i++) {
 
         # verify end-state: Pricing tab selected
         $sel = ($pricing.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)).Current.IsSelected
-        $repLog += [ordered]@{ rep = $i; ok = [bool]$sel; endState = if ($sel) { "Pricing selected" } else { "tab not selected" } }
+        # PS 5.1 can't parse an `if` statement as a hashtable value — keep it a plain expression
+        $endStateTxt = if ($sel) { "Pricing selected" } else { "tab not selected" }
+        $repLog += [ordered]@{ rep = $i; ok = [bool]$sel; endState = $endStateTxt }
         Write-Ok "rep ${i}: Item -> Rx Item -> Pricing (selected=$sel)"
 
         # reset: close Edit Rx Item so the next rep re-opens it (sim binds Escape -> close)
