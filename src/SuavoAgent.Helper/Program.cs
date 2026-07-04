@@ -386,7 +386,9 @@ try
     // for no operational reason. Detection is path+registry only — never
     // process-state — so a PMS box that simply hasn't started PioneerRx
     // yet still enters the polling loop and waits, as designed.
-    if (!PioneerRxInstallDetector.IsInstalled(Log.Logger))
+    // ShouldPollForPms adds the SUAVOAGENT_FORCE_PMS_ATTACH=1 eval/CI override so a
+    // bare sim box (no PioneerRx footprint) can still attach + observe for FSD eval.
+    if (!PioneerRxInstallDetector.ShouldPollForPms(Log.Logger))
     {
         Log.Information(
             "PioneerRx not installed on this host — skipping attach polling. " +
