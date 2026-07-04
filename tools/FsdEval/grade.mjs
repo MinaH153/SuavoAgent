@@ -70,12 +70,15 @@ const base = baseline || { interactions: 0, routines: 0, templates: 0 };
 
 // Wait for a heartbeat that reflects the driver run (+ up to 10 min for the learning pass).
 const driverDone = run.driverFinishedAt ? new Date(run.driverFinishedAt).getTime() : 0;
+// Grace anchor: if the grader starts late (operator latency), don't let that eat the
+// learning-pass window — measure the 6-min grace from whichever is later.
+const graceAnchor = Math.max(driverDone, Date.now());
 const deadline = Date.now() + 10 * 60_000;
 let t = await telemetry(args.agent);
 process.stdout.write("waiting for post-run heartbeat + learning pass");
 while (Date.now() < deadline) {
   const fresh = new Date(t.hb).getTime() > driverDone;
-  if (fresh && (t.templates > base.templates || t.routines > base.routines || (Date.now() - driverDone) > 6 * 60_000)) break;
+  if (fresh && (t.templates > base.templates || t.routines > base.routines || (Date.now() - graceAnchor) > 6 * 60_000)) break;
   process.stdout.write(".");
   await sleep(20_000);
   t = await telemetry(args.agent);

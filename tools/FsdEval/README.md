@@ -95,8 +95,14 @@ next heartbeat and scores. Output: a scorecard JSON + a printed report card.
 
 ## On-box verification points (confirm on first run)
 
-1. The live Helper actually attaches to the launched sim (`core-*.log`: "attached to
-   PioneerPharmacy"). If not, the observer sees nothing.
+1. The live Helper actually attaches to the launched sim — **to THIS pid**. The Helper binds
+   to the FIRST PioneerPharmacy process with a UIA window and re-attaches only when that
+   window dies (Helper health loop, 10s poll). A stale sim from a previous session keeps the
+   observer pointed away from the eval's sim → Observe scores 0 (exactly what happened on the
+   first on-box run, 2026-07-04: leftover pid from the prior day). The driver now pre-flights
+   this (`-KillExisting` on eval boxes) and waits `-AttachWaitSec` (default 15s) after the sim
+   window appears before driving. Attach logs at Debug and the Helper has no writable log file
+   on locked-down boxes — prove attach via the interactionEventCount delta, not log lines.
 2. Which of steps 1/3 the observer records — `InvokedEvent` (step 2) is certain; the expand
    (step 1) and tab-select (step 3) depend on `FocusChanged` firing. If the captured path is
    < 3 events, add an explicit interaction (e.g. click Quick Search) so the path clears

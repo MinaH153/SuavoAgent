@@ -23,6 +23,8 @@ param(
     [ValidateSet("faithful")] [string]$Variant = "faithful",
     [int]$StepPauseMs = 1500,                   # < MaxEdgeGap (30s) so steps stay one routine
     [int]$RepPauseMs = 2500,
+    [int]$AttachWaitSec = 15,                   # settle time for the live Helper to (re)attach to THIS sim pid
+    [switch]$KillExisting,                      # kill pre-existing PioneerPharmacy processes (EVAL BOXES ONLY)
     [switch]$KeepSimOpen
 )
 
@@ -63,6 +65,23 @@ if (-not $SimPath) {
 if (-not (Test-Path $SimPath)) { throw "Sim not found at $SimPath" }
 Write-Ok "Sim: $SimPath"
 
+# ── Pre-flight: a pre-existing PioneerPharmacy starves the eval. The live Helper binds to the
+# FIRST process that yields a UIA window and re-attaches only when that window dies
+# (Helper Program.cs health loop) — so a stale sim keeps the observer pointed away from ours.
+# Found the hard way on the first on-box run (2026-07-04): a leftover sim from the previous
+# day scored Observe 0/100.
+$existing = Get-Process PioneerPharmacy -ErrorAction SilentlyContinue
+if ($existing) {
+    $pids = ($existing | ForEach-Object { $_.Id }) -join ','
+    if ($KillExisting) {
+        Write-Warn2 "Killing pre-existing PioneerPharmacy pid(s) $pids so the Helper re-attaches to OUR sim"
+        $existing | Stop-Process -Force
+        Start-Sleep -Seconds 12   # Helper health poll is 10s — let it notice the window loss and enter re-attach
+    } else {
+        throw "PioneerPharmacy already running (pid $pids). The live Helper stays bound to it and will never observe this eval's sim. Re-run with -KillExisting (eval boxes only)."
+    }
+}
+
 # ── Launch the sim; the live Helper attaches by process name "PioneerPharmacy" ───────────────
 Write-Phase "Launching sim + waiting for main window"
 $sim = Start-Process -FilePath $SimPath -ArgumentList "--variant", $Variant -PassThru
@@ -98,6 +117,13 @@ do {
 } while ((Get-Date) -lt $deadline)
 if (-not $mainWin) { throw "Sim main window not found via UIA (pid $($sim.Id))" }
 Write-Ok "Main window: $($mainWin.Current.Name)"
+
+if ($AttachWaitSec -gt 0) {
+    # Helper attach path: 10s health/attach poll + GetMainWindow(3s) — drive too early and the
+    # first reps happen before the observer subscribes to this pid.
+    Write-Phase "Waiting ${AttachWaitSec}s for the live Helper to attach to pid $($sim.Id)"
+    Start-Sleep -Seconds $AttachWaitSec
+}
 
 function Invoke-El($el)  { ($el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke() }
 function Expand-El($el)  { ($el.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)).Expand() }
@@ -167,5 +193,5 @@ $manifest = [ordered]@{
     baseline          = $null   # grade.mjs fills if absent (snapshot at first score call)
 }
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $Out -Encoding utf8
-Write-Ok "Ground truth written: $Out  ($okReps/$Reps reps clean, expected +$($manifest.expectedInteractionDelta) interactions)"
+Write-Ok "Ground truth written: $Out  ($okReps/$Reps reps clean, expected +$($manifest.expectedInteractionDelta) interactions, finished $($manifest.driverFinishedAt))"
 Write-Host "`nNext: node tools/FsdEval/grade.mjs --run $Out --agent <agentId>" -ForegroundColor Cyan
