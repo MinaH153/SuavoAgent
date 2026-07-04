@@ -117,6 +117,33 @@ next heartbeat and scores. Output: a scorecard JSON + a printed report card.
   + the Execute stage (needs actuation IPC enabled + the auto-rule Approved, then
   `run_learned_template` and grade each `ExpectedAfter`).
 
+## On-box findings — first live run, 2026-07-05 (Queen sim box, v3.92.0)
+
+The harness worked and graded correctly; the moat scored **Observe 0** for a chain of
+reasons the eval is designed to catch. In order of discovery:
+
+1. **`IsInstalled()` gate** (fixed): the Helper skipped the whole attach loop on a sim box.
+   `SUAVOAGENT_FORCE_PMS_ATTACH=1` (this PR) fixes it — confirmed in `helper-*.log`:
+   `PMS attach forced via SUAVOAGENT_FORCE_PMS_ATTACH=1 (eval/CI override) — entering attach polling`.
+2. **Elevated-sim integrity mismatch**: launch the driver from a NON-elevated shell. An
+   elevated sim (driver run from an admin console) is high-integrity; the medium-integrity
+   Helper can't attach → `Skipping PioneerPharmacy process (Win32Exception)`.
+3. **THE REMAINING BLOCKER — Helper never UIA-attaches to the sim.** Even non-elevated, every
+   attach attempt logs `Skipping PioneerPharmacy process (InvalidOperationException)` +
+   `PioneerPharmacy running (1 process) but none yielded a UIA main window`. There is **no
+   `Attached to PioneerRx PID` line anywhere in the day's helper log** — the Helper has never
+   attached to the sim on this box. `PioneerRxUiaEngine.TryAttach` → `Application.Attach(p)` /
+   `GetMainWindow(3s)` (FlaUI UIA2) throws in the Helper's execution context. Root cause is
+   almost certainly a UIA-access boundary (Helper runs as a service account/desktop that can't
+   read the interactive user's PMS window without UIAccess). **Implication: the interaction
+   observer has likely never captured PMS interactions on this box — "moat live" was reading
+   system-observer telemetry (`behavioralEventCount`), not `interactionEventCount`.** This is
+   the real observe blocker; fixing it is a Helper-execution/UIAccess investigation, out of
+   scope for the harness.
+4. **Installer manifest-race** (separate bug): the bootstrap never writes `binaries.manifest`;
+   the Helper launches only via a fail-open race (before `bootstrap.ps1` is persisted) and
+   fail-closes on any Broker restart/reboot. Installer should write the manifest.
+
 ## On-box verification points (confirm on first run)
 
 1. The live Helper actually attaches to the launched sim — **to THIS pid**. The Helper binds
