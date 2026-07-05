@@ -117,10 +117,23 @@ next heartbeat and scores. Output: a scorecard JSON + a printed report card.
   + the Execute stage (needs actuation IPC enabled + the auto-rule Approved, then
   `run_learned_template` and grade each `ExpectedAfter`).
 
-## On-box findings — first live run, 2026-07-05 (Queen sim box, v3.92.0)
+## On-box result — 2026-07-05 (Queen sim box): Observe 100 / PASS on v3.92.1
 
-The harness worked and graded correctly; the moat scored **Observe 0** for a chain of
-reasons the eval is designed to catch. In order of discovery:
+After the fix chain below, the eval scored **Observe 100 PASS** (interactions 2→205, the
+observer captured the full 6-rep interaction stream). The Helper log shows what never appeared
+before: `Attached to PioneerRx PID 348` + `UiaInteractionObserver: subscribed to PID 348`. The
+moat's observe path is validated end-to-end on the box.
+
+**Learn stays 0 by design on a fresh box:** `RoutineDetector` only runs in the **`pattern`**
+phase (`LearningWorker.cs`: `if (session.Phase == "pattern")`), and a fresh box is in
+**`discovery`**. So the Learn stage is structurally 0 until the agent reaches the pattern phase
+(30-day progression, or a forced/seed-accelerated phase advance). To grade Learn, put the agent
+in `pattern` first. Execute is still V2 (needs actuation IPC + an approved auto-rule).
+
+## The fix chain (what it took to get from Observe 0 → 100)
+
+The moat scored **Observe 0** for a chain of reasons the eval is designed to catch. In order of
+discovery:
 
 1. **`IsInstalled()` gate** (fixed): the Helper skipped the whole attach loop on a sim box.
    `SUAVOAGENT_FORCE_PMS_ATTACH=1` (this PR) fixes it — confirmed in `helper-*.log`:
@@ -128,18 +141,19 @@ reasons the eval is designed to catch. In order of discovery:
 2. **Elevated-sim integrity mismatch**: launch the driver from a NON-elevated shell. An
    elevated sim (driver run from an admin console) is high-integrity; the medium-integrity
    Helper can't attach → `Skipping PioneerPharmacy process (Win32Exception)`.
-3. **THE REMAINING BLOCKER — Helper never UIA-attaches to the sim.** Even non-elevated, every
-   attach attempt logs `Skipping PioneerPharmacy process (InvalidOperationException)` +
-   `PioneerPharmacy running (1 process) but none yielded a UIA main window`. There is **no
-   `Attached to PioneerRx PID` line anywhere in the day's helper log** — the Helper has never
-   attached to the sim on this box. `PioneerRxUiaEngine.TryAttach` → `Application.Attach(p)` /
-   `GetMainWindow(3s)` (FlaUI UIA2) throws in the Helper's execution context. Root cause is
-   almost certainly a UIA-access boundary (Helper runs as a service account/desktop that can't
-   read the interactive user's PMS window without UIAccess). **Implication: the interaction
-   observer has likely never captured PMS interactions on this box — "moat live" was reading
-   system-observer telemetry (`behavioralEventCount`), not `interactionEventCount`.** This is
-   the real observe blocker; fixing it is a Helper-execution/UIAccess investigation, out of
-   scope for the harness.
+3. **The real blocker (FIXED in v3.92.1) — Helper never UIA-attached to the sim.** Every attach
+   logged `Skipping PioneerPharmacy process (InvalidOperationException)`, no `Attached to
+   PioneerRx PID` line ever. Root cause: `TryAttach` used FlaUI `Application.GetMainWindow`,
+   which reads `Process.MainWindowHandle` (a Win32/EnumWindows path) — and that throws in the
+   Helper's `CreateProcessAsUser`/SecurityImpersonation launch context. Repro (Queen): a plain
+   interactive process reads the same sim's `MainWindowHandle` fine (=3147520) + finds it via
+   UIA; the service-launched Helper fails 11/11 polls against a stable alive sim. **Fix
+   (v3.92.1):** resolve the window via the UIA tree — `GetDesktop().FindFirstChild(ByProcessId)`
+   — the same path the Helper's own actuation (`UiaLabelResolver`/`UiaSignatureResolver`)
+   already uses and which works from this context. Implication before the fix: the interaction
+   observer had **never** captured PMS interactions on any field box — "moat live" was reading
+   `behavioralEventCount` (system observers), not `interactionEventCount`. **Re-check Nadim's
+   real box has an `Attached to PioneerRx PID` line now.**
 4. **Installer manifest-race** (separate bug): the bootstrap never writes `binaries.manifest`;
    the Helper launches only via a fail-open race (before `bootstrap.ps1` is persisted) and
    fail-closes on any Broker restart/reboot. Installer should write the manifest.
