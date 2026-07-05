@@ -3,6 +3,7 @@ using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Conditions;
 using FlaUI.Core.Definitions;
+using FlaUI.Core.Tools;
 using FlaUI.UIA2;
 using Serilog;
 
@@ -37,24 +38,34 @@ public sealed class PioneerRxUiaEngine : IDisposable
 
             // Bind to the first LIVE process that yields a UIA main window. GetProcessesByName can return
             // an exited/inaccessible entry (a transient self-extract stub, an updater/splash helper, or a
-            // crashed instance) — skip those. But do NOT pre-filter on Win32 Process.MainWindowHandle:
-            // for a large WPF/DevExpress app (PioneerRx) and especially DURING LOAD, that handle is
-            // frequently IntPtr.Zero even though the window exists and IS attachable via UIA. Filtering on
-            // it rejected a perfectly good instance ("none is a live, windowed, accessible instance") and
-            // wedged the whole run with repeated attach failures. Let UIA GetMainWindow be the real
-            // "does this instance have a usable window?" test — it succeeds where MainWindowHandle is 0.
+            // crashed instance) — skip those.
+            //
+            // Resolve the window via the UIA TREE (desktop root → ByProcessId), NOT FlaUI's
+            // Application.GetMainWindow. GetMainWindow reads Process.MainWindowHandle (a Win32/EnumWindows
+            // path); in the Helper's launch context — CreateProcessAsUser with a SecurityImpersonation
+            // primary token (SessionWatcher/NativeProcess.LaunchInSession) — that read throws
+            // InvalidOperationException on every attempt, so attach NEVER succeeded on the field box
+            // (Queen, 2026-07-05: a plain interactive process reads the same sim's MainWindowHandle fine +
+            // finds it via UIA; the service-launched Helper cannot use MainWindowHandle). The Helper's own
+            // actuation already resolves this exact window with ByProcessId off the desktop root
+            // (UiaLabelResolver / UiaSignatureResolver) and that path works from this context — attach now
+            // uses the same one. Retry covers a WPF app still painting its first window.
             foreach (var p in processes)
             {
+                UIA2Automation? automation = null;
                 try
                 {
                     if (p.HasExited) continue;
 
-                    var app = Application.Attach(p);
-                    var automation = new UIA2Automation();
-                    var window = app.GetMainWindow(automation, TimeSpan.FromSeconds(3));
+                    automation = new UIA2Automation();
+                    var desktop = automation.GetDesktop();
+                    var window = Retry.WhileNull(
+                        () => desktop.FindFirstChild(cf => cf.ByProcessId(p.Id))?.AsWindow(),
+                        timeout: TimeSpan.FromSeconds(3),
+                        interval: TimeSpan.FromMilliseconds(250)).Result;
                     if (window != null)
                     {
-                        _app = app;
+                        _app = Application.Attach(p); // kept for ProcessId + lifecycle; Attach() does not touch MainWindowHandle
                         _automation = automation;
                         _mainWindow = window;
                         _logger.Information("Attached to PioneerRx PID {Pid}", p.Id);
@@ -63,11 +74,11 @@ public sealed class PioneerRxUiaEngine : IDisposable
 
                     // This instance has no UIA window (yet) — release and try the next.
                     automation.Dispose();
-                    app.Dispose();
                 }
                 catch (Exception ex)
                 {
                     _logger.Debug("Skipping PioneerPharmacy process ({Type})", ex.GetType().Name);
+                    automation?.Dispose();
                 }
             }
 
