@@ -40,7 +40,7 @@ jobs:
   bootstrap-windows-smoke:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Parse bootstrap.ps1 with Windows PowerShell 5.1
         shell: powershell
@@ -66,10 +66,10 @@ jobs:
       version: ${{ steps.version.outputs.VERSION }}
       version_numeric: ${{ steps.version.outputs.VERSION_NUMERIC }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 8.0.x
 
@@ -102,7 +102,7 @@ jobs:
           done
 
       - name: Upload unsigned binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: suavoagent-unsigned-${{ steps.version.outputs.VERSION }}
           path: release/
@@ -118,10 +118,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Download unsigned binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: suavoagent-unsigned-${{ needs.build.outputs.version }}
           path: release
@@ -185,7 +185,7 @@ jobs:
           output_path: ${{ github.workspace }}/release/signed
 
       - name: Upload signed binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: suavoagent-final-${{ needs.build.outputs.version }}
           path: release/signed/
@@ -200,10 +200,10 @@ jobs:
       needs.sign_windows.result == 'success'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Download final binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: suavoagent-final-${{ needs.build.outputs.version }}
           path: release
@@ -232,7 +232,7 @@ jobs:
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $expanded -BootstrapPath .\bootstrap.ps1 -RequireAuthenticodeSignature -Json
 
       - name: Upload smoked release zip
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: suavoagent-smoked-zip-${{ needs.build.outputs.version }}
           path: suavoagent-${{ needs.build.outputs.version }}-win-x64.zip
@@ -248,16 +248,16 @@ jobs:
       needs.windows-release-smoke.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Download final binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: suavoagent-final-${{ needs.build.outputs.version }}
           path: release
 
       - name: Download smoked release zip
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: suavoagent-smoked-zip-${{ needs.build.outputs.version }}
           path: release
@@ -354,7 +354,7 @@ jobs:
           echo "Signature bytes: $(wc -c < update-manifest-${VERSION}.sig)"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           name: "${{ needs.build.outputs.version }} — Phantom"
           body: |
