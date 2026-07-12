@@ -11,7 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.2" />
+    <PackageReference Include="coverlet.collector" Version="10.0.1" />
     <!-- Bumped to 8.0.2 to match SuavoAgent.Diagnostics's transitive
          requirement (NU1605 downgrade guard). Diagnostics is referenced
          by Watchdog from Mesh PR 4b entry-point integration. -->
