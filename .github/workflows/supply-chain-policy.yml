@@ -31,7 +31,7 @@ jobs:
 
           for workflow in sorted(Path(".github/workflows").glob("*.y*ml")):
               source = workflow.read_text(encoding="utf-8")
-              if "pull_request_target:" in source:
+              if "pull_request" + "_target:" in source:
                   failures.append(f"{workflow}: pull_request_target is prohibited")
               if re.search(r"^\s*permissions:\s*write-all\s*$", source, re.MULTILINE):
                   failures.append(f"{workflow}: permissions write-all is prohibited")
