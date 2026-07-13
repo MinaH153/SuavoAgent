@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Behavioral;
@@ -37,7 +38,11 @@ public sealed class RoutineDetector
 
     public void DetectAndPersist()
     {
-        var events = _db.GetBehavioralEvents(_sessionId, "interaction", limit: 50000);
+        var events = _db.GetBehavioralEvents(
+            _sessionId,
+            "interaction",
+            limit: 50000,
+            sourceChannel: BehavioralEventChannels.Pms);
         if (events.Count < MinPathLength)
             return;
 
@@ -190,7 +195,8 @@ public sealed class RoutineDetector
             string? startElementId = path.First().ElementId;
             string? endElementId = path.Last().ElementId;
             string? correlatedWriteQueries = writeQueryHashes.Count > 0
-                ? string.Join(",", writeQueryHashes)
+                ? JsonSerializer.Serialize(
+                    writeQueryHashes.Distinct(StringComparer.Ordinal).ToArray())
                 : null;
 
             _db.UpsertLearnedRoutine(

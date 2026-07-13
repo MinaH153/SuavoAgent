@@ -1,0 +1,93 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     RequiredVersion="7.0.0">
+  <Bundle Id="MKM.SuavoAgent.Bundle"
+          Name="SuavoAgent"
+          Manufacturer="MKM Technologies LLC"
+          Version="$(SuavoAgentVersion)"
+          UpgradeCode="{2935487C-D0ED-472F-9DA8-0742E68938EF}"
+          Condition="VersionNT64 &gt;= v10.0"
+          Compressed="yes"
+          DisableModify="button"
+          HelpUrl="https://suavollc.com"
+          AboutUrl="https://suavollc.com"
+          Copyright="Copyright © 2026 MKM Technologies LLC">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLargeLicense"
+                                               LicenseUrl=""
+                                               ShowVersion="yes"
+                                               SuppressOptionsUI="yes"
+                                               LaunchTarget="[ProgramFiles64Folder]Suavo\Agent\SuavoAgent.Maintenance.exe"
+                                               LaunchArguments="--connect-installed"
+                                               LaunchTargetElevatedId="SuavoAgentMaintenanceElevated" />
+    </BootstrapperApplication>
+
+    <!-- Burn resolves this path only from an administrator-protected HKLM
+         value authored by the MSI. The success page therefore launches the
+         installed signed host elevated instead of a mutable Downloads copy. -->
+    <ApprovedExeForElevation Id="SuavoAgentMaintenanceElevated"
+                             Key="SOFTWARE\MKM Technologies LLC\SuavoAgent"
+                             Value="MaintenancePath"
+                             Bitness="always64" />
+
+    <util:RegistrySearch Id="DetectVCRedistX64"
+                         Variable="VCRedistInstalled"
+                         Root="HKLM"
+                         Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+                         Value="Installed"
+                         Result="value"
+                         Bitness="always64" />
+    <util:RegistrySearch Id="DetectVCRedistX64Major"
+                         Variable="VCRedistMajor"
+                         Root="HKLM"
+                         Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+                         Value="Major"
+                         Result="value"
+                         Bitness="always64" />
+    <util:RegistrySearch Id="DetectVCRedistX64Minor"
+                         Variable="VCRedistMinor"
+                         Root="HKLM"
+                         Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+                         Value="Minor"
+                         Result="value"
+                         Bitness="always64" />
+    <util:RegistrySearch Id="DetectVCRedistX64Build"
+                         Variable="VCRedistBuild"
+                         Root="HKLM"
+                         Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+                         Value="Bld"
+                         Result="value"
+                         Bitness="always64" />
+    <util:RegistrySearch Id="DetectVCRedistX64Revision"
+                         Variable="VCRedistRevision"
+                         Root="HKLM"
+                         Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+                         Value="Rbld"
+                         Result="value"
+                         Bitness="always64" />
+
+    <Chain>
+      <ExePackage Id="VCRedistX64"
+                  SourceFile="$(VCRedistPath)"
+                  Name="vc_redist.x64.exe"
+                  DisplayName="Microsoft Visual C++ 2015-2022 Redistributable (x64)"
+                  DetectCondition="VCRedistInstalled = 1 AND (VCRedistMajor &gt; $(VCRedistMinimumMajor) OR (VCRedistMajor = $(VCRedistMinimumMajor) AND VCRedistMinor &gt; $(VCRedistMinimumMinor)) OR (VCRedistMajor = $(VCRedistMinimumMajor) AND VCRedistMinor = $(VCRedistMinimumMinor) AND VCRedistBuild &gt; $(VCRedistMinimumBuild)) OR (VCRedistMajor = $(VCRedistMinimumMajor) AND VCRedistMinor = $(VCRedistMinimumMinor) AND VCRedistBuild = $(VCRedistMinimumBuild) AND VCRedistRevision &gt;= $(VCRedistMinimumRevision)))"
+                  InstallArguments="/install /quiet /norestart"
+                  PerMachine="yes"
+                  Permanent="yes"
+                  Vital="yes"
+                  Compressed="yes">
+        <ExitCode Value="0" Behavior="success" />
+        <ExitCode Value="1638" Behavior="success" />
+        <ExitCode Value="3010" Behavior="scheduleReboot" />
+        <ExitCode Behavior="error" />
+      </ExePackage>
+      <MsiPackage Id="SuavoAgentMsi"
+                  SourceFile="$(var.SuavoAgent.Msi.TargetPath)"
+                  DisplayName="SuavoAgent"
+                  Vital="yes"
+                  Compressed="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

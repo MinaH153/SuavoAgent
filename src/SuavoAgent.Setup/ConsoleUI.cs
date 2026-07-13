@@ -3,7 +3,7 @@ namespace SuavoAgent.Setup;
 /// <summary>
 /// Phase-level logging surface used by every install step. Routes through
 /// <see cref="IInstallReporter"/> so the same phase code drives either the
-/// PowerShell-style console path (default) or the Avalonia progress view
+/// headless maintenance console path (default) or the Avalonia progress view
 /// when the GUI installs a custom reporter via <see cref="SetReporter"/>.
 /// The <see cref="Banner"/>, <see cref="CompletionSummary"/>, and
 /// <see cref="WaitForExit"/> / <see cref="FatalError"/> helpers remain
@@ -17,12 +17,28 @@ internal static class ConsoleUI
 
     // Every step line also lands in %ProgramData%\SuavoAgent\logs\setup.log — the GUI
     // has no console, and a failed GUI install used to leave zero on-box evidence.
-    public static void WriteStep(string msg) { SetupLog.Append("STEP", msg); _reporter.Step(msg); }
-    public static void WriteOk(string msg) { SetupLog.Append("OK", msg); _reporter.Ok(msg); }
-    public static void WriteWarn(string msg) { SetupLog.Append("WARN", msg); _reporter.Warn(msg); }
-    public static void WriteFail(string msg) { SetupLog.Append("FAIL", msg); _reporter.Fail(msg); }
-    public static void WriteInfo(string msg) { SetupLog.Append("INFO", msg); _reporter.Info(msg); }
-    public static void WriteProgress(string label, long current, long total) => _reporter.Progress(label, current, total); // not logged — would spam thousands of lines per download
+    public static void WriteStep(string msg) => Report("STEP", msg, _reporter.Step);
+    public static void WriteOk(string msg) => Report("OK", msg, _reporter.Ok);
+    public static void WriteWarn(string msg) => Report("WARN", msg, _reporter.Warn);
+    public static void WriteFail(string msg) => Report("FAIL", msg, _reporter.Fail);
+    public static void WriteInfo(string msg) => Report("INFO", msg, _reporter.Info);
+
+    public static void WriteProgress(string label, long current, long total)
+    {
+        // Progress labels render in both the native GUI and a parent console.
+        // Treat them as untrusted even though current callers use fixed asset names.
+        _reporter.Progress(SetupLog.SanitizeForLog(label), current, total);
+    }
+
+    private static void Report(string level, string message, Action<string> report)
+    {
+        // One privacy boundary for both destinations. Previously SetupLog scrubbed
+        // the file copy but the GUI Details panel and parent console received the
+        // original string, so an exception or tool stderr could still expose PHI.
+        var safe = SetupLog.SanitizeForLog(message);
+        SetupLog.Append(level, safe);
+        report(safe);
+    }
 
     public static void Banner(string pharmacyId, string releaseTag)
     {
@@ -76,9 +92,7 @@ internal static class ConsoleUI
         WriteFail(message);
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.White;
-        Console.WriteLine("  Need help? Contact Suavo support:");
-        Console.WriteLine("  Email: support@suavollc.com");
-        Console.WriteLine("  Phone: (555) 123-4567");
+        Console.WriteLine("  Need help? Contact Suavo support at support@suavollc.com");
         Console.ResetColor();
         WaitForExit();
     }

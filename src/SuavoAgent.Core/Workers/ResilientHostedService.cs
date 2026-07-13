@@ -78,9 +78,7 @@ public abstract class ResilientHostedService : BackgroundService
 
                 RestartCount++;
                 var willEscalate = RestartCount > MaxRestarts;
-                _log.LogCritical(ex,
-                    "Worker {Worker} faulted (restart {Count}/{Max}) — supervising",
-                    WorkerName, RestartCount, MaxRestarts);
+                _log.LogSafeCritical(ex);
                 _healthRegistry?.RecordFault(WorkerName, RestartCount, willEscalate, DateTimeOffset.UtcNow);
 
                 if (willEscalate)
@@ -95,7 +93,7 @@ public abstract class ResilientHostedService : BackgroundService
                     }
                     catch (Exception escEx)
                     {
-                        _log.LogError(escEx, "Worker {Worker} escalation failed", WorkerName);
+                        _log.LogSafeError(escEx);
                     }
                     return;
                 }

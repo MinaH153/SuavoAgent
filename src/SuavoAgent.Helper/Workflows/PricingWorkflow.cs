@@ -4,9 +4,13 @@ using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
 using FlaUI.UIA2;
 using Serilog;
+using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Learning;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Pricing;
+using SuavoAgent.Helper.Actuation;
+using SuavoAgent.Helper.SystemObservers;
 
 namespace SuavoAgent.Helper.Workflows;
 
@@ -20,14 +24,22 @@ namespace SuavoAgent.Helper.Workflows;
 ///   - Pricing tab shows supplier catalog with Cost, Cost Per Unit columns
 ///   - Cheapest = row with lowest Cost Per Unit (sorted ascending by default)
 /// </summary>
-public sealed class PricingWorkflow
+public sealed partial class PricingWorkflow
 {
     private readonly PioneerRxUiaEngine _engine;
+    private readonly ActuationGate _actuationGate;
     private readonly ILogger _logger;
     // Vision-primary grid reader (reads "the one on top" by sight via OCR). Null = vision off →
     // UIA-only, exactly today's behavior. When present, the vision read drives and the UIA read
     // verifies the exact cost (VisionExactReconciler) so a misread never writes wrong pricing.
     private readonly VisionPricingGridReader? _visionReader;
+    private readonly object _screenContractLock = new();
+    private string? _screenContractJobId;
+    private string? _screenContractPmsFingerprint;
+    private string? _screenContractSignature;
+    private long _screenContractVerifiedAtTicks = -1;
+    private static readonly long ScreenContractCacheMilliseconds =
+        (long)TimeSpan.FromSeconds(30).TotalMilliseconds;
 
     // UIA element identifiers confirmed from screenshots
     private const string ItemMenuName = "Item";
@@ -46,10 +58,15 @@ public sealed class PricingWorkflow
     // Bound the sighted read (capture + OCR) per NDC so a stuck OCR can't wedge a 500-item batch.
     private static readonly TimeSpan VisionReadTimeout = TimeSpan.FromSeconds(20);
 
-    public PricingWorkflow(PioneerRxUiaEngine engine, ILogger logger, VisionPricingGridReader? visionReader = null)
+    public PricingWorkflow(
+        PioneerRxUiaEngine engine,
+        ActuationGate actuationGate,
+        ILogger logger,
+        VisionPricingGridReader? visionReader = null)
     {
-        _engine = engine;
-        _logger = logger;
+        _engine = engine ?? throw new ArgumentNullException(nameof(engine));
+        _actuationGate = actuationGate ?? throw new ArgumentNullException(nameof(actuationGate));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _visionReader = visionReader;
     }
 
@@ -73,14 +90,27 @@ public sealed class PricingWorkflow
         // M2b: the resolver tries any active learned selector patch before the hardcoded builtin.
         // With no patches (the case until M2c distributes one) it IS the builtin find — today's
         // behavior unchanged. The builtin always backstops a missed learned selector per element.
-        var resolver = new SelectorResolver(request.Patches);
-
-        var mainWindow = _engine.MainWindow;
-        if (mainWindow == null)
-            return Done(Fail(request, "PioneerRx main window not available"));
+        var resolver = new SelectorResolver(
+            request.Patches,
+            request.PmsFingerprint,
+            request.ScreenSignatureV1);
 
         try
         {
+            if (request.ScreenSignatureV1 is not null &&
+                !AdmitScreenContract(request))
+            {
+                return Done(Fail(request, "pricing_screen_identity_changed"));
+            }
+
+            // Pricing drives a live PMS and has no truthful simulation mode.  Refuse
+            // before touching UIA when disabled, paused, killed, compromised, or dry-run.
+            EnsureLiveActuation();
+
+            var mainWindow = _engine.MainWindow;
+            if (mainWindow == null)
+                return Done(Fail(request, "PioneerRx main window not available"));
+
             using var automation = new UIA2Automation();
             var cf = automation.ConditionFactory;
 
@@ -119,7 +149,7 @@ public sealed class PricingWorkflow
                 if (!VerifyLoadedNdc(editWindow, cf, request.Ndc, searchBox))
                 {
                     Observe(SelectorStepId.VerifyNdc, SelectorOutcome.Failed, SelectorFailureKind.VerifyMismatch);
-                    return Done(Fail(request, $"Loaded item NDC does not match {request.Ndc} — item may not exist or search timed out"));
+                    return Done(Fail(request, "Loaded item did not match the requested identifier"));
                 }
                 Observe(SelectorStepId.VerifyNdc, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
@@ -164,15 +194,14 @@ public sealed class PricingWorkflow
                     if (!decision.Accept)
                     {
                         Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Failed, SelectorFailureKind.GridEmpty);
-                        _logger.Warning("PricingWorkflow: NDC {Ndc} pricing read NOT confirmed: {Reason}",
-                            request.Ndc, decision.RejectReason);
+                        _logger.Warning("PricingWorkflow: pricing read was not confirmed ({Reason})",
+                            decision.RejectReason);
                         return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
                             false, null, null, gridFailure ?? decision.RejectReason ?? "Pricing read not confirmed"));
                     }
 
                     Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Resolved, SelectorFailureKind.None);
-                    _logger.Debug("PricingWorkflow: NDC {Ndc} → {Supplier} @ {Cost}/unit (source {Src})",
-                        request.Ndc, decision.Supplier, decision.CostPerUnit, decision.Source);
+                    _logger.Debug("PricingWorkflow: pricing read confirmed from {Source}", decision.Source);
                     return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
                         true, decision.Supplier, decision.CostPerUnit, null));
                 }
@@ -188,8 +217,7 @@ public sealed class PricingWorkflow
                 }
                 Observe(SelectorStepId.SupplierGrid, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
-                _logger.Debug("PricingWorkflow: NDC {Ndc} → {Supplier} @ {Cost}/unit",
-                    request.Ndc, uiaCheapest.Value.supplier, uiaCheapest.Value.costPerUnit);
+                _logger.Debug("PricingWorkflow: exact pricing read confirmed");
 
                 return Done(new SupplierPriceResult(request.JobId, request.RowIndex, request.Ndc,
                     true, uiaCheapest.Value.supplier, uiaCheapest.Value.costPerUnit, null));
@@ -200,14 +228,118 @@ public sealed class PricingWorkflow
                 TryCloseEditWindow(editWindow, cf);
             }
         }
-        catch (Exception ex)
+        catch (PricingActuationGateClosedException ex)
         {
-            _logger.Error(ex, "PricingWorkflow: unhandled error for NDC {Ndc}", request.Ndc);
+            _logger.Warning(
+                "PricingWorkflow: live UIA halted because actuation gate closed ({Code})",
+                ex.RejectionCode);
+            return Done(Fail(request, PricingSafetyErrors.ActuationGateClosed(ex.RejectionCode)));
+        }
+        catch (Exception)
+        {
+            _logger.Error("PricingWorkflow failed locally");
             // Compliance: never upload a raw exception message (uncontrolled free text — possible
             // leak vector). The real exception is in the local log above; the corpus/cloud get a
             // generic reason + the structured observations only.
             return Done(Fail(request, "Pricing lookup failed (unhandled error)"));
         }
+    }
+
+    internal PricingScreenObservationContext? CaptureObservationContext()
+    {
+        if (!_engine.VerifyAttachedProcessIdentity().Trusted)
+            return null;
+        var mainWindow = _engine.MainWindow;
+        if (mainWindow is null)
+            return null;
+        var handle = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+        if (handle == 0 || _engine.ProcessId <= 0)
+            return null;
+        var snapshot = new IsolatedWindowStructureSnapshotProvider().Capture(
+            handle,
+            _engine.ProcessId,
+            WindowStructureCaptureProfile.Pms);
+        return _engine.VerifyAttachedProcessIdentity().Trusted &&
+               snapshot.Success && !snapshot.Truncated &&
+               snapshot.TreeHash is { Length: 64 } signature
+            ? new PricingScreenObservationContext(_engine.ProcessId, signature)
+            : null;
+    }
+
+    private bool AdmitScreenContract(NdcPricingRequest request)
+    {
+        lock (_screenContractLock)
+        {
+            var nowTicks = Environment.TickCount64;
+            if (string.Equals(
+                    _screenContractJobId,
+                    request.JobId,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    _screenContractPmsFingerprint,
+                    request.PmsFingerprint,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    _screenContractSignature,
+                    request.ScreenSignatureV1,
+                    StringComparison.Ordinal) &&
+                _screenContractVerifiedAtTicks >= 0 &&
+                nowTicks - _screenContractVerifiedAtTicks <=
+                    ScreenContractCacheMilliseconds)
+                return true;
+
+            var currentScreen = CaptureObservationContext();
+            if (currentScreen is null ||
+                !string.Equals(
+                    currentScreen.ScreenSignatureV1,
+                    request.ScreenSignatureV1,
+                    StringComparison.Ordinal))
+                return false;
+
+            _screenContractJobId = request.JobId;
+            _screenContractPmsFingerprint = request.PmsFingerprint;
+            _screenContractSignature = request.ScreenSignatureV1;
+            _screenContractVerifiedAtTicks = nowTicks;
+            return true;
+        }
+    }
+
+    private void EnsureLiveActuation()
+    {
+        var rejection = _actuationGate.CheckLiveOrReject();
+        if (rejection is not null)
+            throw new PricingActuationGateClosedException(
+                rejection.RejectionCode ?? ActuationRejectionCodes.GateDisabled);
+
+        var processTrust = _engine.VerifyAttachedProcessIdentity();
+        if (!processTrust.Trusted)
+        {
+            _logger.Warning(
+                "PricingWorkflow: attached PioneerRx process identity rejected ({Code})",
+                processTrust.Code);
+            throw new PricingActuationGateClosedException(
+                ActuationRejectionCodes.ProcessIdentityUntrusted);
+        }
+    }
+
+    private void ExecuteLiveMutation(Action mutation)
+    {
+        var identityRejected = false;
+        var rejection = _actuationGate.ExecuteLiveMutationOrReject(() =>
+        {
+            if (!_engine.VerifyAttachedProcessIdentity().Trusted)
+            {
+                identityRejected = true;
+                return;
+            }
+            mutation();
+        });
+        if (rejection is not null)
+            throw new PricingActuationGateClosedException(
+                rejection.RejectionCode ?? ActuationRejectionCodes.GateDisabled);
+        if (identityRejected)
+            throw new PricingActuationGateClosedException(
+                ActuationRejectionCodes.ProcessIdentityUntrusted);
     }
 
     // GREEN-tier candidate scan for the failure path: records ControlType / AutomationId /
@@ -221,6 +353,8 @@ public sealed class PricingWorkflow
             return root.FindAllDescendants(cf.ByControlType(type))
                 .Take(5)
                 .Select(ToObserved)
+                .Where(element => element is not null)
+                .Cast<ObservedElement>()
                 .ToList();
         }
         catch
@@ -229,7 +363,7 @@ public sealed class PricingWorkflow
         }
     }
 
-    private static ObservedElement ToObserved(AutomationElement el)
+    private static ObservedElement? ToObserved(AutomationElement el)
     {
         string controlType;
         try { controlType = el.ControlType.ToString(); } catch { controlType = "Unknown"; }
@@ -237,6 +371,11 @@ public sealed class PricingWorkflow
         try { automationId = NullIfEmpty(el.AutomationId); } catch { automationId = null; }
         string? className;
         try { className = NullIfEmpty(el.ClassName); } catch { className = null; }
+        if (automationId is not null &&
+                !StructuralIdentifierSanitizer.IsAllowed(automationId) ||
+            className is not null &&
+                !StructuralIdentifierSanitizer.IsAllowed(className))
+            return null;
         return new ObservedElement(controlType, automationId, className);
     }
 
@@ -247,9 +386,9 @@ public sealed class PricingWorkflow
     private void LogIfLearned(SelectorStepId step, SelectorResolver.Resolution res)
     {
         if (res.ResolvedVia == SelectorResolvedVia.Learned)
-            _logger.Information("PricingWorkflow: step {Step} resolved via learned patch {PatchId}", step, res.PatchId);
+            _logger.Information("PricingWorkflow: step {Step} resolved via an approved learned patch", step);
         else if (res.Outcome == SelectorOutcome.FallbackUsed)
-            _logger.Warning("PricingWorkflow: step {Step} learned patch {PatchId} missed — used builtin fallback", step, res.PatchId);
+            _logger.Warning("PricingWorkflow: step {Step} learned patch missed; used builtin fallback", step);
     }
 
     private bool OpenRxItemDialog(Window mainWindow, ConditionFactory cf, SelectorResolver resolver)
@@ -273,12 +412,12 @@ public sealed class PricingWorkflow
                 // of the bar element. Search the whole window for the "Item" MenuItem by name — robust to
                 // odd menu nesting. The count+names log tells us whether the items are in the tree at all.
                 var windowMenuItems = mainWindow.FindAllDescendants(cf.ByControlType(ControlType.MenuItem));
-                _logger.Debug("OpenRxItemDialog: bar-scope miss; window MenuItems={Count} names=[{Names}]",
-                    windowMenuItems.Length, string.Join(",", windowMenuItems.Select(m => m.Name)));
+                _logger.Debug("OpenRxItemDialog: bar-scope miss; window MenuItems={Count}",
+                    windowMenuItems.Length);
                 itemMenu = windowMenuItems.FirstOrDefault(
                     m => string.Equals(m.Name, ItemMenuName, StringComparison.OrdinalIgnoreCase));
             }
-            _logger.Debug("OpenRxItemDialog: itemMenu '{Name}' found={Found}", ItemMenuName, itemMenu != null);
+            _logger.Debug("OpenRxItemDialog: structural menu target found={Found}", itemMenu != null);
             if (itemMenu == null) return false;
             LogIfLearned(SelectorStepId.OpenItemMenu, itemRes);
 
@@ -295,7 +434,12 @@ public sealed class PricingWorkflow
             AutomationElement? rxItemEntry = null;
             for (var i = 0; i < MenuOpeners.Length; i++)
             {
-                try { MenuOpeners[i](itemMenu); } catch { /* try the next opener */ }
+                try
+                {
+                    ExecuteLiveMutation(() => MenuOpeners[i](itemMenu));
+                }
+                catch (PricingActuationGateClosedException) { throw; }
+                catch { /* try the next opener */ }
                 Thread.Sleep(300);
                 var (found, res) = resolver.FindFirst(searchRoot, cf, SelectorStepId.OpenRxItem, cf.ByName(RxItemMenuName));
                 if (found == null)
@@ -312,9 +456,10 @@ public sealed class PricingWorkflow
             Thread.Sleep(300);
             return true;
         }
-        catch (Exception ex)
+        catch (PricingActuationGateClosedException) { throw; }
+        catch (Exception)
         {
-            _logger.Debug(ex, "PricingWorkflow: OpenRxItemDialog failed");
+            _logger.Debug("PricingWorkflow: OpenRxItemDialog failed locally");
             return false;
         }
     }
@@ -336,7 +481,7 @@ public sealed class PricingWorkflow
     /// leaf entry ("Rx Item") needs <c>Invoke()</c>; some only accept a synthesized Click(). Each attempt
     /// is guarded so an unsupported/throwing pattern falls through to the next rather than aborting.
     /// </summary>
-    private static void OpenMenuElement(AutomationElement el, bool expandToOpenSubmenu)
+    private void OpenMenuElement(AutomationElement el, bool expandToOpenSubmenu)
     {
         if (expandToOpenSubmenu)
         {
@@ -344,10 +489,11 @@ public sealed class PricingWorkflow
             {
                 if (el.Patterns.ExpandCollapse.IsSupported)
                 {
-                    el.Patterns.ExpandCollapse.Pattern.Expand();
+                    ExecuteLiveMutation(() => el.Patterns.ExpandCollapse.Pattern.Expand());
                     return;
                 }
             }
+            catch (PricingActuationGateClosedException) { throw; }
             catch { /* fall through to Invoke/Click */ }
         }
 
@@ -355,13 +501,14 @@ public sealed class PricingWorkflow
         {
             if (el.Patterns.Invoke.IsSupported)
             {
-                el.Patterns.Invoke.Pattern.Invoke();
+                ExecuteLiveMutation(() => el.Patterns.Invoke.Pattern.Invoke());
                 return;
             }
         }
+        catch (PricingActuationGateClosedException) { throw; }
         catch { /* fall through to Click */ }
 
-        el.AsMenuItem()?.Click();
+        ExecuteLiveMutation(() => el.AsMenuItem()?.Click());
     }
 
     private Window? WaitForWindow(UIA2Automation automation, string title)
@@ -369,6 +516,7 @@ public sealed class PricingWorkflow
         var deadline = DateTime.UtcNow + ElementTimeout;
         while (DateTime.UtcNow < deadline)
         {
+            EnsureLiveActuation();
             try
             {
                 var desktop = automation.GetDesktop();
@@ -407,6 +555,7 @@ public sealed class PricingWorkflow
             AutomationElement? searchBox = null;
             while (DateTime.UtcNow < deadline)
             {
+                EnsureLiveActuation();
                 // Learned patch first, then the builtin (ControlType=Edit + HelpText "Quick Search").
                 var builtin = new FlaUI.Core.Conditions.AndCondition(
                     cf.ByControlType(ControlType.Edit),
@@ -414,13 +563,6 @@ public sealed class PricingWorkflow
                 var (box, res) = resolver.FindFirst(editWindow, cf, SelectorStepId.QuickSearchField, builtin);
                 searchBox = box;
                 if (searchBox != null) LogIfLearned(SelectorStepId.QuickSearchField, res);
-
-                if (searchBox == null)
-                {
-                    // Fallback: first Edit control at the top of the window
-                    var edits = editWindow.FindAllDescendants(cf.ByControlType(ControlType.Edit));
-                    searchBox = edits.FirstOrDefault();
-                }
 
                 if (searchBox != null) break;
                 Thread.Sleep(200);
@@ -434,14 +576,15 @@ public sealed class PricingWorkflow
 
             for (int attempt = 1; attempt <= MaxTypeAttempts; attempt++)
             {
-                searchBox.Focus();
+                ExecuteLiveMutation(searchBox.Focus);
                 Thread.Sleep(100);
 
                 // Clear existing text then type NDC
-                Keyboard.TypeSimultaneously(FlaUI.Core.WindowsAPI.VirtualKeyShort.CONTROL,
-                    FlaUI.Core.WindowsAPI.VirtualKeyShort.KEY_A);
+                ExecuteLiveMutation(() => Keyboard.TypeSimultaneously(
+                    FlaUI.Core.WindowsAPI.VirtualKeyShort.CONTROL,
+                    FlaUI.Core.WindowsAPI.VirtualKeyShort.KEY_A));
                 Thread.Sleep(50);
-                Keyboard.Type(ndc);
+                ExecuteLiveMutation(() => Keyboard.Type(ndc));
                 Thread.Sleep(150);
 
                 // Before firing Enter, confirm the search box actually contains
@@ -451,27 +594,29 @@ public sealed class PricingWorkflow
                 // value here catches that without nuking the user's foreground.
                 if (SearchBoxContainsNdc(searchBox, ndc))
                 {
-                    Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.RETURN);
+                    ExecuteLiveMutation(() =>
+                        Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.RETURN));
                     Thread.Sleep(800);
                     return true;
                 }
 
                 _logger.Warning(
-                    "PricingWorkflow: SearchByNdc attempt {Attempt}/{Max} — search box does not contain {Ndc} after type; retrying",
-                    attempt, MaxTypeAttempts, ndc);
+                    "PricingWorkflow: identifier search attempt {Attempt}/{Max} did not verify; retrying",
+                    attempt, MaxTypeAttempts);
                 // Brief backoff before next attempt — gives a transient focus
                 // thief (notification, modal) time to clear.
                 Thread.Sleep(300);
             }
 
             _logger.Warning(
-                "PricingWorkflow: SearchByNdc giving up on {Ndc} after {Max} attempts — never confirmed text landed in Quick Search",
-                ndc, MaxTypeAttempts);
+                "PricingWorkflow: identifier search stopped after {Max} unverified attempts",
+                MaxTypeAttempts);
             return false;
         }
-        catch (Exception ex)
+        catch (PricingActuationGateClosedException) { throw; }
+        catch (Exception)
         {
-            _logger.Debug(ex, "PricingWorkflow: SearchByNdc failed for {Ndc}", ndc);
+            _logger.Debug("PricingWorkflow: identifier search failed locally");
             return false;
         }
     }
@@ -509,7 +654,7 @@ public sealed class PricingWorkflow
         var normalizedNdc = NdcNormalizer.TryNormalize(ndc);
         if (string.IsNullOrEmpty(normalizedNdc))
         {
-            _logger.Warning("PricingWorkflow: cannot normalize NDC '{Ndc}' for verification", ndc);
+            _logger.Warning("PricingWorkflow: requested identifier could not be normalized");
             return false;
         }
 
@@ -518,10 +663,10 @@ public sealed class PricingWorkflow
         // query) can't pass — by identity, not HelpText, so it holds with no HelpText.
         var searchBoxRid = UiaGridReader.TryGetRuntimeId(searchBox);
 
-        var lastSeen = new List<string>();
         var deadline = DateTime.UtcNow + ElementTimeout;
         while (DateTime.UtcNow < deadline)
         {
+            EnsureLiveActuation();
             try
             {
                 // Materialize once. [C-3] NEVER verify against the Quick Search box: it still holds
@@ -534,8 +679,6 @@ public sealed class PricingWorkflow
                     .Select(SafeText)
                     .Where(t => !string.IsNullOrEmpty(t))
                     .ToList();
-                lastSeen = texts;
-
                 // Do-Not-Use must be a FULL-PASS check BEFORE any NDC match. PioneerRx returns a red
                 // "(Do Not Use)" duplicate sharing the active item's NDC; the NDC lives in an Edit
                 // field (enumerated first) while the "(Do Not Use)" marker is a separate Text label.
@@ -544,9 +687,7 @@ public sealed class PricingWorkflow
                 // candidates for the marker first; if any hits, refuse to price.
                 if (texts.Any(PricingGridReader.LooksLikeDoNotUse))
                 {
-                    _logger.Warning(
-                        "PricingWorkflow: loaded item for NDC {Ndc} is marked Do Not Use — refusing to price",
-                        ndc);
+                    _logger.Warning("PricingWorkflow: loaded item is marked Do Not Use; refusing to price");
                     return false;
                 }
 
@@ -568,10 +709,8 @@ public sealed class PricingWorkflow
             Thread.Sleep(300);
         }
 
-        _logger.Warning("PricingWorkflow: NDC {Ndc} not found in loaded item after {Timeout}s",
-            ndc, ElementTimeout.TotalSeconds);
-        _logger.Debug("PricingWorkflow: verify miss for {Ndc} — Edit window texts=[{Seen}]",
-            ndc, string.Join(" | ", lastSeen.Take(15)));
+        _logger.Warning("PricingWorkflow: loaded item did not verify within {Timeout}s",
+            ElementTimeout.TotalSeconds);
         return false;
     }
 
@@ -635,157 +774,4 @@ public sealed class PricingWorkflow
         catch { return false; }
     }
 
-    private bool ClickPricingTab(Window editWindow, ConditionFactory cf, SelectorResolver resolver)
-    {
-        try
-        {
-            var deadline = DateTime.UtcNow + ElementTimeout;
-            while (DateTime.UtcNow < deadline)
-            {
-                var (pricingTab, res) = resolver.FindFirst(editWindow, cf, SelectorStepId.PricingTab, cf.ByName(PricingTabName));
-                if (pricingTab != null)
-                {
-                    LogIfLearned(SelectorStepId.PricingTab, res);
-                    pricingTab.AsTabItem()?.Select();
-                    Thread.Sleep(500);
-                    return true;
-                }
-                Thread.Sleep(200);
-            }
-            return false;
-        }
-        catch (Exception ex)
-        {
-            _logger.Debug(ex, "PricingWorkflow: ClickPricingTab failed");
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Reads the supplier catalog DataGrid on the Pricing tab and returns the entry
-    /// with the lowest Cost Per Unit.
-    ///
-    /// Columns are resolved by header NAME, not ordinal (Codex M-4). If PioneerRx
-    /// reorders, hides, or adds columns, the lookup still finds the right fields.
-    /// On schema miss, fails closed with a distinct failure reason — the prior
-    /// fallback-to-hardcoded-ordinals path was Codex-flagged as risking wrong
-    /// supplier/cost data on a UI revision (data integrity is precedence 1).
-    /// </summary>
-    // Pricing grid columns, resolved by header name (fail closed if a required one is missing/renamed).
-    private static readonly UiaGridReader.ColumnSpec[] PricingColumns =
-    {
-        new("supplier", new[] { "Supplier" }, Required: true),
-        new("cost", new[] { "Cost Per Unit", "Cost (per unit)" }, Required: true),
-        new("status", new[] { "Status" }, Required: false),
-    };
-
-    private (string supplier, decimal costPerUnit)? ReadCheapestSupplier(
-        Window editWindow, ConditionFactory cf, out string? failureReason)
-    {
-        failureReason = null;
-        try
-        {
-            // Shared, virtualization-safe grid read (extracted to UiaGridReader so every grid feature
-            // uses the exact primitives the pricing rehearsal proved live). Pricing keeps only its own
-            // judgment: which columns it needs + the argmin-cost ranking below.
-            var reader = new UiaGridReader(_logger, GridLoadTimeout);
-
-            var grid = reader.FindGrid(editWindow, cf);
-            if (grid == null)
-            {
-                _logger.Debug("PricingWorkflow: no DataGrid found on Pricing tab");
-                failureReason = "Pricing tab DataGrid not found";
-                return null;
-            }
-
-            var rows = reader.WaitForStableRows(grid, cf, out var expectedRowCount);
-            if (rows.Length == 0)
-            {
-                _logger.Debug("PricingWorkflow: Pricing grid has no rows");
-                failureReason = "Pricing grid has no rows";
-                return null;
-            }
-
-            // Precedence-1 (data integrity): if the grid reports more logical rows than we could realize
-            // by scrolling, we're ranking a PARTIAL set and the true cheapest may be off screen. Refuse
-            // rather than write a possibly non-cheapest supplier to the operator's sheet.
-            if (expectedRowCount > rows.Length)
-            {
-                _logger.Warning(
-                    "PricingWorkflow: realized {Read}/{Total} pricing rows (virtualized) — refusing to rank a partial set",
-                    rows.Length, expectedRowCount);
-                failureReason = $"Pricing grid virtualized: read {rows.Length} of {expectedRowCount} supplier rows — refusing to rank a partial set";
-                return null;
-            }
-
-            var cols = reader.ResolveColumns(grid, cf, PricingColumns);
-            if (cols is null)
-            {
-                // Schema didn't resolve → don't read by ordinal (would write wrong cells). Typed failure.
-                failureReason = "Pricing grid schema not recognized — Supplier/Cost columns missing or renamed";
-                return null;
-            }
-            int supplierIdx = cols["supplier"], costIdx = cols["cost"];
-            int statusIdx = cols.TryGetValue("status", out var si) ? si : -1;
-
-            var parsed = new List<PricingGridReader.SupplierRow>(rows.Length);
-            foreach (var row in rows)
-            {
-                var cells = UiaGridReader.RowCells(row, cf);
-
-                var needed = Math.Max(supplierIdx, Math.Max(costIdx, statusIdx));
-                if (cells.Length <= needed) continue;
-
-                // FULL cell text (Value / LegacyIAccessible), not the truncated Name.
-                var supplierText = UiaGridReader.GetCellText(cells[supplierIdx]);
-                var costText = UiaGridReader.GetCellText(cells[costIdx]);
-                var statusText = statusIdx >= 0 ? UiaGridReader.GetCellText(cells[statusIdx]) : "";
-
-                if (!PricingGridReader.TryParseCost(costText, out var cost)) continue;
-                parsed.Add(new PricingGridReader.SupplierRow(supplierText, cost, statusText));
-            }
-
-            _logger.Debug("ReadCheapest: {GridRows} grid rows → {Parsed} usable: [{Detail}]",
-                rows.Length, parsed.Count,
-                string.Join(" | ", parsed.Select(p => $"{p.Supplier}={p.CostPerUnit}/{p.Status}")));
-
-            // Cheapest = min Cost across ALL usable rows (sort is user-toggleable;
-            // never trust row 1) — discontinued/unavailable rows excluded.
-            var cheapest = PricingGridReader.SelectCheapest(parsed);
-            if (cheapest == null)
-            {
-                failureReason = "No usable supplier rows in Pricing tab";
-                return null;
-            }
-            return cheapest;
-        }
-        catch (Exception ex)
-        {
-            _logger.Debug(ex, "PricingWorkflow: ReadCheapestSupplier error");
-            failureReason = "Pricing grid read error";
-            return null;
-        }
-    }
-
-
-
-
-
-    private void TryCloseEditWindow(Window editWindow, ConditionFactory cf)
-    {
-        try
-        {
-            // Press Escape to dismiss — PioneerRx uses Escape to close dialogs
-            editWindow.Focus();
-            Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.ESCAPE);
-            Thread.Sleep(300);
-        }
-        catch (Exception ex)
-        {
-            _logger.Debug(ex, "PricingWorkflow: could not close Edit Rx Item window");
-        }
-    }
-
-    private static SupplierPriceResult Fail(NdcPricingRequest req, string error) =>
-        new(req.JobId, req.RowIndex, req.Ndc, false, null, null, error);
 }

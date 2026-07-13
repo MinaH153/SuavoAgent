@@ -98,6 +98,9 @@ public class RoutineDetectorTests : IDisposable
         var routines = _db.GetLearnedRoutines(_sessionId);
         Assert.NotEmpty(routines);
         Assert.True(routines[0].HasWritebackCandidate);
+        var queryHashes = System.Text.Json.JsonSerializer.Deserialize<string[]>(
+            routines[0].CorrelatedWriteQueries!);
+        Assert.Equal(new[] { "qshape-write" }, queryHashes);
     }
 
     [Fact]
@@ -131,7 +134,7 @@ public class RoutineDetectorTests : IDisposable
     }
 
     [Fact]
-    public void DetectAndPersist_CyclicSequence_DoesNotInfiniteLoop()
+    public async Task DetectAndPersist_CyclicSequence_DoesNotInfiniteLoop()
     {
         // Cycle: A→B→C→A repeated 8 times (edges A→B, B→C, C→A each appear 8 times, exceeding MinFrequency=5)
         // RoutineDetector should complete without infinite looping and produce a bounded routine.
@@ -150,9 +153,7 @@ public class RoutineDetectorTests : IDisposable
 
         // Must complete within 5 seconds — infinite loop would hang
         var task = Task.Run(() => detector.DetectAndPersist());
-        bool completed = task.Wait(TimeSpan.FromSeconds(5));
-
-        Assert.True(completed, "DetectAndPersist did not complete within timeout — possible infinite loop on cyclic DFG");
+        await task.WaitAsync(TimeSpan.FromSeconds(5));
 
         var routines = _db.GetLearnedRoutines(_sessionId);
         Assert.NotEmpty(routines);

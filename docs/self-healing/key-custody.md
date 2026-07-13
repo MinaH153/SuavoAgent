@@ -44,7 +44,7 @@ ingesting.
 encryption via AWS KMS. `agent_signing_key_encrypted` column; plaintext never
 in Postgres.
 
-**Generation at install:** During bootstrap.ps1, agent generates a 256-bit
+**Generation at install:** During the signed native Setup flow, the agent generates a 256-bit
 key from `RNGCryptoServiceProvider`, immediately DPAPI-encrypts, and sends the
 plaintext to cloud over TLS 1.3 inside the `/api/agent/register` payload. Cloud
 envelope-encrypts with KMS and stores. Plaintext is zeroed in memory on both

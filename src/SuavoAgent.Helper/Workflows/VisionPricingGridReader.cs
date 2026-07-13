@@ -13,7 +13,7 @@ namespace SuavoAgent.Helper.Workflows;
 /// <see cref="VisionExactReconciler"/> so a misread never writes wrong pricing.
 ///
 /// Entirely on-device — the capture, OCR, and result never leave the box (HARD constraint: cloud
-/// never sees the PMS). Opt-in via vision.json (same operator acknowledgement as the observation
+/// never sees the PMS). Opt-in via machine registry state (same operator acknowledgement as the observation
 /// pipeline). Fail-soft: any capture/OCR failure returns null and the caller degrades to UIA-only.
 /// </summary>
 public sealed class VisionPricingGridReader : IAsyncDisposable
@@ -39,25 +39,30 @@ public sealed class VisionPricingGridReader : IAsyncDisposable
     public async Task<VisionSupplierGridParser.VisionGridReading?> TryReadCheapestAsync(
         IntPtr hwnd, int expectedPid, CancellationToken ct)
     {
-        if (!IsAvailable || hwnd == IntPtr.Zero) return null;
+        if (!IsAvailable || hwnd == IntPtr.Zero || expectedPid <= 0) return null;
         try
         {
-            // Window-scoped capture of EXACTLY this Edit-Rx-Item window (the grid). PrintWindow is
-            // HWND-scoped, so no other window contributes pixels. expectedPid guards PID reuse.
-            var capture = new WindowScopedScreenCapture(_options, _logger, hwnd, expectedPid);
+            // Resolve the current foreground HWND dynamically, require it to equal this exact
+            // Edit-Rx-Item window/PID, and re-prove the signed PioneerRx executable immediately
+            // before and after PrintWindow. Any focus, HWND, PID, revocation, or trust change
+            // degrades to UIA-only without capturing another surface.
+            var capture = ApprovedPmsForegroundWindowCapture.ForExpectedForegroundWindow(
+                _options, _logger, hwnd, expectedPid);
             if (!capture.IsAvailable) return null;
 
             var bytes = await capture.CapturePrimaryAsync(ct).ConfigureAwait(false);
             if (bytes is null) return null;
 
-            var frame = await _extractor.ExtractAsync(bytes.Value, ct).ConfigureAwait(false);
+            var frame = _extractor is IPricingScreenExtractor pricingExtractor
+                ? await pricingExtractor.ExtractPricingAsync(bytes.Value, ct).ConfigureAwait(false)
+                : await _extractor.ExtractAsync(bytes.Value, ct).ConfigureAwait(false);
             if (frame is null || frame.TextRegions.Count == 0) return null;
 
             var reading = VisionSupplierGridParser.ReadCheapest(frame.TextRegions);
             if (reading is not null)
                 _logger.Debug(
-                    "VisionPricingGridReader: OCR saw {Rows} supplier rows, cheapest={Supplier} @ {Cost} (conf {Conf:F2})",
-                    reading.UsableRowCount, reading.Supplier, reading.CostPerUnit, reading.Confidence);
+                    "VisionPricingGridReader: OCR produced {Rows} usable supplier rows (confidence={Conf:F2})",
+                    reading.UsableRowCount, reading.Confidence);
             return reading;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)

@@ -27,7 +27,7 @@ public class LearningAuditConcurrencyTests : IDisposable
     }
 
     [Fact]
-    public void ConcurrentLearningAudits_AllSucceed_AndChainIsIntact()
+    public async Task ConcurrentLearningAudits_AllSucceed_AndChainIsIntact()
     {
         // 16 concurrent writers per session — chain integrity is verified by
         // walking the resulting rows in id order and confirming each row's
@@ -57,7 +57,7 @@ public class LearningAuditConcurrencyTests : IDisposable
         }
 
         startGate.Set();
-        Task.WaitAll(tasks.ToArray());
+        await Task.WhenAll(tasks);
 
         Assert.Equal(writerCount * writesPerWriter, _db.GetLearningAuditCount(sessionId));
         Assert.True(_db.VerifyLearningAuditChain(sessionId),

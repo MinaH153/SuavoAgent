@@ -1,4 +1,5 @@
 using SuavoAgent.Contracts.Vision;
+using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Core.Learning;
 
 namespace SuavoAgent.Helper.Vision;
@@ -12,7 +13,7 @@ namespace SuavoAgent.Helper.Vision;
 /// is <see cref="ScrubbedExtractorFactory"/>, which guarantees every returned
 /// extractor is wrapped in this decorator (Codex suggestion).
 /// </summary>
-internal sealed class PhiScrubbingExtractor : IScreenExtractor
+internal sealed class PhiScrubbingExtractor : IPricingScreenExtractor
 {
     private readonly IScreenExtractor _inner;
 
@@ -27,6 +28,21 @@ internal sealed class PhiScrubbingExtractor : IScreenExtractor
     public async Task<ScreenFrame?> ExtractAsync(ScreenBytes screen, CancellationToken ct)
     {
         var frame = await _inner.ExtractAsync(screen, ct);
+        return Scrub(frame);
+    }
+
+    public async Task<ScreenFrame?> ExtractPricingAsync(
+        ScreenBytes screen,
+        CancellationToken ct)
+    {
+        var frame = _inner is IPricingScreenExtractor pricing
+            ? await pricing.ExtractPricingAsync(screen, ct)
+            : await _inner.ExtractAsync(screen, ct);
+        return Scrub(frame);
+    }
+
+    private static ScreenFrame? Scrub(ScreenFrame? frame)
+    {
         if (frame == null) return null;
 
         var scrubbedRegions = new List<TextRegion>(frame.TextRegions.Count);
@@ -39,7 +55,12 @@ internal sealed class PhiScrubbingExtractor : IScreenExtractor
         var scrubbedElements = new List<VisualElement>(frame.Elements.Count);
         foreach (var el in frame.Elements)
         {
-            scrubbedElements.Add(el with { Name = PhiScrubber.ScrubText(el.Name) });
+            scrubbedElements.Add(el with
+            {
+                Name = PhiScrubber.ScrubText(el.Name),
+                AutomationId = StructuralIdentifierSanitizer.AllowOrNull(el.AutomationId),
+                ClassName = StructuralIdentifierSanitizer.AllowOrNull(el.ClassName),
+            });
         }
 
         return frame with

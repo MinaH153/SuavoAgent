@@ -18,10 +18,9 @@ namespace SuavoAgent.Helper.Workflows;
 public static class PricingGridReader
 {
     /// <summary>
-    /// A Supplier Catalog row. <see cref="CostPerUnit"/> is the RANKING cost — Nadim's rule is
-    /// "cheapest = argmin over <b>Cost Per Unit</b>, NOT raw Cost" (a 500-count pack can win on
-    /// per-unit while losing on pack cost). Production feeds the grid's "Cost Per Unit" column here;
-    /// the SQL path ranks by the per-unit column too. Never populate this with raw pack Cost.
+    /// A Supplier Catalog row. <see cref="CostPerUnit"/> is the current engine's admitted ranking
+    /// basis: a dedicated "Cost Per Unit" field, never a relabeled raw pack Cost. The pharmacy PIC's
+    /// final cost-basis decision remains a field gate; until then, an unresolved basis halts execution.
     /// </summary>
     public readonly record struct SupplierRow(string Supplier, decimal CostPerUnit, string Status);
 
@@ -51,19 +50,17 @@ public static class PricingGridReader
     }
 
     /// <summary>
-    /// Whether a row's Status keeps it eligible. An empty status (no Status
-    /// column resolved) is treated as usable so we never over-filter when the
-    /// column is absent — the grid's own "Include Discontinued = No" default
-    /// already excludes them in that case.
+    /// Whether a row's Status keeps it eligible. Eligibility is an allowlist,
+    /// not a denylist: only the two PioneerRx states proved safe for selection
+    /// are accepted. A blank or unfamiliar status is never inferred usable.
     /// </summary>
     public static bool IsUsableStatus(string? status)
     {
-        if (string.IsNullOrWhiteSpace(status)) return true;
-        var s = status.Trim().ToLowerInvariant();
-        return !(s.Contains("discontinued")
-            || s.Contains("unavailable")
-            || s.Contains("inactive")
-            || s.Contains("do not use"));
+        if (string.IsNullOrWhiteSpace(status)) return false;
+
+        var value = status.Trim();
+        return value.Equals("Available", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("Active", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>True if the text marks a PioneerRx "(Do Not Use)" item.</summary>
@@ -72,10 +69,9 @@ public static class PricingGridReader
         && text.Replace(" ", string.Empty).Contains("donotuse", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Cheapest usable supplier by <b>Cost Per Unit</b> ascending (Nadim's rule: argmin over
-    /// Cost Per Unit, NOT raw pack Cost — never trust top-row position), skipping blank suppliers,
-    /// non-positive per-unit costs, and discontinued/unavailable rows. Returns null when no row
-    /// qualifies.
+    /// Cheapest usable supplier under the current <b>Cost Per Unit</b> engine contract (never trust
+    /// top-row position), skipping blank suppliers, non-positive per-unit costs, and any row without
+    /// an explicitly eligible status. Returns null when no row qualifies.
     /// </summary>
     public static (string supplier, decimal costPerUnit)? SelectCheapest(IEnumerable<SupplierRow> rows)
     {

@@ -9,7 +9,7 @@ namespace SuavoAgent.Setup.Tests.Verify;
 public class ConsoleVerifyWiringTests
 {
     [Fact]
-    public async Task Default_verifier_composes_the_four_named_gates()
+    public async Task Default_verifier_composes_the_five_named_gates()
     {
         // The single production gate set shared by the GUI orchestrator AND the console installer.
         // We assert the gate NAMES (not their states — on a box without a running agent the gates
@@ -22,6 +22,7 @@ public class ConsoleVerifyWiringTests
         Assert.Contains("Pipe", names);
         Assert.Contains("Brain", names);
         Assert.Contains("Cloud auth", names);
-        Assert.Equal(4, outcome.Gates.Count);
+        Assert.Contains("Workstation", names);
+        Assert.Equal(5, outcome.Gates.Count);
     }
 }

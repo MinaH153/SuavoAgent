@@ -13,20 +13,23 @@ namespace SuavoAgent.Helper.Vision;
 /// surviving task is immediately cancelled via a linked CTS so we don't leak
 /// CPU on an already-failed compose call.
 /// </summary>
-internal sealed class CompositeScreenExtractor : IScreenExtractor
+internal sealed class CompositeScreenExtractor : IPricingScreenExtractor
 {
     private readonly IScreenExtractor _textInner;
     private readonly IUiaElementExtractor _uiaInner;
     private readonly int _maxUiaElements;
+    private readonly bool _requireTextSuccess;
 
     public CompositeScreenExtractor(
         IScreenExtractor textInner,
         IUiaElementExtractor uiaInner,
-        int maxUiaElements = 128)
+        int maxUiaElements = 128,
+        bool requireTextSuccess = false)
     {
         _textInner = textInner;
         _uiaInner = uiaInner;
         _maxUiaElements = maxUiaElements;
+        _requireTextSuccess = requireTextSuccess;
     }
 
     public string ExtractorId => $"composite-{_textInner.ExtractorId}+uia";
@@ -34,6 +37,17 @@ internal sealed class CompositeScreenExtractor : IScreenExtractor
     public bool IsReady => _textInner.IsReady;
 
     public async Task<ScreenFrame?> ExtractAsync(ScreenBytes screen, CancellationToken ct)
+        => await ExtractCoreAsync(screen, pricing: false, ct).ConfigureAwait(false);
+
+    public async Task<ScreenFrame?> ExtractPricingAsync(
+        ScreenBytes screen,
+        CancellationToken ct)
+        => await ExtractCoreAsync(screen, pricing: true, ct).ConfigureAwait(false);
+
+    private async Task<ScreenFrame?> ExtractCoreAsync(
+        ScreenBytes screen,
+        bool pricing,
+        CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
 
@@ -41,7 +55,9 @@ internal sealed class CompositeScreenExtractor : IScreenExtractor
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var token = linked.Token;
 
-        var textTask = _textInner.ExtractAsync(screen, token);
+        var textTask = pricing && _textInner is IPricingScreenExtractor pricingExtractor
+            ? pricingExtractor.ExtractPricingAsync(screen, token)
+            : _textInner.ExtractAsync(screen, token);
         var uiaTask = _uiaInner.ExtractAsync(screen, _maxUiaElements, token);
 
         ScreenFrame? textFrame;
@@ -73,9 +89,15 @@ internal sealed class CompositeScreenExtractor : IScreenExtractor
 
         sw.Stop();
 
-        // If text extractor failed, still emit a frame with UIA elements only.
+        // When OCR is explicitly configured, its failure is load-bearing: an
+        // apparently successful UIA-only frame would lie about runtime vision
+        // readiness. Fail the whole capture so Core/dashboard sees the static
+        // OCR error recorded by TesseractScreenExtractor. UIA-only operation
+        // remains valid when OCR was deliberately left disabled.
         if (textFrame == null)
         {
+            if (_requireTextSuccess)
+                return null;
             return new ScreenFrame
             {
                 Id = Guid.NewGuid().ToString("N"),

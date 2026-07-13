@@ -36,7 +36,7 @@ public sealed class AssertElementVerbTests
     }
 
     private static Dictionary<string, object?> Params(
-        string? processName = "notepad",
+        string? processName = "calc.exe",
         string? expected = "12",
         string? automationId = "CalculatorResults",
         string? name = null,

@@ -61,7 +61,9 @@ public static class BrainStartupProbe
             // the orphaned inference can never surface as an unobserved task
             // exception (Codex P2). OnlyOnFaulted is a no-op on normal completion.
             _ = decideTask.ContinueWith(
-                t => logger.LogWarning(t.Exception, "BrainStartupProbe: orphaned inference faulted after budget"),
+                t => logger.LogWarning(
+                    "core.brain_startup_probe.orphaned_failure exception_type={ExceptionType}",
+                    t.Exception?.GetType().Name ?? "UnknownException"),
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
 
             var guard = Task.Delay(TimeSpan.FromSeconds(3), ct);
@@ -84,7 +86,7 @@ public static class BrainStartupProbe
         catch (Exception ex)
         {
             // Probe failures must not crash startup. Log and keep going.
-            logger.LogError(ex, "BrainStartupProbe: unexpected error — brain wiring may be broken");
+            logger.LogSafeError(ex);
         }
     }
 }

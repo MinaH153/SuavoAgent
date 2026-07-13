@@ -33,7 +33,7 @@ public sealed class WorkflowExecutorDryRunPropagationTests
     public async Task LaunchSandboxAppVerb_PropagatesDefinitionDryRun(bool dryRun)
     {
         var harness = new RecordingHarness();
-        var def = Def("run-launch", dryRun, Step("launch_sandbox_app", "{\"app_key\":\"notepad\"}"));
+        var def = Def("run-launch", dryRun, Step("launch_sandbox_app", "{\"app_key\":\"calculator\"}"));
         var result = await harness.Run(def);
         Assert.Equal(WorkflowRunOutcome.Completed, result.Outcome);
         Assert.NotNull(harness.Gateway.LastLaunchSandboxApp);
@@ -46,7 +46,7 @@ public sealed class WorkflowExecutorDryRunPropagationTests
     public async Task PressKeysVerb_PropagatesDefinitionDryRun(bool dryRun)
     {
         var harness = new RecordingHarness();
-        var def = Def("run-press", dryRun, Step("press_keys", "{\"chords\":[\"Enter\"]}"));
+        var def = Def("run-press", dryRun, Step("press_keys", "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}"));
         var result = await harness.Run(def);
         Assert.Equal(WorkflowRunOutcome.Completed, result.Outcome);
         Assert.NotNull(harness.Gateway.LastPressKeys);
@@ -59,7 +59,7 @@ public sealed class WorkflowExecutorDryRunPropagationTests
     public async Task TypeIntoFieldVerb_PropagatesDefinitionDryRun(bool dryRun)
     {
         var harness = new RecordingHarness();
-        var def = Def("run-type", dryRun, Step("type_into_field", "{\"text\":\"hello\"}"));
+        var def = Def("run-type", dryRun, Step("type_into_field", "{\"text\":\"hello\",\"process_name\":\"calc.exe\"}"));
         var result = await harness.Run(def);
         Assert.Equal(WorkflowRunOutcome.Completed, result.Outcome);
         Assert.NotNull(harness.Gateway.LastTypeText);
@@ -73,7 +73,7 @@ public sealed class WorkflowExecutorDryRunPropagationTests
     {
         var harness = new RecordingHarness();
         var def = Def("run-click", dryRun,
-            Step("click_by_label", "{\"label\":\"Save\",\"process_name\":\"notepad\"}"));
+            Step("click_by_label", "{\"label\":\"Save\",\"process_name\":\"calc.exe\"}"));
         var result = await harness.Run(def);
         Assert.Equal(WorkflowRunOutcome.Completed, result.Outcome);
         Assert.NotNull(harness.Gateway.LastClickByLabel);
@@ -90,7 +90,7 @@ public sealed class WorkflowExecutorDryRunPropagationTests
         // operators reconstruct chain of custody.
         var harness = new RecordingHarness();
         harness.Gateway.NextResult = ActuationResult.Success(5, dryRun: true, evidenceHash: "evidence");
-        var def = Def("run-audit", dryRun: false, Step("press_keys", "{\"chords\":[\"Enter\"]}"));
+        var def = Def("run-audit", dryRun: false, Step("press_keys", "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}"));
 
         await harness.Run(def);
 
@@ -112,7 +112,7 @@ public sealed class WorkflowExecutorDryRunPropagationTests
         // ("indistinguishable from no-actuation-attempted").
         var harness = new RecordingHarness();
         harness.Gateway.NextResult = ActuationResult.Reject("gate_paused", "test", dryRun: true);
-        var def = Def("run-reject", dryRun: false, Step("press_keys", "{\"chords\":[\"Enter\"]}"));
+        var def = Def("run-reject", dryRun: false, Step("press_keys", "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}"));
 
         await harness.Run(def);
 
@@ -141,6 +141,60 @@ public sealed class WorkflowExecutorDryRunPropagationTests
         Assert.True(entry.DryRun);              // requested = workflow definition (was hardcoded false)
         Assert.Null(entry.EffectiveDryRun);     // no actuation surface reached — null is honest
         Assert.Equal("rejected", entry.Outcome);
+    }
+
+    [Fact]
+    public async Task AuditRow_ActuatingVersionMismatch_RecordsGateEffectiveDryRun()
+    {
+        var harness = new RecordingHarness();
+        harness.Gateway.GateState = new ActuationGateState(
+            Enabled: true,
+            DryRun: true,
+            PausedUntilUtc: null,
+            PauseReason: null,
+            KillSwitchTrippedUtc: null);
+        var step = Step(
+            "press_keys",
+            "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}") with
+        {
+            VerbVersion = "999.0.0",
+        };
+        var def = Def("run-version-miss", dryRun: false, step);
+
+        await harness.Run(def);
+
+        var entry = Assert.Single(harness.Audit.StepEntries);
+        Assert.False(entry.RequestedDryRun);
+        Assert.True(entry.EffectiveDryRun);
+        Assert.Equal("manifest_resolution_failed", entry.ErrorKind);
+        Assert.Null(harness.Gateway.LastPressKeys);
+    }
+
+    [Fact]
+    public async Task AuditRow_SkippedActuatingVerb_RecordsGateEffectiveDryRun()
+    {
+        var harness = new RecordingHarness();
+        harness.Gateway.GateState = new ActuationGateState(
+            Enabled: true,
+            DryRun: true,
+            PausedUntilUtc: null,
+            PauseReason: null,
+            KillSwitchTrippedUtc: null);
+        var step = Step(
+            "press_keys",
+            "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}") with
+        {
+            Condition = new WorkflowConditionDto("never", null, null, null),
+        };
+        var def = Def("run-skip", dryRun: false, step);
+
+        await harness.Run(def);
+
+        var entry = Assert.Single(harness.Audit.StepEntries);
+        Assert.Equal("skipped", entry.Outcome);
+        Assert.False(entry.RequestedDryRun);
+        Assert.True(entry.EffectiveDryRun);
+        Assert.Null(harness.Gateway.LastPressKeys);
     }
 
     // ── Harness ─────────────────────────────────────────────────────────────

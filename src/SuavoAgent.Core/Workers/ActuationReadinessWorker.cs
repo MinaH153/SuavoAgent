@@ -57,7 +57,7 @@ public sealed class ActuationReadinessWorker : ResilientHostedService
             if (_selfHeal is not null && snapshot.SkippedReason is null)
             {
                 try { _selfHeal.Consider(snapshot, now); }
-                catch (Exception ex) { _logger.LogError(ex, "Self-heal consideration failed (non-fatal)"); }
+                catch (Exception ex) { _logger.LogSafeError(ex); }
             }
 
             var delay = Interval + TimeSpan.FromMilliseconds(Random.Shared.Next(0, (int)Jitter.TotalMilliseconds));

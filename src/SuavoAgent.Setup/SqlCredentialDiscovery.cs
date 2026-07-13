@@ -121,9 +121,9 @@ internal static class SqlCredentialDiscovery
             var cssMatch = Regex.Match(configText, @"ConnectionStringServer[^""]*""([^""]+)""", RegexOptions.IgnoreCase);
             if (cssMatch.Success) return cssMatch.Groups[1].Value;
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            ConsoleUI.WriteInfo($"Config parse error: {ex.Message}");
+            ConsoleUI.WriteInfo("PioneerRx configuration could not be parsed. Support code: SETUP-SQL-CONFIG-PARSE");
         }
 
         return null;
@@ -176,9 +176,9 @@ internal static class SqlCredentialDiscovery
                 return trimmed;
             }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            ConsoleUI.WriteInfo($"ConnectionStringServer failed: {ex.Message}");
+            ConsoleUI.WriteInfo("PioneerRx connection service was unavailable. Support code: SETUP-SQL-CONNECTION-SERVICE");
         }
 
         return null;
@@ -219,17 +219,25 @@ internal static class SqlCredentialDiscovery
                 password = GetValue(parts, "Password", "PWD");
             }
 
-            if (server == null)
+            if (string.IsNullOrWhiteSpace(server))
             {
                 ConsoleUI.WriteWarn("Connection string missing server address");
                 return null;
             }
 
+            if (!isWindows &&
+                (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(password)))
+            {
+                ConsoleUI.WriteWarn(
+                    "SQL authentication configuration is missing a user name or password");
+                return null;
+            }
+
             return new SqlCredentials(server, database, user, password);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            ConsoleUI.WriteWarn($"Connection string parse failed: {ex.Message}");
+            ConsoleUI.WriteWarn("PioneerRx returned an unusable database configuration. Support code: SETUP-SQL-CONNECTION-PARSE");
             return null;
         }
     }
@@ -238,7 +246,7 @@ internal static class SqlCredentialDiscovery
     {
         foreach (var key in keys)
         {
-            if (parts.TryGetValue(key, out var val))
+            if (parts.TryGetValue(key, out var val) && !string.IsNullOrWhiteSpace(val))
                 return val;
         }
         return null;
@@ -290,9 +298,9 @@ internal static class SqlCredentialDiscovery
                 return server;
             }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            ConsoleUI.WriteInfo($"SQL Browser failed: {ex.Message}");
+            ConsoleUI.WriteInfo("SQL Browser discovery was unavailable. Support code: SETUP-SQL-BROWSER");
         }
 
         return null;

@@ -102,7 +102,7 @@ public class WatchdogDecisionEngineTests
     [Fact]
     public void NotInstalled_RepairBackoff_HoldsRepeatPollsThenRepairsAgain()
     {
-        // QA C3: without the repair backoff, NotInstalled re-ran bootstrap.ps1 on every ~15s poll.
+        // QA C3: without the repair backoff, NotInstalled re-ran privileged native repair every ~15s.
         var eng = Engine();
         var ledger = ServiceLedger.Initial("SuavoAgent.Broker", T0);
 

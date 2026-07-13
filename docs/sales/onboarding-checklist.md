@@ -8,8 +8,9 @@
 - [ ] Print one-pager (docs/sales/pharmacy-one-pager.md)
 - [ ] Prepare BAA for signature
 - [ ] Verify state compliance requirements (docs/compliance/state-compliance-matrix.md)
-- [ ] Generate pharmacy ID and API key in Suavo cloud dashboard
-- [ ] Create setup.json with pharmacy credentials
+- [ ] Confirm the pharmacy and authorized installer entitlement appear in the Suavo dashboard
+- [ ] Confirm the installing owner/PIC can complete MFA and approve device pairing
+- [ ] Download a fresh signed `SuavoAgent-Setup-…-win-x64.exe` only from that authenticated dashboard
 
 ## During Visit
 
@@ -21,19 +22,23 @@
 - [ ] Note which computer(s) to install on
 
 ### Phase 2: Install (5 min)
-- [ ] Open admin PowerShell on pharmacy computer
-- [ ] Run bootstrap.ps1 one-liner
+- [ ] Download the signed SuavoAgent installer from the pharmacy dashboard
+- [ ] Open the signed native installer, approve the verified MKM Technologies LLC publisher, and follow the pairing wizard
 - [ ] Confirm PMS auto-detected
-- [ ] Confirm SQL credentials discovered
-- [ ] Verify services running (Core + Broker)
+- [ ] Confirm SQL/PioneerRx canary is green without copying or recording credentials
+- [ ] Confirm the observed SQL Server certificate digest is included in the signed probation proof and promoted to the workstation identity
+- [ ] Verify services running (Core + Broker + Watchdog)
 - [ ] Verify Helper attaches to PMS
 - [ ] Confirm heartbeat appears on cloud dashboard
+- [ ] Confirm any PioneerRx process approval is bound to that same promoted SQL certificate identity
 
 ### Phase 3: Verify (2 min)
-- [ ] Check logs: no errors in first 60 seconds
+- [ ] Run **Diagnostics** in the dashboard and confirm its PHI-safe health receipt is green
 - [ ] Confirm system tray indicator is visible
 - [ ] Show pharmacy owner the disclosure indicator
 - [ ] Verify learning mode is active on dashboard
+- [ ] Confirm **Windows Settings → Apps → SuavoAgent** offers native Repair and Uninstall
+- [ ] Demonstrate the pharmacist panda's exact **Pause Autopilot**, **Resume**, and **Stop Autopilot** acknowledgements
 
 ## Post-Visit (Same Day)
 
@@ -57,4 +62,4 @@
 - [ ] Approve model if learning looks correct
 - [ ] Transition to active mode
 - [ ] Schedule first delivery batch
-- [ ] Celebrate with the pharmacy owner
+- [ ] For pricing pilots, obtain PIC approval of the exact cost basis and pass the supervised 10 → 100 → 500 reconciliation gates before unattended execution

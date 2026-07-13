@@ -10,13 +10,6 @@ public sealed class LearningSession
     private static readonly string[] PhaseOrder = { "discovery", "pattern", "model", "approved", "active" };
     private static readonly string[] ModeOrder = { "observer", "supervised", "autonomous" };
 
-    private static readonly Dictionary<string, TimeSpan> PhaseDurations = new()
-    {
-        ["discovery"] = TimeSpan.FromDays(7),
-        ["pattern"] = TimeSpan.FromDays(14),
-        ["model"] = TimeSpan.FromDays(9),
-    };
-
     public static bool IsValidPhaseTransition(string from, string to)
     {
         var fromIdx = Array.IndexOf(PhaseOrder, from);
@@ -45,10 +38,9 @@ public sealed class LearningSession
     };
 
     public static string? GetNextPhase(string current, DateTimeOffset phaseStarted)
-    {
-        if (!PhaseDurations.TryGetValue(current, out var duration)) return null;
-        if (DateTimeOffset.UtcNow - phaseStarted < duration) return null;
-        var idx = Array.IndexOf(PhaseOrder, current);
-        return idx >= 0 && idx + 1 < PhaseOrder.Length ? PhaseOrder[idx + 1] : null;
-    }
+        => LearningPhaseProgression.Evaluate(
+            current,
+            phaseStarted,
+            DateTimeOffset.UtcNow,
+            patternPhaseGateReady: false)?.NextPhase;
 }

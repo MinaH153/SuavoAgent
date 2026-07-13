@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "llamasharp-backend-cpu-0.24.0",
+  "evidenceType": "nuget-repository-signed-package",
+  "packageId": "LLamaSharp.Backend.Cpu",
+  "packageVersion": "0.24.0",
+  "artifactUrl": "https://api.nuget.org/v3-flatcontainer/llamasharp.backend.cpu/0.24.0/llamasharp.backend.cpu.0.24.0.nupkg",
+  "artifactSha256": "47120fed200482ab364b9d225271172ccbf2ac7713ad388e4e7fe7d89fdedb0a",
+  "artifactSizeBytes": 21485108,
+  "embeddedSignatureSha256": "93e2b32182b0c456f21077d43318791dc8c8bfa1e6ca58cb0635c4890b474808",
+  "signatureType": "Repository",
+  "serviceIndex": "https://api.nuget.org/v3/index.json",
+  "owners": [
+    "Haiping-Chen"
+  ],
+  "repositoryCertificateSha256": "1f4b311d9acc115c8dc8018b5a49e00fce6da8e2855f9f014ca6f34570bc482d",
+  "timestampUtc": "2025-05-14T23:45:54Z",
+  "sourceRepository": "https://github.com/SciSharp/LLamaSharp",
+  "sourceRevision": "ce8eeb4c3d6937defc1dc38aaac4ad8bd282e8a5",
+  "llamaCppRevision": "ceda28ef8e310a8dee60bf275077a3eedae8e36c",
+  "license": "MIT",
+  "verificationCommand": "dotnet nuget verify --all --verbosity detailed"
+}

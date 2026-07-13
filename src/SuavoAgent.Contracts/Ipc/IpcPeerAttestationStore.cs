@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 
 namespace SuavoAgent.Contracts.Ipc;
 
@@ -6,6 +7,7 @@ public sealed record IpcPeerAttestationEntry(
     int ProcessId,
     uint SessionId,
     DateTimeOffset LaunchedAt,
+    DateTimeOffset ProcessStartedAtUtc,
     string HelperSha256);
 
 public sealed record IpcPeerAttestationDocument(
@@ -16,7 +18,7 @@ public sealed record IpcPeerAttestationDocument(
 
 public static class IpcPeerAttestationStore
 {
-    public const int CurrentVersion = 1;
+    public const int CurrentVersion = 2;
     public const string FileName = "helper-attestations.json";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -50,20 +52,45 @@ public static class IpcPeerAttestationStore
         }
 
         var tmpPath = $"{path}.{Guid.NewGuid():N}.tmp";
-        File.WriteAllText(tmpPath, JsonSerializer.Serialize(doc, JsonOptions));
-        File.Move(tmpPath, path, overwrite: true);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(doc, JsonOptions));
+        try
+        {
+            using (var stream = new FileStream(
+                       tmpPath,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None,
+                       4096,
+                       FileOptions.WriteThrough))
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(tmpPath, path, overwrite: true);
+        }
+        finally
+        {
+            Array.Clear(bytes);
+            if (File.Exists(tmpPath)) File.Delete(tmpPath);
+        }
     }
 
     public static bool ContainsHelper(
         string path,
         string pipeNonce,
         uint processId,
+        uint sessionId,
+        DateTimeOffset processStartedAtUtc,
+        string currentHelperSha256,
         DateTimeOffset now,
         TimeSpan maxAge)
     {
         try
         {
             if (!File.Exists(path)) return false;
+            if (currentHelperSha256.Length != 64 ||
+                currentHelperSha256.Any(character => !Uri.IsHexDigit(character)))
+                return false;
 
             var doc = JsonSerializer.Deserialize<IpcPeerAttestationDocument>(
                 File.ReadAllText(path),
@@ -76,8 +103,15 @@ public static class IpcPeerAttestationStore
 
             return doc.Helpers.Any(helper =>
                 helper.ProcessId == processId &&
-                !string.IsNullOrWhiteSpace(helper.HelperSha256) &&
-                helper.LaunchedAt <= now.AddMinutes(1));
+                helper.SessionId == sessionId &&
+                helper.ProcessStartedAtUtc == processStartedAtUtc &&
+                helper.HelperSha256.Length == 64 &&
+                string.Equals(
+                    helper.HelperSha256,
+                    currentHelperSha256,
+                    StringComparison.OrdinalIgnoreCase) &&
+                helper.LaunchedAt <= now.AddMinutes(1) &&
+                helper.ProcessStartedAtUtc <= now.AddMinutes(1));
         }
         catch
         {

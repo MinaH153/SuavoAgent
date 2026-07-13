@@ -31,11 +31,16 @@ public sealed class ConfigOverrideStore
         "Agent.SqlDatabase",
         "Agent.SqlUser",
         "Agent.SqlPassword",
+        "Agent.SqlTrustServerCertificate",
+        "Agent.SqlServerCertificateSha256",
+        "Agent.ValidatedSqlServerCertificatePath",
         "Agent.HmacSalt",
         "Agent.Pharmacies",
         "Agent.ReceiptOnlyMode",
         "Agent.AutoExecution.Enabled",
         "Agent.AutoExecution.WritebackEnabled",
+        "Agent.PricingCostBasisApproval",
+        "PricingCostBasisApproval",
         "AutoExecution.Enabled",
         "AutoExecution.WritebackEnabled",
         // Replay-first v1 HARD RULE: type/press-bearing skills must never auto-replay (a banked
@@ -50,11 +55,20 @@ public sealed class ConfigOverrideStore
         "Agent.ComplianceMode",
         "Agent.VerticalConfig",
         "Agent.SystemConnector",
+        // Vision is governed only by the Setup-owned, generation-numbered HKLM
+        // registry value. Generic config sync must never create a second
+        // authority or bypass explicit disabled state.
+        "Vision",
+        "Agent.Vision",
     };
 
     private static readonly string[] BlockedPrefixes =
     {
         "Agent.Pharmacies.",
+        "Agent.PricingCostBasisApproval.",
+        "PricingCostBasisApproval.",
+        "Vision.",
+        "Agent.Vision.",
     };
 
     public ConfigOverrideStore(string path, ILogger<ConfigOverrideStore> logger)
@@ -173,14 +187,6 @@ public sealed class ConfigOverrideStore
         ["Agent.HeartbeatJitterSeconds"] = new(0, 300),
         ["Agent.MaxDetectionBatchSize"] = new(1, 500),
         ["Agent.ReceiptRetentionDays"] = new(730, 3650),
-        ["Vision.RetentionHours"] = new(0, 168),
-        ["Vision.MaxStoredScreens"] = new(1, 5000),
-        ["Vision.MinIntervalMs"] = new(250, 60000),
-        ["Vision.PeriodicCapture.IntervalSeconds"] = new(5, 3600),
-        ["Vision.Tesseract.MinConfidence"] = new(0, 100),
-        ["Vision.Tesseract.IdleUnloadSeconds"] = new(0, 3600),
-        ["Vision.Tesseract.MemoryHeadroomBytes"] = new(64L * 1024 * 1024, 4L * 1024 * 1024 * 1024),
-        ["Vision.Tesseract.ExtractionTimeoutSeconds"] = new(1, 120),
     };
 
     private static readonly HashSet<string> BooleanOnlyPaths = new(StringComparer.OrdinalIgnoreCase)
@@ -193,15 +199,10 @@ public sealed class ConfigOverrideStore
         // Per-pharmacy pricing modality: "SqlFirst" (read PioneerRx SQL) or "UiaFirst" (drive
         // PioneerRx's UI — stealth, no SQL/credentials, invisible to the PMS). String enum value.
         "Agent.PricingExecutor",
-        "Agent.SqlTrustServerCertificate",
         "Agent.TemplateLearning.Enabled",
         "Agent.TemplateLearning.RuleGeneration",
         "Agent.TemplateLearning.AutoApproveOnFingerprintMatch",
         "Agent.TestHooks.Enabled",
-        "Vision.Enabled",
-        "Vision.PeriodicCapture.Enabled",
-        "Vision.PeriodicCapture.RequireForegroundMatch",
-        "Vision.Tesseract.Enabled",
     };
 
     private static void Insert(Dictionary<string, object?> node, string[] segments, JsonElement value)

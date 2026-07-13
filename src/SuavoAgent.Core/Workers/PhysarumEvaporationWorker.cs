@@ -43,7 +43,7 @@ public sealed class PhysarumEvaporationWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "physarum evaporation failed for scope {Pharmacy}/{Task}", pharmacyId, taskKey);
+                _logger.LogSafeWarning(ex);
             }
         }
         return swept;
@@ -70,7 +70,7 @@ public sealed class PhysarumEvaporationWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "physarum evaporation tick failed");
+                _logger.LogSafeWarning(ex);
             }
         }
     }

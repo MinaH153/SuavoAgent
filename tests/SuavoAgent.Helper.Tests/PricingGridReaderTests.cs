@@ -73,11 +73,16 @@ public sealed class PricingGridReaderTests
     }
 
     [Fact]
-    public void SelectCheapest_treats_blank_status_as_usable()
+    public void SelectCheapest_rejects_blank_or_unknown_status()
     {
-        // No Status column resolved → empty status → don't over-filter.
-        var rows = new[] { new Row("Anda", 4.20m, "") };
-        Assert.Equal("Anda", PricingGridReader.SelectCheapest(rows)!.Value.supplier);
+        var rows = new[]
+        {
+            new Row("BlankStatus", 1.00m, ""),
+            new Row("UnknownStatus", 2.00m, "Backordered"),
+            new Row("VerifiedStatus", 4.20m, "Active"),
+        };
+
+        Assert.Equal("VerifiedStatus", PricingGridReader.SelectCheapest(rows)!.Value.supplier);
     }
 
     [Theory]
@@ -102,7 +107,14 @@ public sealed class PricingGridReaderTests
 
     [Theory]
     [InlineData("Available", true)]
-    [InlineData("", true)]
+    [InlineData("available", true)]
+    [InlineData(" Active ", true)]
+    [InlineData("", false)]
+    [InlineData(" ", false)]
+    [InlineData("AVAIL", false)]
+    [InlineData("A", false)]
+    [InlineData("Available Soon", false)]
+    [InlineData("Backordered", false)]
     [InlineData("Discontinued", false)]
     [InlineData("UNAVAILABLE", false)]
     [InlineData("inactive", false)]
@@ -118,15 +130,15 @@ public sealed class PricingGridReaderTests
         => Assert.Equal(expected, PricingGridReader.LooksLikeDoNotUse(text));
 
     [Fact]
-    public void SelectCheapest_NadimOmeprazole_ranks_by_cost_per_unit_not_pack_cost()
+    public void SelectCheapest_CurrentPerUnitContract_ranks_by_cost_per_unit_not_pack_cost()
     {
         // Ground truth: Nadim's live Supplier Catalog for Omeprazole Dr 40 Mg (NDC 55111-0645-01).
-        // The row values below are COST PER UNIT (the ranking basis — Graphify rule "argmin over
-        // Cost Per Unit, NOT Cost"). Two McKesson rows carry a blank/0 per-unit cost and render on
-        // top; the engine excludes them fail-closed. Crucially the 500-count McKesson pack has the
+        // The row values below exercise the current engine's dedicated COST PER UNIT contract; the
+        // pharmacy PIC's final cost-basis decision remains open. Two McKesson rows carry a blank/0
+        // per-unit cost and render on top; the engine excludes them fail-closed. The 500-count pack has the
         // LOWEST per-unit ($0.0099) even though its pack cost ($4.95) is far from the lowest — so
-        // ranking by per-unit (correct) picks McKesson, while ranking by raw pack cost (WRONG) would
-        // have picked Real Value Rx. This test locks in the per-unit rule.
+        // the admitted per-unit implementation picks McKesson, while a pack-cost implementation would
+        // pick Real Value Rx. This test locks the current behavior without deciding the PIC's policy.
         var rows = new[]
         {
             new Row("Mckesson 869640", 0m, "Available"),        // blank per-unit, sorts on top -> excluded

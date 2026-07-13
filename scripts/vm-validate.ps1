@@ -32,9 +32,9 @@ Check "Core service exists" { (Get-Service SuavoAgent.Core -ErrorAction Silently
 Check "Broker service exists" { (Get-Service SuavoAgent.Broker -ErrorAction SilentlyContinue) -ne $null }
 Check "Core is running" { (Get-Service SuavoAgent.Core).Status -eq "Running" }
 Check "Broker is running" { (Get-Service SuavoAgent.Broker).Status -eq "Running" }
-Check "Broker runs as NetworkService" {
+Check "Broker runs as LocalSystem" {
     $svc = Get-WmiObject Win32_Service -Filter "Name='SuavoAgent.Broker'"
-    $svc.StartName -eq "NT AUTHORITY\NetworkService"
+    $svc.StartName -eq "LocalSystem"
 }
 
 # 2. ProgramData ACL lockdown
@@ -46,19 +46,23 @@ Check "ACL is protected (no inheritance)" {
     $acl.AreAccessRulesProtected
 }
 
-# 3. Install dir ACL - LocalService has Modify
+# 3. Install dir ACL - LocalService can execute but cannot mutate
 Write-Host "`n--- Install Dir ACL ---" -ForegroundColor Yellow
 Check "Install dir exists" { Test-Path $installDir }
-Check "LocalService has Modify on install dir" {
+Check "LocalService has read/execute without Modify on install dir" {
     $acl = Get-Acl $installDir
     $rules = $acl.Access | Where-Object { $_.IdentityReference -match "LOCAL SERVICE" }
-    $rules | Where-Object { $_.FileSystemRights -match "Modify" }
+    $canRead = $rules | Where-Object { $_.FileSystemRights -match "Read|ReadAndExecute" }
+    $canModify = $rules | Where-Object { $_.FileSystemRights -match "Modify|FullControl|Write" }
+    $canRead -and -not $canModify
 }
-Check "appsettings allows Core DPAPI sealing" {
+Check "appsettings keeps Core read-only" {
     $configPath = Join-Path $installDir "appsettings.json"
     $acl = Get-Acl $configPath
     $rules = $acl.Access | Where-Object { $_.IdentityReference -match "LOCAL SERVICE" }
-    $rules | Where-Object { $_.FileSystemRights -match "Modify" }
+    $canRead = $rules | Where-Object { $_.FileSystemRights -match "Read" }
+    $canModify = $rules | Where-Object { $_.FileSystemRights -match "Modify|FullControl|Write" }
+    $canRead -and -not $canModify
 }
 Check "appsettings keeps Broker read-only" {
     $configPath = Join-Path $installDir "appsettings.json"
@@ -83,22 +87,7 @@ if ($coreLog) {
     Write-Host "  [SKIP] No core log found" -ForegroundColor Yellow
 }
 
-# 5. CheckPendingUpdate test - create fake sentinel
-Write-Host "`n--- CheckPendingUpdate (fake sentinel) ---" -ForegroundColor Yellow
-$sentinel = Join-Path $installDir "update-pending.flag"
-if (-not (Test-Path $sentinel)) {
-    # Write a deliberately INVALID sentinel (bad signature) - should be cleaned up
-    Set-Content $sentinel "invalid|manifest`ninvalid_signature"
-    Stop-Service SuavoAgent.Core -Force -ErrorAction SilentlyContinue
-    Start-Sleep 2
-    Start-Service SuavoAgent.Core
-    Start-Sleep 5
-    Check "Invalid sentinel was cleaned up" { -not (Test-Path $sentinel) }
-} else {
-    Write-Host "  [SKIP] Sentinel already exists - not testing" -ForegroundColor Yellow
-}
-
-# 6. IPC pipe
+# 5. IPC pipe
 Write-Host "`n--- IPC ---" -ForegroundColor Yellow
 Check "Named pipe SuavoAgent exists" {
     [System.IO.Directory]::GetFiles("\\.\pipe\") -match "SuavoAgent"

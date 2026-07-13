@@ -17,12 +17,12 @@ public static class ActionGrammar
     /// <summary>
     /// Builds a grammar that allows exactly ONE JSON object matching:
     /// <code>
-    /// {
-    ///   "action": { "type": "...", "parameters": {...} },
-    ///   "confidence": 0.0-1.0,
-    ///   "rationale": "..."
-    /// }
-    /// </code>
+/// {
+///   "action": { "type": "...", "parameters": {...} },
+///   "confidence": 0.0-1.0,
+///   "rationaleCode": "target_present"
+/// }
+/// </code>
     /// Action types are restricted to <paramref name="allowedActions"/>.
     /// </summary>
     public static string BuildProposalGrammar(IReadOnlySet<RuleActionType> allowedActions)
@@ -36,8 +36,19 @@ public static class ActionGrammar
         sb.AppendLine("root ::= proposal");
         sb.AppendLine();
 
-        // proposal := { "action": <action>, "confidence": <num>, "rationale": <string> }
-        sb.AppendLine("proposal ::= \"{\" ws \"\\\"action\\\":\" ws action ws \",\" ws \"\\\"confidence\\\":\" ws number ws \",\" ws \"\\\"rationale\\\":\" ws string ws \"}\"");
+        // Model prose is forbidden. Rationale is a closed machine-code enum.
+        sb.AppendLine("proposal ::= \"{\" ws \"\\\"action\\\":\" ws action ws \",\" ws \"\\\"confidence\\\":\" ws number ws \",\" ws \"\\\"rationaleCode\\\":\" ws rationale-code ws \"}\"");
+        sb.AppendLine();
+
+        sb.Append("rationale-code ::= ");
+        var firstRationale = true;
+        foreach (var code in Enum.GetValues<InferenceRationaleCode>())
+        {
+            if (!firstRationale) sb.Append(" | ");
+            sb.Append($"\"\\\"{code.ToWireValue()}\\\"\"");
+            firstRationale = false;
+        }
+        sb.AppendLine();
         sb.AppendLine();
 
         // action := { "type": <type>, "parameters": <params> }

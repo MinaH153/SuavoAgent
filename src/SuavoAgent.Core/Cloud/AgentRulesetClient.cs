@@ -14,8 +14,7 @@ namespace SuavoAgent.Core.Cloud;
 /// </summary>
 /// <remarks>
 /// Mirrors <see cref="AgentConfigClient"/>'s HMAC auth (same
-/// <see cref="HmacSigner"/> + same 3 headers: <c>x-agent-api-key</c>,
-/// <c>x-agent-timestamp</c>, <c>x-agent-signature</c>). The ETag round-trip
+/// <see cref="HmacSigner"/> exact-request v2 envelope). The ETag round-trip
 /// shaves cloud bandwidth when the ruleset hasn't changed since the last
 /// fetch; agents poll every 5min so a 304 is the common case.
 /// </remarks>
@@ -96,14 +95,8 @@ public sealed class AgentRulesetClient : IRulesetClient
         LastFailureKind = null;
         try
         {
-            var timestamp = DateTimeOffset.UtcNow.ToString("o");
-            // GET body is empty — signer matches AgentConfigClient.
-            var signature = _signer.Sign(timestamp, string.Empty);
-
             using var request = new HttpRequestMessage(HttpMethod.Get, Endpoint);
-            request.Headers.Add("x-agent-api-key", _options.ApiKey);
-            request.Headers.Add("x-agent-timestamp", timestamp);
-            request.Headers.Add("x-agent-signature", signature);
+            _signer.ApplyHeaders(request, string.Empty);
             if (!string.IsNullOrEmpty(currentETag))
             {
                 request.Headers.TryAddWithoutValidation("If-None-Match", currentETag);
@@ -170,8 +163,7 @@ public sealed class AgentRulesetClient : IRulesetClient
         catch (HttpRequestException ex)
         {
             LastFailureKind = $"network_{ex.HttpRequestError}".ToLowerInvariant();
-            _logger?.LogInformation(ex,
-                "AgentRulesetClient: network failure to {Endpoint}", Endpoint);
+            _logger?.LogSafeInformation(ex);
             return new RulesetFetchResult(null, RulesetFetchOutcome.Transient);
         }
         catch (TaskCanceledException)
@@ -182,8 +174,7 @@ public sealed class AgentRulesetClient : IRulesetClient
         catch (JsonException ex)
         {
             LastFailureKind = "schema_invalid_json";
-            _logger?.LogWarning(ex,
-                "AgentRulesetClient: schema-invalid response body");
+            _logger?.LogSafeWarning(ex);
             return new RulesetFetchResult(null, RulesetFetchOutcome.SchemaInvalid);
         }
     }

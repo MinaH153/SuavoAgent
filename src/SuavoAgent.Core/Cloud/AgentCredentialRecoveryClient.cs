@@ -1,7 +1,4 @@
 using System.Net;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using Microsoft.Extensions.Hosting;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Health;
@@ -24,162 +21,43 @@ public sealed record AgentCredentialRecoveryResult(
 
 public sealed class AgentCredentialRecoveryClient : IAgentCredentialRecoveryClient, IDisposable
 {
-    private const string Endpoint = "/api/agent/recover-key";
-
-    private readonly AgentOptions _options;
-    private readonly string _appSettingsPath;
     private readonly ILogger<AgentCredentialRecoveryClient> _logger;
-    private readonly HttpClient _http;
+    private readonly IDisposable? _transport;
 
     public AgentCredentialRecoveryClient(
         AgentOptions options,
-        string appSettingsPath,
+        IEncryptedCredentialStore credentialStore,
         ILogger<AgentCredentialRecoveryClient> logger)
-        : this(options, appSettingsPath, logger, new HttpClientHandler())
+        : this(options, credentialStore, logger, new HttpClientHandler())
     {
     }
 
     internal AgentCredentialRecoveryClient(
         AgentOptions options,
-        string appSettingsPath,
+        IEncryptedCredentialStore credentialStore,
         ILogger<AgentCredentialRecoveryClient> logger,
         HttpMessageHandler handler)
     {
-        _options = options;
-        _appSettingsPath = appSettingsPath;
+        _ = credentialStore ?? throw new ArgumentNullException(nameof(credentialStore));
         _logger = logger;
 
         var uri = new Uri(options.CloudUrl);
         if (uri.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException($"CloudUrl must use HTTPS, got: {uri.Scheme}");
 
-        _http = new HttpClient(handler) { BaseAddress = uri, Timeout = TimeSpan.FromSeconds(15) };
+        _transport = handler;
     }
 
     public async Task<AgentCredentialRecoveryResult> TryRecoverAsync(CancellationToken ct)
     {
-        if (!Guid.TryParse(_options.AgentId, out _))
-            return new(false, "agent_id_not_recoverable");
-
-        if (string.IsNullOrWhiteSpace(_options.MachineFingerprint))
-            return new(false, "missing_machine_fingerprint");
-
-        var body = JsonSerializer.Serialize(new
-        {
-            agentId = _options.AgentId,
-            machineFingerprint = _options.MachineFingerprint,
-        });
-
-        try
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint)
-            {
-                Content = new StringContent(body, Encoding.UTF8, "application/json"),
-            };
-            using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-            {
-                var errorBody = response.Content == null
-                    ? null
-                    : await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                var reason = CloudErrorSanitizer.FromBody(errorBody);
-                return new(false, $"http_{(int)response.StatusCode}_{reason}");
-            }
-
-            var responseBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            var apiKey = ExtractApiKey(responseBody);
-            if (string.IsNullOrWhiteSpace(apiKey))
-                return new(false, "invalid_recovery_response");
-
-            try
-            {
-                AgentCredentialStore.ReplaceApiKey(_appSettingsPath, apiKey);
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                _logger.LogWarning(ex, "Cloud credential recovery could not update appsettings.json; check LocalService Modify ACL");
-                return new(false, "appsettings_write_failed");
-            }
-            catch (IOException ex)
-            {
-                _logger.LogWarning(ex, "Cloud credential recovery could not update appsettings.json");
-                return new(false, "appsettings_write_failed");
-            }
-
-            return new(true, "key_rotated", RestartRequired: true);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Cloud credential recovery failed before key rotation");
-            return new(false, "recovery_exception");
-        }
+        await Task.CompletedTask;
+        ct.ThrowIfCancellationRequested();
+        _logger.LogWarning(
+            "Automatic credential recovery is disabled; pharmacist-approved device re-pairing is required");
+        return new(false, "device_repair_required");
     }
 
-    private static string? ExtractApiKey(string body)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(body);
-            var root = doc.RootElement;
-            if (!root.TryGetProperty("success", out var success) || !success.GetBoolean())
-                return null;
-            if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
-                return null;
-            if (!data.TryGetProperty("apiKey", out var apiKey) || apiKey.ValueKind != JsonValueKind.String)
-                return null;
-
-            var value = apiKey.GetString();
-            return IsPlausibleAgentKey(value) ? value : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static bool IsPlausibleAgentKey(string? value) =>
-        !string.IsNullOrWhiteSpace(value)
-        && value.StartsWith("sagent_", StringComparison.Ordinal)
-        && value.Length <= 128;
-
-    public void Dispose() => _http.Dispose();
-}
-
-internal static class AgentCredentialStore
-{
-    public static void ReplaceApiKey(string appSettingsPath, string apiKey)
-    {
-        if (string.IsNullOrWhiteSpace(appSettingsPath))
-            throw new ArgumentException("appsettings path is required", nameof(appSettingsPath));
-
-        var json = File.Exists(appSettingsPath)
-            ? File.ReadAllText(appSettingsPath)
-            : "{}";
-        var root = JsonNode.Parse(json)?.AsObject() ?? new JsonObject();
-        var agent = root["Agent"] as JsonObject;
-        if (agent is null)
-        {
-            agent = new JsonObject();
-            root["Agent"] = agent;
-        }
-
-        agent["ApiKey"] = OperatingSystem.IsWindows()
-            ? CredentialProtector.Protect(apiKey)
-            : apiKey;
-
-        var directory = Path.GetDirectoryName(appSettingsPath);
-        if (!string.IsNullOrWhiteSpace(directory))
-            Directory.CreateDirectory(directory);
-
-        // LocalService is granted Modify on appsettings.json, not broad write
-        // access to the install directory. Rewrite the existing file directly
-        // instead of creating a sibling .tmp file that Program Files may block.
-        File.WriteAllText(appSettingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-    }
+    public void Dispose() => _transport?.Dispose();
 }
 
 public sealed class CloudAuthRecoveryCoordinator
@@ -238,9 +116,11 @@ public sealed class CloudAuthRecoveryCoordinator
                 recoveryOutcome: result.Outcome,
                 restartRequested: false);
             _logger.LogWarning("Cloud credential recovery did not complete: {Outcome}", result.Outcome);
-            // Transient failure (5xx / network throw): release the latch so the next 401 retries
-            // instead of being short-circuited for the whole process lifetime.
-            Interlocked.Exchange(ref _attempted, 0);
+            // Re-pairing is a human-approved permanent gate, not a transient
+            // network error. Do not hammer the retired recovery endpoint on
+            // every heartbeat; transient failures may retry on the next 401.
+            if (!string.Equals(result.Outcome, "device_repair_required", StringComparison.Ordinal))
+                Interlocked.Exchange(ref _attempted, 0);
             return false;
         }
 
@@ -287,7 +167,7 @@ public sealed class CloudAuthRecoveryCoordinator
         }
         catch (Exception healthEx)
         {
-            _logger.LogDebug(healthEx, "Cloud credential recovery health write failed");
+            _logger.LogSafeDebug(healthEx);
         }
     }
 

@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using SuavoAgent.Contracts.Maintenance;
+using SuavoAgent.Diagnostics.Maintenance;
 
 namespace SuavoAgent.Watchdog;
 
@@ -17,11 +19,69 @@ public interface IServiceCommand
     ServiceState Query(string serviceName);
     bool Start(string serviceName, TimeSpan timeout);
     bool Stop(string serviceName, TimeSpan timeout);
-    bool InvokeRepair(string bootstrapPath, TimeSpan timeout);
+    bool InvokeRepair(MaintenanceReason reason, TimeSpan timeout);
+    bool InvokeUpdateCoordinator(string requestPath) => false;
+    bool InvokeUpdateCoordinatorResume(string claimPath) => false;
+    bool InvokePioneerRxApprovalInstaller(string requestPath, TimeSpan timeout) => false;
+    bool InvokePioneerRxApprovalBootstrap(string requestPath, TimeSpan timeout) => false;
 }
 
 public sealed class ServiceCommand : IServiceCommand
 {
+    private readonly string _maintenanceExecutablePath;
+    private readonly string _expectedInstallDirectory;
+    private readonly Func<string, bool> _fileExists;
+    private readonly Func<string, MaintenanceHostTrustResult> _verifyMaintenanceTrust;
+    private readonly Func<string, string, TimeSpan, int?> _runForExitCode;
+    private readonly Func<string, string, bool> _runDetached;
+    private readonly string _expectedActivationRequestPath;
+    private readonly string _expectedActiveClaimPath;
+    private readonly string _expectedPioneerRxApprovalRequestPath;
+    private readonly string _expectedPioneerRxBootstrapRequestPath;
+
+    public ServiceCommand()
+        : this(
+            ResolveMaintenanceExecutablePath(),
+            ResolveInstallDirectory(),
+            File.Exists,
+            RunForExitCode,
+            MaintenanceHostTrustVerifier.Verify,
+            RunDetached,
+            UpdateActivationContract.DefaultActivationRequestPath(),
+            UpdateActivationContract.DefaultActiveClaimPath(),
+            PioneerRxApprovalMaintenanceContract.DefaultRequestPath(),
+            PioneerRxApprovalBootstrapContract.DefaultRequestPath())
+    {
+    }
+
+    internal ServiceCommand(
+        string maintenanceExecutablePath,
+        string expectedInstallDirectory,
+        Func<string, bool> fileExists,
+        Func<string, string, TimeSpan, int?> runForExitCode,
+        Func<string, MaintenanceHostTrustResult>? verifyMaintenanceTrust = null,
+        Func<string, string, bool>? runDetached = null,
+        string? expectedActivationRequestPath = null,
+        string? expectedActiveClaimPath = null,
+        string? expectedPioneerRxApprovalRequestPath = null,
+        string? expectedPioneerRxBootstrapRequestPath = null)
+    {
+        _maintenanceExecutablePath = maintenanceExecutablePath;
+        _expectedInstallDirectory = expectedInstallDirectory;
+        _fileExists = fileExists;
+        _runForExitCode = runForExitCode;
+        _verifyMaintenanceTrust = verifyMaintenanceTrust ?? MaintenanceHostTrustVerifier.Verify;
+        _runDetached = runDetached ?? RunDetached;
+        _expectedActivationRequestPath = expectedActivationRequestPath
+                                         ?? UpdateActivationContract.DefaultActivationRequestPath();
+        _expectedActiveClaimPath = expectedActiveClaimPath
+                                   ?? UpdateActivationContract.DefaultActiveClaimPath();
+        _expectedPioneerRxApprovalRequestPath = expectedPioneerRxApprovalRequestPath
+                                                ?? PioneerRxApprovalMaintenanceContract.DefaultRequestPath();
+        _expectedPioneerRxBootstrapRequestPath = expectedPioneerRxBootstrapRequestPath
+                                                 ?? PioneerRxApprovalBootstrapContract.DefaultRequestPath();
+    }
+
     public ServiceState Query(string serviceName)
     {
         var output = RunCapture("sc.exe", $"queryex \"{serviceName}\"", TimeSpan.FromSeconds(10));
@@ -60,15 +120,166 @@ public sealed class ServiceCommand : IServiceCommand
         return Query(serviceName) == ServiceState.Stopped;
     }
 
-    public bool InvokeRepair(string bootstrapPath, TimeSpan timeout)
+    public bool InvokeRepair(MaintenanceReason reason, TimeSpan timeout)
     {
-        // PowerShell 5.1+ is a hard prereq for bootstrap.ps1 (enforced inside the script).
-        var args = $"-NoProfile -ExecutionPolicy Bypass -File \"{bootstrapPath}\" --repair";
-        // QA I-3: require a ZERO exit. `RunCapture(...) is not null` returned true if powershell merely
-        // LAUNCHED — so a bootstrap.ps1 --repair that exited non-zero (Watchdog NOT re-registered) looked
-        // like success, the Broker stopped escalating, and the agent ran with no recovery supervisor.
-        // RunCapture is shared with Query/Stop which parse non-zero output, so check the exit code here.
-        return RunForExitCode("powershell.exe", args, timeout) == 0;
+        if (reason == MaintenanceReason.Unspecified || timeout <= TimeSpan.Zero)
+            return false;
+
+        // The only privileged repair target is the fixed maintenance host staged beside this
+        // service. Reject a renamed, relocated, relative, or missing executable before launch.
+        // This keeps a writable path or environment value from becoming a SYSTEM execution surface.
+        if (!IsExpectedMaintenanceExecutable(_maintenanceExecutablePath, _expectedInstallDirectory) ||
+            !_fileExists(_maintenanceExecutablePath))
+            return false;
+
+        var trust = _verifyMaintenanceTrust(_maintenanceExecutablePath);
+        if (!trust.IsTrusted)
+        {
+            Serilog.Log.Error(
+                "Native maintenance repair rejected before SYSTEM launch: {TrustCode}",
+                trust.Code);
+            return false;
+        }
+
+        var args = MaintenanceContract.BuildRepairArguments(reason);
+        return _runForExitCode(_maintenanceExecutablePath, args, timeout) == 0;
+    }
+
+    public bool InvokeUpdateCoordinator(string requestPath)
+    {
+        if (!IsExpectedActivationRequest(requestPath, _expectedActivationRequestPath) ||
+            !_fileExists(requestPath) ||
+            !IsExpectedMaintenanceExecutable(_maintenanceExecutablePath, _expectedInstallDirectory) ||
+            !_fileExists(_maintenanceExecutablePath))
+            return false;
+
+        var trust = _verifyMaintenanceTrust(_maintenanceExecutablePath);
+        if (!trust.IsTrusted)
+        {
+            Serilog.Log.Error(
+                "SYSTEM update coordinator rejected before launch: {TrustCode}",
+                trust.Code);
+            return false;
+        }
+
+        var args = $"{UpdateActivationContract.ActivateSwitch} " +
+                   $"{UpdateActivationContract.RequestPathSwitch} \"{requestPath}\"";
+        return _runDetached(_maintenanceExecutablePath, args);
+    }
+
+    public bool InvokeUpdateCoordinatorResume(string claimPath)
+    {
+        if (!IsExpectedActivationRequest(claimPath, _expectedActiveClaimPath) ||
+            !_fileExists(claimPath) ||
+            !IsExpectedMaintenanceExecutable(_maintenanceExecutablePath, _expectedInstallDirectory) ||
+            !_fileExists(_maintenanceExecutablePath))
+            return false;
+
+        var trust = _verifyMaintenanceTrust(_maintenanceExecutablePath);
+        if (!trust.IsTrusted)
+        {
+            Serilog.Log.Error(
+                "SYSTEM update resume rejected before launch: {TrustCode}",
+                trust.Code);
+            return false;
+        }
+
+        var args = $"{UpdateActivationContract.ResumeSwitch} " +
+                   $"{UpdateActivationContract.ClaimPathSwitch} \"{claimPath}\"";
+        return _runDetached(_maintenanceExecutablePath, args);
+    }
+
+    public bool InvokePioneerRxApprovalInstaller(string requestPath, TimeSpan timeout)
+    {
+        if (timeout <= TimeSpan.Zero ||
+            !PioneerRxApprovalMaintenanceContract.IsExactRequestPath(
+                requestPath,
+                _expectedPioneerRxApprovalRequestPath) ||
+            !_fileExists(requestPath) ||
+            !IsExpectedMaintenanceExecutable(_maintenanceExecutablePath, _expectedInstallDirectory) ||
+            !_fileExists(_maintenanceExecutablePath))
+            return false;
+
+        var trust = _verifyMaintenanceTrust(_maintenanceExecutablePath);
+        if (!trust.IsTrusted)
+        {
+            Serilog.Log.Error(
+                "SYSTEM PioneerRx approval install rejected before launch: {TrustCode}",
+                trust.Code);
+            return false;
+        }
+
+        var arguments = $"{PioneerRxApprovalMaintenanceContract.InstallSwitch} " +
+                        $"{PioneerRxApprovalMaintenanceContract.RequestPathSwitch} \"{requestPath}\"";
+        return _runForExitCode(_maintenanceExecutablePath, arguments, timeout) == 0;
+    }
+
+    public bool InvokePioneerRxApprovalBootstrap(string requestPath, TimeSpan timeout)
+    {
+        if (timeout <= TimeSpan.Zero ||
+            !PioneerRxApprovalBootstrapContract.IsExactRequestPath(
+                requestPath,
+                _expectedPioneerRxBootstrapRequestPath) ||
+            !_fileExists(requestPath) ||
+            !IsExpectedMaintenanceExecutable(_maintenanceExecutablePath, _expectedInstallDirectory) ||
+            !_fileExists(_maintenanceExecutablePath))
+            return false;
+        var trust = _verifyMaintenanceTrust(_maintenanceExecutablePath);
+        if (!trust.IsTrusted) return false;
+        var arguments = $"{PioneerRxApprovalBootstrapContract.BootstrapSwitch} " +
+                        $"{PioneerRxApprovalBootstrapContract.RequestPathSwitch} \"{requestPath}\"";
+        return _runForExitCode(_maintenanceExecutablePath, arguments, timeout) == 0;
+    }
+
+    internal static string ResolveInstallDirectory() =>
+        Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
+
+    internal static string ResolveMaintenanceExecutablePath() =>
+        Path.Combine(ResolveInstallDirectory(), MaintenanceContract.ExecutableName);
+
+    internal static bool IsExpectedMaintenanceExecutable(string candidatePath, string installDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(candidatePath) || string.IsNullOrWhiteSpace(installDirectory))
+            return false;
+
+        try
+        {
+            if (!Path.IsPathFullyQualified(candidatePath))
+                return false;
+            if (!string.Equals(
+                    Path.GetFileName(candidatePath),
+                    MaintenanceContract.ExecutableName,
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var expected = Path.GetFullPath(Path.Combine(installDirectory, MaintenanceContract.ExecutableName));
+            var actual = Path.GetFullPath(candidatePath);
+            return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal static bool IsExpectedActivationRequest(string candidatePath, string expectedPath)
+    {
+        if (string.IsNullOrWhiteSpace(candidatePath) ||
+            string.IsNullOrWhiteSpace(expectedPath) ||
+            !Path.IsPathFullyQualified(candidatePath) ||
+            !Path.IsPathFullyQualified(expectedPath))
+            return false;
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(candidatePath),
+                Path.GetFullPath(expectedPath),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     internal static ServiceState ParseState(string queryOutput)
@@ -89,7 +300,7 @@ public sealed class ServiceCommand : IServiceCommand
         {
             var psi = new ProcessStartInfo
             {
-                FileName = fileName,
+                FileName = TrustedWindowsSystemBinary.Resolve(fileName),
                 Arguments = arguments,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -98,12 +309,15 @@ public sealed class ServiceCommand : IServiceCommand
             };
             using var p = Process.Start(psi);
             if (p is null) return null;
+            var stdout = p.StandardOutput.ReadToEndAsync();
+            var stderr = p.StandardError.ReadToEndAsync();
             if (!p.WaitForExit((int)timeout.TotalMilliseconds))
             {
                 try { p.Kill(entireProcessTree: true); } catch { }
                 return null;
             }
-            return p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+            Task.WhenAll(stdout, stderr).GetAwaiter().GetResult();
+            return stdout.Result + stderr.Result;
         }
         catch
         {
@@ -111,9 +325,9 @@ public sealed class ServiceCommand : IServiceCommand
         }
     }
 
-    // QA I-3: like RunCapture but returns the process EXIT CODE (null on launch failure / timeout /
-    // exception). Used by InvokeRepair to require a zero exit instead of "merely launched". Reads the
-    // pipes async so a chatty child can't fill a buffer and block before exit.
+    // Returns the process EXIT CODE (null on launch failure / timeout / exception). Repair requires a
+    // zero exit instead of "merely launched". Reads the pipes async so a chatty child can't fill a
+    // buffer and block before exit.
     private static int? RunForExitCode(string fileName, string arguments, TimeSpan timeout)
     {
         try
@@ -143,6 +357,28 @@ public sealed class ServiceCommand : IServiceCommand
         catch
         {
             return null;
+        }
+    }
+
+    private static bool RunDetached(string fileName, string arguments)
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = false,
+                RedirectStandardError = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(fileName) ?? AppContext.BaseDirectory,
+            });
+            return process is not null;
+        }
+        catch
+        {
+            return false;
         }
     }
 }

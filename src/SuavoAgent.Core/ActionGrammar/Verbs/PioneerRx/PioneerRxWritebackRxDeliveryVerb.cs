@@ -57,27 +57,10 @@ public sealed class PioneerRxWritebackRxDeliveryVerb : IVerb
             Justification: "Single Rx delivery status mutation; rollback envelope captures pre-state status code")
     );
 
-    public Task<VerbPreconditionResult> CheckPreconditionsAsync(VerbContext ctx, CancellationToken ct)
-    {
-        if (!ctx.Parameters.TryGetValue("rx_number", out var r) || r is not string rs || string.IsNullOrWhiteSpace(rs))
-        {
-            return Task.FromResult(VerbPreconditionResult.Fail("rx_number_required", "rx_number required"));
-        }
-        if (!ctx.Parameters.TryGetValue("delivery_status", out var d) || d is not string ds
-            || (ds is not "delivered" and not "failed" and not "redelivery_required"))
-        {
-            return Task.FromResult(VerbPreconditionResult.Fail(
-                "delivery_status_invalid",
-                "delivery_status must be one of: delivered | failed | redelivery_required"));
-        }
-        if (!ctx.Parameters.TryGetValue("delivered_at", out var t) || t is not string ts
-            || !DateTimeOffset.TryParse(ts, out _))
-        {
-            return Task.FromResult(VerbPreconditionResult.Fail(
-                "delivered_at_invalid", "delivered_at must be parseable ISO-8601"));
-        }
-        return Task.FromResult(VerbPreconditionResult.Ok());
-    }
+    public Task<VerbPreconditionResult> CheckPreconditionsAsync(VerbContext ctx, CancellationToken ct) =>
+        Task.FromResult(VerbPreconditionResult.Fail(
+            "capability_unavailable",
+            "PioneerRx writeback capability is unavailable until real verified writeback is implemented"));
 
     public Task<VerbRollbackEnvelope> CaptureRollbackAsync(VerbContext ctx, CancellationToken ct)
     {
@@ -90,25 +73,13 @@ public sealed class PioneerRxWritebackRxDeliveryVerb : IVerb
 
     public Task<VerbExecutionResult> ExecuteAsync(VerbContext ctx, CancellationToken ct)
     {
-        // Phase 5.3 scaffold — defense-in-depth check that the dispatcher
-        // never lets us reach this point unless the charter authz policy
-        // confirmed BaaAmendment("writeback-v1"). If we ever DO reach here
-        // in sandbox tier, fail explicitly so the run aborts with a typed
-        // outcome rather than performing a synthetic mutation.
-        if (string.Equals(ctx.Charter.PharmacyId, string.Empty, StringComparison.Ordinal))
-        {
-            return Task.FromResult(VerbExecutionResult.Fail(
-                "pharmacy_id_unbound — Phase 5.3 verbs require a real pharmacy + BaaAmendment writeback-v1"));
-        }
-        return Task.FromResult(VerbExecutionResult.Ok(new Dictionary<string, object?>
-        {
-            ["rows_updated"] = 0,
-            ["verified_status"] = "scaffold-no-op",
-        }));
+        return Task.FromResult(VerbExecutionResult.Fail("capability_unavailable"));
     }
 
     public Task<VerbPostconditionResult> VerifyPostconditionsAsync(
         VerbContext ctx,
         VerbExecutionResult executionResult,
-        CancellationToken ct) => Task.FromResult(VerbPostconditionResult.Ok());
+        CancellationToken ct) => Task.FromResult(VerbPostconditionResult.Fail(
+            "capability_unavailable",
+            "PioneerRx writeback did not execute"));
 }

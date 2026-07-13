@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using Microsoft.Extensions.Options;
 using Serilog;
+using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Vision;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Vision;
 using Tesseract;
 using VisionRect = SuavoAgent.Contracts.Vision.Rect;
 
@@ -21,64 +23,108 @@ namespace SuavoAgent.Helper.Vision;
 ///
 /// Vendor stealth:
 ///   - Native tesseract binaries come from <see cref="TesseractOptions.NativeLibraryPath"/>
-///     (operator-provided). Default install ships zero OCR binaries.
+///     after exact compiled-policy manifest verification. Default install
+///     ships zero OCR native binaries.
 ///
 /// Safety:
 ///   - Never throws for OCR failures — returns null so the controller
 ///     cleanly escalates or emits an empty frame.
 ///   - Confidence floor drops garbage regions before they reach the scrubber.
 /// </summary>
-internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposable
+internal sealed class TesseractScreenExtractor : IPricingScreenExtractor, IAsyncDisposable
 {
     private readonly TesseractOptions _options;
     private readonly ILogger _logger;
+    private readonly ITesseractNativeLoadBoundary _nativeLoadBoundary;
+    private readonly Func<TesseractOptions, TesseractEngine> _engineFactory;
+    private readonly VisionRuntimeStatusTracker? _runtimeStatus;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
     private TesseractEngine? _engine;
     private long _lastUseTicks = -1;
     private int _activeCalls;
+    private int _runtimeReady;
+    private string? _lastFailureCode;
     private CancellationTokenSource? _idleWatcherCts;
-    private static int s_nativeConfigured; // 0 = not yet, 1 = done
-
     public string ExtractorId => $"tesseract-{_options.Language}";
-    public bool IsReady => true; // "configured" — lazy-loads on first call
+    public bool IsReady => Volatile.Read(ref _runtimeReady) == 1;
+    internal string? LastFailureCode => Volatile.Read(ref _lastFailureCode);
 
     public TesseractScreenExtractor(IOptions<AgentOptions> options, ILogger logger)
+        : this(options, logger, runtimeStatus: null)
+    {
+    }
+
+    internal TesseractScreenExtractor(
+        IOptions<AgentOptions> options,
+        ILogger logger,
+        VisionRuntimeStatusTracker? runtimeStatus)
+        : this(
+            options,
+            logger,
+            TesseractNativeLoadBoundary.Shared,
+            configured => new TesseractEngine(
+                configured.TessdataPath,
+                configured.Language,
+                EngineMode.Default),
+            runtimeStatus)
+    {
+    }
+
+    internal TesseractScreenExtractor(
+        IOptions<AgentOptions> options,
+        ILogger logger,
+        ITesseractNativeLoadBoundary nativeLoadBoundary,
+        Func<TesseractOptions, TesseractEngine> engineFactory,
+        VisionRuntimeStatusTracker? runtimeStatus = null)
     {
         _options = options.Value.Vision.Tesseract;
         _logger = logger;
-
-        // Codex M-1: configure native library path at construction time, BEFORE
-        // any TesseractEngine constructor can execute. This guarantees the
-        // Windows DLL search order knows about the operator-provided native
-        // dir when llama.dll / leptonica / tesseract P/Invokes resolve.
-        ConfigureNativeLibraryOnce();
+        _nativeLoadBoundary = nativeLoadBoundary;
+        _engineFactory = engineFactory;
+        _runtimeStatus = runtimeStatus;
     }
 
-    private void ConfigureNativeLibraryOnce()
+    internal async Task<bool> WarmUpAsync(
+        CancellationToken ct,
+        Action? failStop = null)
     {
-        if (Interlocked.CompareExchange(ref s_nativeConfigured, 1, 0) != 0) return;
-
-        if (string.IsNullOrEmpty(_options.NativeLibraryPath)) return;
-        if (!OperatingSystem.IsWindows()) return;
-
+        await _lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            AddDllDirectory(_options.NativeLibraryPath);
-            _logger.Information(
-                "TesseractScreenExtractor: added native dir to DLL search: {Path}",
-                _options.NativeLibraryPath);
+            var ready = await EnsureLoadedWithWatchdogLockedAsync(
+                ct,
+                failStop ?? NativeOcrWatchdog.TerminateCurrentHelper).ConfigureAwait(false);
+            if (ready)
+            {
+                _lastUseTicks = Environment.TickCount64;
+                RestartIdleWatcher();
+            }
+            return ready;
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.Warning(
-                "TesseractScreenExtractor: failed to register native path ({Type}: {Msg})",
-                ex.GetType().FullName, ex.Message);
-            Interlocked.Exchange(ref s_nativeConfigured, 0);
+            _lock.Release();
         }
     }
 
     public async Task<ScreenFrame?> ExtractAsync(ScreenBytes screen, CancellationToken ct)
+        => await ExtractCoreAsync(
+            screen,
+            PageIteratorLevel.TextLine,
+            ct).ConfigureAwait(false);
+
+    public async Task<ScreenFrame?> ExtractPricingAsync(
+        ScreenBytes screen,
+        CancellationToken ct) => await ExtractCoreAsync(
+            screen,
+            PageIteratorLevel.Word,
+            ct).ConfigureAwait(false);
+
+    private async Task<ScreenFrame?> ExtractCoreAsync(
+        ScreenBytes screen,
+        PageIteratorLevel level,
+        CancellationToken ct)
     {
         if (screen.Png == null || screen.Png.Length == 0)
         {
@@ -90,8 +136,15 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         await _lock.WaitAsync(ct);
         try
         {
-            if (!EnsureLoadedLocked())
+            if (!await EnsureLoadedWithWatchdogLockedAsync(
+                    ct,
+                    NativeOcrWatchdog.TerminateCurrentHelper).ConfigureAwait(false))
             {
+                return null;
+            }
+            if (!LoadedNativeModulesMatchApprovedCohort())
+            {
+                RecordFailure(VisionRuntimeCodes.OcrRuntimeInitializationFailed);
                 return null;
             }
             engine = _engine;
@@ -105,69 +158,35 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         }
 
         var sw = Stopwatch.StartNew();
-        var regions = new List<TextRegion>();
-        // Codex 2026-04-26: per-extraction wall-clock timeout. A single OCR
-        // call on a complex screen should finish in 1-3s; anything past
-        // ExtractionTimeoutSeconds is stuck on a hostile image, GDI lock,
-        // or native-lib deadlock and must be cancelled to free the worker.
-        // Linked CTS so caller cancellation still propagates.
-        var timeoutSec = _options.ExtractionTimeoutSeconds;
-        using var timeoutCts = timeoutSec > 0
-            ? CancellationTokenSource.CreateLinkedTokenSource(ct)
-            : null;
-        if (timeoutCts != null) timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
-        var effectiveCt = timeoutCts?.Token ?? ct;
-        // Codex M-4: use try/finally so _activeCalls ALWAYS decrements,
-        // regardless of which exception path fires.
+        IReadOnlyList<TextRegion> regions;
+        var timeoutSec = Math.Clamp(_options.ExtractionTimeoutSeconds, 1, 120);
         try
         {
-            await Task.Run(() =>
-            {
-                using var pix = Pix.LoadFromMemory(screen.Png);
-                using var page = engine.Process(pix);
-                using var iter = page.GetIterator();
-                iter.Begin();
-                do
-                {
-                    if (effectiveCt.IsCancellationRequested) break;
-                    if (!iter.TryGetBoundingBox(PageIteratorLevel.TextLine, out var bounds))
-                        continue;
-
-                    var text = iter.GetText(PageIteratorLevel.TextLine)?.Trim() ?? "";
-                    if (string.IsNullOrEmpty(text)) continue;
-
-                    var confidence = iter.GetConfidence(PageIteratorLevel.TextLine);
-                    if (confidence < _options.MinConfidence) continue;
-
-                    regions.Add(new TextRegion
-                    {
-                        Text = text,
-                        Bounds = new VisionRect(bounds.X1, bounds.Y1, bounds.Width, bounds.Height),
-                        Confidence = confidence / 100.0, // Tesseract reports 0–100
-                    });
-                } while (iter.Next(PageIteratorLevel.TextLine));
-            }, effectiveCt);
+            regions = await NativeOcrWatchdog.RunAsync(
+                () => ExtractRegions(engine, screen.Png, level),
+                TimeSpan.FromSeconds(timeoutSec),
+                ct,
+                NativeOcrWatchdog.TerminateCurrentHelper).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Caller cancellation — propagate. finally still runs.
             throw;
         }
-        catch (OperationCanceledException) when (timeoutCts?.IsCancellationRequested == true)
+        catch (NativeOcrTimeoutException)
         {
-            // Timeout-driven cancellation — log + return null so the caller
-            // can degrade gracefully. Don't propagate as an exception.
-            _logger.Warning(
-                "TesseractScreenExtractor: extraction timed out after {Sec}s ({Bytes} bytes) — returning null",
-                timeoutSec, screen.Png.Length);
-            return null;
+            // Production's watchdog already terminated the Helper. If a host
+            // unexpectedly suppresses termination, invoke the no-dump fail-stop
+            // again; never return while native code may still own the engine.
+            NativeOcrWatchdog.TerminateCurrentHelper();
+            throw new UnreachableException("Native OCR fail-stop unexpectedly returned.");
         }
         catch (Exception ex)
         {
             // Codex M-5: include type name so COM / RCW failures are spotable.
             _logger.Warning(
-                "TesseractScreenExtractor: OCR failed ({Type}: {Msg})",
-                ex.GetType().FullName, ex.Message);
+                "TesseractScreenExtractor: OCR failed ({Type})",
+                ex.GetType().Name);
+            RecordFailure(VisionRuntimeCodes.OcrExtractionFailed);
             return null;
         }
         finally
@@ -181,6 +200,7 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         _logger.Debug(
             "TesseractScreenExtractor: extracted {Count} regions in {Ms}ms",
             regions.Count, sw.ElapsedMilliseconds);
+        RecordReady();
 
         return new ScreenFrame
         {
@@ -195,12 +215,71 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         };
     }
 
+    private async Task<bool> EnsureLoadedWithWatchdogLockedAsync(
+        CancellationToken ct,
+        Action failStop)
+    {
+        var timeoutSec = Math.Clamp(_options.ExtractionTimeoutSeconds, 1, 120);
+        try
+        {
+            return await NativeOcrWatchdog.RunAsync(
+                EnsureLoadedLocked,
+                TimeSpan.FromSeconds(timeoutSec),
+                ct,
+                failStop).ConfigureAwait(false);
+        }
+        catch (NativeOcrTimeoutException)
+        {
+            RecordFailure(VisionRuntimeCodes.OcrRuntimeTimeout);
+            throw;
+        }
+    }
+
+    private IReadOnlyList<TextRegion> ExtractRegions(
+        TesseractEngine engine,
+        byte[] png,
+        PageIteratorLevel level)
+    {
+        var regions = new List<TextRegion>();
+        using var pix = Pix.LoadFromMemory(png);
+        using var page = engine.Process(pix);
+        using var iter = page.GetIterator();
+        iter.Begin();
+        do
+        {
+            if (!iter.TryGetBoundingBox(level, out var bounds))
+                continue;
+            var text = iter.GetText(level)?.Trim() ?? string.Empty;
+            if (text.Length == 0) continue;
+            var confidence = iter.GetConfidence(level);
+            if (confidence < _options.MinConfidence) continue;
+            regions.Add(new TextRegion
+            {
+                Text = text,
+                Bounds = new VisionRect(bounds.X1, bounds.Y1, bounds.Width, bounds.Height),
+                Confidence = confidence / 100.0,
+            });
+        } while (iter.Next(level));
+        return regions;
+    }
+
     /// <summary>
     /// Loads TesseractEngine under the lock. Returns false on any setup
     /// error — missing paths, missing traineddata, native-lib load failure.
     /// </summary>
     private bool EnsureLoadedLocked()
     {
+        // Re-hash the complete compiled-policy inventory immediately before
+        // every native OCR call. A valid config or an earlier startup check
+        // cannot bless files, fallback roots, or process modules that changed.
+        if (!_nativeLoadBoundary.TryPrepare(_options, _logger))
+        {
+            _logger.Warning(
+                "TesseractScreenExtractor: exact native cohort verification failed");
+            RecordFailure(VisionRuntimeCodes.OcrCohortVerificationFailed);
+            return false;
+        }
+
         if (_engine != null) return true;
 
         // Trip A 2026-04-25 Vision-On safety: refuse to load the engine if
@@ -220,6 +299,7 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
                     "is at/above MemoryHeadroomBytes={LimitMb}MB. Set MemoryHeadroomBytes=0 to disable headroom check.",
                     rss / (1024 * 1024),
                     _options.MemoryHeadroomBytes / (1024 * 1024));
+                RecordFailure(VisionRuntimeCodes.OcrMemoryPressure);
                 return false;
             }
         }
@@ -227,13 +307,13 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         if (string.IsNullOrWhiteSpace(_options.TessdataPath))
         {
             _logger.Warning("TesseractScreenExtractor: TessdataPath not configured");
+            RecordFailure(VisionRuntimeCodes.OcrCohortVerificationFailed);
             return false;
         }
         if (!Directory.Exists(_options.TessdataPath))
         {
-            _logger.Warning(
-                "TesseractScreenExtractor: tessdata directory missing at {Path}",
-                _options.TessdataPath);
+            _logger.Warning("TesseractScreenExtractor: tessdata directory missing");
+            RecordFailure(VisionRuntimeCodes.OcrCohortVerificationFailed);
             return false;
         }
 
@@ -242,28 +322,92 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         if (!File.Exists(trainedData))
         {
             _logger.Warning(
-                "TesseractScreenExtractor: missing traineddata for '{Lang}' at {Path}",
-                _options.Language, trainedData);
+                "TesseractScreenExtractor: traineddata missing for language '{Lang}'",
+                _options.Language);
+            RecordFailure(VisionRuntimeCodes.OcrCohortVerificationFailed);
             return false;
         }
 
-        // Native library path was configured in the constructor (Codex M-1).
         try
         {
-            _engine = new TesseractEngine(_options.TessdataPath, _options.Language, EngineMode.Default);
+            // The exclusive native-load boundary has already re-hashed the
+            // cohort, rejected every upstream wrapper fallback, safely
+            // preloaded both native modules, and proved their exact paths.
+            if (!_nativeLoadBoundary.TryRunEngineConstructor(
+                    _options,
+                    _logger,
+                    () => _engine = _engineFactory(_options)) ||
+                _engine is null ||
+                !LoadedNativeModulesMatchApprovedCohort())
+            {
+                _engine?.Dispose();
+                _engine = null;
+                _logger.Error(
+                    "TesseractScreenExtractor: loaded native module identity is not release-approved");
+                RecordFailure(VisionRuntimeCodes.OcrRuntimeInitializationFailed);
+                return false;
+            }
             _logger.Information(
-                "TesseractScreenExtractor: engine loaded ({Lang}, tessdata={Path}, idleUnloadSec={Idle}, headroomMb={HeadroomMb})",
-                _options.Language, _options.TessdataPath,
+                "TesseractScreenExtractor: engine loaded ({Lang}, idleUnloadSec={Idle}, headroomMb={HeadroomMb})",
+                _options.Language,
                 _options.IdleUnloadSeconds,
                 _options.MemoryHeadroomBytes / (1024 * 1024));
+            RecordReady();
             return true;
         }
         catch (Exception ex)
         {
             _logger.Error(
-                "TesseractScreenExtractor: engine init failed ({Type}: {Msg})",
-                ex.GetType().FullName, ex.Message);
+                "TesseractScreenExtractor: engine init failed ({Type})",
+                ex.GetType().Name);
             _engine = null;
+            RecordFailure(VisionRuntimeCodes.OcrRuntimeInitializationFailed);
+            return false;
+        }
+    }
+
+    private void RecordReady()
+    {
+        Volatile.Write(ref _lastFailureCode, null);
+        Volatile.Write(ref _runtimeReady, 1);
+        _runtimeStatus?.RecordReady(ocrReady: true);
+    }
+
+    private void RecordFailure(string code)
+    {
+        Volatile.Write(ref _lastFailureCode, code);
+        Volatile.Write(ref _runtimeReady, 0);
+        _runtimeStatus?.RecordFailure(code);
+    }
+
+    private bool LoadedNativeModulesMatchApprovedCohort()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            var modules = process.Modules
+                .Cast<ProcessModule>()
+                .Where(module =>
+                    string.Equals(
+                        module.ModuleName,
+                        "tesseract50.dll",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    module.ModuleName.StartsWith(
+                        "leptonica-",
+                        StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(
+                    module => module.ModuleName,
+                    module => module.FileName,
+                    StringComparer.OrdinalIgnoreCase);
+            return TesseractNativeCohortPolicy.VerifyLoadedNativeModulePaths(
+                _options,
+                modules);
+        }
+        catch (Exception exception) when (exception is SystemException)
+        {
+            _logger.Warning(
+                "TesseractScreenExtractor: native module enumeration failed ({Type})",
+                exception.GetType().Name);
             return false;
         }
     }
@@ -342,9 +486,4 @@ internal sealed class TesseractScreenExtractor : IScreenExtractor, IAsyncDisposa
         }
     }
 
-    // --- Win32 interop --------------------------------------------------------
-
-    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static extern IntPtr AddDllDirectory(string newDirectory);
 }

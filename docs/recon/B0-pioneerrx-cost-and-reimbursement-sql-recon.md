@@ -1,6 +1,13 @@
 # B0 — PioneerRx SQL recon: the COST path (Feature A, priority) + the REIMBURSEMENT path (Feature B)
 
-> **Status:** SPEC + executable queries. **Execute on the box** (Nadim's PIONEER10, read-only).
+> **INTERNAL DATABASE RECON — not a customer lifecycle or support procedure.**
+> Execution requires an authorized engineering change window and read-only
+> database access. Pharmacy staff must not be asked to open a terminal or run
+> the referenced script.
+
+> **Status:** ARCHIVED SPEC + historical queries. **Not approved for execution
+> on a customer workstation.** Field evidence must come from the signed native
+> product path described in section 3.
 > **Priority reframe (load-bearing):** answer **Feature A's cost-SQL question FIRST.** If
 > `Cost Per Unit` per NDC is readable straight from the PioneerRx DB, the entire
 > DevExpress / row-virtualization / UIA-read risk surface **evaporates for the primary pricing job** —
@@ -164,14 +171,16 @@ Nadim), plus where the preferred-item lives + how to enumerate candidate NDCs fo
 
 ---
 
-## 3. How to run + what to send back
+## 3. Execution gate
 
-1. On Nadim's box (PIONEER10), open PowerShell. Run the **existing** `nadim-pricing-schema-recon.ps1`
-   first (it already covers inventory schema + NDC samples + supplier-table discovery).
-2. Then run the queries above (§1 priority, then §2). Easiest path: **append** the §1/§2 query blocks to
-   the `$queries = @(…)` array in the existing script (same Name/Sql shape) so they land in the same
-   timestamped JSON + raw TSV. (A code follow-up can fold these in; for first contact, SSMS paste works.)
-3. Send back **only** the local JSON + TSV (no cloud upload). The cost-SQL answer (A-Q4) is the headline.
+This document is a historical query design, not a field runbook. Do not ask a
+pharmacy employee to run it, paste SQL, reveal credentials, or transfer raw
+database output. The current product path is the signed native Setup wizard plus
+authenticated dashboard diagnostics. A future schema-recon operation is
+acceptable only after it is implemented as a read-only, PHI-free native action
+with explicit authorization, bounded output, local encryption, and a signed
+receipt. Until that exists and passes a clean Windows validation, every result
+described below is unverified field evidence.
 
 ## 4. The one result that matters most
 

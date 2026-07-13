@@ -57,6 +57,20 @@ public class NdcNormalizerTests
     {
         var outcome = NdcNormalizer.Normalize(input);
         Assert.False(outcome.Ok);
+        Assert.DoesNotContain(input, outcome.Reason ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("John Smith")]
+    [InlineData("jane.patient@example.com")]
+    [InlineData("Rx Number 123456789")]
+    public void Normalize_PhiLikeInvalidInput_NeverEchoesInput(string input)
+    {
+        var outcome = NdcNormalizer.Normalize(input);
+
+        Assert.False(outcome.Ok);
+        Assert.Null(outcome.Canonical11);
+        Assert.DoesNotContain(input, outcome.Reason ?? "", StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]

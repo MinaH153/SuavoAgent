@@ -76,20 +76,14 @@ public sealed class LearningWorker : BackgroundService
         _sessionId = _db.GetActiveSessionId(pharmacyId);
         if (_sessionId != null)
         {
-            _logger.LogInformation("Resuming existing learning session {Id} for pharmacy {Pharmacy}",
-                _sessionId, pharmacyId);
+            _logger.LogInformation("core.learning.session_resumed");
         }
         else
         {
             _sessionId = $"learn-{_options.AgentId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
             _db.CreateLearningSession(_sessionId, pharmacyId);
-            _logger.LogInformation("Created learning session {Id} for pharmacy {Pharmacy}",
-                _sessionId, pharmacyId);
+            _logger.LogInformation("core.learning.session_created");
         }
-
-        // W6: Wire session ID to WritebackProcessor so inline feedback records writeback outcomes
-        var writebackProcessor = _sp.GetService<WritebackProcessor>();
-        writebackProcessor?.SetSessionId(_sessionId);
 
         // Use secret per-session salt for PHI hashing (not AgentId, which is sent in heartbeats)
         var pharmacySalt = _db.GetOrCreateHmacSalt(_sessionId);
@@ -98,9 +92,11 @@ public sealed class LearningWorker : BackgroundService
         var processObs = new ProcessObserver(_db, pharmacySalt,
             _sp.GetRequiredService<ILogger<ProcessObserver>>());
         var sqlObs = new SqlSchemaObserver(_db, pharmacySalt,
-            _sp.GetRequiredService<ILogger<SqlSchemaObserver>>());
+            _sp.GetRequiredService<ILogger<SqlSchemaObserver>>(),
+            _options.SqlTrustServerCertificate,
+            _options.SqlServerCertificateSha256);
         var dmvObs = new DmvQueryObserver(_db,
-            () => new SqlConnection(BuildConnectionString()),
+            () => new SqlConnection(BuildConnectionString(_options)),
             _sp.GetRequiredService<ILogger<DmvQueryObserver>>());
 
         _observers.Add(processObs);
@@ -135,13 +131,29 @@ public sealed class LearningWorker : BackgroundService
         var currentPhase = LearningSession.PhaseToObserverPhase(session.Phase);
         _previousPhase = session.Phase;
         _phaseStartedAt = _db.GetPhaseChangedAt(_sessionId);
+        if (session.Phase is "pattern" or "model")
+        {
+            var restoredSeed = _db.GetLatestAppliedSeed(_sessionId, session.Phase);
+            if (restoredSeed is not null)
+            {
+                _activeSeedDigest = restoredSeed.SeedDigest;
+                _lastSeedDigest = restoredSeed.SeedDigest;
+                if (session.Phase == "pattern")
+                {
+                    _actionCorrelator?.RegisterSeededShapes(
+                        _applicator.GetSeededShapeHashes(restoredSeed.SeedDigest));
+                    _actionCorrelator?.SetActiveSeedDigest(restoredSeed.SeedDigest);
+                }
+                _logger.LogInformation("core.learning.seed_binding_restored");
+            }
+        }
 
         foreach (var obs in _observers)
         {
             if (obs.ActivePhases.HasFlag(currentPhase))
             {
                 _ = obs.StartAsync(_sessionId, stoppingToken);
-                _logger.LogInformation("Started observer: {Name}", obs.Name);
+                _logger.LogInformation("core.learning.observer_started");
             }
         }
 
@@ -166,7 +178,7 @@ public sealed class LearningWorker : BackgroundService
                     && !o.ActivePhases.HasFlag(newPhase)))
                 {
                     await obs.StopAsync();
-                    _logger.LogInformation("Stopped observer {Name} (not active in {Phase})", obs.Name, session.Phase);
+                    _logger.LogInformation("core.learning.observer_stopped_for_phase");
                 }
 
                 // Start observers active in the new phase that weren't in the old phase
@@ -174,7 +186,7 @@ public sealed class LearningWorker : BackgroundService
                     && !o.ActivePhases.HasFlag(oldPhase)))
                 {
                     _ = obs.StartAsync(_sessionId, stoppingToken);
-                    _logger.LogInformation("Started observer {Name} for {Phase}", obs.Name, session.Phase);
+                    _logger.LogInformation("core.learning.observer_started_for_phase");
                 }
 
                 // W-9: Update currentPhase so observer health checks use the correct phase
@@ -188,7 +200,11 @@ public sealed class LearningWorker : BackgroundService
                 _previousPhase = session.Phase;
             }
 
-            // PhaseGate evaluation — check if seed-accelerated phase can advance
+            var patternPhaseGateReady = false;
+
+            // PhaseGate evaluation — seeded pattern learning may advance after
+            // independent local confirmation. Model is still evaluated for
+            // visibility, but can never auto-transition to human approval.
             if (_activeSeedDigest is not null && session.Phase is "pattern" or "model")
             {
                 var canaryClean = !IsCanaryInHold();
@@ -200,9 +216,9 @@ public sealed class LearningWorker : BackgroundService
                 // Every eval is logged (not just advance) so a HOLD is directly observable — which
                 // gate failed and why. Previously the gate was silent unless ready/abort.
                 _logger.LogInformation(
-                    "PhaseGate eval: phase={Phase} ready={Ready} gates=[{Gates}]",
-                    session.Phase, eval.Ready,
-                    string.Join(", ", eval.Gates.Select(g => $"{g.Name}:{(g.Passed ? "pass" : "FAIL")} ({g.Detail})")));
+                    "core.learning.phase_gate_evaluated ready={Ready} count={Count}",
+                    eval.Ready,
+                    eval.Gates.Count);
 
                 if (eval.AbortAcceleration)
                 {
@@ -211,24 +227,56 @@ public sealed class LearningWorker : BackgroundService
                 }
                 else if (eval.Ready)
                 {
-                    _logger.LogInformation("PhaseGate passed — advancing from {Phase}", session.Phase);
-                    try
+                    var seedReceipt = _db.GetSeedApplicationReceipt(_activeSeedDigest);
+                    var confirmed = seedReceipt?.Accepted == true;
+                    if (!confirmed && seedReceipt is not null && _seedClient is not null)
                     {
-                        if (_seedClient is not null)
-                            await _seedClient.ConfirmAsync(new SeedConfirmRequest(
-                                _activeSeedDigest,
-                                DateTimeOffset.UtcNow.ToString("o"),
-                                0, 0), stoppingToken);
+                        try
+                        {
+                            confirmed = await _seedClient.ConfirmAsync(
+                                seedReceipt.Signed, stoppingToken);
+                        }
+                        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogSafeWarning(ex);
+                        }
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Seed confirm failed");
-                    }
-                    // Phase advance is still operator-triggered via signed command;
-                    // PhaseGate readiness is logged for dashboard visibility
+                    if (confirmed && seedReceipt is { Accepted: false })
+                        _db.MarkSeedApplicationReceiptAccepted(
+                            seedReceipt.Signed.Receipt.CommandId);
+                    patternPhaseGateReady = session.Phase == "pattern" && confirmed;
+                    _logger.LogInformation(
+                        "core.learning.phase_gate_passed verified={Verified} ready={Ready}",
+                        confirmed,
+                        patternPhaseGateReady);
+                    if (!confirmed)
+                        _logger.LogWarning(
+                            "Seed application receipt is not cloud-confirmed; phase advancement remains blocked");
                     _db.AppendLearningAudit(_sessionId, "seed", "phase_gate_ready",
                         $"phase:{session.Phase},digest:{_activeSeedDigest[..12]}", phiScrubbed: false);
                 }
+            }
+
+            var progression = LearningPhaseProgression.Evaluate(
+                session.Phase,
+                _phaseStartedAt,
+                DateTimeOffset.UtcNow,
+                patternPhaseGateReady);
+            if (progression is not null)
+            {
+                _db.UpdateLearningPhase(_sessionId, progression.NextPhase);
+                _db.AppendLearningAudit(
+                    _sessionId,
+                    "worker",
+                    "phase_auto_advanced",
+                    $"from:{session.Phase},to:{progression.NextPhase},reason:{progression.Reason}",
+                    phiScrubbed: false);
+                _logger.LogInformation("core.learning.phase_advanced");
+                continue;
             }
 
             // Check observer health — hard stop if any fails
@@ -237,8 +285,7 @@ public sealed class LearningWorker : BackgroundService
                 var health = obs.CheckHealth();
                 if (obs.ActivePhases.HasFlag(currentPhase) && !health.IsRunning)
                 {
-                    _logger.LogWarning("Observer {Name} stopped unexpectedly — flagging anomaly",
-                        health.ObserverName);
+                    _logger.LogWarning("core.learning.observer_stopped_unexpectedly");
                     _db.AppendLearningAudit(_sessionId, "worker", "observer_health_fail",
                         health.ObserverName, phiScrubbed: false);
 
@@ -251,8 +298,9 @@ public sealed class LearningWorker : BackgroundService
                 }
             }
 
-            // Run RoutineDetector in pattern phase (periodic, not one-shot)
-            if (session.Phase == "pattern")
+            // Routine/template extraction starts during discovery, but discovery
+            // is capture-only: no rule file, approval row, assist, or actuation.
+            if (session.Phase is "discovery" or "pattern")
             {
                 try
                 {
@@ -261,7 +309,7 @@ public sealed class LearningWorker : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "RoutineDetector (pattern phase) failed");
+                    _logger.LogSafeWarning(ex);
                 }
 
                 // v3.12 — autonomous workflow template extraction + rule emission.
@@ -270,7 +318,7 @@ public sealed class LearningWorker : BackgroundService
                 // before any auto-rule fires in production.
                 if (_options.TemplateLearning.Enabled)
                 {
-                    TryExtractAndEmitTemplates();
+                    TryExtractAndEmitTemplates(captureOnly: session.Phase == "discovery");
                 }
             }
 
@@ -281,11 +329,11 @@ public sealed class LearningWorker : BackgroundService
                 {
                     _db.PruneBehavioralEvents(_sessionId, olderThanDays: 7);
                     _lastPruneAt = DateTimeOffset.UtcNow;
-                    _logger.LogInformation("Pruned behavioral events older than 7 days for session {Session}", _sessionId);
+                    _logger.LogInformation("core.learning.expired_events_pruned");
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Behavioral event prune failed");
+                    _logger.LogSafeWarning(ex);
                 }
             }
 
@@ -305,7 +353,7 @@ public sealed class LearningWorker : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "FeedbackProcessor batch tick failed");
+                    _logger.LogSafeWarning(ex);
                 }
             }
 
@@ -314,80 +362,88 @@ public sealed class LearningWorker : BackgroundService
             {
                 _logger.LogInformation("Model phase — running schema discovery + pattern engine");
 
-                // CRITICAL-4a: Run SqlSchemaObserver.DiscoverSchemaAsync with a real SqlConnection
-                var schemaObs = _observers.OfType<SqlSchemaObserver>().FirstOrDefault();
-                if (schemaObs != null)
+                try
                 {
+                    // Every query-shaping observation comes from one explicitly
+                    // identity-verified physical SQL connection. Transparent driver
+                    // reconnect is disabled in BuildConnectionString.
+                    var schemaObs = _observers.OfType<SqlSchemaObserver>().FirstOrDefault()
+                        ?? throw new InvalidOperationException("SQL schema observer is unavailable.");
+                    await using var schemaConn = new SqlConnection(BuildConnectionString(_options));
+                    await schemaConn.OpenAsync(stoppingToken);
+                    await schemaObs.DiscoverSchemaAsync(_sessionId, schemaConn, stoppingToken);
+                    _logger.LogInformation("Schema discovery completed via SqlSchemaObserver");
+
+                    // Behavioral routines do not authorize SQL reads, so their
+                    // failure may remain non-blocking for this schema contract.
                     try
                     {
-                        await using var schemaConn = new SqlConnection(BuildConnectionString());
-                        await schemaConn.OpenAsync(stoppingToken);
-                        await schemaObs.DiscoverSchemaAsync(_sessionId, schemaConn, stoppingToken);
-                        _logger.LogInformation("Schema discovery completed via SqlSchemaObserver");
+                        var routineDetector = new RoutineDetector(_db, _sessionId);
+                        routineDetector.DetectAndPersist();
+                        _logger.LogInformation("core.learning.routine_detection_completed");
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Schema discovery failed — inference will use existing data");
+                        _logger.LogSafeWarning(ex);
                     }
-                }
 
-                // Run routine detection for behavioral learning
-                try
+                    var inference = new RxQueueInferenceEngine(_db);
+                    inference.InferAndPersist(_sessionId);
+                    var candidates = _db.GetRxQueueCandidates(_sessionId);
+                    _db.AppendLearningAudit(_sessionId, "pattern", "rx_inference",
+                        $"candidates:{candidates.Count}", phiScrubbed: false);
+
+                    var topCandidate = candidates.FirstOrDefault();
+                    if (topCandidate.PrimaryTable is null || topCandidate.StatusColumn is null)
+                        throw new InvalidDataException("No complete Rx queue candidate was inferred.");
+
+                    var statusValues = await QueryDistinctStatusValuesAsync(
+                        schemaConn,
+                        topCandidate.PrimaryTable,
+                        topCandidate.StatusColumn,
+                        stoppingToken);
+                    if (statusValues.Count == 0)
+                        throw new InvalidDataException("No status values were observed for the inferred Rx queue.");
+
+                    var statusEngine = new StatusOrderingEngine(_db);
+                    statusEngine.InferAndPersist(
+                        _sessionId,
+                        topCandidate.PrimaryTable,
+                        topCandidate.StatusColumn,
+                        statusValues);
+                    _db.CompleteLearnedTemplateEvidence(_sessionId);
+                    if (new AdapterGenerator(_db).Describe(_sessionId) is null)
+                        throw new InvalidDataException("Learned SQL template contract is incomplete.");
+
+                    _logger.LogInformation(
+                        "core.learning.status_ordering_inferred count={Count}",
+                        statusValues.Count);
+
+                    var droppedCount = _behavioralReceiver?.TotalDroppedEvents ?? 0;
+                    _pendingPomJson = PomExporter.Export(
+                        _db,
+                        _sessionId,
+                        droppedEventCount: droppedCount);
+                    _pendingPomDigest = PomExporter.ComputeDigest(
+                        _options.PharmacyId ?? "",
+                        _sessionId,
+                        _pendingPomJson);
+                    _inferenceRan = true;
+                    _db.AppendLearningAudit(_sessionId, "worker", "pom_exported",
+                        $"digest:{_pendingPomDigest[..12]}", phiScrubbed: false);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
-                    var routineDetector = new RoutineDetector(_db, _sessionId);
-                    routineDetector.DetectAndPersist();
-                    _logger.LogInformation("RoutineDetector completed for session {Session}", _sessionId);
+                    throw;
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "RoutineDetector failed — continuing without behavioral routines");
+                    _db.InvalidateLearnedTemplateEvidence(_sessionId);
+                    _inferenceRan = false;
+                    _pendingPomJson = null;
+                    _pendingPomDigest = null;
+                    _logger.LogSafeWarning(ex);
                 }
-
-                // Run Rx queue inference
-                var inference = new RxQueueInferenceEngine(_db);
-                inference.InferAndPersist(_sessionId);
-                _inferenceRan = true;
-
-                var candidates = _db.GetRxQueueCandidates(_sessionId);
-                _db.AppendLearningAudit(_sessionId, "pattern", "rx_inference",
-                    $"candidates:{candidates.Count}", phiScrubbed: false);
-
-                // CRITICAL-4b: Run StatusOrderingEngine for the top candidate's status column
-                var topCandidate = candidates.FirstOrDefault();
-                if (topCandidate.PrimaryTable != null && topCandidate.StatusColumn != null)
-                {
-                    try
-                    {
-                        await using var statusConn = new SqlConnection(BuildConnectionString());
-                        await statusConn.OpenAsync(stoppingToken);
-                        var statusValues = await QueryDistinctStatusValuesAsync(
-                            statusConn, topCandidate.PrimaryTable, topCandidate.StatusColumn, stoppingToken);
-
-                        if (statusValues.Count > 0)
-                        {
-                            var statusEngine = new StatusOrderingEngine(_db);
-                            statusEngine.InferAndPersist(_sessionId, topCandidate.PrimaryTable,
-                                topCandidate.StatusColumn, statusValues);
-                            _logger.LogInformation("Status ordering: {Count} values inferred for {Table}.{Col}",
-                                statusValues.Count, topCandidate.PrimaryTable, topCandidate.StatusColumn);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Status ordering failed for {Table}.{Col}",
-                            topCandidate.PrimaryTable, topCandidate.StatusColumn);
-                    }
-                }
-
-                // Prepare POM for upload
-                var droppedCount = _behavioralReceiver?.TotalDroppedEvents ?? 0;
-                _pendingPomJson = PomExporter.Export(_db, _sessionId,
-                    droppedEventCount: droppedCount);
-                _pendingPomDigest = PomExporter.ComputeDigest(
-                    _options.PharmacyId ?? "", _sessionId, _pendingPomJson);
-
-                _db.AppendLearningAudit(_sessionId, "worker", "pom_exported",
-                    $"digest:{_pendingPomDigest[..12]}", phiScrubbed: false);
             }
 
             // Upload POM (with retry + backoff on subsequent iterations)
@@ -404,8 +460,9 @@ public sealed class LearningWorker : BackgroundService
                     if (pomId != null)
                     {
                         _pomUploaded = true;
-                        _logger.LogInformation("POM uploaded (id={PomId}, digest={Digest}, attempt={Attempt})",
-                            pomId, _pendingPomDigest[..12], _uploadRetryCount + 1);
+                        _logger.LogInformation(
+                            "core.learning.pom_uploaded attempt={Attempt}",
+                            _uploadRetryCount + 1);
 
                         // CRITICAL-6: Freeze POM — stop observers so no mutations after upload
                         foreach (var obs in _observers)
@@ -420,60 +477,29 @@ public sealed class LearningWorker : BackgroundService
                         _uploadRetryCount++;
                         var backoffIdx = Math.Min(_uploadRetryCount - 1, UploadBackoff.Length - 1);
                         _nextUploadRetryAt = DateTimeOffset.UtcNow + UploadBackoff[backoffIdx];
-                        _logger.LogWarning("POM upload failed (attempt {Attempt}) — retrying after {Backoff}",
-                            _uploadRetryCount, UploadBackoff[backoffIdx]);
+                        _logger.LogWarning(
+                            "core.learning.pom_upload_failed attempt={Attempt}",
+                            _uploadRetryCount);
                     }
                 }
             }
 
-            // Activate learned adapter when phase transitions to approved
-            if (session.Phase == "approved" && !_adapterActivated)
+            // Restore or activate only through the digest-bound registry. The
+            // registry independently verifies the local human approval receipt,
+            // frozen POM digest, session, and adapter-template digest.
+            if (session.Phase is "approved" or "active" && !_adapterActivated)
             {
-                // CRITICAL-5: Recompute digest and verify against stored approved_model_digest
-                var storedDigest = session.ApprovedModelDigest;
-                var pomSnapshot = _db.GetPomSnapshot(_sessionId);
-                if (string.IsNullOrEmpty(storedDigest) || string.IsNullOrEmpty(pomSnapshot))
+                var registry = _sp.GetService<IActivePmsAdapterRegistry>();
+                if (registry is null)
                 {
-                    _logger.LogWarning("Activation blocked — missing approval digest or POM snapshot for session {Id}", _sessionId);
+                    _logger.LogWarning("Learned adapter activation blocked — registry unavailable");
                 }
                 else
                 {
-                    var recomputedDigest = PomExporter.ComputeDigest(
-                        _options.PharmacyId ?? "", _sessionId, pomSnapshot);
-
-                    if (!string.Equals(recomputedDigest, storedDigest, StringComparison.OrdinalIgnoreCase))
-                    {
-                        _logger.LogWarning("Activation REFUSED — digest mismatch: stored={Stored} recomputed={Recomputed}. " +
-                            "POM may have been tampered. Requires re-approval.",
-                            storedDigest[..12], recomputedDigest[..12]);
-                    }
-                    else
-                    {
-                        var generator = new AdapterGenerator(_db);
-                        var adapter = generator.Generate(_sessionId,
-                            connectionString: BuildConnectionString(),
-                            logger: _sp.GetRequiredService<ILogger<LearnedPmsAdapter>>());
-
-                        if (adapter != null)
-                        {
-                            _logger.LogInformation("Learned adapter activated: {Pms}, query targets {Table}",
-                                adapter.PmsName, adapter.DetectionQuery.Split('\n')[^1].Trim());
-                            _db.UpdateLearningPhase(_sessionId, "active");
-                            _adapterActivated = true;
-
-                            _db.AppendLearningAudit(_sessionId, "worker", "adapter_activated",
-                                adapter.PmsName, phiScrubbed: false);
-                        }
-                        else
-                        {
-                            _logger.LogWarning("Adapter generation failed — no viable Rx queue candidate");
-                        }
-                    }
+                    var result = registry.ActivateApproved(_sessionId);
+                    _adapterActivated = result.IsActive;
                 }
             }
-
-            // Phase auto-advance is manual for now — operator triggers via signed command
-            // Future: auto-advance based on LearningSession.GetNextPhase()
         }
 
         // Cleanup
@@ -491,7 +517,7 @@ public sealed class LearningWorker : BackgroundService
     /// mode with RuleGeneration explicitly enabled, <see cref="TemplateRuleGenerator"/>.
     /// Never throws; a failure is logged and the phase loop continues.
     /// </summary>
-    private void TryExtractAndEmitTemplates()
+    private void TryExtractAndEmitTemplates(bool captureOnly)
     {
         try
         {
@@ -507,11 +533,12 @@ public sealed class LearningWorker : BackgroundService
             var extractor = new WorkflowTemplateExtractor(
                 _db, _sessionId!, opts.SkillId, opts.ProcessNameGlob,
                 () => BuildLocalPmsVersionFingerprint(),
-                thresholds);
+                thresholds,
+                captureOnly: captureOnly);
             var extracted = extractor.ExtractAndPersist();
 
             var emitted = 0;
-            if (ShouldEmitTemplateRules(opts))
+            if (ShouldEmitTemplateRules(opts, captureOnly))
             {
                 var rulesRoot = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -522,9 +549,7 @@ public sealed class LearningWorker : BackgroundService
             }
             else if (extracted.Count > 0)
             {
-                _logger.LogInformation(
-                    "TemplateLearning: capture-only mode skipped rule emission (mode={Mode}, ruleGeneration={RuleGeneration})",
-                    opts.Mode, opts.RuleGeneration);
+                _logger.LogInformation("core.learning.template_capture_only");
             }
 
             if (extracted.Count > 0 || emitted > 0)
@@ -536,12 +561,15 @@ public sealed class LearningWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "TemplateLearning tick failed — continuing");
+            _logger.LogSafeWarning(ex);
         }
     }
 
-    internal static bool ShouldEmitTemplateRules(TemplateLearningOptions options) =>
+    internal static bool ShouldEmitTemplateRules(
+        TemplateLearningOptions options,
+        bool captureOnly = false) =>
         options.Enabled
+        && !captureOnly
         && options.RuleGeneration
         && !string.Equals(options.Mode, "capture", StringComparison.OrdinalIgnoreCase);
 
@@ -603,31 +631,49 @@ public sealed class LearningWorker : BackgroundService
             var seedResp = await _seedClient.PullAsync(seedReq, ct);
             if (seedResp is null) return;
 
+            var deviceSigner = _sp.GetService<IDeviceAuthoritySigner>()
+                ?? throw new InvalidOperationException(
+                    "Device authority signer unavailable; fleet seed application is blocked.");
+            if (!string.Equals(
+                    seedResp.DeviceKeyId,
+                    deviceSigner.KeyId,
+                    StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "Fleet seed was issued to a different device authority key.");
+
+            var correlationsApplied = 0;
+            var correlationsSkipped = 0;
+
             if (phase == "pattern")
             {
                 var result = _applicator.ApplyPatternSeeds(_sessionId!, seedResp);
+                correlationsApplied += result.ItemsApplied;
+                _activeSeedDigest = seedResp.SeedDigest;
+                _lastSeedDigest = seedResp.SeedDigest;
+                _actionCorrelator?.RegisterSeededShapes(
+                    _applicator.GetSeededShapeHashes(seedResp.SeedDigest));
+                _actionCorrelator?.SetActiveSeedDigest(seedResp.SeedDigest);
                 if (!result.AlreadyApplied)
                 {
-                    _activeSeedDigest = seedResp.SeedDigest;
-                    _lastSeedDigest = seedResp.SeedDigest;
-                    _actionCorrelator?.RegisterSeededShapes(
-                        _applicator.GetSeededShapeHashes(seedResp.SeedDigest));
-                    _actionCorrelator?.SetActiveSeedDigest(seedResp.SeedDigest);
-                    _logger.LogInformation("Applied {Count} pattern seeds from digest {Digest}",
-                        result.ItemsApplied, seedResp.SeedDigest);
+                    _logger.LogInformation(
+                        "core.learning.pattern_seeds_applied count={Count}",
+                        result.ItemsApplied);
                 }
             }
             else // model
             {
                 var result = _applicator.ApplyModelSeeds(
                     _sessionId!, seedResp, _options.FleetLearning.Enabled);
+                correlationsApplied += result.CorrelationsApplied;
+                correlationsSkipped += result.CorrelationsSkipped;
+                _activeSeedDigest = seedResp.SeedDigest;
+                _lastSeedDigest = seedResp.SeedDigest;
                 if (!result.AlreadyApplied)
                 {
-                    _activeSeedDigest = seedResp.SeedDigest;
-                    _lastSeedDigest = seedResp.SeedDigest;
                     _logger.LogInformation(
-                        "Applied {Applied} model seeds, skipped {Skipped} from digest {Digest}",
-                        result.CorrelationsApplied, result.CorrelationsSkipped, seedResp.SeedDigest);
+                        "core.learning.model_seeds_applied count={Count} skipped={Skipped}",
+                        result.CorrelationsApplied,
+                        result.CorrelationsSkipped);
                 }
             }
 
@@ -642,9 +688,12 @@ public sealed class LearningWorker : BackgroundService
                     _sessionId!, seedResp, BuildLocalPmsVersionFingerprint());
                 if (tplResult.TemplatesApplied > 0 || tplResult.TemplatesSkipped > 0)
                 {
+                    correlationsApplied += tplResult.TemplatesApplied;
+                    correlationsSkipped += tplResult.TemplatesSkipped;
                     _logger.LogInformation(
-                        "Applied {Applied} template(s), skipped {Skipped} from digest {Digest}",
-                        tplResult.TemplatesApplied, tplResult.TemplatesSkipped, seedResp.SeedDigest);
+                        "core.learning.templates_applied count={Count} skipped={Skipped}",
+                        tplResult.TemplatesApplied,
+                        tplResult.TemplatesSkipped);
                 }
             }
 
@@ -655,15 +704,26 @@ public sealed class LearningWorker : BackgroundService
                 var patchResult = _applicator.ApplySelectorPatches(seedResp);
                 if (patchResult.PatchesApplied > 0 || patchResult.PatchesSkipped > 0)
                 {
+                    correlationsApplied += patchResult.PatchesApplied;
+                    correlationsSkipped += patchResult.PatchesSkipped;
                     _logger.LogInformation(
-                        "Applied {Applied} selector patch(es), skipped {Skipped} from digest {Digest}",
-                        patchResult.PatchesApplied, patchResult.PatchesSkipped, seedResp.SeedDigest);
+                        "core.learning.selector_patches_applied count={Count} skipped={Skipped}",
+                        patchResult.PatchesApplied,
+                        patchResult.PatchesSkipped);
                 }
             }
+
+            _ = _db.GetOrCreateSeedApplicationReceipt(
+                seedResp,
+                _options,
+                _sessionId!,
+                correlationsApplied,
+                correlationsSkipped,
+                deviceSigner);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Seed pull failed at {Phase} entry — continuing without seeds", phase);
+            _logger.LogSafeWarning(ex);
         }
     }
 
@@ -694,7 +754,8 @@ public sealed class LearningWorker : BackgroundService
         var safeColumn = $"[{statusColumn.Replace("]", "]]")}]";
 
         await using var cmd = new SqlCommand(
-            $"SELECT DISTINCT {safeColumn} FROM {safeTable} WHERE {safeColumn} IS NOT NULL", conn);
+            $"SELECT DISTINCT TOP (256) {safeColumn} FROM {safeTable} " +
+            $"WHERE {safeColumn} IS NOT NULL ORDER BY {safeColumn}", conn);
         cmd.CommandTimeout = 15;
         await using var reader = await cmd.ExecuteReaderAsync(ct);
 
@@ -708,19 +769,19 @@ public sealed class LearningWorker : BackgroundService
         return results;
     }
 
-    private string BuildConnectionString()
+    internal static string BuildConnectionString(AgentOptions options)
     {
         var csb = new SqlConnectionStringBuilder();
-        if (!string.IsNullOrEmpty(_options.SqlServer)) csb.DataSource = _options.SqlServer;
-        if (!string.IsNullOrEmpty(_options.SqlDatabase)) csb.InitialCatalog = _options.SqlDatabase;
+        if (!string.IsNullOrEmpty(options.SqlServer)) csb.DataSource = options.SqlServer;
+        if (!string.IsNullOrEmpty(options.SqlDatabase)) csb.InitialCatalog = options.SqlDatabase;
         csb.ApplicationName = "SuavoAgent";
         csb.MaxPoolSize = 1;
-        csb["Encrypt"] = "true";
-        csb["TrustServerCertificate"] = _options.SqlTrustServerCertificate.ToString();
-        if (!string.IsNullOrEmpty(_options.SqlUser))
+        csb.ConnectRetryCount = 0;
+        SqlConnectionSecurity.Apply(csb, options);
+        if (!string.IsNullOrEmpty(options.SqlUser))
         {
-            csb.UserID = _options.SqlUser;
-            csb.Password = _options.SqlPassword;
+            csb.UserID = options.SqlUser;
+            csb.Password = options.SqlPassword;
         }
         else
         {

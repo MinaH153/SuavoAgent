@@ -13,6 +13,7 @@ public sealed class IpcPeerVerifierTests
             processId: 15512,
             executablePath: @"C:\Program Files\Suavo\Agent\SuavoAgent.Helper.exe",
             coreBaseDirectory: @"C:\Program Files\Suavo\Agent\",
+            brokerEvidence: null,
             isBrokerAttestedHelper: _ => false);
 
         Assert.True(result.Accepted);
@@ -28,7 +29,8 @@ public sealed class IpcPeerVerifierTests
             processId: 15512,
             executablePath: null,
             coreBaseDirectory: @"C:\Program Files\Suavo\Agent\",
-            isBrokerAttestedHelper: pid => pid == 15512);
+            brokerEvidence: Evidence(),
+            isBrokerAttestedHelper: evidence => evidence == Evidence());
 
         Assert.True(result.Accepted);
         Assert.True(result.AcceptedByBrokerAttestation);
@@ -43,7 +45,23 @@ public sealed class IpcPeerVerifierTests
             processId: 15512,
             executablePath: null,
             coreBaseDirectory: @"C:\Program Files\Suavo\Agent\",
+            brokerEvidence: Evidence(),
             isBrokerAttestedHelper: _ => false);
+
+        Assert.False(result.Accepted);
+        Assert.Equal("image_path_unreadable", result.RejectionReason);
+    }
+
+    [Fact]
+    public void Verify_RejectsPidOnlyAttestationWithoutExactProcessEvidence()
+    {
+        var result = IpcPeerVerifier.Verify(
+            processName: "SuavoAgent.Helper",
+            processId: 15512,
+            executablePath: null,
+            coreBaseDirectory: @"C:\Program Files\Suavo\Agent\",
+            brokerEvidence: null,
+            isBrokerAttestedHelper: _ => true);
 
         Assert.False(result.Accepted);
         Assert.Equal("image_path_unreadable", result.RejectionReason);
@@ -57,6 +75,7 @@ public sealed class IpcPeerVerifierTests
             processId: 15512,
             executablePath: null,
             coreBaseDirectory: @"C:\Program Files\Suavo\Agent\",
+            brokerEvidence: Evidence(),
             isBrokerAttestedHelper: _ => true);
 
         Assert.False(result.Accepted);
@@ -71,6 +90,7 @@ public sealed class IpcPeerVerifierTests
             processId: 15512,
             executablePath: @"C:\Users\queen\Downloads\SuavoAgent.Helper.exe",
             coreBaseDirectory: @"C:\Program Files\Suavo\Agent\",
+            brokerEvidence: Evidence(),
             isBrokerAttestedHelper: _ => true);
 
         Assert.False(result.Accepted);
@@ -85,6 +105,7 @@ public sealed class IpcPeerVerifierTests
             processId: 15512,
             executablePath: @"C:\Program Files\Suavo\Other\SuavoAgent.Helper.exe",
             coreBaseDirectory: @"C:\Program Files\Suavo\Agent\",
+            brokerEvidence: null,
             isBrokerAttestedHelper: _ => false);
 
         Assert.False(result.Accepted);
@@ -94,7 +115,7 @@ public sealed class IpcPeerVerifierTests
     [Fact]
     public void Program_UsesShortBrokerAttestationWindow()
     {
-        var source = ReadRepoFile("src/SuavoAgent.Core/Program.cs");
+        var source = ReadRepoFile("src/SuavoAgent.Core/CoreRuntimeServiceRegistration.cs");
 
         Assert.Contains("IpcPeerAttestationStore.ContainsHelper", source);
         Assert.Contains("TimeSpan.FromMinutes(5)", source);
@@ -113,4 +134,10 @@ public sealed class IpcPeerVerifierTests
 
         throw new FileNotFoundException($"Could not locate {relativePath}");
     }
+
+    private static IpcBrokerAttestationEvidence Evidence() => new(
+        15512,
+        1,
+        DateTimeOffset.Parse("2026-07-12T18:00:00Z"),
+        new string('a', 64));
 }

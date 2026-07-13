@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using Serilog;
+using SuavoAgent.Helper.Actuation;
 
 namespace SuavoAgent.Helper;
 
@@ -24,17 +25,9 @@ namespace SuavoAgent.Helper;
 [System.Runtime.Versioning.SupportedOSPlatform("windows")]
 internal static class PioneerRxInstallDetector
 {
-    /// <summary>
-    /// Eval/CI seam. A bare sim box (e.g. Queen) runs PioneerPharmacy.exe from a
-    /// rehearsal dir and satisfies neither <see cref="KnownPaths"/> nor
-    /// <see cref="RegistryKeys"/>, so <see cref="IsInstalled"/> is false and the
-    /// Helper skips the whole UIA attach loop — the interaction observer never
-    /// subscribes and the FSD eval's Observe stage is structurally 0. Setting this
-    /// machine env var to "1" forces the attach loop so the live moat can be graded
-    /// against the sim (attach itself still matches by process name, unchanged).
-    /// OFF by default; NEVER set on a real pharmacy box — there IsInstalled() is
-    /// already true and this would be a redundant no-op anyway.
-    /// </summary>
+    /// <summary>Legacy environment name retained only so old deployment tooling can
+    /// remove it. It has no runtime effect; Release and Debug both require a signed
+    /// local process approval.</summary>
     internal const string ForceAttachEnvVar = "SUAVOAGENT_FORCE_PMS_ATTACH";
 
     private static readonly string[] KnownPaths =
@@ -53,38 +46,50 @@ internal static class PioneerRxInstallDetector
 
     /// <summary>
     /// Returns true if PioneerRx appears to be installed on this host.
-    /// Errors during detection are logged at debug and treated as "installed"
-    /// (fail-open) so a registry permissions hiccup doesn't accidentally
-    /// suppress polling on a real PMS box.
+    /// Errors during detection fail closed. Name/path discovery is not authority;
+    /// the signed exact-executable approval is required by <see cref="ShouldPollForPms"/>.
     /// </summary>
-    /// <summary>
-    /// Whether the Helper should enter the PMS attach-polling loop. True if the
-    /// eval/CI override (<see cref="ForceAttachEnvVar"/>=1) is set, otherwise
-    /// delegates to <see cref="IsInstalled"/>. Program.cs gates the attach loop on
-    /// THIS, not IsInstalled directly, so a sim/eval box can observe without a real
-    /// PioneerRx footprint. IsInstalled stays a pure "is the PMS on disk/registry?".
-    /// </summary>
-    public static bool ShouldPollForPms(ILogger logger)
+    public static bool ShouldPollForPms(
+        ILogger logger,
+        PioneerRxProcessTrustVerifier processTrust)
     {
-        if (string.Equals(
-                Environment.GetEnvironmentVariable(ForceAttachEnvVar), "1", StringComparison.Ordinal))
+        ArgumentNullException.ThrowIfNull(processTrust);
+        if (!processTrust.IsApproved)
         {
-            logger.Information(
-                "PMS attach forced via {Var}=1 (eval/CI override) — entering attach polling despite no detected install",
-                ForceAttachEnvVar);
-            return true;
+            logger.Warning(
+                "PioneerRx attach disabled: local process approval unavailable ({Code})",
+                processTrust.ApprovalCode);
+            return false;
         }
-        return IsInstalled(logger);
+        var verdict = processTrust.VerifyApprovedExecutable();
+        if (!verdict.Trusted)
+            logger.Warning("PioneerRx approved executable did not verify ({Code})", verdict.Code);
+        return verdict.Trusted;
     }
 
     public static bool IsInstalled(ILogger logger)
+    {
+        return IsInstalledFromProbes(
+            path => File.Exists(path),
+            regKey =>
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(regKey);
+                return key?.GetValue("InstallPath") as string;
+            },
+            logger);
+    }
+
+    internal static bool IsInstalledFromProbes(
+        Func<string, bool> fileExists,
+        Func<string, string?> registryInstallPath,
+        ILogger logger)
     {
         try
         {
             foreach (var path in KnownPaths)
             {
                 var exe = Path.Combine(path, "PioneerPharmacy.exe");
-                if (File.Exists(exe))
+                if (fileExists(exe))
                 {
                     logger.Information("PioneerRx detected on disk: {Path}", path);
                     return true;
@@ -93,21 +98,11 @@ internal static class PioneerRxInstallDetector
 
             foreach (var regKey in RegistryKeys)
             {
-                try
+                var installPath = registryInstallPath(regKey);
+                if (!string.IsNullOrEmpty(installPath))
                 {
-                    using var key = Registry.LocalMachine.OpenSubKey(regKey);
-                    var installPath = key?.GetValue("InstallPath") as string;
-                    if (!string.IsNullOrEmpty(installPath))
-                    {
-                        logger.Information(
-                            "PioneerRx detected via registry: {Key} -> {Path}",
-                            regKey, installPath);
-                        return true;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    logger.Debug(ex, "PioneerRx registry probe failed for {Key} (non-fatal)", regKey);
+                    logger.Information("PioneerRx detected via approved registry footprint");
+                    return true;
                 }
             }
 
@@ -115,11 +110,8 @@ internal static class PioneerRxInstallDetector
         }
         catch (Exception ex)
         {
-            // Fail-open: if detection itself errors, assume PioneerRx is
-            // present and let the polling loop sort it out. Better one
-            // log line than a wrongly-suppressed PMS attach.
-            logger.Warning(ex, "PioneerRx install detection failed — assuming installed (fail-open)");
-            return true;
+            logger.Warning(ex, "PioneerRx install detection failed — refusing attach (fail closed)");
+            return false;
         }
     }
 }

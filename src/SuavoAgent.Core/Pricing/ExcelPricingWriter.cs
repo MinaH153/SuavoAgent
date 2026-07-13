@@ -4,8 +4,8 @@ using SuavoAgent.Contracts.Pricing;
 namespace SuavoAgent.Core.Pricing;
 
 /// <summary>
-/// Writes Best Supplier, Best Cost, and Status columns into an Excel file.
-/// Output mode is Sibling by default — produces <c>{stem}-priced-{ts}.xlsx</c> next to the source
+/// Writes Best Supplier, Best Cost Per Unit, and Status columns into an Excel file.
+/// Output mode is Sibling by default — produces a collision-resistant <c>{stem}-priced-{identity}.xlsx</c> next to the source
 /// workbook. In-place mode is available for explicit re-run scenarios; it first verifies the source
 /// is not locked by Excel.exe to avoid the "succeed 499 rows, fail at move" Codex scenario.
 ///
@@ -25,12 +25,26 @@ namespace SuavoAgent.Core.Pricing;
 public sealed class ExcelPricingWriter
 {
     private readonly ILogger<ExcelPricingWriter> _logger;
+    private readonly Func<string, string> _siblingPathFactory;
+    private readonly Action? _publicationPreparedObserver;
 
     public const string DefaultStatusHeader = "Price Lookup Status";
 
-    public ExcelPricingWriter(ILogger<ExcelPricingWriter> logger)
+    public ExcelPricingWriter(
+        ILogger<ExcelPricingWriter> logger,
+        Func<string, string>? siblingPathFactory = null)
+        : this(logger, siblingPathFactory, publicationPreparedObserver: null)
+    {
+    }
+
+    internal ExcelPricingWriter(
+        ILogger<ExcelPricingWriter> logger,
+        Func<string, string>? siblingPathFactory,
+        Action? publicationPreparedObserver)
     {
         _logger = logger;
+        _siblingPathFactory = siblingPathFactory ?? ComputeSiblingPath;
+        _publicationPreparedObserver = publicationPreparedObserver;
     }
 
     public WriteResult Write(
@@ -40,7 +54,53 @@ public sealed class ExcelPricingWriter
         string costColumnHeader = PricingJobDefaults.CostColumn,
         string statusColumnHeader = DefaultStatusHeader,
         WriteMode mode = WriteMode.Sibling,
-        int headerRow = 1)
+        int headerRow = 1,
+        string? siblingPathAnchor = null) =>
+        WriteCore(
+            sourcePath,
+            results,
+            publicationGate: null,
+            supplierColumnHeader,
+            costColumnHeader,
+            statusColumnHeader,
+            mode,
+            headerRow,
+            siblingPathAnchor);
+
+    internal WriteResult WriteAuthorized(
+        string sourcePath,
+        IReadOnlyList<SupplierPriceResult> results,
+        Func<Action, PricingPublicationDecision> publicationGate,
+        string supplierColumnHeader = PricingJobDefaults.SupplierColumn,
+        string costColumnHeader = PricingJobDefaults.CostColumn,
+        string statusColumnHeader = DefaultStatusHeader,
+        WriteMode mode = WriteMode.Sibling,
+        int headerRow = 1,
+        string? siblingPathAnchor = null)
+    {
+        ArgumentNullException.ThrowIfNull(publicationGate);
+        return WriteCore(
+            sourcePath,
+            results,
+            publicationGate,
+            supplierColumnHeader,
+            costColumnHeader,
+            statusColumnHeader,
+            mode,
+            headerRow,
+            siblingPathAnchor);
+    }
+
+    private WriteResult WriteCore(
+        string sourcePath,
+        IReadOnlyList<SupplierPriceResult> results,
+        Func<Action, PricingPublicationDecision>? publicationGate,
+        string supplierColumnHeader,
+        string costColumnHeader,
+        string statusColumnHeader,
+        WriteMode mode,
+        int headerRow,
+        string? siblingPathAnchor)
     {
         if (!File.Exists(sourcePath))
         {
@@ -50,7 +110,17 @@ public sealed class ExcelPricingWriter
 
         var outputPath = mode == WriteMode.InPlace
             ? sourcePath
-            : ComputeSiblingPath(sourcePath);
+            : _siblingPathFactory(siblingPathAnchor ?? sourcePath);
+
+        if (mode == WriteMode.Sibling &&
+            string.Equals(
+                Path.GetFullPath(sourcePath),
+                Path.GetFullPath(outputPath),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogError("core.excel_pricing_writer.output_identity_invalid");
+            return WriteResult.Fail("pricing_output_identity_invalid");
+        }
 
         if (mode == WriteMode.InPlace && IsFileLocked(sourcePath))
         {
@@ -62,6 +132,7 @@ public sealed class ExcelPricingWriter
 
         try
         {
+            costColumnHeader = ExplicitPerUnitCostHeader(costColumnHeader);
             // Load the source workbook — for Sibling mode we'll save to a new path so the lock only
             // matters for Read access, which Excel.exe permits even with a file open.
             using var wb = new XLWorkbook(sourcePath);
@@ -99,31 +170,73 @@ public sealed class ExcelPricingWriter
                 }
             }
 
-            // ClosedXML enforces an Excel extension, so temp files need .xlsx, not .tmp.
-            // Sibling mode: write directly — the path doesn't exist yet, no atomicity risk.
-            // InPlace mode: write-then-replace with a sibling .xlsx tempfile to keep the
-            // "never leave a half-written workbook in place" guarantee Codex asked for.
-            if (mode == WriteMode.Sibling)
+            // Save to a same-directory CreateNew file, flush it, then publish in one filesystem
+            // operation. Sibling publication uses File.Move(overwrite:false): concurrent jobs that
+            // somehow choose the same identity cannot overwrite each other; exactly one wins.
+            var tmp = CreatePublicationTempPath(outputPath);
+            PricingPublicationDecision? deniedPublication = null;
+            var cleanupFailed = false;
+            try
             {
-                wb.SaveAs(outputPath);
-            }
-            else
-            {
-                var tmp = Path.Combine(
-                    Path.GetDirectoryName(outputPath) ?? Directory.GetCurrentDirectory(),
-                    $".suavo-priced-{Guid.NewGuid():N}.xlsx");
-                try
+                using (var stream = new FileStream(
+                           tmp,
+                           FileMode.CreateNew,
+                           FileAccess.ReadWrite,
+                           FileShare.None,
+                           bufferSize: 64 * 1024,
+                           FileOptions.WriteThrough))
                 {
-                    wb.SaveAs(tmp);
-                    File.Replace(tmp, outputPath, destinationBackupFileName: null);
+                    wb.SaveAs(stream);
+                    stream.Flush(flushToDisk: true);
                 }
-                finally
+
+                _publicationPreparedObserver?.Invoke();
+
+                void Publish()
                 {
-                    if (File.Exists(tmp))
+                    if (mode == WriteMode.Sibling)
+                        File.Move(tmp, outputPath, overwrite: false);
+                    else
+                        File.Replace(tmp, outputPath, destinationBackupFileName: null);
+                }
+
+                if (publicationGate is null)
+                {
+                    Publish();
+                }
+                else
+                {
+                    var decision = publicationGate(Publish);
+                    if (!decision.Published)
+                        deniedPublication = decision;
+                }
+            }
+            finally
+            {
+                if (File.Exists(tmp))
+                {
+                    try
                     {
-                        try { File.Delete(tmp); } catch { /* best effort cleanup */ }
+                        File.Delete(tmp);
+                    }
+                    catch (Exception ex)
+                    {
+                        cleanupFailed = true;
+                        _logger.LogCritical(
+                            "core.excel_pricing_writer.temp_cleanup_failed exception_type={ExceptionType}",
+                            ex.GetType().Name);
                     }
                 }
+            }
+
+            if (cleanupFailed)
+                return WriteResult.Fail("pricing_publication_temp_cleanup_failed");
+            if (deniedPublication is { } denied)
+            {
+                _logger.LogWarning(
+                    "core.excel_pricing_writer.publication_denied code={Code}",
+                    denied.Code);
+                return WriteResult.PublicationDenied(denied.Code);
             }
 
             _logger.LogInformation(
@@ -132,9 +245,16 @@ public sealed class ExcelPricingWriter
 
             return WriteResult.Ok(outputPath, okCount, failCount);
         }
+        catch (IOException) when (mode == WriteMode.Sibling && File.Exists(outputPath))
+        {
+            _logger.LogError("core.excel_pricing_writer.output_collision");
+            return WriteResult.Fail("pricing_output_collision");
+        }
         catch (Exception ex)
         {
-            _logger.LogError("ExcelPricingWriter failed ({ErrorType})", ex.GetType().Name);
+            _logger.LogError(
+                "core.excel_pricing_writer.failed exception_type={ExceptionType}",
+                ex.GetType().Name);
             return WriteResult.Fail("Excel write failed");
         }
     }
@@ -144,8 +264,26 @@ public sealed class ExcelPricingWriter
         var dir = Path.GetDirectoryName(source) ?? Directory.GetCurrentDirectory();
         var stem = Path.GetFileNameWithoutExtension(source);
         var ext = Path.GetExtension(source);
-        var ts = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-        return Path.Combine(dir, $"{stem}-priced-{ts}{ext}");
+        var ts = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmssfff");
+        return Path.Combine(dir, $"{stem}-priced-{ts}-{Guid.NewGuid():N}{ext}");
+    }
+
+    private static string CreatePublicationTempPath(string outputPath)
+    {
+        var dir = Path.GetDirectoryName(outputPath) ?? Directory.GetCurrentDirectory();
+        var ext = Path.GetExtension(outputPath);
+        return Path.Combine(dir, $".suavo-priced-{Guid.NewGuid():N}{ext}");
+    }
+
+    private static string ExplicitPerUnitCostHeader(string requested)
+    {
+        var normalized = requested.Trim();
+        return normalized.Equals(
+                   PricingJobDefaults.AmbiguousLegacyCostColumn,
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("Cost", StringComparison.OrdinalIgnoreCase)
+            ? PricingJobDefaults.CostColumn
+            : requested;
     }
 
     /// <summary>
@@ -198,11 +336,15 @@ public sealed class ExcelPricingWriter
 
 public enum WriteMode
 {
-    /// <summary>Write a sibling file <c>{stem}-priced-{ts}.xlsx</c>. Default — safe with Excel open.</summary>
+    /// <summary>Atomically publish a unique sibling file. Default — safe with Excel open.</summary>
     Sibling,
     /// <summary>Overwrite the source file. Refuses if the file is locked.</summary>
     InPlace,
 }
+
+internal readonly record struct PricingPublicationDecision(
+    bool Published,
+    string Code);
 
 public static class StatusMarkers
 {
@@ -216,6 +358,7 @@ public static class StatusMarkers
 public sealed record WriteResult
 {
     public bool Success { get; init; }
+    public bool PublicationWasDenied { get; init; }
     public string? OutputPath { get; init; }
     public int OkRows { get; init; }
     public int FailRows { get; init; }
@@ -226,4 +369,12 @@ public sealed record WriteResult
 
     public static WriteResult Fail(string error) =>
         new() { Success = false, Error = error };
+
+    internal static WriteResult PublicationDenied(string code) =>
+        new()
+        {
+            Success = false,
+            PublicationWasDenied = true,
+            Error = code,
+        };
 }

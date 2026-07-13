@@ -5,7 +5,7 @@
 .DESCRIPTION
     ReleaseArtifact mode validates a staged release directory or zip before a
     GitHub release is published. Installed mode validates the local Windows
-    install: services, binaries, bootstrap repair path, and heartbeat readiness
+    install: services, binaries, native maintenance host, and heartbeat readiness
     prerequisites. The probe never prints appsettings values or log bodies.
 #>
 
@@ -18,20 +18,38 @@ param(
     [string]$ReleaseDir = ".\release",
     [string]$InstallDir = "C:\Program Files\Suavo\Agent",
     [string]$ProgramDataDir = "$env:ProgramData\SuavoAgent",
-    [string]$BootstrapPath,
+    [string]$MaintenancePath,
+    [string]$AllowedSignerSha256,
     [switch]$RequireAuthenticodeSignature,
     [switch]$Json
 )
 
 $ErrorActionPreference = "Stop"
+$expectedPublisher = "MKM TECHNOLOGIES LLC"
+$allowedSignerDigests = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::Ordinal)
+if (-not [string]::IsNullOrWhiteSpace($AllowedSignerSha256)) {
+    foreach ($candidate in $AllowedSignerSha256.Split(
+        [char[]]@(',', ';'),
+        [System.StringSplitOptions]::None)) {
+        $normalized = $candidate.Trim().ToUpperInvariant()
+        if ($normalized -notmatch '^[A-F0-9]{64}$' -or -not $allowedSignerDigests.Add($normalized)) {
+            throw "AllowedSignerSha256 must contain unique SHA-256 certificate digests."
+        }
+    }
+}
+if ($RequireAuthenticodeSignature -and $allowedSignerDigests.Count -eq 0) {
+    throw "Release signature verification requires an explicit signer SHA-256 allowlist."
+}
 
-$requiredBinaries = @(
+$runtimeBinaries = @(
     "SuavoAgent.Core.exe",
     "SuavoAgent.Broker.exe",
     "SuavoAgent.Helper.exe",
-    "SuavoAgent.Watchdog.exe",
-    "SuavoSetup.exe"
+    "SuavoAgent.Watchdog.exe"
 )
+$releaseBinaries = @($runtimeBinaries) + @("SuavoSetup.exe")
+$installedBinaries = @($runtimeBinaries) + @("SuavoAgent.Maintenance.exe")
 
 $requiredServices = @(
     "SuavoAgent.Core",
@@ -63,10 +81,67 @@ function Get-HashPrefix {
     return $hash.Substring(0, 16)
 }
 
-function Test-ReleaseBinaries {
-    param([string]$Directory)
+function Get-CertificateSha256 {
+    param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($Certificate.RawData))).Replace('-', '')
+    } finally {
+        $sha.Dispose()
+    }
+}
 
-    foreach ($binary in $requiredBinaries) {
+function Find-SignTool {
+    $command = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    if (-not (Test-Path -LiteralPath $kits -PathType Container)) { return $null }
+    return Get-ChildItem -LiteralPath $kits -Directory |
+        Sort-Object Name -Descending |
+        ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+}
+
+function Test-Rfc3161Timestamp {
+    param([string]$Path, [object]$Signature)
+    if (-not $Signature.TimeStamperCertificate) { return $false }
+    $timestampEku = $false
+    foreach ($extension in $Signature.TimeStamperCertificate.Extensions) {
+        if ($extension -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]) {
+            foreach ($oid in $extension.EnhancedKeyUsages) {
+                if ($oid.Value -eq '1.3.6.1.5.5.7.3.8') { $timestampEku = $true }
+            }
+        }
+    }
+    if (-not $timestampEku) { return $false }
+    $signtool = Find-SignTool
+    if (-not $signtool) { return $false }
+    $output = & $signtool verify /pa /all /tw $Path 2>&1
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Test-ExactSignature {
+    param([string]$Path, [object]$Signature)
+    if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+        -not $Signature.SignerCertificate) { return $false }
+    $publisher = $Signature.SignerCertificate.GetNameInfo(
+        [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+        $false)
+    $digest = Get-CertificateSha256 $Signature.SignerCertificate
+    return $publisher -ceq $expectedPublisher -and
+        $allowedSignerDigests.Contains($digest) -and
+        (Test-Rfc3161Timestamp $Path $Signature)
+}
+
+function Test-Binaries {
+    param(
+        [string]$Directory,
+        [string[]]$Names,
+        [bool]$RequireValidSignature
+    )
+
+    foreach ($binary in $Names) {
         $path = Join-Path $Directory $binary
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             Add-ProbeResult -Name "binary:$binary" -Ok $false -Detail "missing"
@@ -88,51 +163,163 @@ function Test-ReleaseBinaries {
         $signature = Get-AuthenticodeSignature -LiteralPath $path
         $signatureMetadata = @{
             status = $signature.Status.ToString()
-            signerThumbprint = if ($signature.SignerCertificate) { $signature.SignerCertificate.Thumbprint } else { $null }
+            signerSha256 = if ($signature.SignerCertificate) { Get-CertificateSha256 $signature.SignerCertificate } else { $null }
             signerSubject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
+            rfc3161Timestamp = if ($signature.SignerCertificate) { Test-Rfc3161Timestamp $path $signature } else { $false }
         }
-        $signatureValid = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+        $publisher = if ($signature.SignerCertificate) {
+            $signature.SignerCertificate.GetNameInfo(
+                [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+                $false)
+        } else { $null }
+        $signatureValid = Test-ExactSignature $path $signature
         Add-ProbeResult `
             -Name "signature:$binary" `
-            -Ok ((-not $RequireAuthenticodeSignature) -or $signatureValid) `
-            -Detail $signature.Status.ToString() `
-            -Metadata $signatureMetadata
+            -Ok ((-not $RequireValidSignature) -or $signatureValid) `
+            -Detail $(if ($signatureValid) { "Valid:$publisher" } else { "$($signature.Status):publisher_mismatch" }) `
+            -Metadata ($signatureMetadata + @{ publisher = $publisher; expectedPublisher = $expectedPublisher })
 
-        if ($RequireAuthenticodeSignature -and -not $signatureValid) {
+        if ($RequireValidSignature -and -not $signatureValid) {
             continue
         }
     }
 }
 
-function Test-BootstrapRepairPath {
-    param([string]$Path)
+function Test-NativeMaintenanceHost {
+    param(
+        [string]$Path,
+        [string]$ExpectedFileName,
+        [bool]$RequireValidSignature
+    )
 
     if (-not $Path) {
-        Add-ProbeResult -Name "bootstrap:repair-path" -Ok $false -Detail "path_missing"
+        Add-ProbeResult -Name "maintenance:host" -Ok $false -Detail "path_missing"
+        return
+    }
+
+    if ([System.IO.Path]::GetFileName($Path) -ne $ExpectedFileName) {
+        Add-ProbeResult -Name "maintenance:host" -Ok $false -Detail "unexpected_filename"
         return
     }
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        Add-ProbeResult -Name "bootstrap:repair-path" -Ok $false -Detail "file_missing"
+        Add-ProbeResult -Name "maintenance:host" -Ok $false -Detail "file_missing"
         return
     }
 
-    $source = Get-Content -LiteralPath $Path -Raw
-    $null = [scriptblock]::Create($source)
-    $parseErrors = $null
-    [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
-    if ($parseErrors -and $parseErrors.Count -gt 0) {
-        Add-ProbeResult -Name "bootstrap:repair-path" -Ok $false -Detail "parse_error"
-        return
-    }
-
-    $hasRepairSwitch = $source.Contains("[switch]`$Repair")
-    $hasRepairInvocation = $source.Contains("--repair") -or $source.Contains("-Repair")
+    $item = Get-Item -LiteralPath $Path
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $publisher = if ($signature.SignerCertificate) {
+        $signature.SignerCertificate.GetNameInfo(
+            [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false)
+    } else { $null }
+    $signatureValid = Test-ExactSignature $Path $signature
     Add-ProbeResult `
-        -Name "bootstrap:repair-path" `
-        -Ok ($hasRepairSwitch -and $hasRepairInvocation) `
-        -Detail "parseable" `
-        -Metadata @{ repairSwitch = $hasRepairSwitch; repairInvocation = $hasRepairInvocation }
+        -Name "maintenance:host" `
+        -Ok (($item.Length -gt 0) -and ((-not $RequireValidSignature) -or $signatureValid)) `
+        -Detail $signature.Status.ToString() `
+        -Metadata @{
+            bytes = $item.Length
+            sha256Prefix = Get-HashPrefix $Path
+            signerSha256 = if ($signature.SignerCertificate) { Get-CertificateSha256 $signature.SignerCertificate } else { $null }
+            signerSubject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
+            publisher = $publisher
+            expectedPublisher = $expectedPublisher
+            rfc3161Timestamp = if ($signature.SignerCertificate) { Test-Rfc3161Timestamp $Path $signature } else { $false }
+        }
+}
+
+function Test-InstalledCohortIntegrity {
+    param(
+        [string]$Directory,
+        [string]$DataDirectory
+    )
+
+    $statePath = Join-Path $Directory "install-state.json"
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        Add-ProbeResult -Name "install-state" -Ok $false -Detail "missing"
+    } else {
+        try {
+            $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            $stateCohort = @($state.installedCohort | ForEach-Object { [string]$_ })
+            $cohortMatches = $stateCohort.Count -eq $installedBinaries.Count
+            if ($cohortMatches) {
+                for ($i = 0; $i -lt $installedBinaries.Count; $i++) {
+                    if ($stateCohort[$i] -ne $installedBinaries[$i]) {
+                        $cohortMatches = $false
+                        break
+                    }
+                }
+            }
+
+            $stateValid =
+                [int]$state.schemaVersion -eq 1 -and
+                [string]$state.installerKind -eq "native-maintenance-bridge" -and
+                [string]$state.maintenanceExecutable -eq "SuavoAgent.Maintenance.exe" -and
+                $cohortMatches
+            Add-ProbeResult `
+                -Name "install-state" `
+                -Ok $stateValid `
+                -Detail $(if ($stateValid) { "valid" } else { "invalid" }) `
+                -Metadata @{ cohortCount = $stateCohort.Count; valuesRedacted = $true }
+        } catch {
+            Add-ProbeResult -Name "install-state" -Ok $false -Detail "unreadable"
+        }
+    }
+
+    $manifestPath = Join-Path $DataDirectory "binaries.manifest"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        Add-ProbeResult -Name "binaries-manifest:cohort" -Ok $false -Detail "missing"
+        foreach ($binary in $installedBinaries) {
+            Add-ProbeResult -Name "manifest-hash:$binary" -Ok $false -Detail "manifest_missing"
+        }
+        return
+    }
+
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $properties = @($manifest.PSObject.Properties)
+        $unexpected = @($properties | Where-Object { $installedBinaries -notcontains $_.Name })
+        $missing = @($installedBinaries | Where-Object { $properties.Name -notcontains $_ })
+        $shapeValid =
+            $properties.Count -eq $installedBinaries.Count -and
+            $unexpected.Count -eq 0 -and
+            $missing.Count -eq 0
+        Add-ProbeResult `
+            -Name "binaries-manifest:cohort" `
+            -Ok $shapeValid `
+            -Detail $(if ($shapeValid) { "five_entries" } else { "invalid_entries" }) `
+            -Metadata @{ entryCount = $properties.Count; valuesRedacted = $true }
+
+        foreach ($binary in $installedBinaries) {
+            $binaryPath = Join-Path $Directory $binary
+            $property = $manifest.PSObject.Properties[$binary]
+            if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
+                Add-ProbeResult -Name "manifest-hash:$binary" -Ok $false -Detail "binary_missing"
+                continue
+            }
+            if (-not $property) {
+                Add-ProbeResult -Name "manifest-hash:$binary" -Ok $false -Detail "entry_missing"
+                continue
+            }
+
+            $expectedHash = [string]$property.Value
+            $expectedValid = $expectedHash -match '^[A-Fa-f0-9]{64}$'
+            $actualHash = (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $hashMatches = $expectedValid -and $actualHash -eq $expectedHash.ToLowerInvariant()
+            Add-ProbeResult `
+                -Name "manifest-hash:$binary" `
+                -Ok $hashMatches `
+                -Detail $(if ($hashMatches) { "match" } else { "mismatch" }) `
+                -Metadata @{ sha256Prefix = $actualHash.Substring(0, 16); valuesRedacted = $true }
+        }
+    } catch {
+        Add-ProbeResult -Name "binaries-manifest:cohort" -Ok $false -Detail "unreadable"
+        foreach ($binary in $installedBinaries) {
+            Add-ProbeResult -Name "manifest-hash:$binary" -Ok $false -Detail "manifest_unreadable"
+        }
+    }
 }
 
 function Test-InstalledServices {
@@ -526,6 +713,15 @@ function Resolve-ReleaseDirectory {
     return $ReleaseDir
 }
 
+$legalProbeSupport = Join-Path $PSScriptRoot 'Test-SuavoAgentReleaseProbe.Legal.ps1'
+if (-not (Test-Path -LiteralPath $legalProbeSupport -PathType Leaf)) {
+    throw "Release legal probe support is missing: $legalProbeSupport"
+}
+. $legalProbeSupport
+if (-not (Get-Command Test-ReleaseLegalBundle -CommandType Function -ErrorAction SilentlyContinue)) {
+    throw "Release legal probe support did not define Test-ReleaseLegalBundle."
+}
+
 try {
     if ($Mode -eq "ReleaseArtifact") {
         $dir = Resolve-ReleaseDirectory
@@ -533,20 +729,36 @@ try {
             throw "ReleaseDir not found: $dir"
         }
 
-        Test-ReleaseBinaries -Directory $dir
-        if (-not $BootstrapPath) {
-            $BootstrapPath = Join-Path (Get-Location) "bootstrap.ps1"
+        Test-Binaries `
+            -Directory $dir `
+            -Names $releaseBinaries `
+            -RequireValidSignature ([bool]$RequireAuthenticodeSignature)
+        if (-not $MaintenancePath) {
+            $MaintenancePath = Join-Path $dir "SuavoSetup.exe"
         }
-        Test-BootstrapRepairPath -Path $BootstrapPath
+        Test-NativeMaintenanceHost `
+            -Path $MaintenancePath `
+            -ExpectedFileName "SuavoSetup.exe" `
+            -RequireValidSignature ([bool]$RequireAuthenticodeSignature)
+        Test-ReleaseLegalBundle -Directory $dir
     } else {
-        Test-ReleaseBinaries -Directory $InstallDir
+        # Installed evidence is always fail-closed: all five installed executables
+        # must have valid Authenticode, regardless of the optional release-artifact switch.
+        Test-Binaries `
+            -Directory $InstallDir `
+            -Names $installedBinaries `
+            -RequireValidSignature $true
+        Test-InstalledCohortIntegrity -Directory $InstallDir -DataDirectory $ProgramDataDir
         Test-InstalledServices
         Test-CrashLogMarkers -DataDirectory $ProgramDataDir
         Test-HelperAttestation -DataDirectory $ProgramDataDir
-        if (-not $BootstrapPath) {
-            $BootstrapPath = Join-Path $ProgramDataDir "bootstrap.ps1"
+        if (-not $MaintenancePath) {
+            $MaintenancePath = Join-Path $InstallDir "SuavoAgent.Maintenance.exe"
         }
-        Test-BootstrapRepairPath -Path $BootstrapPath
+        Test-NativeMaintenanceHost `
+            -Path $MaintenancePath `
+            -ExpectedFileName "SuavoAgent.Maintenance.exe" `
+            -RequireValidSignature $true
         Test-AppSettingsAcl -Directory $InstallDir
         Test-HeartbeatReadiness -Directory $InstallDir -DataDirectory $ProgramDataDir
         Test-AgentCloudAuth -Directory $InstallDir

@@ -270,6 +270,48 @@ public class BehavioralEventReceiverTests : IDisposable
         Assert.Empty(_db.GetBehavioralEvents(SessionId));
     }
 
+    [Theory]
+    [InlineData("patient_123456789", "Edit")]
+    [InlineData("safeButton", "customer_5551234567")]
+    [InlineData("member@example.com", null)]
+    public void ProcessBatch_PmsChannelRejectsDynamicStructuralIdentifiers(
+        string elementId,
+        string? className)
+    {
+        var callbacks = 0;
+        var receiver = new BehavioralEventReceiver(
+            _db,
+            SessionId,
+            (_, _, _, _) => callbacks++);
+        var interaction = BehavioralEvent.Interaction(
+            "click", "tree", elementId, "Edit", className, null);
+
+        var result = receiver.ProcessBatch(
+            [interaction],
+            droppedSinceLast: 0,
+            sourceChannel: BehavioralEventChannels.Pms);
+
+        Assert.Equal(0, result.EventsStored);
+        Assert.Equal(1, result.EventsRejected);
+        Assert.Equal(0, callbacks);
+    }
+
+    [Fact]
+    public void ProcessBatch_PmsChannelAcceptsExactGeneratedAnonymousIdentity()
+    {
+        var identity = "anon:path:unavailable:rid:" +
+            "72230967" + new string('a', 56) +
+            ":shape:" + new string('b', 64);
+        var interaction = BehavioralEvent.Interaction(
+            "click", "tree", identity, "Edit", "TextBox", null);
+
+        var result = _receiver.ProcessBatch(
+            [interaction], 0, BehavioralEventChannels.Pms);
+
+        Assert.Equal(1, result.EventsStored);
+        Assert.Equal(0, result.EventsRejected);
+    }
+
     [Fact]
     public void ProcessBatch_RejectsTreeSnapshot_WithEmptyTreeHash()
     {
@@ -330,5 +372,188 @@ public class BehavioralEventReceiverTests : IDisposable
 
         var events = _db.GetBehavioralEvents(SessionId, eventType: "keystrokecategory");
         Assert.Single(events);
+    }
+
+    [Fact]
+    public void LegacyV1Envelope_PersistsHighWater_ButMarksDeliveryUnverified()
+    {
+        var batch = MakeVersionedBatch(
+            streamId: Guid.NewGuid().ToString("N"),
+            firstSequence: 1,
+            BehavioralEvent.TreeSnapshot("tree-versioned"),
+            BehavioralEvent.Interaction("click", "tree-versioned", "button-1", "Button", null, null));
+
+        var result = _receiver.ProcessBatch(batch);
+
+        Assert.True(result.Accepted);
+        Assert.False(result.Duplicate);
+        Assert.Equal(2, result.EventsStored);
+        Assert.Equal(2, result.AcceptedThroughSequence);
+
+        var health = _db.GetBehavioralDeliveryHealth();
+        Assert.Equal(1, health.StreamCount);
+        Assert.Equal(1, health.AcceptedBatchCount);
+        Assert.Equal(0, health.VerifiedBatchCount);
+        Assert.Null(health.LastVerifiedBatchUtc);
+        Assert.Null(health.LastVerifiedPmsBatchUtc);
+        Assert.Equal(0, health.SequenceGapCount);
+        Assert.True(health.LegacyUnverifiedSeen);
+    }
+
+    [Fact]
+    public void VersionedBatch_LostAckRetryAfterReceiverRestart_IsDurablyDeduplicated()
+    {
+        var callbackCount = 0;
+        var streamId = Guid.NewGuid().ToString("N");
+        var batch = MakeVersionedBatch(
+            streamId,
+            1,
+            BehavioralEvent.Interaction("click", "tree", "button-1", "Button", null, null));
+
+        var firstReceiver = new BehavioralEventReceiver(
+            _db, SessionId, (_, _, _, _) => callbackCount++);
+        var first = firstReceiver.ProcessBatch(batch);
+
+        // Simulate Core process restart after commit but before Helper saw the response.
+        var restartedReceiver = new BehavioralEventReceiver(
+            _db, SessionId, (_, _, _, _) => callbackCount++);
+        var retry = restartedReceiver.ProcessBatch(batch);
+
+        Assert.True(first.Accepted);
+        Assert.True(retry.Accepted);
+        Assert.True(retry.Duplicate);
+        Assert.Equal(0, retry.EventsStored);
+        Assert.Equal(1, _db.GetBehavioralEventCount(SessionId, "interaction"));
+        Assert.Equal(1, callbackCount);
+        Assert.Equal(1, _db.GetBehavioralDeliveryHealth().DuplicateBatchCount);
+    }
+
+    [Fact]
+    public void VersionedBatch_SequenceGapAndHelperDrop_AreVisibleInDurableHealth()
+    {
+        var streamId = Guid.NewGuid().ToString("N");
+        var first = MakeVersionedBatch(
+            streamId,
+            1,
+            BehavioralEvent.TreeSnapshot("tree-1"));
+        var afterEviction = MakeVersionedBatch(
+            streamId,
+            4,
+            BehavioralEvent.TreeSnapshot("tree-4")) with { DroppedTotal = 2 };
+
+        Assert.True(_receiver.ProcessBatch(first).Accepted);
+        Assert.True(_receiver.ProcessBatch(afterEviction).Accepted);
+
+        var health = _db.GetBehavioralDeliveryHealth();
+        Assert.Equal(2, health.SequenceGapCount);
+        Assert.Equal(2, health.DroppedEventCount);
+        Assert.Equal(2, _receiver.TotalDroppedEvents);
+    }
+
+    [Fact]
+    public void VersionedBatch_RejectsMalformedSequenceRangeWithoutPersistence()
+    {
+        var batch = MakeVersionedBatch(
+            Guid.NewGuid().ToString("N"),
+            1,
+            BehavioralEvent.TreeSnapshot("tree")) with
+        {
+            LastSequence = 2,
+        };
+
+        var result = _receiver.ProcessBatch(batch);
+
+        Assert.False(result.Accepted);
+        Assert.Equal("sequence_range_mismatch", result.ErrorCode);
+        Assert.Empty(_db.GetBehavioralEvents(SessionId));
+    }
+
+    [Fact]
+    public void VersionedBatch_RejectsStreamChannelRebinding()
+    {
+        var streamId = Guid.NewGuid().ToString("N");
+        var first = MakeVersionedBatch(
+            streamId,
+            1,
+            BehavioralEvent.TreeSnapshot("tree-1"));
+        var rebound = MakeVersionedBatch(
+            streamId,
+            2,
+            BehavioralEvent.TreeSnapshot("tree-2")) with
+        {
+            Channel = BehavioralEventChannels.System,
+        };
+
+        Assert.True(_receiver.ProcessBatch(first).Accepted);
+        var result = _receiver.ProcessBatch(rebound);
+
+        Assert.False(result.Accepted);
+        Assert.Equal("behavioral_stream_channel_mismatch", result.ErrorCode);
+        Assert.Single(_db.GetBehavioralEvents(SessionId));
+    }
+
+    [Fact]
+    public void VersionedBatch_RejectsPartialOverlapWithStableStructuralCode()
+    {
+        var streamId = Guid.NewGuid().ToString("N");
+        var first = MakeVersionedBatch(
+            streamId,
+            1,
+            BehavioralEvent.TreeSnapshot("tree-1"));
+        var overlap = MakeVersionedBatch(
+            streamId,
+            1,
+            BehavioralEvent.TreeSnapshot("tree-overlap"),
+            BehavioralEvent.TreeSnapshot("tree-2"));
+
+        Assert.True(_receiver.ProcessBatch(first).Accepted);
+        var result = _receiver.ProcessBatch(overlap);
+
+        Assert.False(result.Accepted);
+        Assert.Equal("behavioral_stream_partial_overlap", result.ErrorCode);
+        Assert.Single(_db.GetBehavioralEvents(SessionId));
+    }
+
+    [Fact]
+    public void VersionedBatch_RejectsDroppedCounterRegressionWithStableStructuralCode()
+    {
+        var streamId = Guid.NewGuid().ToString("N");
+        var first = MakeVersionedBatch(
+            streamId,
+            1,
+            BehavioralEvent.TreeSnapshot("tree-1")) with { DroppedTotal = 2 };
+        var regressed = MakeVersionedBatch(
+            streamId,
+            2,
+            BehavioralEvent.TreeSnapshot("tree-2")) with { DroppedTotal = 1 };
+
+        Assert.True(_receiver.ProcessBatch(first).Accepted);
+        var result = _receiver.ProcessBatch(regressed);
+
+        Assert.False(result.Accepted);
+        Assert.Equal("behavioral_dropped_total_regression", result.ErrorCode);
+        Assert.Single(_db.GetBehavioralEvents(SessionId));
+    }
+
+    private static BehavioralEventBatch MakeVersionedBatch(
+        string streamId,
+        long firstSequence,
+        params BehavioralEvent[] events)
+    {
+        var sequenced = events
+            .Select((behavioralEvent, index) => behavioralEvent.WithSeq(firstSequence + index))
+            .ToArray();
+        return new BehavioralEventBatch
+        {
+            ContractVersion = BehavioralEventBatch.LegacyContractVersion,
+            BatchId = Guid.NewGuid().ToString("N"),
+            StreamId = streamId,
+            Channel = BehavioralEventChannels.Pms,
+            FirstSequence = sequenced[0].Seq,
+            LastSequence = sequenced[^1].Seq,
+            DroppedTotal = 0,
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            Events = sequenced,
+        };
     }
 }

@@ -1,125 +1,327 @@
+using System.Globalization;
 using ClosedXML.Excel;
 using SuavoAgent.Contracts.Pricing;
 
 namespace SuavoAgent.Core.Pricing;
 
 /// <summary>
-/// Feature B — an EXCEL-IN reader (an <see cref="IPreferredNdcDataSource"/>). It makes the preferred-NDC
-/// report RUNNABLE TODAY without the box: the pharmacist exports (or the agent later reads) a candidate
-/// sheet — one row per candidate NDC with its acquisition cost + expected reimbursement under a plan —
-/// and this reader groups it by (medication, plan) so <c>PreferredNdcReportRunner</c> can pick the
-/// most-profitable NDC per pair. The live PioneerRx SQL/UIA reader (B2) is the same seam, added after the
-/// box recon maps the reimbursement tables; the report format + engine are identical either way.
-///
-/// <para>Read-only by construction (it only reads a file). Columns are matched by header name
-/// (case-insensitive, substring) so the exact export layout can vary. A row missing a cost or
-/// reimbursement is still surfaced (nullable) — the engine fails closed on it rather than the reader
-/// dropping it silently.</para>
-///
-/// Expected headers (any order): Drug/Medication, Plan/Insurance, NDC, Manufacturer,
-/// Acquisition (cost), Reimbursement, Status, [Basis].
+/// In-memory, read-only Feature-B source created only from an admitted private workbook snapshot.
+/// The loader is deliberately internal: production composition must enter through
+/// <see cref="PreferredNdcWorkbookAdmission"/>, which applies the archive/DLP boundary before this
+/// exact schema parser sees any values.
 /// </summary>
 public sealed class ExcelPreferredNdcReader : IPreferredNdcDataSource
 {
-    private readonly Dictionary<string, (List<PreferredNdcCandidate> Cands, ReimbursementBasis Basis)> _byPair;
+    internal const string RequiredWorksheetName = "Preferred NDC Candidates";
+    internal const int MaximumDataRows = PreferredNdcEvidencePolicy.MaximumCandidatesPerWorkbook;
 
-    private ExcelPreferredNdcReader(Dictionary<string, (List<PreferredNdcCandidate>, ReimbursementBasis)> byPair)
-        => _byPair = byPair;
+    internal static readonly string[] RequiredHeaders =
+    [
+        "Drug Group Key",
+        "Insurance Plan ID",
+        "NDC11",
+        "Manufacturer",
+        "Acquisition Amount",
+        "Acquisition Amount Basis",
+        "Expected Reimbursement",
+        "Reimbursement Amount Basis",
+        "Available",
+        "Eligible",
+        "Reimbursement Basis",
+        "Acquisition Evidence Provenance",
+        "Reimbursement Evidence Provenance",
+        "Acquisition Evidence As Of UTC",
+        "Reimbursement Evidence As Of UTC",
+        "Historical Sample Count",
+    ];
 
-    /// <summary>The distinct (medication, plan) pairs found in the sheet — the report's row set.</summary>
-    public IReadOnlyList<(string DrugGroupKey, string PlanId)> Pairs { get; private set; } = new List<(string, string)>();
+    private readonly IReadOnlyDictionary<PairKey, PairBucket> _byPair;
 
-    public Task<PreferredNdcReadResult> ReadCandidatesAsync(PreferredNdcRequest r, CancellationToken ct)
+    private ExcelPreferredNdcReader(
+        IReadOnlyDictionary<PairKey, PairBucket> byPair,
+        IReadOnlyList<(string DrugGroupKey, string PlanId)> pairs)
     {
-        var key = Key(r.DrugGroupKey, r.PlanId);
-        if (_byPair.TryGetValue(key, out var hit) && hit.Cands.Count > 0)
+        _byPair = byPair;
+        Pairs = pairs;
+    }
+
+    /// <summary>The exact, first-seen order of admitted medication/plan pairs.</summary>
+    public IReadOnlyList<(string DrugGroupKey, string PlanId)> Pairs { get; }
+
+    public Task<PreferredNdcReadResult> ReadCandidatesAsync(
+        PreferredNdcRequest request,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var key = new PairKey(request.DrugGroupKey, request.PlanId);
+        if (_byPair.TryGetValue(key, out var hit))
+        {
             return Task.FromResult(new PreferredNdcReadResult(
-                r.JobId, r.RowIndex, r.DrugGroupKey, r.PlanId, true, hit.Cands, hit.Basis, null));
+                request.JobId,
+                request.RowIndex,
+                request.DrugGroupKey,
+                request.PlanId,
+                Found: true,
+                hit.Candidates,
+                hit.Basis,
+                ErrorMessage: null));
+        }
+
         return Task.FromResult(new PreferredNdcReadResult(
-            r.JobId, r.RowIndex, r.DrugGroupKey, r.PlanId, false,
-            new List<PreferredNdcCandidate>(), ReimbursementBasis.Unspecified, "pair_not_in_sheet"));
+            request.JobId,
+            request.RowIndex,
+            request.DrugGroupKey,
+            request.PlanId,
+            Found: false,
+            Array.Empty<PreferredNdcCandidate>(),
+            ReimbursementBasis.Unspecified,
+            "pair_not_in_sheet"));
     }
 
-    /// <summary>Loads the candidate sheet. Throws only on an unreadable/empty workbook; a row with a bad
-    /// number is kept with a null value (engine fails closed) rather than aborting the load.</summary>
-    public static ExcelPreferredNdcReader Load(string path)
+    internal static ExcelPreferredNdcReader LoadAdmittedSnapshot(string path)
     {
-        using var wb = new XLWorkbook(path);
-        var ws = wb.Worksheets.First();
-        var lastRow = ws.LastRowUsed()?.RowNumber() ?? 0;
-        var lastCol = ws.LastColumnUsed()?.ColumnNumber() ?? 0;
-
-        int drug = -1, plan = -1, ndc = -1, mfr = -1, cost = -1, reimb = -1, status = -1, basis = -1;
-        for (var c = 1; c <= lastCol; c++)
+        try
         {
-            var h = ws.Cell(1, c).GetString().Trim().ToLowerInvariant();
-            if (drug == -1 && (h.Contains("drug") || h.Contains("medication"))) drug = c;
-            else if (plan == -1 && (h.Contains("plan") || h.Contains("insurance"))) plan = c;
-            else if (ndc == -1 && h.Contains("ndc")) ndc = c;
-            else if (mfr == -1 && (h.Contains("manufacturer") || h.Contains("mfr"))) mfr = c;
-            else if (cost == -1 && (h.Contains("acquisition") || h.Contains("cost"))) cost = c;
-            else if (reimb == -1 && h.Contains("reimb")) reimb = c;
-            else if (status == -1 && h.Contains("status")) status = c;
-            else if (basis == -1 && h.Contains("basis")) basis = c;
-        }
-        if (drug == -1 || plan == -1 || ndc == -1)
-            throw new InvalidOperationException("candidate sheet is missing a Drug, Plan, or NDC column");
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                64 * 1024,
+                FileOptions.SequentialScan);
+            using var workbook = new XLWorkbook(stream);
+            if (workbook.Worksheets.Count != 1)
+                throw SchemaError();
 
-        var byPair = new Dictionary<string, (List<PreferredNdcCandidate>, ReimbursementBasis)>(StringComparer.Ordinal);
-        var pairs = new List<(string, string)>();
-        for (var r = 2; r <= lastRow; r++)
+            var worksheet = workbook.Worksheets.Single();
+            if (!string.Equals(
+                    worksheet.Name,
+                    RequiredWorksheetName,
+                    StringComparison.Ordinal))
+                throw SchemaError();
+
+            var lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 0;
+            var lastColumn = worksheet.LastColumnUsed()?.ColumnNumber() ?? 0;
+            if (lastRow < 2 || lastRow - 1 > MaximumDataRows ||
+                lastColumn != RequiredHeaders.Length)
+                throw SchemaError();
+
+            var columns = ReadExactHeaderMap(worksheet, lastColumn);
+            var builders = new Dictionary<PairKey, PairBuilder>();
+            var pairOrder = new List<(string DrugGroupKey, string PlanId)>();
+
+            for (var row = 2; row <= lastRow; row++)
+            {
+                if (IsBlankRow(worksheet, row, lastColumn))
+                    continue;
+
+                var drug = ReadIdentity(worksheet.Cell(row, columns["Drug Group Key"]));
+                var plan = ReadIdentity(worksheet.Cell(row, columns["Insurance Plan ID"]));
+                var ndc = ReadIdentity(worksheet.Cell(row, columns["NDC11"]));
+                if (!PreferredNdcEvidencePolicy.IsCanonicalNdc11(ndc))
+                    throw DataError();
+
+                var key = new PairKey(drug, plan);
+                if (!builders.TryGetValue(key, out var builder))
+                {
+                    builder = new PairBuilder();
+                    builders.Add(key, builder);
+                    pairOrder.Add((drug, plan));
+                }
+                if (!builder.NdcIdentities.Add(ndc))
+                    throw new PricingWorkbookContentException("xlsx_preferred_ndc_duplicate_identity");
+
+                var basis = ReadReimbursementBasis(
+                    worksheet.Cell(row, columns["Reimbursement Basis"]));
+                if (builder.Basis is { } existingBasis && existingBasis != basis)
+                    throw DataError();
+                builder.Basis = basis;
+
+                builder.Candidates.Add(new PreferredNdcCandidate(
+                    ndc,
+                    ReadOptionalText(worksheet.Cell(row, columns["Manufacturer"]), 200),
+                    ReadNullableAmount(worksheet.Cell(row, columns["Acquisition Amount"])),
+                    ReadNullableAmount(worksheet.Cell(row, columns["Expected Reimbursement"])),
+                    ReadBoolean(worksheet.Cell(row, columns["Available"])),
+                    ReadBoolean(worksheet.Cell(row, columns["Eligible"])),
+                    ReadAmountBasis(worksheet.Cell(row, columns["Acquisition Amount Basis"])),
+                    ReadAmountBasis(worksheet.Cell(row, columns["Reimbursement Amount Basis"])),
+                    ReadAcquisitionProvenance(
+                        worksheet.Cell(row, columns["Acquisition Evidence Provenance"])),
+                    ReadReimbursementProvenance(
+                        worksheet.Cell(row, columns["Reimbursement Evidence Provenance"])),
+                    ReadEvidenceTime(
+                        worksheet.Cell(row, columns["Acquisition Evidence As Of UTC"])),
+                    ReadEvidenceTime(
+                        worksheet.Cell(row, columns["Reimbursement Evidence As Of UTC"])),
+                    ReadSampleCount(worksheet.Cell(row, columns["Historical Sample Count"]))));
+            }
+
+            if (builders.Count == 0)
+                throw SchemaError();
+
+            var frozen = builders.ToDictionary(
+                pair => pair.Key,
+                pair => new PairBucket(
+                    pair.Value.Candidates.ToArray(),
+                    pair.Value.Basis ?? ReimbursementBasis.Unspecified));
+            return new ExcelPreferredNdcReader(frozen, pairOrder.ToArray());
+        }
+        catch (PricingWorkbookContentException)
         {
-            var d = ws.Cell(r, drug).GetString().Trim();
-            var p = ws.Cell(r, plan).GetString().Trim();
-            var n = ws.Cell(r, ndc).GetString().Trim();
-            if (d.Length == 0 || p.Length == 0 || n.Length == 0) continue;
-
-            var cand = new PreferredNdcCandidate(
-                n,
-                mfr > 0 ? ws.Cell(r, mfr).GetString().Trim() : "",
-                cost > 0 ? ParseMoney(ws.Cell(r, cost).GetString()) : null,
-                reimb > 0 ? ParseMoney(ws.Cell(r, reimb).GetString()) : null,
-                status > 0 ? ws.Cell(r, status).GetString().Trim() : "");
-
-            var key = Key(d, p);
-            var rowBasis = ReadBasis(basis > 0 ? ws.Cell(r, basis).GetString() : "");
-            if (!byPair.TryGetValue(key, out var bucket))
-            {
-                bucket = (new List<PreferredNdcCandidate>(), rowBasis);
-                pairs.Add((d, p));
-            }
-            else if (bucket.Item2 != rowBasis)
-            {
-                // Rows in the same pair disagree on provenance → fail closed to Unspecified rather than
-                // branding the winner's number with row 1's basis (contract vs. estimate must not be faked).
-                bucket = (bucket.Item1, ReimbursementBasis.Unspecified);
-            }
-            bucket.Item1.Add(cand);
-            byPair[key] = bucket;
+            throw;
         }
-
-        return new ExcelPreferredNdcReader(byPair) { Pairs = pairs };
+        catch (Exception ex) when (ex is
+            IOException or InvalidDataException or ArgumentException or FormatException or OverflowException)
+        {
+            throw new PricingWorkbookContentException("xlsx_preferred_ndc_schema_invalid");
+        }
     }
 
-    private static string Key(string drug, string plan) => drug + "\u0001" + plan;
-
-    private static decimal? ParseMoney(string? s) =>
-        ProfitOptimizerMoney.TryParse(s, out var v) ? v : (decimal?)null;
-
-    private static ReimbursementBasis ReadBasis(string s)
+    private static Dictionary<string, int> ReadExactHeaderMap(
+        IXLWorksheet worksheet,
+        int lastColumn)
     {
-        s = s.Trim().ToLowerInvariant();
-        if (s.Contains("contract") || s.Contains("mac")) return ReimbursementBasis.ContractOrMac;
-        if (s.Contains("claim") || s.Contains("adjud") || s.Contains("estimate")) return ReimbursementBasis.AdjudicatedHistory;
-        return ReimbursementBasis.Unspecified;
-    }
-}
+        var columns = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var column = 1; column <= lastColumn; column++)
+        {
+            var header = worksheet.Cell(1, column).GetString();
+            if (!columns.TryAdd(header, column))
+                throw SchemaError();
+        }
 
-/// <summary>Money parse identical to ProfitOptimizer.TryParseMoney, duplicated here to keep Core free of a
-/// Helper dependency (ProfitOptimizer lives in Helper). Same lenient rules ($ + thousands tolerated).</summary>
-internal static class ProfitOptimizerMoney
-{
-    public static bool TryParse(string? text, out decimal value) =>
-        decimal.TryParse((text ?? "").Trim().TrimStart('$'),
-            System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out value);
+        if (columns.Count != RequiredHeaders.Length ||
+            RequiredHeaders.Any(header => !columns.ContainsKey(header)))
+            throw SchemaError();
+        return columns;
+    }
+
+    private static bool IsBlankRow(IXLWorksheet worksheet, int row, int lastColumn)
+    {
+        for (var column = 1; column <= lastColumn; column++)
+        {
+            if (!string.IsNullOrWhiteSpace(worksheet.Cell(row, column).GetString()))
+                return false;
+        }
+        return true;
+    }
+
+    private static string ReadIdentity(IXLCell cell)
+    {
+        var raw = cell.GetString();
+        var value = raw.Trim();
+        if (!string.Equals(raw, value, StringComparison.Ordinal) ||
+            value.Length is < 1 or > 200 || value.Any(char.IsControl))
+            throw DataError();
+        return value;
+    }
+
+    private static string ReadOptionalText(IXLCell cell, int maximumLength)
+    {
+        var value = cell.GetString().Trim();
+        if (value.Length > maximumLength || value.Any(char.IsControl))
+            throw DataError();
+        return value;
+    }
+
+    private static decimal? ReadNullableAmount(IXLCell cell)
+    {
+        var value = cell.GetString().Trim();
+        if (value.Length == 0)
+            return null;
+        if (!decimal.TryParse(
+                value,
+                NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                CultureInfo.InvariantCulture,
+                out var amount))
+            throw DataError();
+        return amount;
+    }
+
+    private static bool ReadBoolean(IXLCell cell)
+    {
+        var value = cell.GetString().Trim();
+        return value switch
+        {
+            "TRUE" => true,
+            "FALSE" => false,
+            _ => throw DataError(),
+        };
+    }
+
+    private static PreferredNdcAmountBasis ReadAmountBasis(IXLCell cell) =>
+        cell.GetString().Trim() switch
+        {
+            "per_dispensed_fill" => PreferredNdcAmountBasis.PerDispensedFill,
+            "per_package" => PreferredNdcAmountBasis.PerPackage,
+            "per_unit" => PreferredNdcAmountBasis.PerUnit,
+            _ => throw DataError(),
+        };
+
+    private static ReimbursementBasis ReadReimbursementBasis(IXLCell cell) =>
+        cell.GetString().Trim() switch
+        {
+            "contract_or_mac" => ReimbursementBasis.ContractOrMac,
+            "adjudicated_history" => ReimbursementBasis.AdjudicatedHistory,
+            _ => throw DataError(),
+        };
+
+    private static PreferredNdcEvidenceProvenance ReadAcquisitionProvenance(IXLCell cell) =>
+        cell.GetString().Trim() switch
+        {
+            "pioneerrx_acquisition_cost_export" =>
+                PreferredNdcEvidenceProvenance.PioneerRxAcquisitionCostExport,
+            _ => throw DataError(),
+        };
+
+    private static PreferredNdcEvidenceProvenance ReadReimbursementProvenance(IXLCell cell) =>
+        cell.GetString().Trim() switch
+        {
+            "pioneerrx_contract_or_mac_export" =>
+                PreferredNdcEvidenceProvenance.PioneerRxContractOrMacExport,
+            "pioneerrx_adjudicated_claims_export" =>
+                PreferredNdcEvidenceProvenance.PioneerRxAdjudicatedClaimsExport,
+            _ => throw DataError(),
+        };
+
+    private static DateTimeOffset ReadEvidenceTime(IXLCell cell)
+    {
+        var value = cell.GetString().Trim();
+        if (!value.EndsWith('Z') ||
+            !DateTimeOffset.TryParse(
+                value,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+            throw DataError();
+        return parsed;
+    }
+
+    private static int ReadSampleCount(IXLCell cell)
+    {
+        var value = cell.GetString().Trim();
+        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var count) ||
+            count is < 0 or > PreferredNdcEvidencePolicy.MaximumHistoricalSampleCount)
+            throw DataError();
+        return count;
+    }
+
+    private static PricingWorkbookContentException SchemaError() =>
+        new("xlsx_preferred_ndc_schema_forbidden");
+
+    private static PricingWorkbookContentException DataError() =>
+        new("xlsx_preferred_ndc_data_forbidden");
+
+    private readonly record struct PairKey(string DrugGroupKey, string PlanId);
+
+    private sealed record PairBucket(
+        IReadOnlyList<PreferredNdcCandidate> Candidates,
+        ReimbursementBasis Basis);
+
+    private sealed class PairBuilder
+    {
+        internal List<PreferredNdcCandidate> Candidates { get; } = [];
+        internal HashSet<string> NdcIdentities { get; } = new(StringComparer.Ordinal);
+        internal ReimbursementBasis? Basis { get; set; }
+    }
 }

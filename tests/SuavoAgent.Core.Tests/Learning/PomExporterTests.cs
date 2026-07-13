@@ -22,6 +22,7 @@ public class PomExporterTests : IDisposable
     {
         var export = PomExporter.Export(_db, "sess-1");
         var doc = JsonDocument.Parse(export);
+        Assert.Equal(1, doc.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("sess-1", doc.RootElement.GetProperty("sessionId").GetString());
         Assert.Equal("pharm-1", doc.RootElement.GetProperty("pharmacyId").GetString());
     }
@@ -37,6 +38,55 @@ public class PomExporterTests : IDisposable
         var procs = doc.RootElement.GetProperty("processes");
         Assert.Equal(1, procs.GetArrayLength());
         Assert.Equal("PioneerPharmacy.exe", procs[0].GetProperty("processName").GetString());
+    }
+
+    [Fact]
+    public void Export_ProcessCatalog_ExcludesArbitraryHostInventory()
+    {
+        _db.UpsertObservedProcess("sess-1", "PioneerPharmacy.exe",
+            @"C:\PioneerRx\PioneerPharmacy.exe", isPmsCandidate: true);
+        _db.UpsertObservedProcess("sess-1", "Joshua-Private-Tool.exe",
+            @"C:\Users\Joshua\Joshua-Private-Tool.exe", isPmsCandidate: true);
+        _db.UpsertObservedProcess("sess-1", "notepad.exe",
+            @"C:\Windows\notepad.exe", isPmsCandidate: false);
+
+        var export = PomExporter.Export(_db, "sess-1");
+        var processes = JsonDocument.Parse(export).RootElement.GetProperty("processes");
+
+        Assert.Single(processes.EnumerateArray());
+        Assert.Equal("PioneerPharmacy.exe", processes[0].GetProperty("processName").GetString());
+        Assert.DoesNotContain("Joshua-Private-Tool", export, StringComparison.Ordinal);
+        Assert.DoesNotContain("notepad", export, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Export_ProcessCatalog_RejectsAmbiguousPmsIdentity()
+    {
+        _db.UpsertObservedProcess("sess-1", "PioneerPharmacy.exe",
+            @"C:\PioneerRx\PioneerPharmacy.exe", isPmsCandidate: true);
+        _db.UpsertObservedProcess("sess-1", "BestRx.exe",
+            @"C:\BestRx\BestRx.exe", isPmsCandidate: true);
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => PomExporter.Export(_db, "sess-1"));
+
+        Assert.Equal(
+            "POM export refused because more than one PMS identity was observed",
+            error.Message);
+    }
+
+    [Fact]
+    public void Export_ProcessCatalog_AllowsMultipleProcessesForSamePmsFamily()
+    {
+        _db.UpsertObservedProcess("sess-1", "QS1NexGen.exe",
+            @"C:\QS1\QS1NexGen.exe", isPmsCandidate: true);
+        _db.UpsertObservedProcess("sess-1", "NexGen.exe",
+            @"C:\QS1\NexGen.exe", isPmsCandidate: true);
+
+        var processes = JsonDocument.Parse(PomExporter.Export(_db, "sess-1"))
+            .RootElement.GetProperty("processes");
+
+        Assert.Equal(2, processes.GetArrayLength());
     }
 
     [Fact]

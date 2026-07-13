@@ -63,7 +63,10 @@ public class PricingSqlE2ETests
             DrugNameColumn: "Name", StrengthColumn: "Strength",
             BrandGenericColumn: "BrandGeneric", GenericValue: "Generic",
             RxOtcColumn: "RxOtc", RxValue: "Rx",
-            ScheduleColumn: "DeaSchedule", NoScheduleValue: "0");
+            ScheduleColumn: "DeaSchedule", NoScheduleValue: "0",
+            BrandGenericColumnShape: new PricingSqlColumnShape("nvarchar", 40, null, null, false),
+            RxOtcColumnShape: new PricingSqlColumnShape("nvarchar", 20, null, null, false),
+            ScheduleColumnShape: new PricingSqlColumnShape("nvarchar", 20, null, null, false));
         var gen = new SqlTopDispensedGenerator(
             _ => Task.FromResult(new SqlConnection(dbConn).OpenAndReturn()),
             new[] { "Sold", "Completed" },

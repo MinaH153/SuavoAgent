@@ -20,7 +20,7 @@ public sealed record RawElementProperties(
 /// HIPAA boundary enforcer for UIA element properties.
 ///
 /// Tiers:
-///   GREEN  — structural metadata, safe in plain text (ControlType, AutomationId, ClassName, BoundingRect, Depth, ChildIndex)
+///   GREEN  — bounded structural metadata after vendor-controlled identifier validation
 ///   YELLOW — column headers, always HMAC-hashed
 ///   RED    — Value, Text, Selection, HelpText, ItemStatus — NEVER collected
 /// </summary>
@@ -32,8 +32,8 @@ public static class UiaPropertyScrubber
     public static ScrubbedElement Scrub(RawElementProperties raw, string pharmacySalt) =>
         new(
             ControlType: raw.ControlType,
-            AutomationId: raw.AutomationId,
-            ClassName: raw.ClassName,
+            AutomationId: StructuralIdentifierSanitizer.AllowOrNull(raw.AutomationId),
+            ClassName: StructuralIdentifierSanitizer.AllowOrNull(raw.ClassName),
             NameHash: raw.Name is null ? null : HmacHash(raw.Name, pharmacySalt),
             BoundingRect: raw.BoundingRect,
             Depth: raw.Depth,
@@ -44,7 +44,8 @@ public static class UiaPropertyScrubber
     /// </summary>
     public static ScrubbedElement? TryScrub(RawElementProperties raw, string pharmacySalt)
     {
-        if (string.IsNullOrEmpty(raw.AutomationId) && string.IsNullOrEmpty(raw.ClassName))
+        if (!StructuralIdentifierSanitizer.IsAllowed(raw.AutomationId) &&
+            !StructuralIdentifierSanitizer.IsAllowed(raw.ClassName))
             return null;
 
         return Scrub(raw, pharmacySalt);
@@ -55,10 +56,10 @@ public static class UiaPropertyScrubber
     /// </summary>
     public static string? BuildElementId(RawElementProperties raw)
     {
-        if (!string.IsNullOrEmpty(raw.AutomationId))
+        if (StructuralIdentifierSanitizer.IsAllowed(raw.AutomationId))
             return raw.AutomationId;
 
-        if (!string.IsNullOrEmpty(raw.ClassName))
+        if (StructuralIdentifierSanitizer.IsAllowed(raw.ClassName))
             return $"{raw.ClassName}:{raw.Depth}:{raw.ChildIndex}";
 
         return null;

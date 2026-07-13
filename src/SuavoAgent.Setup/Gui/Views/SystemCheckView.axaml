@@ -9,7 +9,7 @@
              Background="{DynamicResource SuavoBackgroundGradientBrush}">
 
     <UserControl.Styles>
-        <!-- Check rows: transparent until hovered, then a warm elevated wash. -->
+        <!-- Check rows: transparent until hovered, then a cool elevated wash. -->
         <Style Selector="Border.checkRow">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="Transitions">
@@ -22,10 +22,10 @@
             <Setter Property="Background" Value="{DynamicResource SuavoSurfaceElevatedBrush}" />
         </Style>
 
-        <!-- Primary CTA: gold gradient, dark ink, intentional disabled state. -->
+        <!-- Primary CTA: sapphire gradient, white ink, intentional disabled state. -->
         <Style Selector="Button.cta">
             <Setter Property="Background" Value="{DynamicResource SuavoAccentGradientBrush}" />
-            <Setter Property="Foreground" Value="#1A1407" />
+            <Setter Property="Foreground" Value="{DynamicResource SuavoAccentTextInverseBrush}" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="FontSize" Value="14" />
             <Setter Property="Padding" Value="32,13" />
@@ -63,7 +63,7 @@
                        FontSize="32" FontWeight="Light" />
             <Border Height="2" Width="128" HorizontalAlignment="Left" CornerRadius="1"
                     Background="{DynamicResource SuavoAccentRuleBrush}" />
-            <TextBlock Text="We only need a couple of essentials to take control — SuavoAgent configures the rest itself."
+            <TextBlock Text="Setup verifies encryption, TPM identity, PioneerRx, and SQL before any pharmacy data is activated."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14" MaxWidth="640" HorizontalAlignment="Left"
                        TextWrapping="Wrap" />
@@ -161,12 +161,12 @@
         <!-- ── Footer ───────────────────────────────────────────────────── -->
         <Grid Grid.Row="3" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
             <TextBlock Grid.Column="0" VerticalAlignment="Center" MaxWidth="520" TextWrapping="Wrap"
-                       Text="Everything runs locally. Nothing leaves this computer until you approve it."
+                       Text="Readiness checks run locally. Observation data is not activated until you approve it."
                        Foreground="{DynamicResource SuavoTextSubtleBrush}" FontSize="11.5" />
             <Panel Grid.Column="1">
                 <Border Classes="ctaGlow" IsVisible="{Binding IsReady}" CornerRadius="12" Margin="-6"
                         Background="{DynamicResource SuavoAccentBrush}" Opacity="0.35"
-                        BoxShadow="0 0 26 2 #66D4A24C" />
+                        BoxShadow="0 0 26 2 #662563EB" />
                 <Button Classes="cta" Content="Continue"
                         Command="{Binding ContinueCommand}"
                         IsEnabled="{Binding IsReady}" />

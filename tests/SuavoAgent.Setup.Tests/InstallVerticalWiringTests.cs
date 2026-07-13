@@ -10,23 +10,22 @@ namespace SuavoAgent.Setup.Tests;
 
 /// <summary>
 /// Guards the install-posture resolution + vertical-config baking pipeline:
-/// absent/blocked → fail-closed to HIPAA; verified → honor the config.
+/// absent/unsigned/blocked → refuse installation; verified → honor the config.
 /// </summary>
 public class InstallVerticalWiringTests
 {
     // ── ResolveInstallPosture ────────────────────────────────────────────────
 
     [Fact]
-    public void ResolvePosture_absent_vc_returns_hipaa_default()
+    public void ResolvePosture_absent_vc_refuses_installation()
     {
         var config = BaseConfig();  // no VerticalConfig fields
-        var posture = InstallOrchestrator.ResolveInstallPosture(config, AnyVerifier());
-        Assert.Equal("hipaa", posture.ComplianceMode);
-        Assert.Equal("pioneerrx", posture.SystemConnector);
+        Assert.Throws<InstallException>(() =>
+            InstallOrchestrator.ResolveInstallPosture(config, AnyVerifier()));
     }
 
     [Fact]
-    public void ResolvePosture_blocked_vc_fails_closed_to_hipaa()
+    public void ResolvePosture_blocked_vc_refuses_installation()
     {
         // Blocked = bad base64 signature → blocked → hipaa
         var dto = DefaultDto();
@@ -37,8 +36,8 @@ public class InstallVerticalWiringTests
             VerticalConfigSignature = Convert.ToBase64String(new byte[64]),  // garbage sig
             VerticalConfigKeyId = TestKeyId,
         };
-        var posture = InstallOrchestrator.ResolveInstallPosture(config, MakeVerifier());
-        Assert.Equal("hipaa", posture.ComplianceMode);
+        Assert.Throws<InstallException>(() =>
+            InstallOrchestrator.ResolveInstallPosture(config, MakeVerifier()));
     }
 
     [Fact]

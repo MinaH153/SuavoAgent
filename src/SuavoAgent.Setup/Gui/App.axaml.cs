@@ -14,27 +14,17 @@ public partial class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            var ctx = TryLoadContext(desktop.Args ?? Array.Empty<string>());
             var window = new MainWindow
             {
-                DataContext = new MainWindowViewModel(ctx, exitCode => desktop.Shutdown(exitCode)),
+                DataContext = new MainWindowViewModel(
+                    exitCode => desktop.Shutdown(exitCode),
+                    startInUninstall: Program.IsUninstallUiMode(desktop.Args),
+                    startInRepair: Program.IsRepairUiMode(desktop.Args),
+                    configureInstalledCohort: Program.IsConnectInstalledMode(desktop.Args)),
             };
             desktop.MainWindow = window;
         }
         base.OnFrameworkInitializationCompleted();
     }
 
-    private static InstallContext? TryLoadContext(string[] args)
-    {
-        try
-        {
-            var config = SetupConfig.Load(args);
-            return config == null ? null : new InstallContext(config);
-        }
-        catch
-        {
-            // SetupConfig.Validate threw — surface the no-config error view.
-            return null;
-        }
-    }
 }

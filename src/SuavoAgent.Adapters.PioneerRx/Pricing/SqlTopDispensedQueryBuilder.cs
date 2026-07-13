@@ -19,20 +19,25 @@ namespace SuavoAgent.Adapters.PioneerRx.Pricing;
 /// <list type="bullet">
 ///   <item>required Item identifiers missing (table / id / NDC / drug-name);</item>
 ///   <item>the "generics only" gate is unresolved (no BrandGeneric column or value);</item>
+///   <item>the Rx-not-OTC gate is unresolved (no Rx/OTC column or requested Rx value);</item>
+///   <item>the no-schedule gate is unresolved (no schedule column or requested no-schedule value);</item>
 ///   <item>no dispensed-status names supplied (an unfiltered SUM would count voids/reversals and
 ///     rank the wrong items — the same overcount hazard the volume builder guards).</item>
 /// </list>
-/// The Rx-not-OTC and No-Schedule gates are applied only when their columns are resolved; absent, the
-/// generics gate + the report's own scope still hold, and the omission is the caller's to log.
 /// </summary>
 public static class SqlTopDispensedQueryBuilder
 {
+    public const string RxFilterUnresolvedCode = "top_dispensed_rx_filter_unresolved";
+    public const string ScheduleFilterUnresolvedCode = "top_dispensed_schedule_filter_unresolved";
+    public const string FilterTypeUnresolvedCode = "top_dispensed_filter_type_unresolved";
     public const string TopNParameter = "@topN";
     public const string WindowStartParameter = "@windowStart";
     public const string GenericParameter = "@generic";
     public const string RxParameter = "@rxOtc";
     public const string NoScheduleParameter = "@noSchedule";
     public const string StatusParameterPrefix = "@tdstatus";
+    internal const int MaximumClassificationSize = 64;
+    internal const int StatusParameterSize = 128;
 
     // Canary-pinned (PioneerRxCanarySource) — identical anchors to SqlVolumeQueryBuilder.
     private const string RxSchema = "Prescription";
@@ -57,6 +62,11 @@ public static class SqlTopDispensedQueryBuilder
             || string.IsNullOrWhiteSpace(spec.BrandGenericColumn)
             || string.IsNullOrWhiteSpace(spec.GenericValue))
             return null;
+        if (string.IsNullOrWhiteSpace(spec.RxOtcColumn) || string.IsNullOrWhiteSpace(spec.RxValue))
+            throw new InvalidOperationException(RxFilterUnresolvedCode);
+        if (string.IsNullOrWhiteSpace(spec.ScheduleColumn) || string.IsNullOrWhiteSpace(spec.NoScheduleValue))
+            throw new InvalidOperationException(ScheduleFilterUnresolvedCode);
+        ValidateFilterTypes(spec);
 
         var rx = QualifiedIdent(RxSchema, RxTable);
         var statusTbl = QualifiedIdent(RxSchema, StatusTable);
@@ -80,11 +90,8 @@ public static class SqlTopDispensedQueryBuilder
             $"st.{BracketIdent(StatusDescriptionColumn)} IN ({statusParams})",
             $"it.{BracketIdent(spec.BrandGenericColumn)} = {GenericParameter}",
         };
-        // Optional gates — only when the column is resolved AND a value to match is supplied.
-        if (!string.IsNullOrWhiteSpace(spec.RxOtcColumn) && !string.IsNullOrWhiteSpace(spec.RxValue))
-            where.Add($"it.{BracketIdent(spec.RxOtcColumn!)} = {RxParameter}");
-        if (!string.IsNullOrWhiteSpace(spec.ScheduleColumn) && !string.IsNullOrWhiteSpace(spec.NoScheduleValue))
-            where.Add($"it.{BracketIdent(spec.ScheduleColumn!)} = {NoScheduleParameter}");
+        where.Add($"it.{BracketIdent(spec.RxOtcColumn)} = {RxParameter}");
+        where.Add($"it.{BracketIdent(spec.ScheduleColumn)} = {NoScheduleParameter}");
 
         var groupBy = new List<string> { $"it.{BracketIdent(spec.DrugNameColumn)}" };
         if (strengthGroupBy is not null) groupBy.Add(strengthGroupBy);
@@ -106,6 +113,30 @@ public static class SqlTopDispensedQueryBuilder
 
     private static string QualifiedIdent(string schema, string table) =>
         $"{BracketIdent(schema)}.{BracketIdent(table)}";
+
+    internal static void ValidateFilterTypes(TopDispensedSpec spec)
+    {
+        if (!PricingSqlTypePolicy.TryGetBoundedTextParameter(
+                spec.BrandGenericColumnShape,
+                spec.GenericValue.Length,
+                MaximumClassificationSize,
+                out _,
+                out _) ||
+            !PricingSqlTypePolicy.TryGetBoundedTextParameter(
+                spec.RxOtcColumnShape,
+                spec.RxValue!.Length,
+                MaximumClassificationSize,
+                out _,
+                out _) ||
+            !PricingSqlTypePolicy.TryGetTextOrIntegerParameter(
+                spec.NoScheduleValue!,
+                spec.ScheduleColumnShape,
+                MaximumClassificationSize,
+                out _,
+                out _,
+                out _))
+            throw new InvalidOperationException(FilterTypeUnresolvedCode);
+    }
 
     private static string BracketIdent(string ident) => "[" + ident.Replace("]", "]]") + "]";
 }

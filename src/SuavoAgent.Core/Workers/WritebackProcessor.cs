@@ -4,7 +4,6 @@ using SuavoAgent.Contracts.Writeback;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
-using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
@@ -55,7 +54,7 @@ public sealed class WritebackProcessor : ResilientHostedService
     public void SetSessionId(string sessionId)
     {
         _sessionId = sessionId;
-        _logger.LogInformation("Session ID attached to WritebackProcessor: {SessionId}", sessionId);
+        _logger.LogInformation("core.writeback.session_attached");
     }
 
     protected override string WorkerName => "writeback";
@@ -85,7 +84,7 @@ public sealed class WritebackProcessor : ResilientHostedService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Writeback processing cycle failed");
+                _logger.LogSafeWarning(ex);
             }
 
             await Task.Delay(TimeSpan.FromSeconds(ProcessIntervalSeconds), stoppingToken);
@@ -101,8 +100,10 @@ public sealed class WritebackProcessor : ResilientHostedService
         {
             foreach (var (taskId, state, rxNumber, retryCount, _) in pending)
             {
-                _logger.LogInformation("Recovering writeback {TaskId} in state {State} (retries: {Retries})",
-                    taskId, state, retryCount);
+                _logger.LogInformation(
+                    "core.writeback.recovery_item state={State} retries={Retries}",
+                    state,
+                    retryCount);
 
                 var machine = new WritebackStateMachine(taskId, state, OnStateChanged, retryCount);
                 _machines[taskId] = machine;
@@ -124,7 +125,7 @@ public sealed class WritebackProcessor : ResilientHostedService
         {
             if (_machines.ContainsKey(taskId))
             {
-                _logger.LogDebug("Writeback {TaskId} already tracked", taskId);
+                _logger.LogDebug("core.writeback.enqueue_duplicate");
                 return;
             }
 
@@ -136,8 +137,7 @@ public sealed class WritebackProcessor : ResilientHostedService
             _deliveredAts[taskId] = deliveredAt;
         }
         _stateDb.UpsertWritebackState(taskId, rxNumber, WritebackState.Queued, 0, null);
-        _logger.LogInformation("Enqueued writeback {TaskId} for Rx {RxHash} transition={Transition}",
-            taskId, PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "[no-hmac-salt]"), transition);
+        _logger.LogInformation("core.writeback.enqueued");
     }
 
     private async Task ProcessPendingWritebacksAsync(CancellationToken ct)
@@ -167,7 +167,7 @@ public sealed class WritebackProcessor : ResilientHostedService
                 if (machine2.CanFire(WritebackTrigger.HelperDisconnected))
                 {
                     machine2.Fire(WritebackTrigger.HelperDisconnected);
-                    _logger.LogDebug("Writeback {TaskId} blocked — no Helper", taskId2);
+                    _logger.LogDebug("core.writeback.helper_unavailable");
                 }
             }
             return;
@@ -180,7 +180,7 @@ public sealed class WritebackProcessor : ResilientHostedService
             // If no engine available, skip (backward compatible)
             if (_writebackEngine == null || !_writebackEngine.WritebackEnabled)
             {
-                _logger.LogDebug("Writeback {TaskId} — no engine or engine disabled", taskId);
+                _logger.LogDebug("core.writeback.engine_unavailable");
                 continue;
             }
 
@@ -191,7 +191,7 @@ public sealed class WritebackProcessor : ResilientHostedService
 
             if (!int.TryParse(state.RxNumber, out var rxNumber))
             {
-                _logger.LogWarning("Writeback {TaskId} — invalid RxNumber '{RxHash}'", taskId, PhiScrubber.HmacHash(state.RxNumber, _options.HmacSalt ?? "[no-hmac-salt]"));
+                _logger.LogWarning("core.writeback.rx_number_invalid");
                 if (machine.CanFire(WritebackTrigger.BusinessError))
                     machine.Fire(WritebackTrigger.BusinessError);
                 continue;
@@ -200,8 +200,7 @@ public sealed class WritebackProcessor : ResilientHostedService
             // Per-RxNumber serialization
             if (!_writebackEngine.TryAcquireRxLock(rxNumber))
             {
-                _logger.LogDebug("Writeback {TaskId} — Rx {RxHash} locked, skipping cycle",
-                    taskId, PhiScrubber.HmacHash(rxNumber.ToString(), _options.HmacSalt ?? "[no-hmac-salt]"));
+                _logger.LogDebug("core.writeback.rx_lock_busy");
                 continue;
             }
 
@@ -226,8 +225,7 @@ public sealed class WritebackProcessor : ResilientHostedService
 
                 if (resolved == null)
                 {
-                    _logger.LogWarning("Writeback {TaskId} — Rx {RxHash} not in expected state for {Transition}",
-                        taskId, PhiScrubber.HmacHash(rxNumber.ToString(), _options.HmacSalt ?? "[no-hmac-salt]"), transition);
+                    _logger.LogWarning("core.writeback.rx_state_unexpected");
                     if (machine.CanFire(WritebackTrigger.BusinessError))
                         machine.Fire(WritebackTrigger.BusinessError);
                     continue;
@@ -264,15 +262,15 @@ public sealed class WritebackProcessor : ResilientHostedService
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Feedback recording failed for {TaskId} — non-fatal", machine.TaskId);
+                        _logger.LogSafeWarning(ex);
                     }
                 }
 
-                _logger.LogInformation("Writeback {TaskId} result: {Outcome}", taskId, result.Outcome);
+                _logger.LogInformation("core.writeback.result_received");
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Writeback {TaskId} error", taskId);
+                _logger.LogSafeWarning(ex);
                 if (machine.CanFire(WritebackTrigger.SystemError))
                     machine.Fire(WritebackTrigger.SystemError);
             }
@@ -325,8 +323,11 @@ public sealed class WritebackProcessor : ResilientHostedService
 
     private void OnStateChanged(string taskId, WritebackState previousState, WritebackState newState, WritebackTrigger trigger)
     {
-        _logger.LogInformation("Writeback {TaskId} {From} -> {To} ({Trigger})",
-            taskId, previousState, newState, trigger);
+        _logger.LogInformation(
+            "core.writeback.state_transition from={From} to={To} trigger={Trigger}",
+            previousState,
+            newState,
+            trigger);
 
         WritebackStateMachine? machine;
         string rxNum;
@@ -364,12 +365,13 @@ public sealed class WritebackProcessor : ResilientHostedService
         {
             _stateDb.UpsertWritebackState(taskId, rxNum, newState, machine?.RetryCount ?? 0,
                 "max retries exceeded");
-            _logger.LogWarning("Writeback {TaskId} DEAD-LETTERED after {Retries} retries",
-                taskId, machine?.RetryCount ?? 0);
+            _logger.LogWarning(
+                "core.writeback.dead_letter retries={Retries}",
+                machine?.RetryCount ?? 0);
         }
         else if (newState is WritebackState.Done or WritebackState.ManualReview)
         {
-            _logger.LogInformation("Writeback {TaskId} reached terminal state: {State}", taskId, newState);
+            _logger.LogInformation("core.writeback.terminal state={State}", newState);
         }
     }
 }

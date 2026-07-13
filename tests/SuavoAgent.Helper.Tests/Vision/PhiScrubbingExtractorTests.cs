@@ -70,6 +70,29 @@ public class PhiScrubbingExtractorTests
     }
 
     [Fact]
+    public async Task Extract_DropsDynamicAutomationIdentifiers()
+    {
+        var inner = new FakeExtractor
+        {
+            Output = FrameWith(elements:
+            [
+                new VisualElement
+                {
+                    Role = "input",
+                    Name = "Search",
+                    AutomationId = "patient_123456789",
+                    Bounds = new Rect(0, 0, 100, 20),
+                },
+            ]),
+        };
+
+        var result = await new PhiScrubbingExtractor(inner).ExtractAsync(
+            FakeScreen(), CancellationToken.None);
+
+        Assert.Null(result!.Elements[0].AutomationId);
+    }
+
+    [Fact]
     public async Task Extract_PreservesNonPHIFields()
     {
         const string clean = "Pricing tab";

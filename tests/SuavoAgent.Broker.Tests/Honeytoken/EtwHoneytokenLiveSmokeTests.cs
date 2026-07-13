@@ -63,7 +63,7 @@ public sealed class EtwHoneytokenLiveSmokeTests
             if (!File.Exists(handoffPath))
             {
                 // Armed but no handoff after a real open = a wiring/keyword regression. FAIL loudly.
-                Assert.True(false, "ETW oracle armed but a real decoy open produced no handoff (keyword/wiring regression)");
+                Assert.Fail("ETW oracle armed but a real decoy open produced no handoff (keyword/wiring regression)");
             }
 
             var entries = HoneytokenAttributionStore.Read(handoffPath, nonce, DateTimeOffset.UtcNow, TimeSpan.FromMinutes(1));

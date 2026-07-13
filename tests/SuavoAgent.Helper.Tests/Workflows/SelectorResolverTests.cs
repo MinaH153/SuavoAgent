@@ -17,8 +17,28 @@ public class SelectorResolverTests
 
     private static SelectorPatch Patch(
         SelectorStepId step = SelectorStepId.QuickSearchField,
-        string? pms = null, string? screen = null, int version = 1, string id = "p1") =>
-        new(id, "skill-x", step, pms, screen, Target, new[] { Fallback }, 0.9, "digest", version);
+        string? pms = null, string? screen = null, int version = 1, string id = "p1",
+        string? approvedByRole = SelectorResolver.PharmacistInChargeRole) =>
+        new(id, "skill-x", step, pms, screen, Target, new[] { Fallback }, 0.9, "digest", version,
+            approvedByRole);
+
+    [Fact]
+    public void QuickSearch_UnapprovedLearnedPatch_IsIgnored_AndOnlyBuiltinRuns()
+    {
+        var resolver = new SelectorResolver(new[] { Patch(approvedByRole: null) });
+        var signatureCalls = 0;
+        var builtinCalls = 0;
+
+        var result = resolver.Resolve(
+            SelectorStepId.QuickSearchField,
+            _ => { signatureCalls++; return true; },
+            () => { builtinCalls++; return false; });
+
+        Assert.Equal(0, signatureCalls);
+        Assert.Equal(1, builtinCalls);
+        Assert.Equal(SelectorOutcome.Failed, result.Outcome);
+        Assert.Null(result.PatchId);
+    }
 
     [Fact]
     public void NoPatch_TriesOnlyBuiltin_IdenticalToToday()

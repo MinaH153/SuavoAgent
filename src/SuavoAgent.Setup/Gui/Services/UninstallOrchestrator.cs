@@ -1,73 +1,98 @@
+using SuavoAgent.Contracts.Maintenance;
+using SuavoAgent.Setup.Maintenance;
+
 namespace SuavoAgent.Setup.Gui.Services;
 
 /// <summary>
-/// GUI counterpart to <see cref="InstallOrchestrator"/>. Drives the symmetric
-/// uninstall from the progress step: stop + remove the three Windows services
-/// (watchdog-first, kills the orphan Helper that locks binaries), remove the
-/// data directory, then the install directory. All the real work lives in
-/// <see cref="ServiceInstaller.Uninstall(string,string)"/> — this just sequences
-/// progress phases around the single blocking call and surfaces the final
-/// <see cref="ServiceInstaller.UninstallResult"/> for zero-residue verification.
+/// Visible uninstall boundary. Local intent alone is not deletion authority:
+/// cleanup can start only from the exact cloud-signed claim already accepted
+/// by Broker, and success is terminal only after the signed cleanup ticket is
+/// acknowledged by the cloud finalizer.
 /// </summary>
 internal sealed class UninstallOrchestrator
 {
-    public enum Phase { StopServices, RemoveData, RemoveInstall, Done }
+    public enum Phase { Authorize, StopServices, PreserveEvidence, Finalize, Done }
 
     public sealed record PhaseEvent(Phase Phase, string Message);
 
-    /// <summary>Default install/data dirs, matching ConsoleInstaller / UninstallInstaller.</summary>
     public const string DefaultInstallDir = @"C:\Program Files\Suavo\Agent";
     public const string DefaultDataDir = @"C:\ProgramData\SuavoAgent";
 
     private readonly string _installDir;
     private readonly string _dataDir;
+    private readonly Func<string, bool> _fileExists;
+    private readonly Func<
+        string,
+        string,
+        string,
+        CancellationToken,
+        Task<SelfUninstallFinalizationResult>> _finalize;
 
-    public UninstallOrchestrator(string? installDir = null, string? dataDir = null)
+    public UninstallOrchestrator(
+        string? installDir = null,
+        string? dataDir = null,
+        Func<string, bool>? fileExists = null,
+        Func<string, string, string, CancellationToken,
+            Task<SelfUninstallFinalizationResult>>? finalize = null)
     {
         _installDir = string.IsNullOrWhiteSpace(installDir) ? DefaultInstallDir : installDir!;
         _dataDir = string.IsNullOrWhiteSpace(dataDir) ? DefaultDataDir : dataDir!;
+        _fileExists = fileExists ?? File.Exists;
+        _finalize = finalize ?? SelfUninstallCompletionFinalizer.ExecuteProductionAsync;
     }
 
-    /// <summary>
-    /// Runs the uninstall end-to-end. The single <see cref="ServiceInstaller.Uninstall"/>
-    /// call is blocking (it shells out to sc.exe and deletes directories), so the
-    /// caller runs this on a background thread (Task.Run) — exactly like install —
-    /// while ConsoleUI.Write* messages flow into the GUI via the installed reporter.
-    /// Returns the <see cref="ServiceInstaller.UninstallResult"/> so the caller can
-    /// route to a clean Success or a residue Error.
-    /// </summary>
-    public async Task<ServiceInstaller.UninstallResult> RunAsync(
-        IProgress<PhaseEvent> progress, CancellationToken ct)
+    public async Task<SelfUninstallFinalizationResult> RunAsync(
+        IProgress<PhaseEvent> progress,
+        CancellationToken cancellationToken)
     {
-        ct.ThrowIfCancellationRequested();
+        cancellationToken.ThrowIfCancellationRequested();
+        progress.Report(new PhaseEvent(
+            Phase.Authorize,
+            "Confirming signed dashboard removal authority"));
 
-        progress.Report(new PhaseEvent(Phase.StopServices, "Stopping SuavoAgent services"));
-        ConsoleUI.WriteStep("Phase 1: Stopping and removing Windows services");
-
-        // ServiceInstaller.Uninstall is one atomic, blocking operation: it stops the
-        // services (Phase 1), removes the data dir (Phase 2), then the install dir
-        // (Phase 3). It reports its own ConsoleUI.Write* lines for each, which the GUI
-        // reporter renders live — so we surface the phase markers around the single call.
-        var result = await Task.Run(() =>
+        var claimPath = Path.Combine(
+            _dataDir,
+            SelfUninstallContract.RequestFileName + ".claimed");
+        if (!_fileExists(claimPath))
         {
-            progress.Report(new PhaseEvent(Phase.RemoveData, "Removing local data"));
-            ConsoleUI.WriteStep("Phase 2: Removing local data directory");
-
-            var r = ServiceInstaller.Uninstall(_installDir, _dataDir);
-
-            progress.Report(new PhaseEvent(Phase.RemoveInstall, "Removing program files"));
-            ConsoleUI.WriteStep("Phase 3: Removing install directory");
-            return r;
-        }, ct);
-
-        if (result.FullyClean)
-            ConsoleUI.WriteOk("SuavoAgent fully removed — this computer is clean.");
-        else
             ConsoleUI.WriteWarn(
-                $"Uninstall finished with residue: servicesRemaining={result.ServicesRemaining}, "
-                + $"dataDirRemoved={result.DataDirRemoved}, installDirRemoved={result.InstallDirRemoved}.");
+                "Removal is pending signed approval from the Suavo dashboard. " +
+                "No service, credential, evidence, or program file was changed.");
+            return SelfUninstallFinalizationResult.Pending(
+                "signed_cloud_authority_required");
+        }
 
-        progress.Report(new PhaseEvent(Phase.Done, "Uninstall complete"));
+        progress.Report(new PhaseEvent(
+            Phase.StopServices,
+            "Removing the authorized runtime"));
+        progress.Report(new PhaseEvent(
+            Phase.PreserveEvidence,
+            "Preserving protected compliance evidence"));
+        var result = await _finalize(
+                claimPath,
+                _installDir,
+                _dataDir,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        progress.Report(new PhaseEvent(
+            Phase.Finalize,
+            "Confirming signed cloud completion"));
+        if (!result.IsFinalized || result.Cleanup is not { FullyClean: true })
+        {
+            ConsoleUI.WriteWarn(
+                $"Removal is safely pending ({result.Code}). " +
+                "SuavoAgent will not report completion until cloud finalization and zero-residue proof both succeed.");
+            return result.IsFinalized
+                ? SelfUninstallFinalizationResult.Pending(
+                    "cleanup_proof_incomplete",
+                    result.Cleanup)
+                : result;
+        }
+
+        ConsoleUI.WriteOk(
+            "SuavoAgent runtime removed; signed cloud completion and retained evidence were verified.");
+        progress.Report(new PhaseEvent(Phase.Done, "Removal finalized"));
         return result;
     }
 }

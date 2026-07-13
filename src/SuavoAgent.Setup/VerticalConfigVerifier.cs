@@ -2,16 +2,13 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SuavoAgent.Diagnostics;
 
 namespace SuavoAgent.Setup;
 
 /// <summary>Outcome of verifying a <see cref="ParsedVerticalConfig"/>.</summary>
 public enum VerticalVerificationOutcome
 {
-    /// <summary>No verticalConfig in the server response — back-compat install.</summary>
-    Absent,
-    /// <summary>verticalConfig present but no signature — back-compat install.</summary>
-    UnsignedBackcompat,
     /// <summary>Signed, passes signature check, DTO valid.</summary>
     Verified,
     /// <summary>Blocked: malformed DTO or bad signature.</summary>
@@ -31,15 +28,9 @@ public sealed record VerticalVerificationResult(
 /// ECDsa P-256 verifier for server-issued signed verticalConfig payloads.
 /// Mirrors <see cref="SuavoAgent.Diagnostics.RulesetSignatureVerifier"/> pattern.
 ///
-/// Five-state install matrix:
-///   (1) absent           → Absent        (back-compat)
-///   (2) present+unsigned → UnsignedBackcompat (back-compat)
-///   (3) present+signed+malformed DTO → Blocked
-///   (4) present+signed+bad-sig       → Blocked
-///   (5) present+signed+good-sig+valid → Verified
-///
-/// Fail-closed on unknown / absent / invalid: caller maps Absent +
-/// UnsignedBackcompat to HIPAA posture; only Verified may relax it.
+/// No legacy lane exists: absent, unsigned, malformed, unknown-key, and bad
+/// signatures are all blocked. HIPAA defaults are not a substitute for proving
+/// which vertical/connector contract the workstation was authorized to run.
 /// </summary>
 internal sealed class VerticalConfigVerifier
 {
@@ -92,16 +83,18 @@ internal sealed class VerticalConfigVerifier
         return new VerticalConfigVerifier(dict);
     }
 
-    /// <summary>Five-state verification per install matrix.</summary>
+    /// <summary>Strict signed-only verification.</summary>
     internal VerticalVerificationResult Verify(ParsedVerticalConfig vc)
     {
-        // State (1): absent
         if (vc.Raw is null)
-            return new VerticalVerificationResult(VerticalVerificationOutcome.Absent);
+            return new VerticalVerificationResult(
+                VerticalVerificationOutcome.Blocked,
+                "vertical_config_missing");
 
-        // State (2): present but unsigned — back-compat install
         if (vc.Signature is null)
-            return new VerticalVerificationResult(VerticalVerificationOutcome.UnsignedBackcompat);
+            return new VerticalVerificationResult(
+                VerticalVerificationOutcome.Blocked,
+                "vertical_config_signature_missing");
 
         // State (3): signed but DTO is null (malformed JSON)
         if (vc.Dto is null)
@@ -153,8 +146,8 @@ internal sealed class VerticalConfigVerifier
     }
 
     /// <summary>RFC 8785 canonicalize a raw JSON string.</summary>
-    internal static string CanonicalizeRaw(string json)
-        => new global::Org.Webpki.JsonCanonicalizer.JsonCanonicalizer(json).GetEncodedString();
+    internal static string CanonicalizeRaw(string json) =>
+        Rfc8785Canonicalizer.Canonicalize(json);
 
     internal static string ExtractKeyId(string resName)
     {

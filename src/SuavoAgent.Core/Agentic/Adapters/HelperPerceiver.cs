@@ -6,6 +6,8 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Behavioral;
+using SuavoAgent.Contracts.Reasoning;
 using SuavoAgent.Contracts.Vision;
 using SuavoAgent.Core.Ipc;
 
@@ -84,13 +86,34 @@ public static class PerceivedScreenMapper
     {
         var summary = new List<string>(frame.Elements.Count + frame.TextRegions.Count);
         var signatures = new List<string>();
+        var fingerprints = new List<ElementSignature>();
+        var structuralStates = new List<StructuralElementObservation>();
+        var completeStructuralState = true;
 
         foreach (var e in frame.Elements)
         {
             summary.Add(string.IsNullOrEmpty(e.Name) ? e.Role : $"{e.Role}:{e.Name}");
             // GREEN-tier structural signature ("controlType|automationId") for template-replay checks.
             if (!string.IsNullOrEmpty(e.AutomationId))
+            {
                 signatures.Add($"{e.Role}|{e.AutomationId}");
+                fingerprints.Add(new ElementSignature(
+                    e.Role,
+                    e.AutomationId,
+                    e.ClassName));
+                if (e.StructuralStateByte is { } stateByte)
+                {
+                    structuralStates.Add(new StructuralElementObservation(
+                        fingerprints[^1],
+                        stateByte));
+                }
+                else
+                {
+                    // UIA unsupported/missing truth is never represented as
+                    // a fabricated zero state in a cloud request.
+                    completeStructuralState = false;
+                }
+            }
         }
 
         foreach (var t in frame.TextRegions)
@@ -99,7 +122,48 @@ public static class PerceivedScreenMapper
 
         // Frames from the Helper are PHI-scrubbed by construction (PhiScrubbingExtractor wraps every
         // extractor at the factory). The Scrubbed flag carries that invariant to ISafetyGate.AssertScrubbed.
-        return new PerceivedScreen(ComputeContentHash(summary), Scrubbed: true, summary, WindowTitle: null, Signatures: signatures);
+        // Cloud /reason is intentionally smaller than the local replay view.
+        // Sort by structural identity so the same UIA tree produces the same
+        // bounded set regardless of traversal order. Conflicting duplicate
+        // identities are ambiguous and therefore ineligible.
+        var orderedStates = structuralStates
+            .OrderBy(value => value.Signature.ControlType, StringComparer.Ordinal)
+            .ThenBy(value => value.Signature.AutomationId, StringComparer.Ordinal)
+            .ThenBy(value => value.Signature.ClassName, StringComparer.Ordinal)
+            .ThenBy(value => value.StateByte)
+            .ToArray();
+        var ambiguousIdentity = orderedStates
+            .GroupBy(value => new
+            {
+                value.Signature.ControlType,
+                value.Signature.AutomationId,
+                value.Signature.ClassName,
+            })
+            .Any(group => group.Select(value => value.StateByte).Distinct().Count() > 1);
+        var boundedStates = orderedStates
+            .DistinctBy(value => new
+            {
+                value.Signature.ControlType,
+                value.Signature.AutomationId,
+                value.Signature.ClassName,
+            })
+            .Take(8)
+            .ToArray();
+        var cloudEligible = !string.IsNullOrWhiteSpace(frame.ProcessName) &&
+            completeStructuralState &&
+            !ambiguousIdentity &&
+            boundedStates.Length > 0;
+
+        return new PerceivedScreen(
+            ComputeContentHash(summary),
+            Scrubbed: true,
+            summary,
+            WindowTitle: null,
+            Signatures: signatures,
+            ProcessName: frame.ProcessName,
+            ElementFingerprints: fingerprints,
+            StructuralElementStates: boundedStates,
+            CloudStructuralStateEligible: cloudEligible);
     }
 
     private static string ComputeContentHash(IReadOnlyList<string> lines)

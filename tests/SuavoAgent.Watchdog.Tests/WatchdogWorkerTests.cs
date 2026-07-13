@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Text.Json;
+using SuavoAgent.Contracts.Maintenance;
 using SuavoAgent.Watchdog;
 using Xunit;
 
@@ -12,10 +13,12 @@ public class WatchdogWorkerTests
         public Dictionary<string, Queue<ServiceState>> Queries { get; } = new(StringComparer.OrdinalIgnoreCase);
         public List<string> StartCalls { get; } = new();
         public List<string> StopCalls { get; } = new();
-        public List<string> RepairCalls { get; } = new();
+        public List<MaintenanceReason> RepairCalls { get; } = new();
+        public List<string> UpdateResumeCalls { get; } = new();
         public Func<string, bool> StartOutcome { get; set; } = _ => true;
         public Func<string, bool> StopOutcome { get; set; } = _ => true;
         public bool RepairOutcome { get; set; } = true;
+        public bool UpdateResumeOutcome { get; set; } = true;
 
         public ServiceState Query(string serviceName)
         {
@@ -33,34 +36,33 @@ public class WatchdogWorkerTests
             StopCalls.Add(serviceName);
             return StopOutcome(serviceName);
         }
-        public bool InvokeRepair(string bootstrapPath, TimeSpan timeout)
+        public bool InvokeRepair(MaintenanceReason reason, TimeSpan timeout)
         {
-            RepairCalls.Add(bootstrapPath);
+            RepairCalls.Add(reason);
             return RepairOutcome;
+        }
+        public bool InvokeUpdateCoordinatorResume(string claimPath)
+        {
+            UpdateResumeCalls.Add(claimPath);
+            return UpdateResumeOutcome;
         }
     }
 
     private static WatchdogWorker MakeWorker(
         FakeCommand cmd,
-        string? bootstrapPath = null,
         string? telemetryPath = null,
-        string? repairRequestPath = null,
-        string? restartRequestPath = null,
-        Func<string, bool>? reapplyHelperGrant = null)
+        string? repairRequestPath = null)
     {
         var opts = new WatchdogOptions
         {
             WatchedServices = new[] { "SuavoAgent.Core" },
-            BootstrapPath = bootstrapPath,
             TelemetryPath = telemetryPath,
             RepairRequestPath = repairRequestPath,
-            // Default to a guaranteed-absent path so the post-OTA handler is a no-op in
-            // tests that don't exercise it (never resolve to the test host's install dir).
-            RestartRequestPath = restartRequestPath
-                ?? Path.Combine(Path.GetTempPath(), $"no-such-restart-{Guid.NewGuid():N}.json"),
-            // Default to a no-op grant so tests never shell out to icacls on the host. Tests that
-            // assert the re-grant inject a recording stub.
-            ReapplyHelperExeGrant = reapplyHelperGrant ?? (_ => true),
+            ExpectedAgentId = "agent-watchdog-test",
+            ExpectedMachineFingerprint = "fingerprint-watchdog-test",
+            // Tick-only tests never execute the startup ACL repair; keep it injectable for the
+            // hosted-service path without coupling these decisions to the local host.
+            ReapplyHelperExeGrant = _ => true,
         };
         var worker = new WatchdogWorker(NullLogger<WatchdogWorker>.Instance, cmd, opts);
         // Seed ledger via reflection-free helper: call TickOnce with a "Running" observation
@@ -97,7 +99,6 @@ public class WatchdogWorkerTests
                 WatchedServices = new[] { "SuavoAgent.Core" },
                 HangBeaconDirectory = beaconDir,
                 HangStaleThreshold = TimeSpan.FromSeconds(90),
-                RestartRequestPath = Path.Combine(Path.GetTempPath(), $"no-such-{Guid.NewGuid():N}.json"),
             });
             SeedLedgers(worker);
 
@@ -126,7 +127,6 @@ public class WatchdogWorkerTests
                 WatchedServices = new[] { "SuavoAgent.Core" },
                 HangBeaconDirectory = beaconDir,
                 HangStaleThreshold = TimeSpan.FromSeconds(90),
-                RestartRequestPath = Path.Combine(Path.GetTempPath(), $"no-such-{Guid.NewGuid():N}.json"),
             });
             SeedLedgers(worker);
 
@@ -159,7 +159,6 @@ public class WatchdogWorkerTests
                 WatchedServices = new[] { "SuavoAgent.Core" },
                 HangBeaconDirectory = beaconDir,
                 HangStaleThreshold = TimeSpan.FromSeconds(90),
-                RestartRequestPath = Path.Combine(Path.GetTempPath(), $"no-such-{Guid.NewGuid():N}.json"),
             });
             SeedLedgers(worker);
 
@@ -194,28 +193,18 @@ public class WatchdogWorkerTests
     {
         var cmd = new FakeCommand { StartOutcome = _ => false };
         cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(Enumerable.Repeat(ServiceState.Stopped, 10));
-        var bootstrap = Path.Combine(Path.GetTempPath(), $"bootstrap-{Guid.NewGuid():N}.ps1");
-        File.WriteAllText(bootstrap, "# stub");
-        try
-        {
-            var worker = MakeWorker(cmd, bootstrap);
-            SeedLedgers(worker);
+        var worker = MakeWorker(cmd);
+        SeedLedgers(worker);
 
-            var now = DateTimeOffset.UtcNow;
-            worker.TickOnce(now);                          // mark unhealthy
-            worker.TickOnce(now.AddMinutes(6));            // attempt 1 → fail
-            worker.TickOnce(now.AddMinutes(6).AddSeconds(61)); // attempt 2 → fail
-            worker.TickOnce(now.AddMinutes(6).AddSeconds(122)); // attempt 3 → fail
-            worker.TickOnce(now.AddMinutes(6).AddSeconds(183)); // escalate
+        var now = DateTimeOffset.UtcNow;
+        worker.TickOnce(now);                          // mark unhealthy
+        worker.TickOnce(now.AddMinutes(6));            // attempt 1 → fail
+        worker.TickOnce(now.AddMinutes(6).AddSeconds(61)); // attempt 2 → fail
+        worker.TickOnce(now.AddMinutes(6).AddSeconds(122)); // attempt 3 → fail
+        worker.TickOnce(now.AddMinutes(6).AddSeconds(183)); // escalate
 
-            Assert.Equal(3, cmd.StartCalls.Count);
-            Assert.Single(cmd.RepairCalls);
-            Assert.Equal(bootstrap, cmd.RepairCalls[0]);
-        }
-        finally
-        {
-            File.Delete(bootstrap);
-        }
+        Assert.Equal(3, cmd.StartCalls.Count);
+        Assert.Equal([MaintenanceReason.ServiceRestartFailed], cmd.RepairCalls);
     }
 
     [Fact]
@@ -227,27 +216,18 @@ public class WatchdogWorkerTests
         // restart is counted as a failure on the next tick → repair escalates after 3 cycles.
         var cmd = new FakeCommand { StartOutcome = _ => true }; // SCM always accepts
         cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(Enumerable.Repeat(ServiceState.Stopped, 12));
-        var bootstrap = Path.Combine(Path.GetTempPath(), $"bootstrap-{Guid.NewGuid():N}.ps1");
-        File.WriteAllText(bootstrap, "# stub");
-        try
-        {
-            var worker = MakeWorker(cmd, bootstrap);
-            SeedLedgers(worker);
+        var worker = MakeWorker(cmd);
+        SeedLedgers(worker);
 
-            var now = DateTimeOffset.UtcNow;
-            worker.TickOnce(now);                               // mark unhealthy
-            worker.TickOnce(now.AddMinutes(6));                 // attempt 1 (accepted, pending liveness)
-            worker.TickOnce(now.AddMinutes(6).AddSeconds(61));  // count fail 1 → attempt 2
-            worker.TickOnce(now.AddMinutes(6).AddSeconds(122)); // count fail 2 → attempt 3
-            worker.TickOnce(now.AddMinutes(6).AddSeconds(183)); // count fail 3 → escalate
+        var now = DateTimeOffset.UtcNow;
+        worker.TickOnce(now);                               // mark unhealthy
+        worker.TickOnce(now.AddMinutes(6));                 // attempt 1 (accepted, pending liveness)
+        worker.TickOnce(now.AddMinutes(6).AddSeconds(61));  // count fail 1 → attempt 2
+        worker.TickOnce(now.AddMinutes(6).AddSeconds(122)); // count fail 2 → attempt 3
+        worker.TickOnce(now.AddMinutes(6).AddSeconds(183)); // count fail 3 → escalate
 
-            Assert.Equal(3, cmd.StartCalls.Count);
-            Assert.Single(cmd.RepairCalls);
-        }
-        finally
-        {
-            File.Delete(bootstrap);
-        }
+        Assert.Equal(3, cmd.StartCalls.Count);
+        Assert.Equal([MaintenanceReason.ServiceRestartFailed], cmd.RepairCalls);
     }
 
     [Fact]
@@ -255,32 +235,23 @@ public class WatchdogWorkerTests
     {
         var cmd = new FakeCommand();
         cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.NotInstalled });
-        var bootstrap = Path.Combine(Path.GetTempPath(), $"bootstrap-{Guid.NewGuid():N}.ps1");
-        File.WriteAllText(bootstrap, "# stub");
-        try
-        {
-            var worker = MakeWorker(cmd, bootstrap);
-            SeedLedgers(worker);
-            worker.TickOnce(DateTimeOffset.UtcNow);
-            Assert.Single(cmd.RepairCalls);
-            Assert.Empty(cmd.StartCalls);
-        }
-        finally
-        {
-            File.Delete(bootstrap);
-        }
+        var worker = MakeWorker(cmd);
+        SeedLedgers(worker);
+        worker.TickOnce(DateTimeOffset.UtcNow);
+        Assert.Equal([MaintenanceReason.ServiceRestartFailed], cmd.RepairCalls);
+        Assert.Empty(cmd.StartCalls);
     }
 
     [Fact]
-    public void Tick_EscalateWithMissingBootstrap_NoCrash()
+    public void Tick_EscalateWhenNativeMaintenanceFails_NoCrashAndRecordsAttempt()
     {
-        var cmd = new FakeCommand();
+        var cmd = new FakeCommand { RepairOutcome = false };
         cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.NotInstalled });
-        var worker = MakeWorker(cmd, bootstrapPath: "/nonexistent/path.ps1");
+        var worker = MakeWorker(cmd);
         SeedLedgers(worker);
         var ex = Record.Exception(() => worker.TickOnce(DateTimeOffset.UtcNow));
         Assert.Null(ex);
-        Assert.Empty(cmd.RepairCalls); // repair wasn't attempted because path is bad
+        Assert.Equal([MaintenanceReason.ServiceRestartFailed], cmd.RepairCalls);
     }
 
     [Fact]
@@ -316,12 +287,10 @@ public class WatchdogWorkerTests
     }
 
     [Fact]
-    public void Tick_QueuedRemoteRepair_InvokesBootstrapRepairAndDeletesRequest()
+    public void Tick_UnsignedLegacyRemoteRepair_IsRejectedAndDeleted()
     {
         var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
         var requestPath = Path.Combine(Path.GetTempPath(), $"watchdog-repair-{Guid.NewGuid():N}.json");
-        var bootstrap = Path.Combine(Path.GetTempPath(), $"bootstrap-{Guid.NewGuid():N}.ps1");
-        File.WriteAllText(bootstrap, "# stub");
         File.WriteAllText(requestPath, """
         {
           "schemaVersion": 1,
@@ -334,40 +303,36 @@ public class WatchdogWorkerTests
 
         var cmd = new FakeCommand();
         cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, bootstrap, telemetryPath, requestPath);
+        var worker = MakeWorker(cmd, telemetryPath, requestPath);
         SeedLedgers(worker);
 
         try
         {
             worker.TickOnce(DateTimeOffset.Parse("2026-05-07T00:00:00Z"));
 
-            Assert.Single(cmd.RepairCalls);
-            Assert.Equal(bootstrap, cmd.RepairCalls[0]);
+            Assert.Empty(cmd.RepairCalls);
             Assert.False(File.Exists(requestPath));
 
             using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
             var remoteRepair = doc.RootElement.GetProperty("remoteRepair");
             Assert.True(remoteRepair.GetProperty("present").GetBoolean());
-            Assert.Equal("cmd-repair-queued-1", remoteRepair.GetProperty("commandId").GetString());
-            Assert.Equal("watchdog_critical", remoteRepair.GetProperty("reason").GetString());
-            Assert.Equal("repair_completed", remoteRepair.GetProperty("outcome").GetString());
-            Assert.True(remoteRepair.GetProperty("repairInvoked").GetBoolean());
+            Assert.Equal("not_available", remoteRepair.GetProperty("commandId").GetString());
+            Assert.Equal("validation_rejected", remoteRepair.GetProperty("reason").GetString());
+            Assert.Equal("request_invalid_json", remoteRepair.GetProperty("outcome").GetString());
+            Assert.False(remoteRepair.GetProperty("repairInvoked").GetBoolean());
         }
         finally
         {
             try { File.Delete(telemetryPath); } catch { }
             try { File.Delete(requestPath); } catch { }
-            try { File.Delete(bootstrap); } catch { }
         }
     }
 
     [Fact]
-    public void Tick_QueuedRemoteRepair_RedactsUnexpectedReasonInTelemetry()
+    public void Tick_UnsignedUnexpectedReason_IsRejectedWithPhiFreeTelemetry()
     {
         var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
         var requestPath = Path.Combine(Path.GetTempPath(), $"watchdog-repair-{Guid.NewGuid():N}.json");
-        var bootstrap = Path.Combine(Path.GetTempPath(), $"bootstrap-{Guid.NewGuid():N}.ps1");
-        File.WriteAllText(bootstrap, "# stub");
         File.WriteAllText(requestPath, """
         {
           "schemaVersion": 1,
@@ -379,7 +344,7 @@ public class WatchdogWorkerTests
 
         var cmd = new FakeCommand();
         cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, bootstrap, telemetryPath, requestPath);
+        var worker = MakeWorker(cmd, telemetryPath, requestPath);
         SeedLedgers(worker);
 
         try
@@ -388,292 +353,163 @@ public class WatchdogWorkerTests
 
             using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
             var remoteRepair = doc.RootElement.GetProperty("remoteRepair");
-            Assert.Equal("remote_command", remoteRepair.GetProperty("reason").GetString());
+            Assert.Equal("not_available", remoteRepair.GetProperty("commandId").GetString());
+            Assert.Equal("validation_rejected", remoteRepair.GetProperty("reason").GetString());
+            Assert.False(remoteRepair.GetProperty("repairInvoked").GetBoolean());
+            Assert.Empty(cmd.RepairCalls);
+            Assert.DoesNotContain("patient_john_smith", File.ReadAllText(telemetryPath));
         }
         finally
         {
             try { File.Delete(telemetryPath); } catch { }
             try { File.Delete(requestPath); } catch { }
-            try { File.Delete(bootstrap); } catch { }
         }
     }
 
-    // ── Post-OTA restart handler (#OTA restart-sequencing fix) ──
-
-    private static string WriteRestartRequest(
-        int schema, string version, string requestedAt, params string[] services)
-    {
-        var path = Path.Combine(Path.GetTempPath(), $"watchdog-restart-{Guid.NewGuid():N}.json");
-        File.WriteAllText(path, JsonSerializer.Serialize(new
-        {
-            schemaVersion = schema,
-            version,
-            requestedAt,
-            services
-        }));
-        return path;
-    }
-
     [Fact]
-    public void Tick_UpdateRestart_CyclesBrokerAndDeletesFile()
+    public void Tick_StaleDurableUpdateClaim_RelaunchesResumeOncePerLease()
     {
-        var now = DateTimeOffset.Parse("2026-06-02T12:00:00Z");
-        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
-        var requestPath = WriteRestartRequest(1, "3.18.3", now.ToString("o"), "SuavoAgent.Broker");
+        var now = DateTimeOffset.Parse("2026-07-10T22:00:00Z");
+        var root = Path.GetFullPath(Path.Combine(
+            Path.GetTempPath(),
+            "suavo-worker-claim-" + Guid.NewGuid().ToString("N")));
+        var updateRoot = Path.Combine(root, "updates");
+        var maintenanceRoot = Path.Combine(root, "maintenance");
+        var stagingId = new string('a', 64);
+        var requestPath = UpdateActivationContract.GetCoordinatorRequestPath(
+            maintenanceRoot,
+            stagingId);
+        var payloadDirectory = UpdateActivationContract.GetCoordinatorPayloadDirectory(
+            maintenanceRoot,
+            stagingId);
+        var activeClaimPath = Path.Combine(
+            maintenanceRoot,
+            UpdateActivationContract.ActiveClaimFileName);
+        Directory.CreateDirectory(payloadDirectory);
+        File.WriteAllText(requestPath, "{}");
+        File.WriteAllText(
+            activeClaimPath,
+            UpdateActivationContract.Serialize(new UpdateActivationClaimPointer(
+                UpdateActivationContract.SchemaVersion,
+                new string('b', 64),
+                stagingId,
+                "2.0.0",
+                requestPath,
+                payloadDirectory,
+                now.AddMinutes(-5).ToString("O"),
+                now.AddMinutes(-3).ToString("O"))));
 
         var cmd = new FakeCommand();
-        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath);
-        SeedLedgers(worker);
-
-        try
-        {
-            worker.TickOnce(now);
-
-            Assert.Equal(new[] { "SuavoAgent.Broker" }, cmd.StopCalls);
-            Assert.Contains("SuavoAgent.Broker", cmd.StartCalls);
-            Assert.False(File.Exists(requestPath)); // consumed on success
-
-            using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
-            var ur = doc.RootElement.GetProperty("updateRestart");
-            Assert.Equal("restarted", ur.GetProperty("outcome").GetString());
-            Assert.Equal("3.18.3", ur.GetProperty("version").GetString());
-            Assert.Equal("SuavoAgent.Broker", ur.GetProperty("servicesRestarted")[0].GetString());
-        }
-        finally
-        {
-            try { File.Delete(telemetryPath); } catch { }
-            try { File.Delete(requestPath); } catch { }
-        }
-    }
-
-    [Fact]
-    public void Tick_UpdateRestart_StartFails_KeepsFileForRetry()
-    {
-        var now = DateTimeOffset.Parse("2026-06-02T12:00:00Z");
-        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
-        var requestPath = WriteRestartRequest(1, "3.18.3", now.ToString("o"), "SuavoAgent.Broker");
-
-        // Broker stop succeeds but start is rejected (Core still START_PENDING).
-        var cmd = new FakeCommand { StartOutcome = _ => false };
-        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath);
-        SeedLedgers(worker);
-
-        try
-        {
-            worker.TickOnce(now);
-
-            Assert.Equal(new[] { "SuavoAgent.Broker" }, cmd.StopCalls);
-            Assert.Contains("SuavoAgent.Broker", cmd.StartCalls);
-            Assert.True(File.Exists(requestPath)); // KEPT for next-tick retry
-
-            using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
-            Assert.Equal("pending_retry", doc.RootElement.GetProperty("updateRestart").GetProperty("outcome").GetString());
-        }
-        finally
-        {
-            try { File.Delete(telemetryPath); } catch { }
-            try { File.Delete(requestPath); } catch { }
-        }
-    }
-
-    [Fact]
-    public void Tick_UpdateRestart_NonAllowlistedService_Rejected()
-    {
-        var now = DateTimeOffset.Parse("2026-06-02T12:00:00Z");
-        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
-        // Core is NOT in the allowlist — a forged request must not let anyone bounce Core.
-        var requestPath = WriteRestartRequest(1, "3.18.3", now.ToString("o"), "SuavoAgent.Core");
-
-        var cmd = new FakeCommand();
-        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath);
-        SeedLedgers(worker);
-
-        try
-        {
-            worker.TickOnce(now);
-
-            Assert.Empty(cmd.StopCalls);
-            Assert.Empty(cmd.StartCalls);
-            Assert.False(File.Exists(requestPath)); // poison request discarded
-
-            using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
-            Assert.Equal("rejected_service", doc.RootElement.GetProperty("updateRestart").GetProperty("outcome").GetString());
-        }
-        finally
-        {
-            try { File.Delete(telemetryPath); } catch { }
-            try { File.Delete(requestPath); } catch { }
-        }
-    }
-
-    [Fact]
-    public void Tick_UpdateRestart_Expired_Discarded()
-    {
-        var now = DateTimeOffset.Parse("2026-06-02T12:00:00Z");
-        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
-        var requestPath = WriteRestartRequest(1, "3.18.3", now.AddMinutes(-20).ToString("o"), "SuavoAgent.Broker");
-
-        var cmd = new FakeCommand();
-        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath);
-        SeedLedgers(worker);
-
-        try
-        {
-            worker.TickOnce(now);
-
-            Assert.Empty(cmd.StopCalls);
-            Assert.Empty(cmd.StartCalls);
-            Assert.False(File.Exists(requestPath));
-
-            using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
-            Assert.Equal("expired", doc.RootElement.GetProperty("updateRestart").GetProperty("outcome").GetString());
-        }
-        finally
-        {
-            try { File.Delete(telemetryPath); } catch { }
-            try { File.Delete(requestPath); } catch { }
-        }
-    }
-
-    [Fact]
-    public void Tick_UpdateRestart_BadSchema_Rejected()
-    {
-        var now = DateTimeOffset.Parse("2026-06-02T12:00:00Z");
-        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
-        var requestPath = WriteRestartRequest(2, "3.18.3", now.ToString("o"), "SuavoAgent.Broker");
-
-        var cmd = new FakeCommand();
-        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath);
-        SeedLedgers(worker);
-
-        try
-        {
-            worker.TickOnce(now);
-
-            Assert.Empty(cmd.StopCalls);
-            Assert.Empty(cmd.StartCalls);
-            Assert.False(File.Exists(requestPath));
-
-            using var doc = JsonDocument.Parse(File.ReadAllText(telemetryPath));
-            Assert.Equal("rejected_schema", doc.RootElement.GetProperty("updateRestart").GetProperty("outcome").GetString());
-        }
-        finally
-        {
-            try { File.Delete(telemetryPath); } catch { }
-            try { File.Delete(requestPath); } catch { }
-        }
-    }
-
-    [Fact]
-    public void Tick_UpdateRestart_ReappliesHelperGrant_BeforeCyclingBroker()
-    {
-        // Post-OTA: the swap (File.Move) dropped the de-priv Helper's per-file read ACE. The Watchdog
-        // (LocalSystem) MUST re-apply it BEFORE cycling the Broker, so the Broker relaunches a Helper
-        // that can self-extract — otherwise it churns and helper_attached never flips.
-        var now = DateTimeOffset.Parse("2026-06-11T12:00:00Z");
-        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
-        var requestPath = WriteRestartRequest(1, "3.58.0", now.ToString("o"), "SuavoAgent.Broker");
-        var expectedInstallDir = Path.GetDirectoryName(requestPath);
-
-        string? grantedDir = null;
-        var startCountAtGrant = -1;
-
-        var cmd = new FakeCommand();
-        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath,
-            reapplyHelperGrant: dir =>
+        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>([ServiceState.Running]);
+        string? terminatedRoot = null;
+        string? terminatedStagingId = null;
+        var worker = new WatchdogWorker(
+            NullLogger<WatchdogWorker>.Instance,
+            cmd,
+            new WatchdogOptions
             {
-                grantedDir = dir;
-                startCountAtGrant = cmd.StartCalls.Count; // capture ordering vs the Broker start
-                return true;
+                WatchedServices = ["SuavoAgent.Core"],
+                UpdateRoot = updateRoot,
+                ActivationRequestPath = Path.Combine(
+                    updateRoot,
+                    UpdateActivationContract.ActivationRequestFileName),
+                ReplayLedgerPath = Path.Combine(updateRoot, "launch-leases.json"),
+                MaintenanceRoot = maintenanceRoot,
+                ActiveClaimPath = activeClaimPath,
+                ActivationCompletionPath = Path.Combine(
+                    maintenanceRoot,
+                    UpdateActivationContract.CompletionFileName),
+                ReapplyHelperExeGrant = _ => true,
+                TerminateStaleUpdateRunner = (candidateRoot, candidateStagingId) =>
+                {
+                    terminatedRoot = candidateRoot;
+                    terminatedStagingId = candidateStagingId;
+                    return true;
+                },
             });
         SeedLedgers(worker);
 
         try
         {
             worker.TickOnce(now);
+            worker.TickOnce(now.AddSeconds(30));
 
-            Assert.Equal(expectedInstallDir, grantedDir);   // granted the right install dir
-            Assert.Equal(0, startCountAtGrant);             // BEFORE any Broker start (no churn window)
-            Assert.Contains("SuavoAgent.Broker", cmd.StartCalls); // and the Broker was still cycled
-            Assert.False(File.Exists(requestPath));
+            Assert.Equal([activeClaimPath], cmd.UpdateResumeCalls);
+            Assert.Equal(maintenanceRoot, terminatedRoot);
+            Assert.Equal(stagingId, terminatedStagingId);
         }
         finally
         {
-            try { File.Delete(telemetryPath); } catch { }
-            try { File.Delete(requestPath); } catch { }
+            try { Directory.Delete(root, recursive: true); } catch { }
         }
     }
 
     [Fact]
-    public void Tick_UpdateRestart_GrantFailure_StillCyclesBroker()
+    public void Tick_StaleRunnerTerminationFailure_ReleasesLeaseForNextRetry()
     {
-        // The re-grant is best-effort: even if icacls fails, we still cycle the Broker (not cycling is
-        // worse — it strands on the old binary). The churn, if any, surfaces in heartbeat telemetry.
-        var now = DateTimeOffset.Parse("2026-06-11T12:00:00Z");
-        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
-        var requestPath = WriteRestartRequest(1, "3.58.0", now.ToString("o"), "SuavoAgent.Broker");
-
+        var now = DateTimeOffset.Parse("2026-07-10T22:00:00Z");
+        var root = Path.GetFullPath(Path.Combine(
+            Path.GetTempPath(),
+            "suavo-worker-kill-retry-" + Guid.NewGuid().ToString("N")));
+        var updateRoot = Path.Combine(root, "updates");
+        var maintenanceRoot = Path.Combine(root, "maintenance");
+        var stagingId = new string('c', 64);
+        var requestPath = UpdateActivationContract.GetCoordinatorRequestPath(
+            maintenanceRoot,
+            stagingId);
+        var payloadDirectory = UpdateActivationContract.GetCoordinatorPayloadDirectory(
+            maintenanceRoot,
+            stagingId);
+        var claimPath = Path.Combine(
+            maintenanceRoot,
+            UpdateActivationContract.ActiveClaimFileName);
+        Directory.CreateDirectory(payloadDirectory);
+        File.WriteAllText(requestPath, "{}");
+        File.WriteAllText(claimPath, UpdateActivationContract.Serialize(
+            new UpdateActivationClaimPointer(
+                UpdateActivationContract.SchemaVersion,
+                new string('d', 64),
+                stagingId,
+                "2.0.0",
+                requestPath,
+                payloadDirectory,
+                now.AddMinutes(-5).ToString("O"),
+                now.AddMinutes(-3).ToString("O"))));
+        var terminationCalls = 0;
         var cmd = new FakeCommand();
-        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath,
-            reapplyHelperGrant: _ => false); // grant fails
-        SeedLedgers(worker);
-
-        try
-        {
-            var ex = Record.Exception(() => worker.TickOnce(now));
-            Assert.Null(ex);
-            Assert.Contains("SuavoAgent.Broker", cmd.StartCalls);
-            Assert.False(File.Exists(requestPath)); // restart still completed + consumed
-        }
-        finally
-        {
-            try { File.Delete(telemetryPath); } catch { }
-            try { File.Delete(requestPath); } catch { }
-        }
-    }
-
-    [Fact]
-    public void Tick_UpdateRestart_RejectedRequest_DoesNotReapplyGrant()
-    {
-        // A poison/forged request (bad schema) is discarded BEFORE any privileged action — the re-grant
-        // must not run for a request we refused to act on.
-        var now = DateTimeOffset.Parse("2026-06-11T12:00:00Z");
-        var telemetryPath = Path.Combine(Path.GetTempPath(), $"watchdog-{Guid.NewGuid():N}.json");
-        var requestPath = WriteRestartRequest(2, "3.58.0", now.ToString("o"), "SuavoAgent.Broker"); // schema 2 = unsupported
-
-        var grantCalls = 0;
-        var cmd = new FakeCommand();
-        cmd.Queries["SuavoAgent.Broker"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>(new[] { ServiceState.Running });
-        var worker = MakeWorker(cmd, telemetryPath: telemetryPath, restartRequestPath: requestPath,
-            reapplyHelperGrant: _ => { grantCalls++; return true; });
+        cmd.Queries["SuavoAgent.Core"] = new Queue<ServiceState>([ServiceState.Running]);
+        var worker = new WatchdogWorker(
+            NullLogger<WatchdogWorker>.Instance,
+            cmd,
+            new WatchdogOptions
+            {
+                WatchedServices = ["SuavoAgent.Core"],
+                UpdateRoot = updateRoot,
+                ActivationRequestPath = Path.Combine(
+                    updateRoot,
+                    UpdateActivationContract.ActivationRequestFileName),
+                ReplayLedgerPath = Path.Combine(updateRoot, "launch-leases.json"),
+                MaintenanceRoot = maintenanceRoot,
+                ActiveClaimPath = claimPath,
+                ActivationCompletionPath = Path.Combine(
+                    maintenanceRoot,
+                    UpdateActivationContract.CompletionFileName),
+                ReapplyHelperExeGrant = _ => true,
+                TerminateStaleUpdateRunner = (_, _) => ++terminationCalls > 1,
+            });
         SeedLedgers(worker);
 
         try
         {
             worker.TickOnce(now);
+            worker.TickOnce(now.AddSeconds(30));
 
-            Assert.Equal(0, grantCalls);          // never granted for a rejected request
-            Assert.Empty(cmd.StartCalls);
-            Assert.False(File.Exists(requestPath));
+            Assert.Equal(2, terminationCalls);
+            Assert.Equal([claimPath], cmd.UpdateResumeCalls);
         }
         finally
         {
-            try { File.Delete(telemetryPath); } catch { }
-            try { File.Delete(requestPath); } catch { }
+            try { Directory.Delete(root, recursive: true); } catch { }
         }
     }
 
@@ -713,7 +549,7 @@ public class WatchdogWorkerTests
             return true;
         }
 
-        public bool InvokeRepair(string bootstrapPath, TimeSpan timeout) => true;
+        public bool InvokeRepair(MaintenanceReason reason, TimeSpan timeout) => true;
 
         public int Pid(string serviceName)
         {
@@ -755,7 +591,6 @@ public class WatchdogWorkerTests
                 HangCheckedServices = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "agent-core" },
                 HangBeaconDirectory = beaconDir,
                 HangStaleThreshold = TimeSpan.FromSeconds(90),
-                RestartRequestPath = Path.Combine(Path.GetTempPath(), $"no-such-{Guid.NewGuid():N}.json"),
             });
             SeedLedgers(worker);
 

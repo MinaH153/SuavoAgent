@@ -213,9 +213,13 @@ public sealed class AgentRulesetClientTests
         await client.FetchAsync(null, CancellationToken.None);
 
         Assert.NotNull(handler.LastRequest);
+        Assert.True(handler.LastRequest!.Headers.Contains("x-agent-auth-version"));
         Assert.True(handler.LastRequest!.Headers.Contains("x-agent-api-key"));
         Assert.True(handler.LastRequest.Headers.Contains("x-agent-timestamp"));
+        Assert.True(handler.LastRequest.Headers.Contains("x-agent-nonce"));
+        Assert.True(handler.LastRequest.Headers.Contains("x-agent-content-sha256"));
         Assert.True(handler.LastRequest.Headers.Contains("x-agent-signature"));
+        Assert.Equal("2", handler.LastRequest.Headers.GetValues("x-agent-auth-version").Single());
         Assert.Equal(TestApiKey, handler.LastRequest.Headers.GetValues("x-agent-api-key").Single());
     }
 

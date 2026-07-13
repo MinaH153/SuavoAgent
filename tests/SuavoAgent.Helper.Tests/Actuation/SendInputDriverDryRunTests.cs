@@ -102,7 +102,7 @@ public sealed class SendInputDriverDryRunTests
     public async Task LaunchSandboxApp_RequestTrue_GateFalse_EffectiveTrue_NoProcessStarted()
     {
         var driver = BuildDriver(gateDryRun: false);
-        var req = new LaunchSandboxAppRequest(AppKey: "notepad", DryRun: true);
+        var req = new LaunchSandboxAppRequest(AppKey: "calculator", DryRun: true);
         var result = await driver.LaunchSandboxAppAsync(req, CancellationToken.None);
         Assert.True(result.Ok);
         Assert.True(result.DryRun);
@@ -114,7 +114,7 @@ public sealed class SendInputDriverDryRunTests
     public async Task LaunchSandboxApp_RequestFalse_GateTrue_EffectiveTrue()
     {
         var driver = BuildDriver(gateDryRun: true);
-        var req = new LaunchSandboxAppRequest(AppKey: "notepad", DryRun: false);
+        var req = new LaunchSandboxAppRequest(AppKey: "calculator", DryRun: false);
         var result = await driver.LaunchSandboxAppAsync(req, CancellationToken.None);
         Assert.True(result.Ok);
         Assert.True(result.DryRun);
@@ -124,7 +124,7 @@ public sealed class SendInputDriverDryRunTests
     public async Task LaunchSandboxApp_RequestTrue_GateTrue_EffectiveTrue()
     {
         var driver = BuildDriver(gateDryRun: true);
-        var req = new LaunchSandboxAppRequest(AppKey: "notepad", DryRun: true);
+        var req = new LaunchSandboxAppRequest(AppKey: "calculator", DryRun: true);
         var result = await driver.LaunchSandboxAppAsync(req, CancellationToken.None);
         Assert.True(result.Ok);
         Assert.True(result.DryRun);
@@ -174,5 +174,16 @@ public sealed class SendInputDriverDryRunTests
         Assert.False(result.Ok);
         Assert.Equal(ActuationRejectionCodes.PhiPatternDetected, result.RejectionCode);
         Assert.True(result.DryRun);
+    }
+
+    [Fact]
+    public async Task LaunchSandboxApp_Notepad_IsAlwaysRejected()
+    {
+        var driver = BuildDriver(gateDryRun: true);
+        var result = await driver.LaunchSandboxAppAsync(
+            new LaunchSandboxAppRequest("notepad", DryRun: true),
+            CancellationToken.None);
+        Assert.False(result.Ok);
+        Assert.Equal(ActuationRejectionCodes.AppNotInAllowlist, result.RejectionCode);
     }
 }

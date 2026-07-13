@@ -17,8 +17,9 @@ namespace SuavoAgent.Contracts.Learning;
 /// so a fix learned on one PioneerRx version/screen can't mis-fire on another. Provenance:
 /// <see cref="SeedDigest"/> (which signed seed delivered it) + monotonic <see cref="Version"/>.
 ///
-/// Compliance: a patch may only change WHERE the agent clicks (PHI-free structure) — never clinical
-/// intent. It carries no PHI: every field is an id, an enum, a structural atom, or a number.
+/// Compliance: a patch may only change WHERE the agent clicks — never clinical intent. Structural
+/// fields are strings and are not PHI-free by type; signed-seed ingestion must independently enforce
+/// the structural-token allowlist, exact schema, source receipts, and PHI scan before activation.
 /// </summary>
 public sealed record SelectorPatch(
     string PatchId,
@@ -30,4 +31,8 @@ public sealed record SelectorPatch(
     IReadOnlyList<ElementSignature> Fallbacks,
     double Confidence,
     string SeedDigest,
-    int Version);
+    int Version,
+    // A Quick Search field can receive NDC keystrokes and therefore requires explicit pharmacist
+    // authority. This role travels inside the signed seed/command and is persisted with the exact
+    // selector. Null is the safe default for legacy/fleet patches.
+    string? ApprovedByRole = null);

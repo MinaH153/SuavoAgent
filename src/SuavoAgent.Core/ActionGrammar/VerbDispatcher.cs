@@ -63,7 +63,7 @@ public sealed class VerbDispatcher
         }
         catch (Exception ex)
         {
-            return Reject(ctx, meta, "precondition_exception", ex.Message, rollback: VerbRollbackEnvelope.None(ctx.InvocationId));
+            return Reject(ctx, meta, "precondition_exception", ex.GetType().Name, rollback: VerbRollbackEnvelope.None(ctx.InvocationId));
         }
 
         if (!precond.Satisfied)
@@ -83,7 +83,7 @@ public sealed class VerbDispatcher
         }
         catch (Exception ex)
         {
-            return Reject(ctx, meta, "rollback_capture_exception", ex.Message, rollback: VerbRollbackEnvelope.None(ctx.InvocationId));
+            return Reject(ctx, meta, "rollback_capture_exception", ex.GetType().Name, rollback: VerbRollbackEnvelope.None(ctx.InvocationId));
         }
 
         ctx.Audit.Append(
@@ -116,7 +116,7 @@ public sealed class VerbDispatcher
         catch (Exception ex)
         {
             await TryRunInverseAsync(rollback, ctx, ct).ConfigureAwait(false);
-            return FailWithAudit(ctx, meta, rollback, "execution_exception", ex.Message);
+            return FailWithAudit(ctx, meta, rollback, "execution_exception", ex.GetType().Name);
         }
 
         if (!exec.Succeeded)
@@ -137,7 +137,7 @@ public sealed class VerbDispatcher
         catch (Exception ex)
         {
             await TryRunInverseAsync(rollback, ctx, ct).ConfigureAwait(false);
-            return FailWithAudit(ctx, meta, rollback, "postcondition_exception", ex.Message);
+            return FailWithAudit(ctx, meta, rollback, "postcondition_exception", ex.GetType().Name);
         }
 
         if (!postcond.Satisfied)
@@ -272,7 +272,8 @@ public sealed class VerbDispatcher
                 metadata: new Dictionary<string, object?>
                 {
                     ["inverse_action"] = envelope.InverseActionType,
-                    ["error"] = ex.Message,
+                    ["error_code"] = "rollback_exception",
+                    ["exception_type"] = ex.GetType().Name,
                 });
         }
     }

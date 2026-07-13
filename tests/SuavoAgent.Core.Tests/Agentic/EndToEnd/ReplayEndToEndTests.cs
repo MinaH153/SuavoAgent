@@ -122,7 +122,7 @@ public sealed class ReplayEndToEndTests
         Assert.Equal(0, result.FailedOrdinal);
     }
 
-    /// <summary>Builds a minimal valid WorkflowTemplate around the given steps (notepad-scoped so the verb allowlist passes).</summary>
+    /// <summary>Builds a minimal valid WorkflowTemplate around the given steps (Calculator-scoped so the verb allowlist passes).</summary>
     private static WorkflowTemplate TemplatePlanCompilerTestTemplate(params TemplateStep[] steps)
     {
         var entry = steps[0].ExpectedVisible;
@@ -132,7 +132,7 @@ public sealed class ReplayEndToEndTests
             TemplateId: WorkflowTemplate.ComputeTemplateId(screenSig, stepsHash),
             TemplateVersion: "1",
             SkillId: "navigate",
-            ProcessNameGlob: "notepad*",
+            ProcessNameGlob: "calc.exe*",
             PmsVersionRange: Array.Empty<PmsVersionFingerprint>(),
             ScreenSignatureV1: screenSig,
             StepsHash: stepsHash,

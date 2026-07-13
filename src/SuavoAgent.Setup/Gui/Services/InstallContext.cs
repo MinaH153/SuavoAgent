@@ -10,12 +10,14 @@ namespace SuavoAgent.Setup.Gui.Services;
 internal sealed class InstallContext
 {
     public SetupConfig Config { get; }
+    public bool ConfigureInstalledCohort { get; }
 
     public string InstallDir { get; set; } = @"C:\Program Files\Suavo\Agent";
     public string DataDir { get; } = @"C:\ProgramData\SuavoAgent";
 
     public PioneerRxDiscovery.DiscoveryResult? Pioneer { get; set; }
     public SqlCredentialDiscovery.SqlCredentials? SqlCredentials { get; set; }
+    public string? SqlServerCertificateSourcePath { get; set; }
     public ConsentReceiptData? Consent { get; set; }
 
     public string? AgentId { get; set; }
@@ -25,9 +27,10 @@ internal sealed class InstallContext
     /// screen shows "brain ready" vs "finishing in the background").</summary>
     public bool BrainInstalled { get; set; }
 
-    public InstallContext(SetupConfig config)
+    public InstallContext(SetupConfig config, bool configureInstalledCohort = false)
     {
         Config = config;
+        ConfigureInstalledCohort = configureInstalledCohort;
     }
 
     public string InstallerVersion =>

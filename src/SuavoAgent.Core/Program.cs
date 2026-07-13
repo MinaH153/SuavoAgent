@@ -14,6 +14,10 @@ using SuavoAgent.Core.State;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Workers;
 using SuavoAgent.Diagnostics;
+using SuavoAgent.Contracts.Security;
+using SuavoAgent.Core.Diagnostics;
+using SuavoAgent.Core.Vision;
+using SuavoAgent.Core.Health;
 
 // Diagnostic Mesh: Wire.AttachUnhandledHooks MUST be the literal first
 // executable statement (spec §7 PR 4 wire-ordering invariant; verified
@@ -36,8 +40,16 @@ Wire.AttachUnhandledHooks(WireComponent.Core, new WireOptions
     EnableSentry = true,
 });
 
+// LocalService is shared by unrelated Windows services. Core may proceed only
+// when SCM has added the unique NT SERVICE\SuavoAgent.Core SID configured by
+// the signed installer/repair path. Keep this before log, config, credential,
+// state, IPC, and network initialization so a misconfigured old install fails
+// closed without touching protected runtime state.
+if (OperatingSystem.IsWindows())
+    CoreServiceIdentityGuard.DemandCurrentProcessHasServiceSid();
+
 // Crash sink: before ANY other code runs, wire a last-resort handler that
-// persists unhandled exceptions to a file under ProgramData (writable by
+// persists a PHI-safe structural failure record under ProgramData (writable by
 // LocalService/NetworkService/SYSTEM). Otherwise early-bootstrap failures
 // die silently under service context — the .NET runtime never gets a
 // chance to emit an Application event, so operators see only Windows
@@ -54,12 +66,28 @@ static string CoreCrashDir()
     try { Directory.CreateDirectory(dir); } catch { }
     return dir;
 }
-static void WriteCrash(string stage, Exception ex)
+static string SafeExceptionType(Exception? exception)
+{
+    var name = exception?.GetType().Name ?? "NonExceptionFailure";
+    return new string(name
+        .Take(96)
+        .Select(ch => char.IsAsciiLetterOrDigit(ch) ? ch : '_')
+        .ToArray());
+}
+static string SafeCrashStage(string stage) => stage switch
+{
+    "UnhandledException" => "unhandled_exception",
+    "UnobservedTaskException" => "unobserved_task_exception",
+    "EarlyBootstrap" => "early_bootstrap",
+    "Main" => "main",
+    _ => "unknown",
+};
+static void WriteCrash(string stage, Exception? exception)
 {
     try
     {
-        var line = $"[{DateTimeOffset.Now:O}] [{stage}] {ex.GetType().FullName}: {ex.Message}"
-                   + Environment.NewLine + ex.ToString() + Environment.NewLine + Environment.NewLine;
+        var line = $"[{DateTimeOffset.UtcNow:O}] code=core.{SafeCrashStage(stage)}.fatal " +
+                   $"exception_type={SafeExceptionType(exception)}{Environment.NewLine}";
         File.AppendAllText(
             Path.Combine(CoreCrashDir(), "startup-crash.log"),
             line,
@@ -69,7 +97,7 @@ static void WriteCrash(string stage, Exception ex)
 }
 
 AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-    WriteCrash("UnhandledException", e.ExceptionObject as Exception ?? new Exception(e.ExceptionObject?.ToString() ?? "unknown"));
+    WriteCrash("UnhandledException", e.ExceptionObject as Exception);
 TaskScheduler.UnobservedTaskException += (_, e) =>
     WriteCrash("UnobservedTaskException", e.Exception);
 
@@ -84,6 +112,7 @@ try
     Directory.CreateDirectory(Path.Combine(dataDir, "logs"));
 
     using var serilogLogger = new LoggerConfiguration()
+        .SanitizeCoreDiagnostics()
         .WriteTo.Console()
         .WriteTo.File(
             Path.Combine(dataDir, "logs", "startup-.log"),
@@ -95,26 +124,10 @@ try
     using var earlyLogFactory = LoggerFactory.Create(lb => lb.AddSerilog(serilogLogger));
     var earlyLog = earlyLogFactory.CreateLogger("SuavoAgent.Bootstrap");
 
-    if (SuavoAgent.Core.Cloud.SelfUpdater.CheckPendingUpdate(earlyLog))
-    {
-        serilogLogger.Information("Bootstrap update applied — restarting");
-        Environment.Exit(1);
-    }
-
-    // OTA crash-loop guard — runs BEFORE any risky init (DPAPI / DB / brain probe) so a crash-loop
-    // converges to a downgrade. If the just-swapped set crash-loops past its boot budget, restore the
-    // last-good .old set and restart onto it; otherwise count the boot and continue.
-    var probationInstallDir = Path.GetDirectoryName(Environment.ProcessPath);
-    if (!string.IsNullOrEmpty(probationInstallDir))
-    {
-        var probationAction = SuavoAgent.Core.Cloud.SelfUpdater.HandleProbationOnStartup(
-            probationInstallDir, SuavoAgent.Core.Cloud.OtaProbationEvaluator.DefaultMaxProbationBoots, earlyLog);
-        if (probationAction == SuavoAgent.Core.Cloud.SelfUpdater.ProbationStartupAction.RestartForDowngrade)
-        {
-            serilogLogger.Information("OTA crash-loop — downgraded to last-good binaries; restarting");
-            Environment.Exit(1);
-        }
-    }
+    // Core runs under LocalService but is authorized only through its exact service SID and has
+    // read/execute-only access to Program Files. OTA staging happens
+    // under ProgramData; the LocalSystem Watchdog and signed Maintenance coordinator own activation,
+    // rollback, and service lifecycle. Never inspect or mutate legacy install-dir sentinels here.
 }
 catch (Exception ex)
 {
@@ -137,6 +150,7 @@ Log.Logger = new LoggerConfiguration()
         fileSizeLimitBytes: 50_000_000,
         rollOnFileSizeLimit: true)
     .Enrich.FromLogContext()
+    .SanitizeCoreDiagnostics()
     .CreateLogger();
 
 try
@@ -171,19 +185,44 @@ try
         "SuavoAgent",
         "reasoning.json");
     builder.Configuration.AddJsonFile(reasoningConfigPath, optional: true, reloadOnChange: true);
-    var appSettingsPath = Path.Combine(exeDir, "appsettings.json");
-
+    // Vision has one authority: a strict generation-numbered value under the
+    // Setup-owned HKLM key. Apply it after every file/environment/config-sync
+    // provider so generic overrides cannot bypass the machine consent state.
+    // An absent value is an explicit default-disabled posture; malformed state
+    // is a startup fault, not a silent downgrade to disabled.
+    var visionDataDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SuavoAgent");
+    IVisionConfigurationStore visionStore = new WindowsVisionConfigurationStore();
+    var visionRegistryState = VisionConfigurationRegistry.Load(
+        visionStore,
+        visionDataDirectory);
+    if (!visionRegistryState.IsValid)
+    {
+        Log.Error(
+            "Vision registry state is invalid code={Code}; Core startup refused",
+            visionRegistryState.Code);
+        throw new InvalidDataException(
+            $"Vision registry state is invalid ({visionRegistryState.Code}).");
+    }
+    builder.Configuration.AddInMemoryCollection(
+        visionRegistryState.EffectiveOptions.ToConfigurationValues());
     // Version comes from the STAMPED ASSEMBLY, not appsettings.json — the OTA swaps the binaries but
     // never rewrites Agent.Version, so config-sourced version drifts stale after every update. See AgentVersion.
     var startupVersion = AgentVersion.Resolve(builder.Configuration.GetSection("Agent").Get<AgentOptions>()?.Version);
     Log.Information("SuavoAgent.Core starting v{Version}", startupVersion);
     builder.Services.AddWindowsService(options => options.ServiceName = "SuavoAgent.Core");
     builder.Services.AddSerilog();
+    builder.Services.AddSingleton(visionStore);
+    builder.Services.AddSingleton(new VisionConfigurationStatusProvider(
+        visionRegistryState,
+        visionStore,
+        visionDataDirectory));
+    builder.Services.AddSingleton(new VisionConfigurationCoordinator(
+        visionStore,
+        visionDataDirectory));
 
     builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent"));
-    // Override the config-bound Version with the stamped assembly version for every IOptions<AgentOptions>
-    // consumer (heartbeat → cloud agent_version, etc.) so the reported version is OTA-correct.
-    builder.Services.PostConfigure<AgentOptions>(o => o.Version = AgentVersion.Resolve(o.Version));
 
     var agentOpts = builder.Configuration.GetSection("Agent").Get<AgentOptions>() ?? new AgentOptions();
     // The local copy feeds SuavoCloudClient directly (heartbeat), so apply the same assembly-version override.
@@ -216,23 +255,69 @@ try
             "Mission Loop Phase 1 dormant — config gate closed (MissionLoop.Phase1.Enabled=false).");
     }
 
-    // H-1: Seal plaintext credentials with DPAPI on first run (Windows only)
-    SuavoAgent.Core.Config.CredentialProtector.SealSecretsFile(
-        appSettingsPath,
-        LoggerFactory.Create(lb => lb.AddSerilog()).CreateLogger("CredentialProtector"));
+    IEncryptedCredentialStore? credentialStore = null;
+    CloudCredentialBootstrapResult? credentialBootstrap = null;
 
-    // The cloud clients below capture this local AgentOptions instance, not the
-    // later IOptions<AgentOptions>.Value object. On restart, appsettings.json
-    // already contains DPAPI-wrapped secrets, so unwrap agentOpts before any
-    // HMAC signer is constructed. Otherwise config/heartbeat clients sign with
-    // the literal "DPAPI:..." envelope and cloud correctly returns 401.
+    // Cloud auth is mutable (rotation/recovery) and therefore lives only in
+    // ProgramData's machine-DPAPI credential store. The protected store is
+    // loaded before any cloud/HMAC client captures AgentOptions. A legacy
+    // appsettings ApiKey is a one-way migration input; Core never writes to
+    // Program Files and never treats appsettings as authoritative afterward.
     if (OperatingSystem.IsWindows())
     {
-        agentOpts.ApiKey = SuavoAgent.Core.Config.CredentialProtector.Unprotect(agentOpts.ApiKey);
-        agentOpts.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(agentOpts.SqlPassword);
+        credentialStore = CredentialStoreFactory.Create();
+        CloudCredentialBootstrapper.ValidateSqlSecretsAreProtected(agentOpts, enforce: true);
+        credentialBootstrap = CloudCredentialBootstrapper.LoadOrMigrate(
+            credentialStore,
+            agentOpts,
+            unprotectLegacyValue: true);
+        agentOpts.ApiKey = credentialBootstrap.AuthKey;
+        agentOpts.InstallProvisioningId = credentialBootstrap.ProvisioningId;
+        agentOpts.DeviceAttestationKeyName = credentialBootstrap.DeviceKeyName;
+        agentOpts.DeviceAttestationKeyId = credentialBootstrap.DeviceKeyId;
+        agentOpts.InstallDeviceCode = credentialBootstrap.DeviceCode;
+        agentOpts.InstallDeviceChallenge = credentialBootstrap.DeviceChallenge;
+        if (!string.IsNullOrWhiteSpace(credentialBootstrap.DeviceFingerprint) &&
+            !string.Equals(
+                agentOpts.MachineFingerprint,
+                credentialBootstrap.DeviceFingerprint,
+                StringComparison.Ordinal))
+            throw new InvalidDataException(
+                "Pending device proof fingerprint does not match this target configuration.");
+        agentOpts.SqlPassword = CredentialProtector.Unprotect(agentOpts.SqlPassword);
         foreach (var ph in agentOpts.Pharmacies)
-            ph.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(ph.SqlPassword);
+            ph.SqlPassword = CredentialProtector.Unprotect(ph.SqlPassword);
     }
+
+    // Every IOptions consumer gets the same credential-store override as the
+    // captured local AgentOptions above. appsettings can no longer win through
+    // a later bind/reload, including when a stale legacy ApiKey remains inert.
+    var runtimeAuthKey = agentOpts.ApiKey;
+    var runtimeInstallProvisioningId = agentOpts.InstallProvisioningId;
+    var runtimeDeviceKeyName = agentOpts.DeviceAttestationKeyName;
+    var runtimeDeviceKeyId = agentOpts.DeviceAttestationKeyId;
+    var runtimeInstallDeviceCode = agentOpts.InstallDeviceCode;
+    var runtimeInstallDeviceChallenge = agentOpts.InstallDeviceChallenge;
+    builder.Services.PostConfigure<AgentOptions>(o =>
+    {
+        o.Version = AgentVersion.Resolve(o.Version);
+        o.ApiKey = runtimeAuthKey;
+        o.InstallProvisioningId = runtimeInstallProvisioningId;
+        o.DeviceAttestationKeyName = runtimeDeviceKeyName;
+        o.DeviceAttestationKeyId = runtimeDeviceKeyId;
+        o.InstallDeviceCode = runtimeInstallDeviceCode;
+        o.InstallDeviceChallenge = runtimeInstallDeviceChallenge;
+        if (OperatingSystem.IsWindows())
+        {
+            CloudCredentialBootstrapper.ValidateSqlSecretsAreProtected(o, enforce: true);
+            o.SqlPassword = CredentialProtector.Unprotect(o.SqlPassword);
+            foreach (var pharmacy in o.Pharmacies)
+                pharmacy.SqlPassword = CredentialProtector.Unprotect(pharmacy.SqlPassword);
+        }
+    });
+
+    var isDeviceProbation =
+        credentialBootstrap?.Source == CloudCredentialSource.PendingProvisioning;
 
     Log.Information(
         "Writeback mode: {Mode} (SQL writes {Status}) — audit receipts always generated",
@@ -240,19 +325,37 @@ try
         agentOpts.ReceiptOnlyMode ? "DISABLED" : "ENABLED");
     if (!string.IsNullOrWhiteSpace(agentOpts.ApiKey))
     {
-        var cloudClient = new SuavoCloudClient(agentOpts);
-        builder.Services.AddSingleton(cloudClient);
-        builder.Services.AddSingleton<IPostSigner>(cloudClient);
-        builder.Services.AddSingleton<PricingJobCloudUploader>();
-        builder.Services.AddSingleton<SeedClient>();
-        builder.Services.AddSingleton<IAgentCredentialRecoveryClient>(sp =>
-            new AgentCredentialRecoveryClient(
-                agentOpts,
-                appSettingsPath,
-                sp.GetRequiredService<ILogger<AgentCredentialRecoveryClient>>()));
-        builder.Services.AddSingleton<CloudAuthRecoveryCoordinator>();
+        builder.Services.AddSingleton<SuavoAgent.Core.Cloud.IDeviceAuthoritySigner>(sp =>
+            new SuavoAgent.Core.Cloud.DeviceAuthoritySigner(
+                sp.GetRequiredService<IOptions<AgentOptions>>().Value));
+        if (isDeviceProbation)
+        {
+            // Pending authority gets one deliberately narrow transport. It
+            // cannot heartbeat, fetch commands/config, upload observations, or
+            // reach any PHI-bearing route before Setup commits the device.
+            builder.Services.AddSingleton(new DeviceProbationCloudClient(agentOpts));
+            Log.Information(
+                "Cloud credential is in device probation — only PHI-free probation health egress is registered");
+        }
+        else
+        {
+            var cloudClient = new SuavoCloudClient(agentOpts);
+            builder.Services.AddSingleton(cloudClient);
+            builder.Services.AddSingleton<IPostSigner>(cloudClient);
+            builder.Services.AddHostedService<AutonomyEvidenceSyncWorker>();
+            builder.Services.AddSingleton<PricingJobCloudUploader>();
+            builder.Services.AddHostedService<PricingResultOutboxWorker>();
+            builder.Services.AddSingleton<PricingTerminalAckOutbox>();
+            builder.Services.AddHostedService<PricingTerminalAckOutboxWorker>();
+            builder.Services.AddSingleton<SeedClient>();
+            builder.Services.AddSingleton<IAgentCredentialRecoveryClient>(sp =>
+                new AgentCredentialRecoveryClient(
+                    agentOpts,
+                    credentialStore!,
+                    sp.GetRequiredService<ILogger<AgentCredentialRecoveryClient>>()));
+            builder.Services.AddSingleton<CloudAuthRecoveryCoordinator>();
 
-        // Cloud config-push: AgentConfigClient polls GET /api/agent/config,
+            // Cloud config-push: AgentConfigClient polls GET /api/agent/config,
         // ConfigOverrideStore flattens to config-overrides.json on disk,
         // ConfigSyncWorker runs the loop. Manual HttpClient instantiation
         // matches SuavoCloudClient's idiom — the codebase doesn't use
@@ -263,6 +366,7 @@ try
         var configHandler = new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            AllowAutoRedirect = false,
         };
         var configHttp = new HttpClient(configHandler, disposeHandler: true)
         {
@@ -293,26 +397,56 @@ try
         // missing endpoint.
         builder.Services.AddDiagnosticMeshOta(agentOpts);
 
-        builder.Services.AddHostedService<ConfigSyncWorker>();
+            builder.Services.AddHostedService<ConfigSyncWorker>();
+        }
     }
     else
     {
-        Log.Warning("No ApiKey configured — cloud sync disabled. Set Agent:ApiKey in appsettings.json");
+        Log.Warning("No protected cloud credential is available — cloud sync disabled; reconnect this workstation from the Suavo dashboard");
     }
+
+    if (isDeviceProbation)
+    {
+        // The pending credential is intentionally hosted in a separate,
+        // minimum-necessary process graph. No state DB, Rx detector, pricing,
+        // vision, learning, IPC actuation, command poller, or PHI-capable
+        // worker is constructed before PIC approval and cloud promotion.
+        builder.Services.AddSingleton<IPioneerRxProbationSqlCanary, PioneerRxProbationSqlCanary>();
+        builder.Services.AddHostedService<DeviceProbationWorker>();
+        builder.Services.Configure<HostOptions>(options =>
+            options.ShutdownTimeout = TimeSpan.FromSeconds(15));
+        using var probationHost = builder.Build();
+        Log.Information(
+            "Device probation host started with TLS and INFORMATION_SCHEMA canary only");
+        probationHost.Run();
+        return;
+    }
+
     builder.Services.AddSingleton(sp => new SeedApplicator(sp.GetRequiredService<AgentStateDb>()));
 
     // M3 per-task autonomy graduation ledger (fed by finished pricing/workflow runs).
     builder.Services.AddSingleton(sp => new SuavoAgent.Core.Autonomy.TaskAutonomyLedger(
         sp.GetRequiredService<AgentStateDb>(),
-        sp.GetRequiredService<IOptions<AgentOptions>>().Value.TaskAutonomyCleanRunsThreshold));
+        sp.GetRequiredService<IOptions<AgentOptions>>().Value.TaskAutonomyCleanRunsThreshold,
+        sp.GetRequiredService<IOptions<AgentOptions>>().Value,
+        sp.GetService<SuavoAgent.Core.Cloud.IDeviceAuthoritySigner>()));
+    builder.Services.AddSingleton<SuavoAgent.Core.Autonomy.IPioneerRxAutonomyIdentityProvider>(sp =>
+        new SuavoAgent.Core.Autonomy.PioneerRxAutonomyIdentityProvider(
+            sp.GetRequiredService<IOptions<AgentOptions>>().Value));
 
     // Adapter registry — single source of per-PMS Core config + the enforced PHI-policy invariant.
     builder.Services.AddAdapterRegistry();
+    builder.Services.AddSingleton<SuavoAgent.Core.Learning.ActivePmsAdapterRegistry>();
+    builder.Services.AddSingleton<SuavoAgent.Core.Learning.IActivePmsAdapterRegistry>(sp =>
+        sp.GetRequiredService<SuavoAgent.Core.Learning.ActivePmsAdapterRegistry>());
 
     // Supervised-worker health: ResilientHostedService workers record faults here; the
     // heartbeat (HealthSnapshot.workers[]) surfaces restart-looping/escalated workers to the
     // cloud for closed-loop remediation. Singleton so every worker + the snapshot share it.
     builder.Services.AddSingleton<SuavoAgent.Core.Workers.WorkerHealthRegistry>();
+    // One process-wide human-control constitution. Every Heartbeat actuation
+    // path resolves this exact singleton so Pause/Stop reaches every run.
+    builder.Services.AddSingleton<SuavoAgent.Core.Autonomy.AutopilotRunCoordinator>();
 
     builder.Services.AddHostedService<HeartbeatWorker>();
     // Liveness beacon — the Watchdog reads it to detect an alive-but-hung Core (SCM can't see deadlock).
@@ -323,7 +457,8 @@ try
     // VisionCaptureWorker — fires periodic capture_screen IPC commands when
     // Vision.Enabled + PeriodicCapture.Enabled + active learning session.
     // Both gates default OFF so this is a no-op until a pilot opts in.
-    builder.Services.Configure<VisionOptions>(builder.Configuration.GetSection("Vision"));
+    builder.Services.Configure<VisionOptions>(
+        builder.Configuration.GetSection("Agent:Vision"));
     builder.Services.AddSingleton<SuavoAgent.Core.Workers.VisionCaptureTelemetry>();
     builder.Services.AddSingleton<IVisionShadowReasoner, VisionGroundedShadowReasoner>();
     builder.Services.AddHostedService<SuavoAgent.Core.Workers.VisionCaptureWorker>();
@@ -335,103 +470,17 @@ try
             "SuavoAgent");
         Directory.CreateDirectory(dataDir);
 
-        // ACL-lock ProgramData\SuavoAgent to SYSTEM, LocalService, Administrators only (HIPAA 164.312(a)(2)(iv))
+        // Core is deliberately not privileged to repair its own filesystem
+        // boundary. Setup/Maintenance establishes SYSTEM ownership and exact,
+        // no-follow ACLs before services start; runtime may only verify that
+        // invariant. A missing or damaged boundary is a hard startup failure,
+        // never an invitation to reopen a mutable path for ACL repair.
         if (OperatingSystem.IsWindows())
         {
-            try
-            {
-                var dirInfo = new DirectoryInfo(dataDir);
-                var dirSecurity = dirInfo.GetAccessControl();
-                dirSecurity.SetAccessRuleProtection(true, false); // Remove inherited rules
-                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(
-                        System.Security.Principal.WellKnownSidType.LocalSystemSid, null),
-                    System.Security.AccessControl.FileSystemRights.FullControl,
-                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
-                    System.Security.AccessControl.PropagationFlags.None,
-                    System.Security.AccessControl.AccessControlType.Allow));
-                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(
-                        System.Security.Principal.WellKnownSidType.LocalServiceSid, null),
-                    System.Security.AccessControl.FileSystemRights.FullControl,
-                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
-                    System.Security.AccessControl.PropagationFlags.None,
-                    System.Security.AccessControl.AccessControlType.Allow));
-                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(
-                        System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null),
-                    System.Security.AccessControl.FileSystemRights.FullControl,
-                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
-                    System.Security.AccessControl.PropagationFlags.None,
-                    System.Security.AccessControl.AccessControlType.Allow));
-                // QA Setup I-1 (HIPAA): REMOVED a NetworkService:Modify(OI)(CI) grant here. Its comment
-                // claimed "NetworkService needs write for Broker logs", but the Broker runs as LocalSystem
-                // (ServiceInstaller obj=LocalSystem) and no SuavoAgent service uses NetworkService — so it
-                // was a dead grant that gave ANY NetworkService process on the box (e.g. SQL Server) Modify
-                // on credentials.dat / state.key / state.db (plaintext PHI). LocalSystem + LocalService are
-                // already granted above; nothing legitimate needs NetworkService.
-                // The Helper runs as a de-privileged user (always in BUILTIN\Users) and must
-                // traverse the data dir (this-dir-only — NO inherited file reads: state.db is
-                // plaintext PHI and state.key is machine-DPAPI). Mirrors the installer's
-                // GrantInteractiveHelperAccess (BUILTIN\Users — robust vs INTERACTIVE for a
-                // UAC-filtered token) so whichever lockdown runs last leaves the Helper alive.
-                // (2026-06-10 helper crash-loop on fresh install.)
-                dirSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(
-                        System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
-                    System.Security.AccessControl.FileSystemRights.ReadAndExecute,
-                    System.Security.AccessControl.InheritanceFlags.None,
-                    System.Security.AccessControl.PropagationFlags.None,
-                    System.Security.AccessControl.AccessControlType.Allow));
-                dirInfo.SetAccessControl(dirSecurity);
-
-                // Helper-writable subtrees: logs\helper (Serilog + helper-crash.log)
-                // and diagnostics\helper (Wire journal) get inherited Modify; the
-                // logs\ and diagnostics\ roots get traverse ONLY so a local user can
-                // never plant junctions where SYSTEM (Broker/Watchdog) appends —
-                // log-dir EoP class. honeytokens\ is Helper-planted decoy bait.
-                foreach (var (sub, rights, inherit) in new[]
-                {
-                    ("logs", System.Security.AccessControl.FileSystemRights.ReadAndExecute, false),
-                    (Path.Combine("logs", "helper"), System.Security.AccessControl.FileSystemRights.Modify, true),
-                    ("diagnostics", System.Security.AccessControl.FileSystemRights.ReadAndExecute, false),
-                    (Path.Combine("diagnostics", "helper"), System.Security.AccessControl.FileSystemRights.Modify, true),
-                    ("honeytokens", System.Security.AccessControl.FileSystemRights.Modify, true),
-                })
-                {
-                    var subDir = new DirectoryInfo(Path.Combine(dataDir, sub));
-                    subDir.Create();
-                    var subSec = subDir.GetAccessControl();
-                    subSec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                        new System.Security.Principal.SecurityIdentifier(
-                            System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
-                        rights,
-                        inherit
-                            ? System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit
-                            : System.Security.AccessControl.InheritanceFlags.None,
-                        System.Security.AccessControl.PropagationFlags.None,
-                        System.Security.AccessControl.AccessControlType.Allow));
-                    subDir.SetAccessControl(subSec);
-                }
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                // Setting a directory's DACL requires WRITE_DAC, which the
-                // NT AUTHORITY\LocalService account does not have by default.
-                // The install-time bootstrap runs as Administrator and is the
-                // canonical owner of this ACL — so a runtime failure here
-                // just means bootstrap already locked things down and the
-                // service correctly has no authority to mutate its own DACL.
-                // Log it and keep going; fleet dashboard can surface the
-                // signal if the bootstrap-time lockdown ever fails to run.
-                Log.Warning(ex, "ACL_LOCKDOWN_DEFERRED: {Dir} DACL will be pinned by bootstrap at install time (runtime account lacks WRITE_DAC)", dataDir);
-            }
-            catch (Exception ex)
-            {
-                if (OperatingSystem.IsWindows())
-                    throw; // Any non-permission ACL failure is still mandatory to surface on Windows — HIPAA 164.312(a)(2)(iv)
-                Log.Warning(ex, "ACL not available on this platform");
-            }
+            if (!SuavoAgent.Core.State.InstalledDataRootVerifier.IsSafe(dataDir))
+                throw new InvalidDataException(
+                    "Installed data-root owner or ACL is not the exact protected policy.");
+            Log.Information("core.acl_boundary_verified");
         }
 
         var dbPath = Path.Combine(dataDir, "state.db");
@@ -466,7 +515,9 @@ try
         {
             if (OperatingSystem.IsWindows())
                 throw; // DPAPI encryption is mandatory on Windows — unencrypted DB is HIPAA violation
-            Log.Warning(ex, "DPAPI not available on this platform — state DB unencrypted");
+            Log.Warning(
+                "core.dpapi_unavailable exception_type={ExceptionType}",
+                SafeExceptionType(ex));
         }
 
         // Migrate existing unencrypted DB to encrypted if key is available
@@ -483,6 +534,22 @@ try
         opts.HmacSalt = db.GetOrCreateHmacSalt("agent-audit");
 
         return db;
+    });
+
+    // Closed-loop PioneerRx promotion: raw Rx lookup keys live only in the fixed,
+    // ACL-locked ProgramData boundary as machine-DPAPI ciphertext. Candidate sync
+    // fails closed if this store cannot be constructed or written.
+    builder.Services.AddSingleton<IRxCorrelationStore>(_ =>
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Protected Rx correlation storage requires Windows DPAPI.");
+        return RxCorrelationStore.CreateProduction();
+    });
+    builder.Services.AddSingleton<IDeliveryWritebackLedger>(_ =>
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Protected delivery writeback storage requires Windows DPAPI.");
+        return DeliveryWritebackLedger.CreateProduction();
     });
 
     // MOAT — durable Physarum edge-conductance store (slime-mold exploration memory). Backed by the
@@ -523,336 +590,7 @@ try
         File.WriteAllText(Path.Combine(nonceDir, "pipe.nonce"), pipeNonce);
     }
 
-    // Pricing intelligence — Core→Helper command channel
-    builder.Services.AddSingleton<IpcCommandClient>(sp =>
-        new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()));
-    builder.Services.AddSingleton<IIpcCommandClient>(sp => sp.GetRequiredService<IpcCommandClient>());
-    builder.Services.AddSingleton<IIntentCursorClient, IntentCursorClient>();
-    builder.Services.AddSingleton<ExcelPricingReader>();
-    builder.Services.AddSingleton<ExcelPricingWriter>();
-    builder.Services.AddSingleton<IPricingLookupFactory, PioneerRxSqlPricingLookupFactory>();
-
-    // Register both pricing executors as concrete singletons so either can be selected at
-    // resolve time. The IPricingJobExecutor interface is bound below based on
-    // AgentOptions.PricingExecutor — SqlFirst (default) or UiaFirst (Nadim-style UIA-only
-    // pharmacies). Both implementations are fail-closed by design.
-    builder.Services.AddSingleton<SqlFirstPricingJobExecutor>();
-    builder.Services.AddSingleton<UiaFirstPricingJobExecutor>();
-    builder.Services.AddSingleton<IPricingJobExecutor>(sp =>
-    {
-        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
-        IPricingJobExecutor executor = opts.PricingExecutor switch
-        {
-            // VisionFirst drives the screen identically to UiaFirst (same blind-run gate, same Helper
-            // IPC path); the difference is the Helper reads the grid by sight when vision.json is on.
-            PricingExecutorMode.UiaFirst or PricingExecutorMode.VisionFirst
-                => sp.GetRequiredService<UiaFirstPricingJobExecutor>(),
-            _ => sp.GetRequiredService<SqlFirstPricingJobExecutor>(),
-        };
-        Log.Information(
-            "Pricing executor selected: {Mode} ({Type}); throttle={ThrottleMs}ms",
-            opts.PricingExecutor, executor.GetType().Name, opts.PricingThrottleMs);
-        return executor;
-    });
-
-    // Autonomous daily pricing schedule — the "bot does it on its own" overnight batch (Nadim's
-    // documented top-500 run). OFF by default (Agent.PricingSchedule.Enabled=false). SqlFirst-ONLY by
-    // construction: it is handed the read-only SqlFirstPricingJobExecutor and additionally self-gates on
-    // PricingExecutor==SqlFirst, so a timer can never drive the live PMS UI (Precedence-1).
-    builder.Services.AddHostedService(sp => new SuavoAgent.Core.Workers.PricingScheduleWorker(
-        sp.GetRequiredService<ILogger<SuavoAgent.Core.Workers.PricingScheduleWorker>>(),
-        sp.GetRequiredService<IOptionsMonitor<AgentOptions>>(),
-        sp.GetRequiredService<SqlFirstPricingJobExecutor>(),
-        // Optional: present only when an API key is configured (registered in the cloud block above).
-        // When present, an autonomous run surfaces in the cockpit just like a cockpit-triggered one.
-        sp.GetService<SuavoAgent.Core.Cloud.PricingJobCloudUploader>()));
-
-    // File discovery — Core side. Helper runs the actual locator; this client
-    // wraps the find_file IPC call so HeartbeatWorker can dispatch
-    // find_and_run_pricing_job without knowing IPC details.
-    builder.Services.AddSingleton<SuavoAgent.Core.Discovery.DiscoveryClient>();
-
-    // SP4 Phase 5.2 — Actuation chain (Track 5). Verb registry + dispatcher +
-    // workflow executor. The HelperActuationGateway wraps the existing IPC
-    // command client so verbs delegate to the Helper-resident
-    // SendInputDriver / UiaLabelResolver. Disabled-by-default by virtue of
-    // the Helper-side ActuationGate (gate flips false unless operator
-    // approves via cloud + signs the per-pharmacy actuation.json).
-    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Policy.IAuthzPolicy>(sp =>
-        new SuavoAgent.Core.ActionGrammarV1.Policy.CharterDrivenAuthzPolicy());
-    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.VerbDispatcher>();
-    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.VerbRegistry>(sp =>
-        SuavoAgent.Core.ActionGrammarV1.VerbRegistry.Build(
-            new[] { typeof(SuavoAgent.Core.ActionGrammarV1.IVerb).Assembly },
-            sp.GetRequiredService<ILogger<SuavoAgent.Core.ActionGrammarV1.VerbRegistry>>()));
-    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.IActuationGateway>(sp =>
-        new SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.HelperActuationGateway(
-            clientFactory: () => new IpcCommandClient(cmdPipeName, sp.GetRequiredService<ILogger<IpcCommandClient>>()),
-            logger: sp.GetRequiredService<ILogger<SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation.HelperActuationGateway>>()));
-    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Workflows.IWorkflowAuditClient>(sp =>
-    {
-        var cloud = sp.GetService<SuavoAgent.Core.Cloud.SuavoCloudClient>();
-        if (cloud is null)
-        {
-            // Cloud is optional in some test/runtime configurations. Returning
-            // a null-object lets workflows still execute locally for dry-run
-            // smoke tests.
-            return new SuavoAgent.Core.ActionGrammarV1.Workflows.NullWorkflowAuditClient();
-        }
-        return new SuavoAgent.Core.Cloud.WorkflowAuditCloudClient(
-            cloud,
-            sp.GetRequiredService<ILogger<SuavoAgent.Core.Cloud.WorkflowAuditCloudClient>>());
-    });
-    builder.Services.AddSingleton<SuavoAgent.Core.ActionGrammarV1.Workflows.WorkflowExecutor>();
-
-    // PricingJobRunner gets an optional TieredBrain evaluator wired only when
-    // Reasoning.PricingBrainEnabled is true. Default: disabled — behavior is
-    // byte-for-byte identical to pre-brain. Enabling lets the brain Halt jobs
-    // on streak failures (Tier-1 rules) or ambiguous states (Tier-2/3).
-    builder.Services.AddSingleton<PricingJobRunner>(sp =>
-    {
-        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
-        var reasoning = opts.Reasoning;
-        PricingBrainEvaluator? evaluator = null;
-        if (reasoning.PricingBrainEnabled)
-        {
-            evaluator = new PricingBrainEvaluator(
-                sp.GetRequiredService<TieredBrain>(),
-                sp.GetRequiredService<ILogger<PricingBrainEvaluator>>());
-            Log.Information(
-                "Pricing brain ENABLED — PricingJobRunner will consult TieredBrain after each NDC lookup");
-        }
-        else
-        {
-            Log.Information(
-                "Pricing brain disabled (Reasoning.PricingBrainEnabled=false) — runner skips TieredBrain");
-        }
-
-        return new PricingJobRunner(
-            sp.GetRequiredService<ExcelPricingReader>(),
-            sp.GetRequiredService<ExcelPricingWriter>(),
-            sp.GetRequiredService<AgentStateDb>(),
-            sp.GetRequiredService<ILogger<PricingJobRunner>>(),
-            evaluator,
-            interLookupDelay: TimeSpan.FromMilliseconds(opts.PricingThrottleMs));
-    });
-
-    // Tier-1 Reasoning — rule engine. The bundled catalog is embedded in this
-    // assembly so it travels inside the signed single-file exe; operator
-    // overrides still load from ProgramData. Fail-closed: a malformed rule
-    // file prevents the agent from starting.
-    builder.Services.AddSingleton<YamlRuleLoader>();
-    builder.Services.AddSingleton<RuleEngine>(sp =>
-    {
-        var loader = sp.GetRequiredService<YamlRuleLoader>();
-        var log = sp.GetRequiredService<ILogger<RuleEngine>>();
-
-        var overrideDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "SuavoAgent", "rules");
-
-        var rules = new List<SuavoAgent.Contracts.Reasoning.Rule>();
-        rules.AddRange(loader.LoadFromEmbeddedResources(
-            typeof(Program).Assembly,
-            "SuavoAgent.Core.Reasoning.Rules."));
-
-        // QA learning-hardening: gate auto-GENERATED directory rules — only operator-Approved auto-rules
-        // load (a rule with no auto_rule_approvals row is a hand-authored override and loads normally).
-        // Without this, a Pending/Shadow/Rejected auto-rule loaded + surfaced as an operator prompt
-        // identically to an Approved one. Embedded rules above are trusted and never gated.
-        var ruleApprovalDb = sp.GetRequiredService<AgentStateDb>();
-        var directoryRules = loader.LoadFromDirectory(overrideDir, required: false);
-        rules.AddRange(AutoRuleApprovalGate.AdmitApproved(
-            directoryRules,
-            id => ruleApprovalDb.GetAutoRuleApproval(id)?.Status,
-            log));
-
-        var engine = new RuleEngine(rules, log);
-        Log.Information("RuleEngine loaded {Count} rules across {Skills} skill(s): {SkillList}",
-            engine.RuleCount, engine.KnownSkills.Count, string.Join(", ", engine.KnownSkills));
-        return engine;
-    });
-
-    // Tier-2 Reasoning — local inference. Selected at startup based on
-    // ReasoningOptions + on-disk model verification. Default: NullLocalInference
-    // so the agent boots useful in rules-only mode. Real LLM wiring lands in
-    // Week 2c once a signed model manifest is shipped to GitHub releases.
-    builder.Services.AddSingleton<ActionVerifier>(sp =>
-        new ActionVerifier(sp.GetRequiredService<IOptions<AgentOptions>>()));
-    // HttpModelProvisioner auto-downloads the GGUF on first run when ModelUrl is set (so the local
-    // brain ships with a client install); with no URL it behaves exactly like the legacy verify-only
-    // LocalFileModelManager. Fail-soft — a download failure just leaves reasoning off.
-    builder.Services.AddSingleton<IModelManager, HttpModelProvisioner>();
-    // NativeLibProvisioner downloads the llama.cpp native DLLs on first run when NativeLibsUrl is set
-    // (they're deliberately not shipped — stealth). Background + fail-soft, like the model provisioner.
-    builder.Services.AddSingleton<NativeLibProvisioner>();
-    builder.Services.AddSingleton<ILocalInference>(sp =>
-    {
-        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
-        if (!opts.Enabled)
-        {
-            Log.Information("Tier-2 LocalInference disabled (Reasoning.Enabled=false) — running rules-only");
-            return new NullLocalInference();
-        }
-
-        // DeferredLocalInference kicks the one-time background provisioning of the model GGUF + native
-        // llama.cpp DLLs and runs rules-only until they land, then lazily constructs the real engine on
-        // the next call — no second restart, no startup stall (the old factory blocked here verifying a
-        // 2 GB SHA-256). Native binaries stay off the installer (stealth); they're fetched on demand.
-        Log.Information("Tier-2 LocalInference ENABLED — model '{Id}' (deferred: provisioning if absent)", opts.ModelId);
-        return new DeferredLocalInference(
-            sp.GetRequiredService<IOptions<AgentOptions>>(),
-            sp.GetRequiredService<NativeLibProvisioner>(),
-            sp.GetRequiredService<IModelManager>(),
-            sp.GetRequiredService<ILogger<LLamaLocalInference>>(),
-            sp.GetRequiredService<ILogger<DeferredLocalInference>>());
-    });
-
-    // Tier-3 Reasoning — cloud Claude via /api/agent/reason. Opt-in via
-    // Reasoning.CloudEnabled + the standard ApiKey (shared with heartbeat/sync).
-    // No ApiKey means NullCloudReasoning, which TieredBrain treats as "skip Tier-3".
-    builder.Services.AddSingleton<ICloudReasoning>(sp =>
-    {
-        var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
-        if (!opts.Reasoning.CloudEnabled || string.IsNullOrWhiteSpace(opts.ApiKey))
-        {
-            Log.Information("Tier-3 CloudReasoning disabled (CloudEnabled={Enabled}, ApiKey={HasKey})",
-                opts.Reasoning.CloudEnabled, !string.IsNullOrWhiteSpace(opts.ApiKey));
-            return new NullCloudReasoning();
-        }
-
-        var signer = sp.GetService<IPostSigner>();
-        if (signer == null)
-        {
-            Log.Warning("Tier-3 CloudReasoning enabled but IPostSigner not registered — disabling");
-            return new NullCloudReasoning();
-        }
-
-        Log.Information("Tier-3 CloudReasoning ENABLED — will escalate low-confidence Tier-2 proposals");
-        return new ClaudeCloudReasoning(signer, sp.GetRequiredService<ILogger<ClaudeCloudReasoning>>());
-    });
-
-    builder.Services.AddSingleton<TieredBrain>(sp =>
-    {
-        var reasoning = sp.GetRequiredService<IOptions<AgentOptions>>().Value.Reasoning;
-        return new TieredBrain(
-            sp.GetRequiredService<RuleEngine>(),
-            sp.GetRequiredService<ILocalInference>(),
-            sp.GetRequiredService<ActionVerifier>(),
-            sp.GetRequiredService<ILogger<TieredBrain>>(),
-            sp.GetService<ICloudReasoning>(),
-            TimeSpan.FromSeconds(Math.Max(1, reasoning.InferenceTimeoutSeconds)));
-    });
-
-    builder.Services.AddSingleton<IpcPipeServer>(sp =>
-    {
-        var logger = sp.GetRequiredService<ILogger<IpcPipeServer>>();
-        var eventRateLimiter = new SuavoAgent.Core.Ipc.EventRateLimiter(maxEventsPerSecond: 500);
-        var helperAttestationPath = SuavoAgent.Contracts.Ipc.IpcPeerAttestationStore.GetDefaultPath();
-        return new IpcPipeServer(pipeName, msg =>
-        {
-            logger.LogDebug("IPC: {Command}", msg.Command);
-
-            switch (msg.Command)
-            {
-                case SuavoAgent.Contracts.Ipc.IpcCommands.GetHealth:
-                {
-                    var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
-                    var db = sp.GetRequiredService<AgentStateDb>();
-                    var snapshot = new HealthSnapshot(opts, db, sp, DateTimeOffset.UtcNow);
-                    var data = snapshot.Take();
-                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
-                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, data, null));
-                }
-
-                case SuavoAgent.Contracts.Ipc.IpcCommands.GetPharmacySalt:
-                {
-                    var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
-                    var db = sp.GetRequiredService<AgentStateDb>();
-                    var sessionId = db.GetActiveSessionId(opts.PharmacyId ?? "");
-                    var masterSalt = sessionId != null ? db.GetOrCreateHmacSalt(sessionId) : "";
-                    // C-1: derive date-scoped ephemeral key — master salt never crosses the IPC boundary.
-                    // Leaking the derived key can't de-anonymize data from other days.
-                    string ephemeralKey = "";
-                    if (masterSalt.Length > 0)
-                    {
-                        var dayBytes = System.Text.Encoding.UTF8.GetBytes(
-                            DateTimeOffset.UtcNow.ToString("yyyy-MM-dd"));
-                        ephemeralKey = Convert.ToBase64String(
-                            System.Security.Cryptography.HMACSHA256.HashData(
-                                System.Text.Encoding.UTF8.GetBytes(masterSalt), dayBytes));
-                    }
-                    var saltJson = System.Text.Json.JsonSerializer.SerializeToElement(ephemeralKey);
-                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
-                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, saltJson, null));
-                }
-
-                case SuavoAgent.Contracts.Ipc.IpcCommands.BehavioralEvents:
-                {
-                    if (!eventRateLimiter.TryAcquire())
-                    {
-                        logger.LogWarning("IPC: BehavioralEvents rate limit exceeded (dropped={Total})",
-                            eventRateLimiter.DroppedTotal);
-                        return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
-                            msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.BadRequest, msg.Command, null,
-                            new SuavoAgent.Contracts.Ipc.IpcError("rate_limited", "rate limit exceeded", true, 0)));
-                    }
-                    var events = msg.Data.HasValue
-                        ? System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Behavioral.BehavioralEvent>>(
-                            msg.Data.Value.GetRawText())
-                        : null;
-                    // Cap batch size at 200 to prevent memory/disk abuse
-                    if (events != null && events.Count > 200)
-                    {
-                        var originalCount = events.Count;
-                        events = events.Take(200).ToList();
-                        logger.LogWarning("IPC: Capped behavioral batch from {Original} to 200 ({Dropped} dropped)",
-                            originalCount, originalCount - 200);
-                    }
-                    if (events is { Count: > 0 })
-                    {
-                        var receiver = sp.GetRequiredService<BehavioralEventReceiver>();
-                        receiver.ProcessBatch(events, 0);
-                    }
-                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
-                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
-                }
-
-                case SuavoAgent.Contracts.Ipc.IpcCommands.SystemEvents:
-                {
-                    if (!eventRateLimiter.TryAcquire())
-                    {
-                        return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
-                            msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.BadRequest, msg.Command, null,
-                            new SuavoAgent.Contracts.Ipc.IpcError("rate_limited", "rate limit exceeded", true, 0)));
-                    }
-                    var events = msg.Data.HasValue
-                        ? System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Behavioral.BehavioralEvent>>(
-                            msg.Data.Value.GetRawText())
-                        : null;
-                    if (events != null && events.Count > 200)
-                        events = events.Take(200).ToList();
-                    if (events is { Count: > 0 })
-                    {
-                        var receiver = sp.GetRequiredService<BehavioralEventReceiver>();
-                        receiver.ProcessBatch(events, 0);
-                    }
-                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
-                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, default, null));
-                }
-
-                default:
-                    return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(
-                        msg.Id, SuavoAgent.Contracts.Ipc.IpcStatus.Ok, msg.Command, null, null));
-            }
-        }, logger, isBrokerAttestedHelper: pid =>
-            SuavoAgent.Contracts.Ipc.IpcPeerAttestationStore.ContainsHelper(
-                helperAttestationPath,
-                pipeNonce,
-                pid,
-                DateTimeOffset.UtcNow,
-                TimeSpan.FromMinutes(5)));
-    });
+    CoreRuntimeServiceRegistration.Register(builder, cmdPipeName, pipeName, pipeNonce);
 
     builder.Services.AddSingleton<RxDetectionWorker>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<RxDetectionWorker>());
@@ -902,8 +640,6 @@ try
         sp.GetRequiredService<ILogger<SuavoAgent.Core.Workers.ActuationReadinessWorker>>(),
         sp.GetService<WorkerHealthRegistry>()));
 
-    builder.Services.AddHostedService<WritebackProcessor>();
-
     // Learning Agent — only active when LearningMode is enabled
     if (agentOpts.LearningMode)
     {
@@ -915,14 +651,23 @@ try
 
     var host = builder.Build();
 
-    // H-1: Decrypt DPAPI-wrapped credentials for runtime use (must happen before services start)
-    if (OperatingSystem.IsWindows())
+    // Persist an immutable, PHI-free migration event after state.db exists. The
+    // marker was committed atomically with AuthKey, so a crash before this point
+    // retries the audit on restart instead of losing evidence.
+    if (credentialStore is not null && credentialBootstrap?.MigrationAuditPending == true)
     {
-        var runtimeOpts = host.Services.GetRequiredService<IOptions<AgentOptions>>().Value;
-        runtimeOpts.ApiKey = SuavoAgent.Core.Config.CredentialProtector.Unprotect(runtimeOpts.ApiKey);
-        runtimeOpts.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(runtimeOpts.SqlPassword);
-        foreach (var ph in runtimeOpts.Pharmacies)
-            ph.SqlPassword = SuavoAgent.Core.Config.CredentialProtector.Unprotect(ph.SqlPassword);
+        var stateDb = host.Services.GetRequiredService<AgentStateDb>();
+        stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: agentOpts.AgentId ?? string.Empty,
+            EventType: "cloud_credential_migrated",
+            FromState: "legacy_appsettings",
+            ToState: "dpapi_credential_store",
+            Trigger: "startup_migration",
+            Actor: "system",
+            SourceComponent: "cloud_credential_bootstrapper",
+            CaptureReason: "move_mutable_auth_out_of_install_directory"));
+        CloudCredentialBootstrapper.MarkMigrationAuditComplete(credentialStore);
+        Log.Information("Cloud credential migrated to the machine-protected ProgramData store");
     }
 
     // Eager-resolve RuleEngine + TieredBrain so any startup-time config error
@@ -960,7 +705,13 @@ catch (Exception ex)
     // Log to both Serilog (for the nominal path) and the last-resort
     // crash sink (so service contexts still leave evidence even if the
     // main Serilog sink itself is the thing that failed).
-    try { Log.Fatal(ex, "SuavoAgent.Core terminated unexpectedly"); } catch { }
+    try
+    {
+        Log.Fatal(
+            "core.main.fatal exception_type={ExceptionType}",
+            SafeExceptionType(ex));
+    }
+    catch { }
     WriteCrash("Main", ex);
     Environment.Exit(1);
 }

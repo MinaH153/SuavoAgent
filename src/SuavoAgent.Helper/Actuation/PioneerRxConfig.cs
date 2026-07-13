@@ -35,12 +35,9 @@ public sealed record PioneerRxConfig
     public string ProcessName { get; init; } = "PioneerPharmacy.exe";
 
     /// <summary>
-    /// QA C4 — the BAA scope tags this host is authorized to actuate under. Every PioneerRx request
-    /// carries a <c>baaScopeTag</c> (what the cloud verb declared); the handler rejects the verb unless
-    /// the tag is non-empty AND present here. Default EMPTY → with the opt-in enabled but no scopes
-    /// configured, ALL PioneerRx actuation fails closed on scope. The operator lists the scopes the BAA
-    /// amendment authorizes for this host. Closes the gap where the class contract promised
-    /// "deviations fail closed" but no code read the tag.
+    /// Legacy display-only field. Mutable ProgramData configuration is never authorization. The exact
+    /// closed BAA scope set used by the runtime is bound into the locally and cloud co-signed approval
+    /// receipt; this value cannot widen it.
     /// </summary>
     public string[] AllowedBaaScopeTags { get; init; } = Array.Empty<string>();
 

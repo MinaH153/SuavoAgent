@@ -14,8 +14,8 @@ namespace SuavoAgent.Core.Agentic.Replication;
 /// Composition root for a learned-template replay: wires <see cref="TemplateReplayer"/> to the same
 /// production perceiver / actuator / safety adapters the NL loop uses (no reasoner — the template IS
 /// the plan). Built per-run because the actuation envelope is run-scoped. Mirrors
-/// <see cref="NavigateLoopFactory"/>; same v1 synthetic-gate-state caveat (Helper CheckOrReject is
-/// authoritative at act time).
+/// <see cref="NavigateLoopFactory"/>. The caller supplies Helper gate truth read over authenticated
+/// IPC; Helper remains authoritative at act time.
 /// </summary>
 public static class ReplayFactory
 {
@@ -24,13 +24,13 @@ public static class ReplayFactory
         NavigateSafetyOptions safetyOptions,
         MissionCharter charter,
         AuditChain audit,
-        DateTimeOffset deadlineUtc)
+        DateTimeOffset deadlineUtc,
+        ActuationGateState? helperGateState)
     {
         var perceiver = new HelperPerceiver(services.GetRequiredService<IIpcCommandClient>());
 
         var safety = new CompositeSafetyGate(
-            gateState: () => new ActuationGateState(
-                Enabled: true, DryRun: false, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null),
+            gateState: () => helperGateState,
             ledger: services.GetRequiredService<TaskAutonomyLedger>(),
             options: safetyOptions);
 
@@ -48,20 +48,21 @@ public static class ReplayFactory
     /// <see cref="GatedTemplateExecutor"/> to the SAME production perceiver / actuator / safety adapters as
     /// <see cref="Create"/> — same gate policy, no bypass, no parallel gate. The only difference from
     /// <see cref="Create"/> is the executor on top (click-family only, preflight + entry/drift/ExpectedAfter
-    /// verify, dry-run-is-a-STOP). Same v1 synthetic-gate-state caveat (Helper CheckOrReject authoritative).
+    /// verify, dry-run-is-a-STOP). The gate delegate can additionally withdraw an exact approval
+    /// while execution is in progress; a null result fails closed.
     /// </summary>
     public static GatedTemplateExecutor CreateExecutor(
         IServiceProvider services,
         NavigateSafetyOptions safetyOptions,
         MissionCharter charter,
         AuditChain audit,
-        DateTimeOffset deadlineUtc)
+        DateTimeOffset deadlineUtc,
+        Func<ActuationGateState?> gateState)
     {
         var perceiver = new HelperPerceiver(services.GetRequiredService<IIpcCommandClient>());
 
         var safety = new CompositeSafetyGate(
-            gateState: () => new ActuationGateState(
-                Enabled: true, DryRun: false, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null),
+            gateState: gateState,
             ledger: services.GetRequiredService<TaskAutonomyLedger>(),
             options: safetyOptions);
 

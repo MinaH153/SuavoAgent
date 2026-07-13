@@ -58,11 +58,11 @@ public sealed class WatchLearnReplicateEndToEndTests : IDisposable
         new RoutineDetector(_db, SessionId).DetectAndPersist();
         Assert.NotEmpty(_db.GetLearnedRoutines(SessionId));
 
-        // 2) LEARN: extract a grounded WorkflowTemplate from the observed routine (notepad-scoped so the
+        // 2) LEARN: extract a grounded WorkflowTemplate from the observed routine (Calculator-scoped so the
         //    actuation allowlist passes on replay).
         var extractor = new WorkflowTemplateExtractor(
-            _db, SessionId, "learned", "notepad",
-            () => new PmsVersionFingerprint("notepad", "schema", "dialect", "1.0"),
+            _db, SessionId, "learned", "calc.exe",
+            () => new PmsVersionFingerprint("calc.exe", "schema", "dialect", "1.0"),
             WorkflowTemplateThresholds.Default);
         var learned = extractor.ExtractAndPersist();
         Assert.NotEmpty(learned);

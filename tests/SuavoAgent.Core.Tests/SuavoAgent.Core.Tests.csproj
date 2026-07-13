@@ -26,6 +26,9 @@
     <None Update="Fixtures\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="Learning\phi-golden-trusted.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="Never" />
   </ItemGroup>
 
 </Project>

@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Security.Cryptography;
+using System.Net;
+using System.Net.Http;
 using System.Text.Json;
 using SuavoAgent.Setup;
 using Xunit;
@@ -17,6 +19,26 @@ namespace SuavoAgent.Setup.Tests;
 /// </summary>
 public sealed class BinaryDownloaderTests
 {
+    [Theory]
+    [InlineData("v3.20.0")]
+    [InlineData("3.20.0")]
+    [InlineData("v3.20.0-rc.1")]
+    public void ReleaseTag_accepts_only_pinned_version_identifiers(string releaseTag)
+    {
+        Assert.True(BinaryDownloader.IsValidReleaseTag(releaseTag));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("latest")]
+    [InlineData("../main")]
+    [InlineData("v3.20")]
+    [InlineData("v3.20.0/other")]
+    public void ReleaseTag_rejects_unpinned_or_path_like_values(string releaseTag)
+    {
+        Assert.False(BinaryDownloader.IsValidReleaseTag(releaseTag));
+    }
+
     private const string ChecksumsB64 =
         "MjZlYWVmZDFlMDA0MDE0OTU2YWQxYTA3NjAyNGUwMGE4MTRmMmQ2N2NjMzRhY2RkMmExNzA3YmNlYWRjNzBiYSAgU3Vhdm9BZ2VudC5Db3JlLmV4ZQoxOWI2NDE0ZWE4YWNlMDFlY2I2OWZjZTY2Mjg5NjAxNTRhNzk3OWRlNTIwZGI5NDViM2ZmNWYzNThlZDE3MDU4ICBTdWF2b0FnZW50LkJyb2tlci5leGUKNDc4NTQzNTExZjBkOTI1YjJkYWZlNGEyYzEyOTEzYTdiNmJjYzNiNTAwNDVjYjk3MzE0OTUwZGQ2NDM2YjU1NyAgU3Vhdm9BZ2VudC5IZWxwZXIuZXhlCjE4NjlmZGRlMWVjMjhhZTdjN2RlODExOWQwZmFmMzdiY2NjNWQyODg1ZWIwMzgzOTIzOWNiMGQ1YjM0ZTEwNTUgIFN1YXZvQWdlbnQuV2F0Y2hkb2cuZXhlCmFlMTEyYzQyMzY0NjBhMzg5MDg4YWRkYTQ4M2U3MzZiNWMxZjUyM2Y3MWJjMzY5MzU1ZmE4NDBkYmMyNmNmM2EgIFN1YXZvU2V0dXAuZXhlCmY3NmFiYWZmYzA3MzM1NmRmM2Y1YWQ0NTFmYTE3MTc2MjIxNTc1ZTg1MGZjNDZmZDJmNGFlMGY4NWNkNjcxMWUgIHN1YXZvYWdlbnQtdjMuMTUuMi13aW4teDY0LnppcApmOTkyMGM3MmU1ODQzY2Y1YTAyYzI4NTg5MTcxN2ViYzlmYzZhMzAyZTBjYmNhMjMzNTk5Y2RiZTU1NjYxNGQ3ICBmaWVsZC1yZWxlYXNlLXJlY2VpcHQuanNvbgo=";
 
@@ -42,10 +64,59 @@ public sealed class BinaryDownloaderTests
         Assert.False(BinaryDownloader.VerifyChecksumSignature(checksums, signature));
     }
 
+    [Fact]
+    public async Task Metadata_header_over_cap_is_rejected_before_body_read()
+    {
+        var content = new TrackingContent([1]);
+        content.Headers.ContentLength = BinaryDownloader.MaxChecksumManifestBytes + 1;
+        using var http = new HttpClient(new StaticResponseHandler(content));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            BinaryDownloader.DownloadBoundedBytesAsync(
+                http,
+                "https://assets.example/checksums.sha256",
+                BinaryDownloader.MaxChecksumManifestBytes,
+                CancellationToken.None));
+        Assert.False(content.StreamOpened);
+    }
+
+    [Fact]
+    public async Task Metadata_without_length_is_still_stopped_by_streaming_cap()
+    {
+        var bytes = new byte[BinaryDownloader.MaxChecksumSignatureBytes + 1];
+        using var http = new HttpClient(new StaticResponseHandler(
+            new UnknownLengthContent(bytes)));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            BinaryDownloader.DownloadBoundedBytesAsync(
+                http,
+                "https://assets.example/checksums.sha256.sig",
+                BinaryDownloader.MaxChecksumSignatureBytes,
+                CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Metadata_at_exact_cap_is_returned_without_unbounded_buffering()
+    {
+        var bytes = Enumerable.Range(0, BinaryDownloader.MaxChecksumSignatureBytes)
+            .Select(value => (byte)value)
+            .ToArray();
+        using var http = new HttpClient(new StaticResponseHandler(
+            new UnknownLengthContent(bytes)));
+
+        var downloaded = await BinaryDownloader.DownloadBoundedBytesAsync(
+            http,
+            "https://assets.example/checksums.sha256.sig",
+            BinaryDownloader.MaxChecksumSignatureBytes,
+            CancellationToken.None);
+
+        Assert.Equal(bytes, downloaded);
+    }
+
     // Regression for the 2026-06-05 brick: the GUI installer placed binaries but never wrote
     // binaries.manifest, so the Broker's integrity guard rejected the Helper -> agent blind. The
     // manifest MUST carry the Helper's on-disk sha256 in the exact shape the Broker reads
-    // (manifest["SuavoAgent.Helper.exe"] == lowercase-hex sha256). A missing Watchdog is omitted, not fatal.
+    // (manifest["SuavoAgent.Helper.exe"] == lowercase-hex sha256), and must bind all five executables.
     [Fact]
     public void WriteBinariesManifest_carries_helper_hash_the_broker_compares()
     {
@@ -54,13 +125,11 @@ public sealed class BinaryDownloaderTests
         var manifestPath = Path.Combine(dir, "binaries.manifest");
         try
         {
-            File.WriteAllText(Path.Combine(dir, "SuavoAgent.Core.exe"), "core-bytes");
-            File.WriteAllText(Path.Combine(dir, "SuavoAgent.Broker.exe"), "broker-bytes");
+            foreach (var binary in BinaryDownloader.InstalledCohort)
+                File.WriteAllText(Path.Combine(dir, binary), binary + "-bytes");
             var helperPath = Path.Combine(dir, "SuavoAgent.Helper.exe");
-            File.WriteAllText(helperPath, "helper-bytes");
-            // Watchdog intentionally absent — must be omitted, not crash.
 
-            BinaryDownloader.WriteBinariesManifest(dir, manifestPath);
+            Assert.True(BinaryDownloader.WriteBinariesManifest(dir, manifestPath));
 
             Assert.True(File.Exists(manifestPath));
             using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
@@ -69,11 +138,34 @@ public sealed class BinaryDownloaderTests
             var expected = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(helperPath))).ToLowerInvariant();
             Assert.Equal(expected, helperEl.GetString());
 
-            Assert.False(doc.RootElement.TryGetProperty("SuavoAgent.Watchdog.exe", out _));
+            Assert.Equal(BinaryDownloader.InstalledCohort.Count, doc.RootElement.EnumerateObject().Count());
+            Assert.All(
+                BinaryDownloader.InstalledCohort,
+                binary => Assert.True(doc.RootElement.TryGetProperty(binary, out _), $"Missing {binary}"));
         }
         finally
         {
             try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void WriteBinariesManifest_rejects_partial_cohort_and_removes_stale_manifest()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "suavo-manifest-partial-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var manifestPath = Path.Combine(dir, "binaries.manifest");
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "SuavoAgent.Core.exe"), "core-bytes");
+            File.WriteAllText(manifestPath, "{\"stale\":\"manifest\"}");
+
+            Assert.False(BinaryDownloader.WriteBinariesManifest(dir, manifestPath));
+            Assert.False(File.Exists(manifestPath));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
         }
     }
 
@@ -96,6 +188,20 @@ public sealed class BinaryDownloaderTests
     }
 
     [Fact]
+    public void Installed_cohort_adds_native_maintenance_without_downloading_it_twice()
+    {
+        Assert.DoesNotContain(
+            SuavoAgent.Contracts.Maintenance.MaintenanceContract.ExecutableName,
+            BinaryDownloader.RequiredBinaries);
+        Assert.Equal(
+            [
+                .. BinaryDownloader.RequiredBinaries,
+                SuavoAgent.Contracts.Maintenance.MaintenanceContract.ExecutableName,
+            ],
+            BinaryDownloader.InstalledCohort);
+    }
+
+    [Fact]
     public void HashMatches_accepts_correct_rejects_tampered_and_is_case_insensitive()
     {
         // QA wave2.5: the per-binary tamper gate DownloadAndVerifyAsync uses on a fresh install.
@@ -114,5 +220,51 @@ public sealed class BinaryDownloaderTests
             Assert.False(BinaryDownloader.HashMatches(tmp, realHex));
         }
         finally { File.Delete(tmp); }
+    }
+
+    private sealed class StaticResponseHandler(HttpContent content) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage(
+            HttpStatusCode.OK)
+        {
+            Content = content,
+        });
+    }
+
+    private sealed class TrackingContent(byte[] bytes) : HttpContent
+    {
+        public bool StreamOpened { get; private set; }
+
+        protected override Task SerializeToStreamAsync(
+            Stream stream,
+            TransportContext? context)
+        {
+            StreamOpened = true;
+            return stream.WriteAsync(bytes).AsTask();
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = bytes.Length;
+            return true;
+        }
+    }
+
+    private sealed class UnknownLengthContent(byte[] bytes) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(
+            Stream stream,
+            TransportContext? context) => stream.WriteAsync(bytes).AsTask();
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromResult<Stream>(new MemoryStream(bytes, writable: false));
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
     }
 }

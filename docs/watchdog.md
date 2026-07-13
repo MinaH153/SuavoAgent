@@ -1,180 +1,146 @@
-# Watchdog service — tiered self-healing
+# Watchdog and native maintenance
 
-SuavoAgent runs three Windows services. Two of them (Core, Broker) do real
-work and occasionally fail. The third (Watchdog) exists to restart the
-other two before a human has to get involved.
+SuavoAgent uses Windows Service Control Manager, a dedicated Watchdog service,
+and the installed `SuavoAgent.Maintenance.exe` host to recover without asking a
+customer to use a terminal.
 
-This doc explains what the Watchdog does, how to debug it, and what the
-escalation tree looks like when it gives up. It is the reference companion
-to `docs/runbooks/agent-heartbeat-dead.md` in the Suavo web repo, which
-tells the on-call operator what to do.
+This document describes the current native architecture and its release bar. It
+does not prove that a particular signed build has passed clean-Windows or
+pharmacy hardware validation.
 
-## Architecture
+## Runtime layout
 
-```
-┌────────────────────── Windows SCM ──────────────────────┐
-│                                                         │
-│   SuavoAgent.Core  ──► LocalService, restart 5/30/60s  │
-│   SuavoAgent.Broker ──► NetworkService, restart 5/30/60s│
-│   SuavoAgent.Watchdog ──► LocalSystem, restart 10/60/300s │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-          ▲
-          │ sc.exe query / sc.exe start
-          │
-┌──────── Watchdog decision engine (poll every 60s) ──────┐
-│                                                         │
-│  observed state (Running / Stopped / StartPending /     │
-│  StopPending / NotInstalled / Unknown) + ledger         │
-│  → decision (DoNothing / AttemptRestart / Escalate      │
-│  Repair / Alert)                                        │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
+```text
+Windows Service Control Manager
+├── SuavoAgent.Core       LocalService   cloud, policy, and reasoning
+├── SuavoAgent.Broker     LocalSystem    interactive-session supervisor
+└── SuavoAgent.Watchdog   LocalSystem    health and native recovery
+        └── SuavoAgent.Maintenance.exe   fixed signed repair/uninstall host
+
+Interactive Windows session
+└── SuavoAgent.Helper     de-privileged UI observation and approved actuation
 ```
 
-The decision engine is a pure function (`WatchdogDecisionEngine.Decide`)
-so it's trivially testable. See
-`tests/SuavoAgent.Watchdog.Tests/WatchdogDecisionEngineTests.cs` for the
-10-point test coverage.
+Broker and Watchdog require narrowly scoped system authority for session and
+service coordination. Helper performs desktop work with the signed-in user's
+token. Core remains least-privileged. The installed directory and component
+cohort must prevent a lower-privileged process from substituting the maintenance
+host before Watchdog launches it as LocalSystem.
 
-## Service placements and why
+## Recovery ladder
 
-| Service | Account | Failure actions | Rationale |
-| --- | --- | --- | --- |
-| `SuavoAgent.Core` | `NT AUTHORITY\LocalService` | 5s → 30s → 60s | Least privilege. SQL access is via `Integrated Security=true`; `LocalService` is sufficient because PioneerRx's SQL auth scheme accepts the machine account. |
-| `SuavoAgent.Broker` | `NT AUTHORITY\NetworkService` | 5s → 30s → 60s | Needs `SeTcbPrivilege` (held by NetworkService when configured as a service) for `WTSQueryUserToken` + `CreateProcessAsUser` calls. `LocalSystem` was excessive. |
-| `SuavoAgent.Watchdog` | `LocalSystem` | 10s → 60s → 5min | Needs SCM control of the other services and rights to invoke `bootstrap.ps1 -Repair` under arbitrary user contexts. Longer SCM recovery windows because Watchdog churn would mask real problems. |
+### Tier 1 — Windows service recovery
 
-## The three-tier self-healing tree
+Windows restarts a crashed required service using its configured backoff. This
+handles transient process failures without customer action.
 
-When Core or Broker dies, the following sequence runs without human input:
+### Tier 2 — Watchdog restart
 
-### Tier 1 — Windows SCM
+Watchdog observes Core and Broker state and Core liveness. After the configured
+grace period, it asks Windows to start or cycle the unhealthy service. Attempts
+are backoff-controlled so a broken component cannot create a tight loop.
 
-SCM's own failure-action config restarts the service in 5 seconds. For ~95%
-of transient crashes this is the only tier that fires. The restart is
-invisible: no cloud event, no runbook.
+### Tier 3 — native cohort repair
 
-### Tier 2 — Watchdog decision engine
+After repeated restart failures, Watchdog invokes the fixed adjacent
+`SuavoAgent.Maintenance.exe` host. Before a privileged launch, the caller must
+reject a missing, renamed, relocated, untrusted, or cohort-mismatched host.
+Native maintenance then:
 
-If Core or Broker is `Stopped` (or `StopPending`, `Unknown`) for longer
-than the **UnhealthyGrace** (5 minutes), the Watchdog calls `sc.exe start`.
-This is the tier that catches:
+1. verifies its trust proof and installed cohort;
+2. reasserts the required Program Files and ProgramData access controls;
+3. repairs the Core, Broker, and Watchdog service registrations;
+4. restarts the required services without stopping Watchdog mid-repair; and
+5. reports success only when the complete required service cohort is running.
 
-- SCM exhausted its three-attempt budget (the 5/30/60 config).
-- Service entered a stuck state SCM doesn't recognise as a failure.
-- `start= delayed-auto` races during post-reboot where the boot
-  dependencies aren't quite ready.
+Repair does not use or persist a script. It must not delete tenant binding,
+consent, operator configuration, retained audit evidence, or pharmacy data.
 
-Between restart attempts the Watchdog waits **RestartBackoff** (60 s) to
-avoid tight-looping a permanently broken binary.
+### Tier 4 — visible escalation
 
-### Tier 3 — Bootstrap repair
+If native repair cannot establish a trusted cohort, Watchdog stops escalating
+and surfaces a sanitized failure through the health path. The dashboard must
+show **Needs attention** rather than silently retrying or displaying healthy.
 
-After **EscalateAfterConsecutiveFailures** (3) restart attempts in a row
-fail, Watchdog invokes `bootstrap.ps1 -Repair`. This re-applies service
-registration, ACLs, and config without touching operator data (SQL creds,
-consent receipt). It's safe to run idempotently.
+## Dashboard repair
 
-Signed cloud repair commands use the same service-owned path. Core verifies
-the signed command and writes a non-PHI `watchdog-repair-request.json` marker
-under ProgramData; Watchdog consumes the marker as LocalSystem, invokes
-`bootstrap.ps1 -Repair`, deletes the marker, and includes the sanitized result
-in `watchdog-health.json` for the next heartbeat. Core does not launch the
-repair process directly because Core runs with lower service rights.
+The supported remote path is:
 
-### Tier 4 — Alert
+1. an authorized operator requests **Repair** in the Suavo dashboard;
+2. Core verifies the signed cloud command, intended agent, schema, freshness,
+   and replay state;
+3. the service-owned handoff is authenticated and consumed atomically;
+4. Watchdog launches the trusted native maintenance host; and
+5. the dashboard receives the matching acknowledgement and refreshed
+   diagnostics.
 
-If Watchdog has no remediation path (bootstrap not configured, service
-state reported as `NotInstalled` after a repair run), it emits a
-`LogCritical` line. The install-telemetry + crash-log-upload paths
-surface this to cloud; the `agent-heartbeat-dead.md` runbook takes over.
+The request handoff is a security boundary, not a presence flag. A build cannot
+pass the release gate if a locally writable or malformed marker can trigger a
+LocalSystem repair, if a request can be replayed, or if the acknowledgement is
+not bound to the initiating command.
 
-## Configuration surface
+## Local repair
 
-```csharp
-new WatchdogOptions
-{
-    WatchedServices = ["SuavoAgent.Core", "SuavoAgent.Broker"],
-    PollInterval = TimeSpan.FromSeconds(60),
-    StartTimeout = TimeSpan.FromSeconds(90),
-    RepairTimeout = TimeSpan.FromMinutes(5),
-    BootstrapPath = @"C:\SuavoAgent\bootstrap.ps1",
-    RepairRequestPath = @"C:\ProgramData\SuavoAgent\watchdog-repair-request.json",
-}
-```
+The supported customer path is **Windows Settings → Apps → Installed apps →
+SuavoAgent → Modify/Repair**. Windows launches the installed maintenance host
+registered by setup. Customers must not run service-control commands, launch a
+repair executable by path, or edit the registry.
 
-All fields are init-only. Tunables live in `appsettings.json` under a
-`Watchdog:` section if operators ever need to override; default values
-above are appropriate for every pharmacy we have in-flight and all
-future ones unless proven otherwise.
+## Installation and updates
 
-## Install paths — which one installs Watchdog?
+- The signed WiX Burn `SuavoAgent-Setup-…-win-x64.exe` bundle is the only
+  customer installer. Its embedded `SuavoSetup.exe` is an internal signed
+  maintenance payload, not a customer entry point.
+- Setup stages and verifies the native maintenance host before registering
+  repair and uninstall with Windows.
+- Setup is successful only when Core, Broker, and Watchdog are running. Helper
+  may wait for an interactive sign-in, but that state must be explicit.
+- Dashboard-driven OTA is the only customer update path. A complete signed
+  cohort is staged before activation; no one replaces files in Program Files.
+- A failed activation must recover to the last known-good cohort and remain
+  visible in the dashboard.
 
-All three paths install Watchdog as of 2026-04-22:
+## Diagnostics
 
-| Path | Invokes | Watchdog? |
-| --- | --- | --- |
-| `suavo-agent-<pharmacy>.cmd` (pharmacy self-service) | bootstrap.ps1 | Yes (line 1046–1050) |
-| `install.ps1` (fleet deploy scripts) | install.ps1 | Yes (line 212, 1047) |
-| Avalonia `SuavoSetup.exe` (GUI or `--console`) | ServiceInstaller.cs | Yes (as of this commit) |
+Customers and first-line support use **Diagnostics** in the dashboard. The
+built-in `fetch_diagnostics` command returns a PHI-safe summary of service
+health, Helper attachment, version, cloud/config health, and native maintenance
+presence.
 
-Before this commit, the GUI installer path silently skipped Watchdog. The
-.cmd / bootstrap path was unaffected — Nadim's 2026-04-25 pilot uses the
-.cmd path. The GUI path is pharmacy #2+ territory.
+Raw logs, configuration files, screenshots, prescription numbers, credentials,
+and patient data are not customer support artifacts. Engineering may access
+deeper evidence only under an approved, audited support procedure.
 
-## Debugging
+## Configuration ownership
 
-### Is Watchdog running?
+Watchdog timing, service names, request locations, trust keys, and access-control
+rules are product configuration. Customers do not edit them. A field-specific
+override must be signed, schema-validated, visible in the dashboard, and
+reversible.
 
-```powershell
-sc.exe query SuavoAgent.Watchdog
-```
+## Release evidence required
 
-Expect `STATE : 4 RUNNING`. If `STOPPED`, Windows SCM will restart it in
-10 seconds via the failure-action config. If `NotInstalled`, the installer
-skipped it — check install logs and reinstall with current bootstrap.
+Before calling native recovery production-ready, the exact signed build must
+prove on clean Windows that:
 
-### What is Watchdog deciding?
+- setup registers Core, Broker, Watchdog, native repair, and native uninstall;
+- each privileged maintenance launch rejects substitution and cohort mismatch;
+- automatic, dashboard, and Windows Settings repair restore all required
+  services and return matching receipts;
+- repair cannot deadlock by waiting for a process it must stop;
+- updates and rollback cover the same signed component cohort;
+- diagnostics remain PHI-safe; and
+- no customer step requires a terminal, script, manual service restart, registry
+  edit, or file replacement.
 
-```powershell
-Get-Content "$env:PROGRAMDATA\SuavoAgent\logs\watchdog-*.log" -Tail 50
-```
-
-Every tick logs `observed=<state> action=<decision> reason=<why>`. A long
-run of `action=DoNothing reason=running` means Core + Broker are healthy.
-A sudden shift to `action=AttemptRestart` indicates tier-2 kicked in.
-`action=EscalateRepair` means tier-3. `action=Alert` means tier-4 —
-bring the [agent-heartbeat-dead.md](../../Suavo/docs/runbooks/agent-heartbeat-dead.md)
-runbook up on a phone.
-
-### Watchdog itself is dead
-
-SCM's failure-action config restarts it. If SCM gives up after three
-attempts, the agent is in a very bad state — the only recovery is a
-full reinstall from the dashboard. This has never happened in the field
-as of 2026-04-22.
-
-## Gaps + future work
-
-- **Watchdog observability via cloud** — Watchdog's decisions are local.
-  A future enhancement: every tier-2+ action emits a telemetry event to
-  `install_telemetry_events` so Mina can see "pharmacy X had 3 Core
-  restarts this hour" in the supervisor dashboard.
-- **Self-watchdog** — SCM's failure-action config is the only thing that
-  restarts Watchdog. If SCM itself is compromised (malware, registry
-  corruption), there's no fallback. A remote "kill-switch + reinstall"
-  command is the mitigation; lives in the Mission Loop roadmap.
-- **Cross-service kill-then-restart dance** — currently Core and Broker
-  start independently. A future optimisation: if Core restarts, Broker
-  should be reset too so its cached Core-session tokens don't linger.
+Until that evidence is attached to a release, the architecture is implemented
+work, not a Windows-validated field claim.
 
 ## Related
 
-- `src/SuavoAgent.Watchdog/WatchdogDecision.cs` — decision engine (pure).
-- `src/SuavoAgent.Watchdog/WatchdogWorker.cs` — background service.
-- `src/SuavoAgent.Setup/ServiceInstaller.cs` — GUI installer path.
-- `bootstrap.ps1` lines 1042–1050 — .cmd installer path.
-- `install.ps1` — fleet deploy path.
-- `docs/self-healing/invariants.md` — Phase 0 spec for Mission Loop.
-- Suavo web `docs/runbooks/agent-heartbeat-dead.md` — operator-facing runbook.
+- `docs/sales/windows-agent-lifecycle.md`
+- `docs/hardening/release-gate.md`
+- `src/SuavoAgent.Watchdog/WatchdogWorker.cs`
+- `src/SuavoAgent.Watchdog/ServiceCommand.cs`
+- `src/SuavoAgent.Setup/Maintenance/`
+- `src/SuavoAgent.Diagnostics/Maintenance/`

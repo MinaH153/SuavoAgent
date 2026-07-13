@@ -58,11 +58,24 @@
                 BorderBrush="{DynamicResource SuavoBorderBrush}"
                 BorderThickness="0,1,0,0"
                 Height="36">
-            <TextBlock Text="Suavo LLC · HIPAA-compliant pharmacy intelligence"
-                       Foreground="{DynamicResource SuavoTextSubtleBrush}"
-                       FontSize="11"
-                       VerticalAlignment="Center"
-                       HorizontalAlignment="Center"/>
+            <Grid ColumnDefinitions="*,Auto,*" Margin="20,0">
+                <TextBlock Grid.Column="1"
+                           Text="Suavo LLC · HIPAA-first pharmacy safeguards"
+                           Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                           FontSize="11"
+                           VerticalAlignment="Center"
+                           HorizontalAlignment="Center"/>
+                <Button Grid.Column="2"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Center"
+                        Padding="8,2"
+                        FontSize="11"
+                        Click="OpenThirdPartyNotices"
+                        AutomationProperties.Name="Open third-party software notices"
+                        ToolTip.Tip="Licenses and provenance for software included with SuavoAgent">
+                    Third-party notices
+                </Button>
+            </Grid>
         </Border>
 
     </Grid>

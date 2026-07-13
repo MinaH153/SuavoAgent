@@ -15,4 +15,9 @@
                       ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="SuavoAgent.Contracts.Tests" />
+    <InternalsVisibleTo Include="SuavoAgent.Setup.Tests" />
+  </ItemGroup>
+
 </Project>

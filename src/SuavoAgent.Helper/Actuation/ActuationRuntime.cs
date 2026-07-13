@@ -74,7 +74,9 @@ public sealed class ActuationRuntime : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Error(ex, "ActuationRuntime hook pump failed — tripping kill switch (fail-closed)");
+            _logger.Error(
+                "ActuationRuntime hook pump failed ({ErrorType}) — tripping kill switch (fail-closed)",
+                ex.GetType().Name);
             _gate.TripKillSwitch("hook_pump_failure");
         }
         finally

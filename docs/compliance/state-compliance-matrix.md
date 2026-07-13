@@ -3,7 +3,9 @@
 ## Mandatory Written Notice States
 
 These states REQUIRE written notice to employees before electronic monitoring.
-SuavoAgent MUST NOT be deployed without distributing the employee notice template.
+SuavoAgent MUST NOT be deployed without distributing an accurate, completed
+employee notice. Product policy requires notice acknowledgment for every HIPAA
+deployment, including states whose statutes may not independently require it.
 
 | State | Statute | Requirement | Penalty |
 |-------|---------|-------------|---------|
@@ -30,6 +32,7 @@ Even in states without explicit monitoring statutes, provide:
 1. Written employee notice (use template)
 2. Employee acknowledgment signature
 3. System tray disclosure indicator (built into SuavoAgent v3.7+)
+4. Counsel approval of the completed notice for the deployment state
 
 ## Verticals to AVOID
 
@@ -47,6 +50,7 @@ Before deploying SuavoAgent at any business:
 - [ ] Business owner signs MSA with monitoring disclosure clause
 - [ ] Employee notice template distributed to all affected employees
 - [ ] Employee acknowledgments collected and retained by business
+- [ ] Notice accurately discloses window-scoped screen capture when vision is enabled
 - [ ] System tray indicator enabled on all monitored workstations
 - [ ] BAA executed (if healthcare/pharmacy)
 - [ ] State-specific requirements met (see table above)

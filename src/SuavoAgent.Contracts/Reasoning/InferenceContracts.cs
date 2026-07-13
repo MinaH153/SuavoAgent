@@ -22,11 +22,149 @@ public sealed record InferenceProposal
     /// <summary>Id of the model that produced this proposal, for audit.</summary>
     public required string ModelId { get; init; }
 
-    /// <summary>Short human-readable rationale for logs + operator UI.</summary>
-    public string? Rationale { get; init; }
+    /// <summary>
+    /// Fixed machine rationale selected by the model. Model-written prose is
+    /// never retained, logged, or sent across a process/network boundary.
+    /// </summary>
+    public required InferenceRationaleCode RationaleCode { get; init; }
 
     /// <summary>Latency of the local inference call, in milliseconds.</summary>
     public long LatencyMs { get; init; }
+}
+
+/// <summary>
+/// Closed rationale vocabulary shared by local and cloud inference. Wire values
+/// are lower snake case and are parsed ordinally through
+/// <see cref="InferenceRationaleCodeCodec"/>.
+/// </summary>
+public enum InferenceRationaleCode
+{
+    TargetPresent,
+    TargetAbsentWait,
+    WorkflowStateAmbiguous,
+    OperatorInputRequired,
+    VerificationRequired,
+    RecoveryStepRequired,
+    NoSafeAction,
+}
+
+/// <summary>
+/// Exact wire codec plus deterministic, local-only operator copy. Keeping the
+/// display text here prevents model prose from becoming a PHI/log channel.
+/// </summary>
+public static class InferenceRationaleCodeCodec
+{
+    public static bool TryParseWireValue(
+        string? value,
+        out InferenceRationaleCode code)
+    {
+        code = value switch
+        {
+            "target_present" => InferenceRationaleCode.TargetPresent,
+            "target_absent_wait" => InferenceRationaleCode.TargetAbsentWait,
+            "workflow_state_ambiguous" =>
+                InferenceRationaleCode.WorkflowStateAmbiguous,
+            "operator_input_required" =>
+                InferenceRationaleCode.OperatorInputRequired,
+            "verification_required" =>
+                InferenceRationaleCode.VerificationRequired,
+            "recovery_step_required" =>
+                InferenceRationaleCode.RecoveryStepRequired,
+            "no_safe_action" => InferenceRationaleCode.NoSafeAction,
+            _ => default,
+        };
+        return value is
+            "target_present" or
+            "target_absent_wait" or
+            "workflow_state_ambiguous" or
+            "operator_input_required" or
+            "verification_required" or
+            "recovery_step_required" or
+            "no_safe_action";
+    }
+
+    public static string ToWireValue(this InferenceRationaleCode code) =>
+        code switch
+        {
+            InferenceRationaleCode.TargetPresent => "target_present",
+            InferenceRationaleCode.TargetAbsentWait => "target_absent_wait",
+            InferenceRationaleCode.WorkflowStateAmbiguous =>
+                "workflow_state_ambiguous",
+            InferenceRationaleCode.OperatorInputRequired =>
+                "operator_input_required",
+            InferenceRationaleCode.VerificationRequired =>
+                "verification_required",
+            InferenceRationaleCode.RecoveryStepRequired =>
+                "recovery_step_required",
+            InferenceRationaleCode.NoSafeAction => "no_safe_action",
+            _ => throw new ArgumentOutOfRangeException(nameof(code), code, null),
+        };
+
+    public static string ToOperatorMessage(this InferenceRationaleCode code) =>
+        code switch
+        {
+            InferenceRationaleCode.TargetPresent =>
+                "The requested target is present.",
+            InferenceRationaleCode.TargetAbsentWait =>
+                "The requested target is not present yet.",
+            InferenceRationaleCode.WorkflowStateAmbiguous =>
+                "The current workflow state is ambiguous.",
+            InferenceRationaleCode.OperatorInputRequired =>
+                "Operator input is required.",
+            InferenceRationaleCode.VerificationRequired =>
+                "Verification is required before continuing.",
+            InferenceRationaleCode.RecoveryStepRequired =>
+                "A recovery step is required.",
+            InferenceRationaleCode.NoSafeAction =>
+                "No safe action is available.",
+            _ => throw new ArgumentOutOfRangeException(nameof(code), code, null),
+        };
+}
+
+/// <summary>
+/// Exact action-parameter vocabulary shared by local proposal parsing and the
+/// signed cloud-receipt boundary. This mirrors the server/SQL preflight gate;
+/// model output cannot widen it with extra keys.
+/// </summary>
+public static class InferenceActionParameterContract
+{
+    public static bool IsExact(
+        RuleActionType action,
+        IReadOnlyDictionary<string, string> parameters)
+    {
+        ArgumentNullException.ThrowIfNull(parameters);
+        var keys = parameters.Keys;
+        bool Only(params string[] allowed) =>
+            keys.All(key => allowed.Contains(key, StringComparer.Ordinal));
+        bool Present(string key) =>
+            parameters.TryGetValue(key, out var value) &&
+            !string.IsNullOrWhiteSpace(value);
+
+        return action switch
+        {
+            RuleActionType.Click =>
+                parameters.Count is >= 1 and <= 2 &&
+                Only("name", "controlType") && Present("name"),
+            RuleActionType.Type =>
+                parameters.Count is >= 1 and <= 2 &&
+                Only("text", "source") &&
+                (Present("text") || Present("source")),
+            RuleActionType.PressKey =>
+                parameters.Count == 1 && Only("key") && Present("key"),
+            RuleActionType.WaitForElement =>
+                parameters.Count is >= 1 and <= 2 &&
+                Only("controlType", "name") &&
+                (Present("controlType") || Present("name")),
+            RuleActionType.VerifyElement =>
+                parameters.Count is >= 1 and <= 3 &&
+                Only("name", "controlType", "containsFromContext") &&
+                (Present("name") || Present("controlType") ||
+                    Present("containsFromContext")),
+            RuleActionType.Escalate or RuleActionType.AskOperator or
+                RuleActionType.Log => parameters.Count == 0,
+            _ => false,
+        };
+    }
 }
 
 /// <summary>

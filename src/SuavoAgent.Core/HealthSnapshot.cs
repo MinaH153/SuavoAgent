@@ -39,8 +39,27 @@ public sealed class HealthSnapshot
         var wbEngine = rxWorker?.WritebackEngine;
         var learningSessionId = _stateDb.GetActiveSessionId(_options.PharmacyId ?? "");
         var visionCapture = (_sp.GetService(typeof(VisionCaptureTelemetry)) as VisionCaptureTelemetry)?.Snapshot();
+        var visionConfiguration = (_sp.GetService(
+            typeof(Vision.VisionConfigurationStatusProvider)) as
+            Vision.VisionConfigurationStatusProvider)?.Snapshot();
+        var behavioralDelivery = _stateDb.GetBehavioralDeliveryHealth(learningSessionId);
+        var nowUtc = DateTimeOffset.UtcNow;
+        var pioneerObserver = _stateDb.GetLatestObserverStatus("pioneerrx");
+        var helperAttached = ipcServer?.IsConnected ?? false;
+        var observationReadiness = ObservationReadinessEvaluator.Evaluate(new(
+            nowUtc,
+            helperAttached,
+            behavioralDelivery,
+            pioneerObserver,
+            _stateDb.GetLatestObserverStatus("system_liveness"),
+            _stateDb.GetLatestObserverStatus("browser_domain"),
+            _stateDb.GetLatestObserverStatus("print"),
+            _stateDb.GetLatestObserverStatus("user_session"),
+            _stateDb.GetLatestObserverStatus("multi_app_uia")));
         var (ipcRejectionCount, lastIpcRejectReason, lastIpcRejectAt) = IpcRejectionStats.Snapshot();
         var workerHealth = _sp.GetService(typeof(WorkerHealthRegistry)) as WorkerHealthRegistry;
+        var actuationReadiness = (_sp.GetService(typeof(ActuationReadinessTracker)) as
+            ActuationReadinessTracker)?.Current;
         var workers = (workerHealth?.Snapshot() ?? Array.Empty<WorkerHealth>())
             .Select(w => new
             {
@@ -68,10 +87,19 @@ public sealed class HealthSnapshot
             },
             helper = new
             {
-                attached = ipcServer?.IsConnected ?? false,
+                attached = helperAttached,
                 ipcRejectionCount,
                 lastIpcRejectReason,
-                lastIpcRejectAt = lastIpcRejectAt?.ToString("o")
+                lastIpcRejectAt = lastIpcRejectAt?.ToString("o"),
+                pioneerRxObserving = observationReadiness.PioneerRxReady,
+                pioneerRxObserverStatus = pioneerObserver?.Status ?? "not_reported",
+                pioneerRxObserverLastSeenAt = pioneerObserver?.ReceivedAtUtc.ToString("o"),
+                pioneerRxObserverFresh = observationReadiness.PioneerRxReady,
+                liveObservationReady = observationReadiness.LiveObservationReady,
+                observationReadinessCode = observationReadiness.Code,
+                observationReadinessBlockers = observationReadiness.Blockers,
+                visionRuntime = HeartbeatWorker.BuildVisionRuntimePayload(
+                    actuationReadiness?.VisionRuntime),
             },
             // Supervised-worker liveness — restart-looping or escalated workers (the cloud's
             // signal for worker-granular remediation, vs. only detecting a fully-silent agent).
@@ -99,6 +127,9 @@ public sealed class HealthSnapshot
             {
                 enabled = _options.Vision.Enabled,
                 periodicCaptureEnabled = _options.Vision.PeriodicCapture.Enabled,
+                configuration = visionConfiguration,
+                runtime = HeartbeatWorker.BuildVisionRuntimePayload(
+                    actuationReadiness?.VisionRuntime),
                 capture = visionCapture?.ToPayload(),
             },
             writebackEngine = new
@@ -114,23 +145,41 @@ public sealed class HealthSnapshot
                     pmsVersionHash = (string?)null, // computed from PMS executable during discovery; wired in future pass
                     uniqueScreens = _stateDb.GetUniqueScreenCount(learningSessionId),
                     totalEvents = _stateDb.GetBehavioralEventCount(learningSessionId),
-                    treeSnapshotCount = _stateDb.GetBehavioralEventCount(learningSessionId, "tree_snapshot"),
+                    treeSnapshotCount = _stateDb.GetBehavioralEventCount(learningSessionId, "treesnapshot"),
                     interactionEventCount = _stateDb.GetBehavioralEventCount(learningSessionId, "interaction"),
-                    keystrokeCategoryCount = _stateDb.GetBehavioralEventCount(learningSessionId, "keystroke"),
+                    keystrokeCategoryCount = _stateDb.GetBehavioralEventCount(learningSessionId, "keystrokecategory"),
+                    observerStatusEventCount = _stateDb.GetBehavioralEventCount(learningSessionId, "observerstatus"),
                     correlatedActions = _stateDb.GetCorrelatedActionCount(learningSessionId),
                     writebackCandidates = _stateDb.GetWritebackCandidateCount(learningSessionId),
                     learnedRoutines = _stateDb.GetLearnedRoutineCount(learningSessionId),
                     routinesWithWriteback = _stateDb.GetRoutinesWithWritebackCount(learningSessionId),
                     dmvQueryShapes = _stateDb.GetDmvQueryObservations(learningSessionId, 10000).Count,
                     dmvWriteShapes = _stateDb.GetDmvWriteShapeCount(learningSessionId),
-                    // TODO: droppedEventCount, dropRatePercent, clockOffsetMs, clockCalibrated, hasDmvAccess
-                    // are runtime state held in the live Helper/DmvQueryObserver instances.
-                    // Wire via heartbeat telemetry in a future pass — not accessible from HealthSnapshot today.
-                    droppedEventCount = 0,
-                    dropRatePercent = 0.0,
-                    clockOffsetMs = 0,
-                    clockCalibrated = false,
-                    hasDmvAccess = false,
+                    deliveryContractVersion = SuavoAgent.Contracts.Behavioral.BehavioralEventBatch.CurrentContractVersion,
+                    deliveryVerified = observationReadiness.ProtocolCompatible,
+                    deliveryLossless = observationReadiness.Lossless,
+                    liveObservationReady = observationReadiness.LiveObservationReady,
+                    observationReadinessCode = observationReadiness.Code,
+                    observationReadinessBlockers = observationReadiness.Blockers,
+                    streamCount = behavioralDelivery.StreamCount,
+                    droppedEventCount = behavioralDelivery.DroppedEventCount,
+                    dropRatePercent = CalculateDropRate(
+                        _stateDb.GetBehavioralEventCount(learningSessionId),
+                        behavioralDelivery.DroppedEventCount),
+                    sequenceGapCount = behavioralDelivery.SequenceGapCount,
+                    acceptedBatchCount = behavioralDelivery.AcceptedBatchCount,
+                    duplicateBatchCount = behavioralDelivery.DuplicateBatchCount,
+                    rejectedEventCount = behavioralDelivery.RejectedEventCount,
+                    lastBatchUtc = behavioralDelivery.LastBatchUtc?.ToString("o"),
+                    legacyUnverifiedSeen = behavioralDelivery.LegacyUnverifiedSeen,
+                    lastLegacyBatchUtc = behavioralDelivery.LastLegacyBatchUtc?.ToString("o"),
+                    observationSpoolStatus = behavioralDelivery.ObservationSpoolStatus,
+                    observationSpoolStatusAt = behavioralDelivery.LastObservationSpoolStatusUtc?.ToString("o"),
+                    clockOffsetMs = (long?)null,
+                    clockCalibrated = (bool?)null,
+                    clockCalibrationStatus = "not_reported",
+                    hasDmvAccess = (bool?)null,
+                    dmvAccessStatus = "not_reported",
                 }
                 : (object)new
                 {
@@ -141,17 +190,36 @@ public sealed class HealthSnapshot
                     treeSnapshotCount = 0,
                     interactionEventCount = 0,
                     keystrokeCategoryCount = 0,
+                    observerStatusEventCount = 0,
                     correlatedActions = 0,
                     writebackCandidates = 0,
                     learnedRoutines = 0,
                     routinesWithWriteback = 0,
                     dmvQueryShapes = 0,
                     dmvWriteShapes = 0,
-                    droppedEventCount = 0,
-                    dropRatePercent = 0.0,
-                    clockOffsetMs = 0,
-                    clockCalibrated = false,
-                    hasDmvAccess = false,
+                    deliveryContractVersion = SuavoAgent.Contracts.Behavioral.BehavioralEventBatch.CurrentContractVersion,
+                    deliveryVerified = false,
+                    deliveryLossless = observationReadiness.Lossless,
+                    liveObservationReady = false,
+                    observationReadinessCode = observationReadiness.Code,
+                    observationReadinessBlockers = observationReadiness.Blockers,
+                    streamCount = behavioralDelivery.StreamCount,
+                    droppedEventCount = behavioralDelivery.DroppedEventCount,
+                    dropRatePercent = CalculateDropRate(0, behavioralDelivery.DroppedEventCount),
+                    sequenceGapCount = behavioralDelivery.SequenceGapCount,
+                    acceptedBatchCount = behavioralDelivery.AcceptedBatchCount,
+                    duplicateBatchCount = behavioralDelivery.DuplicateBatchCount,
+                    rejectedEventCount = behavioralDelivery.RejectedEventCount,
+                    lastBatchUtc = behavioralDelivery.LastBatchUtc?.ToString("o"),
+                    legacyUnverifiedSeen = behavioralDelivery.LegacyUnverifiedSeen,
+                    lastLegacyBatchUtc = behavioralDelivery.LastLegacyBatchUtc?.ToString("o"),
+                    observationSpoolStatus = behavioralDelivery.ObservationSpoolStatus,
+                    observationSpoolStatusAt = behavioralDelivery.LastObservationSpoolStatusUtc?.ToString("o"),
+                    clockOffsetMs = (long?)null,
+                    clockCalibrated = (bool?)null,
+                    clockCalibrationStatus = "not_reported",
+                    hasDmvAccess = (bool?)null,
+                    dmvAccessStatus = "not_reported",
                 },
             feedback = learningSessionId is not null
                 ? (object)new
@@ -181,4 +249,11 @@ public sealed class HealthSnapshot
         var json = JsonSerializer.Serialize(snapshot);
         return JsonDocument.Parse(json).RootElement.Clone();
     }
+
+    private static double CalculateDropRate(long storedEvents, long droppedEvents)
+    {
+        var total = storedEvents + droppedEvents;
+        return total <= 0 ? 0 : Math.Round(droppedEvents * 100.0 / total, 4);
+    }
+
 }

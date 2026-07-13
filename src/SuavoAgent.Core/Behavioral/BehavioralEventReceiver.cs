@@ -54,7 +54,13 @@ public sealed class BehavioralEventReceiver
     /// </summary>
     public long TotalDroppedEvents => Interlocked.Read(ref _totalDroppedEvents);
 
-    public record BatchResult(bool Accepted, int EventsStored, int EventsRejected);
+    public record BatchResult(
+        bool Accepted,
+        int EventsStored,
+        int EventsRejected,
+        bool Duplicate = false,
+        long AcceptedThroughSequence = 0,
+        string? ErrorCode = null);
 
     /// <param name="db">State database.</param>
     /// <param name="sessionResolver">
@@ -107,8 +113,14 @@ public sealed class BehavioralEventReceiver
     /// </summary>
     /// <param name="events">Events to process.</param>
     /// <param name="droppedSinceLast">Number of events dropped by the Helper since last batch.</param>
-    public BatchResult ProcessBatch(IReadOnlyList<BehavioralEvent> events, long droppedSinceLast)
+    public BatchResult ProcessBatch(
+        IReadOnlyList<BehavioralEvent> events,
+        long droppedSinceLast,
+        string sourceChannel = BehavioralEventChannels.Pms)
     {
+        if (!BehavioralEventChannels.IsKnown(sourceChannel))
+            return new BatchResult(false, 0, events.Count, ErrorCode: "invalid_channel");
+        _db.MarkLegacyBehavioralDeliverySeen();
         int stored = 0;
         int rejected = 0;
         var now = DateTimeOffset.UtcNow;
@@ -138,7 +150,7 @@ public sealed class BehavioralEventReceiver
 
             foreach (var evt in events)
             {
-                if (!IsValid(evt))
+                if (!IsValid(evt, sourceChannel))
                 {
                     rejected++;
                     continue;
@@ -172,7 +184,8 @@ public sealed class BehavioralEventReceiver
                     timingBucket: evt.Timing?.ToString().ToLowerInvariant(),
                     keystrokeCount: evt.KeystrokeCount,
                     occurrenceCount: evt.OccurrenceCount,
-                    helperTimestamp: evt.Timestamp.ToString("o"));
+                    helperTimestamp: evt.Timestamp.ToString("o"),
+                    sourceChannel: sourceChannel);
 
                 stored++;
             }
@@ -193,19 +206,159 @@ public sealed class BehavioralEventReceiver
         // inside the persist loop so it never fired for empty-id events.
         // Replicate that semantics outside the lock so ActionCorrelator
         // never sees phantom empty-id interactions.
-        if (onInteractionSnapshot is not null)
+        if (onInteractionSnapshot is not null
+            && string.Equals(sourceChannel, BehavioralEventChannels.Pms, StringComparison.Ordinal))
         {
             foreach (var evt in events)
             {
                 if (evt.Type == BehavioralEventType.Interaction
-                    && !string.IsNullOrEmpty(evt.ElementId))
+                    && IsValid(evt, sourceChannel))
                 {
-                    onInteractionSnapshot(evt.TreeHash ?? "", evt.ElementId, evt.ControlType, evt.Timestamp);
+                    onInteractionSnapshot(evt.TreeHash ?? "", evt.ElementId!, evt.ControlType, evt.Timestamp);
                 }
             }
         }
 
         return new BatchResult(Accepted: true, EventsStored: stored, EventsRejected: rejected);
+    }
+
+    /// <summary>
+    /// Processes a versioned Helper envelope. Core persists the source stream
+    /// high-water mark in the same transaction as the events, so a lost IPC
+    /// response or Core restart is safe to retry.
+    /// </summary>
+    public BatchResult ProcessBatch(BehavioralEventBatch batch)
+    {
+        var envelopeError = ValidateEnvelope(batch);
+        if (envelopeError is not null)
+            return new BatchResult(false, 0, batch.Events?.Count ?? 0, ErrorCode: envelopeError);
+
+        string sessionId;
+        if (batch.ContractVersion == BehavioralEventBatch.LegacyContractVersion)
+        {
+            // Compatibility only. A v1 envelope has no cryptographic lease
+            // and therefore can only be attributed at receive time.
+            _db.MarkLegacyBehavioralDeliverySeen();
+            sessionId = ResolveSessionSafe();
+        }
+        else
+        {
+            var lease = _db.ValidateObservationLease(batch, DateTimeOffset.UtcNow);
+            if (!lease.IsValid || string.IsNullOrWhiteSpace(lease.SessionId))
+            {
+                return new BatchResult(
+                    Accepted: false,
+                    EventsStored: 0,
+                    EventsRejected: batch.Events.Count,
+                    ErrorCode: lease.ErrorCode ?? "observation_lease_invalid");
+            }
+            sessionId = lease.SessionId;
+        }
+
+        Action<string, string, string?, DateTimeOffset>? onInteractionSnapshot;
+        AgentStateDb.BehavioralDeliveryCommit commit;
+        IReadOnlyList<BehavioralEvent> validEvents;
+        bool mayCorrelateWithActiveSession;
+
+        lock (_lock)
+        {
+            var activeSessionId = ResolveSessionSafe();
+            if (!string.Equals(activeSessionId, _currentSessionId, StringComparison.Ordinal))
+            {
+                _recentTreeHashes.Clear();
+                _nextSeq = 1;
+                Interlocked.Exchange(ref _totalDroppedEvents, 0);
+                _currentSessionId = activeSessionId;
+            }
+            mayCorrelateWithActiveSession = string.Equals(
+                sessionId,
+                activeSessionId,
+                StringComparison.Ordinal);
+
+            var now = DateTimeOffset.UtcNow;
+            var accepted = new List<BehavioralEvent>(batch.Events.Count);
+            var rejected = 0;
+            foreach (var behavioralEvent in batch.Events)
+            {
+                if (!IsValid(behavioralEvent, batch.Channel))
+                {
+                    rejected++;
+                    continue;
+                }
+
+                if (behavioralEvent.Type == BehavioralEventType.TreeSnapshot)
+                {
+                    // Delayed batches can legitimately target an earlier
+                    // leased session. Include that immutable target in the
+                    // dedup key so interleaved sessions cannot suppress one
+                    // another's snapshots.
+                    var hash = sessionId + "\0" + behavioralEvent.TreeHash!;
+                    if (_recentTreeHashes.TryGetValue(hash, out var lastSeen)
+                        && now - lastSeen < DedupWindow)
+                    {
+                        continue;
+                    }
+                    _recentTreeHashes[hash] = now;
+                }
+
+                accepted.Add(behavioralEvent);
+            }
+
+            PruneStaleDedup(now);
+            try
+            {
+                commit = _db.CommitBehavioralDeliveryBatch(sessionId, batch, accepted, rejected);
+            }
+            catch (BehavioralDeliveryContractException ex)
+            {
+                return new BatchResult(
+                    Accepted: false,
+                    EventsStored: 0,
+                    EventsRejected: batch.Events.Count,
+                    ErrorCode: ex.ErrorCode);
+            }
+            catch (InvalidDataException ex)
+            {
+                return new BatchResult(
+                    Accepted: false,
+                    EventsStored: 0,
+                    EventsRejected: batch.Events.Count,
+                    ErrorCode: $"behavioral_commit_invalid:{ex.GetType().Name}");
+            }
+            if (mayCorrelateWithActiveSession)
+                Interlocked.Add(ref _totalDroppedEvents, commit.DroppedDelta);
+            onInteractionSnapshot = _onInteraction;
+            validEvents = accepted;
+        }
+
+        if (onInteractionSnapshot is not null
+            && !commit.Duplicate
+            && mayCorrelateWithActiveSession
+            && string.Equals(batch.Channel, BehavioralEventChannels.Pms, StringComparison.Ordinal))
+        {
+            foreach (var behavioralEvent in validEvents)
+            {
+                if (!commit.StoredSourceSequences.Contains(behavioralEvent.Seq)
+                    || behavioralEvent.Type != BehavioralEventType.Interaction
+                    || string.IsNullOrEmpty(behavioralEvent.ElementId))
+                {
+                    continue;
+                }
+
+                onInteractionSnapshot(
+                    behavioralEvent.TreeHash ?? "",
+                    behavioralEvent.ElementId,
+                    behavioralEvent.ControlType,
+                    behavioralEvent.Timestamp);
+            }
+        }
+
+        return new BatchResult(
+            Accepted: true,
+            EventsStored: commit.EventsStored,
+            EventsRejected: commit.EventsRejected,
+            Duplicate: commit.Duplicate,
+            AcceptedThroughSequence: commit.AcceptedThroughSequence);
     }
 
     private string ResolveSessionSafe()
@@ -220,7 +373,7 @@ public sealed class BehavioralEventReceiver
         }
     }
 
-    private static bool IsValid(BehavioralEvent evt)
+    private static bool IsValid(BehavioralEvent evt, string sourceChannel)
     {
         if (!Enum.IsDefined(evt.Type))
             return false;
@@ -228,9 +381,63 @@ public sealed class BehavioralEventReceiver
         return evt.Type switch
         {
             BehavioralEventType.TreeSnapshot => !string.IsNullOrEmpty(evt.TreeHash),
-            BehavioralEventType.Interaction => !string.IsNullOrEmpty(evt.ElementId),
+            BehavioralEventType.Interaction => !string.IsNullOrEmpty(evt.ElementId) &&
+                (!string.Equals(sourceChannel, BehavioralEventChannels.Pms, StringComparison.Ordinal) ||
+                 StructuralIdentifierSanitizer.IsAllowedElementIdentity(evt.ElementId) &&
+                 (evt.ClassName is null || StructuralIdentifierSanitizer.IsAllowed(evt.ClassName))),
+            BehavioralEventType.ObserverStatus =>
+                !string.IsNullOrEmpty(evt.Subtype) && !string.IsNullOrEmpty(evt.ElementId),
             _ => true
         };
+    }
+
+    private static string? ValidateEnvelope(BehavioralEventBatch batch)
+    {
+        if (batch.ContractVersion is not (
+                BehavioralEventBatch.LegacyContractVersion or
+                BehavioralEventBatch.CurrentContractVersion))
+            return "unsupported_contract_version";
+        if (!Guid.TryParseExact(batch.BatchId, "N", out _))
+            return "invalid_batch_id";
+        if (!Guid.TryParseExact(batch.StreamId, "N", out _))
+            return "invalid_stream_id";
+        if (!BehavioralEventChannels.IsKnown(batch.Channel))
+            return "invalid_channel";
+        if (batch.DroppedTotal < 0)
+            return "invalid_dropped_total";
+        if (batch.Events is null || batch.Events.Count == 0)
+            return "empty_batch";
+        if (batch.Events.Count > BehavioralEventBatch.MaximumEventCount)
+            return "batch_too_large";
+        if (batch.FirstSequence <= 0 || batch.LastSequence < batch.FirstSequence)
+            return "invalid_sequence_range";
+        if (batch.ContractVersion == BehavioralEventBatch.CurrentContractVersion
+            && (string.IsNullOrWhiteSpace(batch.LeaseId)
+                || string.IsNullOrWhiteSpace(batch.LeaseSessionBinding)
+                || batch.LeaseEpoch <= 0
+                || string.IsNullOrWhiteSpace(batch.AuthenticationTag)))
+        {
+            return "observation_lease_invalid";
+        }
+        if (batch.Events[0].Seq != batch.FirstSequence
+            || batch.Events[^1].Seq != batch.LastSequence)
+        {
+            return "sequence_range_mismatch";
+        }
+
+        long previous = 0;
+        foreach (var behavioralEvent in batch.Events)
+        {
+            if (behavioralEvent.Seq <= previous
+                || behavioralEvent.Seq < batch.FirstSequence
+                || behavioralEvent.Seq > batch.LastSequence)
+            {
+                return "non_monotonic_sequence";
+            }
+            previous = behavioralEvent.Seq;
+        }
+
+        return null;
     }
 
     private void PruneStaleDedup(DateTimeOffset now)

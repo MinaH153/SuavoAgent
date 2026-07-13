@@ -13,7 +13,9 @@ public class VcRedistInstallerTests
         var checker = new VcRedistChecker(
             fileExists: _ => installedAfter, readRegistryVersion: () => null);
         return new VcRedistInstaller(
-            runProcess: (_, _, _) => Task.FromResult(exitCode), checker: checker);
+            runProcess: (_, _, _) => Task.FromResult(exitCode),
+            checker: checker,
+            verifyBeforeLaunch: _ => true);
     }
 
     [Fact]
@@ -39,5 +41,29 @@ public class VcRedistInstallerTests
         var r = await Make(1603, installedAfter: false).InstallAsync("vc_redist.x64.exe", CancellationToken.None);
         Assert.False(r.Success);
         Assert.Equal(1603, r.ExitCode);
+    }
+
+    [Fact]
+    public async Task Trust_failure_never_launches_installer()
+    {
+        var launched = false;
+        var installer = new VcRedistInstaller(
+            runProcess: (_, _, _) =>
+            {
+                launched = true;
+                return Task.FromResult(0);
+            },
+            checker: new VcRedistChecker(
+                fileExists: _ => true,
+                readRegistryVersion: () => null),
+            verifyBeforeLaunch: _ => false);
+
+        var result = await installer.InstallAsync(
+            "vc_redist.x64.exe",
+            CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal(-1, result.ExitCode);
+        Assert.False(launched);
     }
 }

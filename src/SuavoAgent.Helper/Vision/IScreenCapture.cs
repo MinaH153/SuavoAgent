@@ -3,8 +3,9 @@ using SuavoAgent.Contracts.Vision;
 namespace SuavoAgent.Helper.Vision;
 
 /// <summary>
-/// Captures the primary monitor into PNG-encoded bytes. Lives in the Helper's
-/// interactive session — Core (SYSTEM) cannot capture the user's desktop.
+/// Captures one policy-approved visual surface into PNG-encoded bytes. Live PMS
+/// implementations are required to be exact-window scoped; Core (SYSTEM) cannot
+/// capture the user's interactive desktop directly.
 ///
 /// Returns null on any failure (capture disabled, non-Windows, GDI error,
 /// rate-limited). Never throws for capture failures — always fail-closed so
@@ -19,5 +20,7 @@ public interface IScreenCapture
     /// </summary>
     bool IsAvailable { get; }
 
+    // Historical method name retained for compatibility. Production live-PMS
+    // implementations must never interpret "Primary" as the primary monitor.
     Task<ScreenBytes?> CapturePrimaryAsync(CancellationToken ct);
 }

@@ -53,35 +53,21 @@ public sealed class PioneerRxClickVerb : IVerb
             Justification: "Single click in the live PMS window; UIA-resolved coordinates")
     );
 
-    public Task<VerbPreconditionResult> CheckPreconditionsAsync(VerbContext ctx, CancellationToken ct)
-    {
-        if (!ctx.Parameters.TryGetValue("label", out var l) || l is not string ls || string.IsNullOrWhiteSpace(ls))
-        {
-            return Task.FromResult(VerbPreconditionResult.Fail("label_non_empty", "label required"));
-        }
-        return Task.FromResult(VerbPreconditionResult.Ok());
-    }
+    public Task<VerbPreconditionResult> CheckPreconditionsAsync(VerbContext ctx, CancellationToken ct) =>
+        Task.FromResult(VerbPreconditionResult.Fail(
+            "capability_unavailable",
+            "PioneerRx click capability is unavailable until signed live execution is implemented"));
 
     public Task<VerbRollbackEnvelope> CaptureRollbackAsync(VerbContext ctx, CancellationToken ct) =>
         Task.FromResult(VerbRollbackEnvelope.None(ctx.InvocationId));
 
-    public Task<VerbExecutionResult> ExecuteAsync(VerbContext ctx, CancellationToken ct)
-    {
-        // Phase 5.3 scaffold — Helper-side IPC handler
-        // (PioneerRxActuationCommandHandler) lands together with the BAA
-        // amendment + pilot survival gates. Until then the verb runs as a
-        // synthetic dry-run-equivalent so the full audit chain is exercised
-        // for any sandbox testing.
-        return Task.FromResult(VerbExecutionResult.Ok(new Dictionary<string, object?>
-        {
-            ["dry_run"] = true,
-            ["evidence_hash"] = "scaffold-no-op",
-            ["duration_ms"] = 0L,
-        }));
-    }
+    public Task<VerbExecutionResult> ExecuteAsync(VerbContext ctx, CancellationToken ct) =>
+        Task.FromResult(VerbExecutionResult.Fail("capability_unavailable"));
 
     public Task<VerbPostconditionResult> VerifyPostconditionsAsync(
         VerbContext ctx,
         VerbExecutionResult executionResult,
-        CancellationToken ct) => Task.FromResult(VerbPostconditionResult.Ok());
+        CancellationToken ct) => Task.FromResult(VerbPostconditionResult.Fail(
+            "capability_unavailable",
+            "PioneerRx click did not execute"));
 }

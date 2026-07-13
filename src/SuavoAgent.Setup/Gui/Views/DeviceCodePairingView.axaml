@@ -41,6 +41,15 @@
                            Foreground="{DynamicResource SuavoTextMutedBrush}"
                            FontSize="13"
                            HorizontalAlignment="Center"/>
+                <TextBox Text="{Binding VerificationUrl}"
+                         IsReadOnly="True"
+                         MinWidth="520"
+                         HorizontalContentAlignment="Center"
+                         Foreground="{DynamicResource SuavoTextMutedBrush}"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         FontSize="12"
+                         AutomationProperties.Name="Secure pharmacy dashboard pairing link"/>
             </StackPanel>
         </Border>
 

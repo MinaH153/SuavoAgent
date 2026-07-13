@@ -24,7 +24,7 @@ Every delivery service sends a driver when the order comes in. Your staff stops 
 ## The Software
 
 - Invisible — no windows, no pop-ups, no training needed
-- HIPAA compliant — BAA provided, full security audit completed
+- HIPAA safeguards — BAA required, minimum-necessary access, encryption, and auditable controls
 - Never captures patient names, SSNs, or personal data
 - Reads prescription status only — same data your staff sees on screen
 - Employee disclosure included per state law requirements

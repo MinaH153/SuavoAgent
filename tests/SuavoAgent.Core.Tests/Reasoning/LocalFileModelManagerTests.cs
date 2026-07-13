@@ -16,7 +16,7 @@ public class LocalFileModelManagerTests
         var result = await mgr.VerifyAsync(CancellationToken.None);
 
         Assert.False(result.IsValid);
-        Assert.Contains("not configured", result.Reason);
+        Assert.Contains("publisher authorization rejected", result.Reason);
     }
 
     [Fact]
@@ -26,23 +26,23 @@ public class LocalFileModelManagerTests
         var result = await mgr.VerifyAsync(CancellationToken.None);
 
         Assert.False(result.IsValid);
-        Assert.Contains("missing", result.Reason!.ToLowerInvariant());
+        Assert.Contains("publisher authorization rejected", result.Reason);
     }
 
     [Fact]
-    public async Task Verify_FilePresentNoHash_IsValid_WithWarning()
+    public async Task Verify_FilePresentNoHash_IsRejectedAsUnsignedLegacyInput()
     {
         using var file = new TempFile("test content");
         var mgr = New(new ReasoningOptions { ModelPath = file.Path });
 
         var result = await mgr.VerifyAsync(CancellationToken.None);
 
-        Assert.True(result.IsValid);
-        Assert.Contains("unchecked", result.Reason!);
+        Assert.False(result.IsValid);
+        Assert.Contains("publisher authorization rejected", result.Reason);
     }
 
     [Fact]
-    public async Task Verify_CorrectHash_IsValid()
+    public async Task Verify_CorrectHashWithoutPublisherSignature_IsRejected()
     {
         const string content = "deterministic model content";
         using var file = new TempFile(content);
@@ -56,8 +56,8 @@ public class LocalFileModelManagerTests
 
         var result = await mgr.VerifyAsync(CancellationToken.None);
 
-        Assert.True(result.IsValid);
-        Assert.Equal(expectedHash, result.Sha256Actual);
+        Assert.False(result.IsValid);
+        Assert.Contains("publisher authorization rejected", result.Reason);
     }
 
     [Fact]
@@ -73,13 +73,11 @@ public class LocalFileModelManagerTests
         var result = await mgr.VerifyAsync(CancellationToken.None);
 
         Assert.False(result.IsValid);
-        Assert.Contains("mismatch", result.Reason!.ToLowerInvariant());
-        Assert.NotEqual("0000000000000000000000000000000000000000000000000000000000000000",
-            result.Sha256Actual);
+        Assert.Contains("publisher authorization rejected", result.Reason);
     }
 
     [Fact]
-    public async Task Verify_HashComparisonIsCaseInsensitive()
+    public async Task Verify_UppercaseHashCannotEnterCanonicalPublisherContract()
     {
         const string content = "content";
         using var file = new TempFile(content);
@@ -92,7 +90,8 @@ public class LocalFileModelManagerTests
         });
 
         var result = await mgr.VerifyAsync(CancellationToken.None);
-        Assert.True(result.IsValid);
+        Assert.False(result.IsValid);
+        Assert.Contains("publisher authorization rejected", result.Reason);
     }
 
     // --- helpers -------------------------------------------------------------

@@ -140,6 +140,27 @@ public class ExcelPricingWriterTests : IDisposable
     }
 
     [Fact]
+    public void Write_AmbiguousLegacyCostHeaderIsUpgradedToPerUnit()
+    {
+        var path = CreateExcel();
+
+        var result = _writer.Write(
+            path,
+            [new("job1", 2, "55111064501", true, "McKesson", 0.0316m, null)],
+            costColumnHeader: PricingJobDefaults.AmbiguousLegacyCostColumn);
+
+        Assert.True(result.Success, result.Error);
+        using var workbook = new XLWorkbook(result.OutputPath!);
+        var headers = GetHeaders(workbook.Worksheet(1));
+        Assert.Contains(PricingJobDefaults.CostColumn, headers.Keys);
+        Assert.DoesNotContain(PricingJobDefaults.AmbiguousLegacyCostColumn, headers.Keys);
+        Assert.Equal(
+            0.0316,
+            workbook.Worksheet(1).Cell(2, headers[PricingJobDefaults.CostColumn]).GetDouble(),
+            4);
+    }
+
+    [Fact]
     public void Write_MissingFile_Fails()
     {
         var result = _writer.Write(Path.Combine(_tempDir, "Patient Jane Doe Top500.xlsx"), []);
@@ -180,6 +201,35 @@ public class ExcelPricingWriterTests : IDisposable
         var ws = wb.Worksheet(1);
         var headers = GetHeaders(ws);
         Assert.Equal("McKesson", ws.Cell(2, headers[PricingJobDefaults.SupplierColumn]).GetString());
+    }
+
+    [Fact]
+    public async Task Write_Sibling_ConcurrentIdentityCollision_PublishesExactlyOnceWithoutOverwrite()
+    {
+        var source = CreateExcel();
+        var sourceBytes = File.ReadAllBytes(source);
+        var destination = Path.Combine(_tempDir, "fixed-priced-identity.xlsx");
+        var first = new ExcelPricingWriter(
+            NullLogger<ExcelPricingWriter>.Instance,
+            _ => destination);
+        var second = new ExcelPricingWriter(
+            NullLogger<ExcelPricingWriter>.Instance,
+            _ => destination);
+        SupplierPriceResult[] rows =
+        [
+            new("job1", 2, "55111064501", true, "McKesson", 0.0316m, null),
+        ];
+
+        var attempts = await Task.WhenAll(
+            Task.Run(() => first.Write(source, rows)),
+            Task.Run(() => second.Write(source, rows)));
+
+        Assert.Single(attempts, result => result.Success);
+        var rejected = Assert.Single(attempts, result => !result.Success);
+        Assert.Equal("pricing_output_collision", rejected.Error);
+        Assert.Equal(sourceBytes, File.ReadAllBytes(source));
+        using var published = new XLWorkbook(destination);
+        Assert.Equal("McKesson", published.Worksheet(1).Cell(2, 3).GetString());
     }
 
     private static Dictionary<string, int> GetHeaders(IXLWorksheet ws)

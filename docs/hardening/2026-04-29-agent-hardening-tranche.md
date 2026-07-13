@@ -1,5 +1,9 @@
 # SuavoAgent Hardening Tranche — 2026-04-29
 
+> **ARCHIVED / DO NOT USE AS A RUNBOOK.** This dated implementation record
+> intentionally preserves references to the tooling that existed in April 2026.
+> It is evidence, not a customer install, repair, update, or support procedure.
+
 ## Goal
 
 Move SuavoAgent toward field-grade operation before any V4 branding: safe remote control surfaces, truthful runtime gates, and audit-complete pipelines.
@@ -120,6 +124,13 @@ UX effect: pharmacists see what the agent knows, what it is missing, and what st
 
 ### 10. Install false-green and cloud-auth recovery
 
+> **Security supersession (2026-07-10):** The unauthenticated
+> `/api/agent/recover-key` rotation design described in this historical tranche
+> is retired. The endpoint now returns `410 device_repair_required`; Core never
+> calls it. Repair requires a new pharmacist-approved device pairing, and prior
+> bindings are retired atomically. This note overrides the historical recovery
+> bullets below.
+
 Problem: a Windows machine could show Core, Broker, Helper, and Watchdog as running while cloud auth was dead. Two root causes were observed in the field: LocalService could not rewrite `appsettings.json` to DPAPI-seal/rotate credentials, and a reinstall with a fresh token could accidentally reuse a stale local API key.
 
 Fix:
@@ -129,8 +140,8 @@ Fix:
 - The older `SuavoSetup.exe` console/GUI path no longer generates friendly local `agent-*` IDs; it requires a cloud UUID if that legacy path is ever invoked.
 - Bootstrap Phase 6 now signs a redacted GET `/api/agent/config` and fails the install before the success banner if cloud HMAC auth is rejected.
 - The release probe checks appsettings ACLs and performs a redacted live HMAC GET to `/api/agent/config`.
-- Core can recover from a 401 `Agent not found` by calling `/api/agent/recover-key` with the cloud UUID + machine fingerprint, writing the rotated key locally, and stopping so Watchdog restarts Core with a rebuilt HMAC signer.
-- Config sync now invokes the same one-shot recovery coordinator when `/api/agent/config` returns 401 `Agent not found`, so recovery is not delayed until the next heartbeat.
+- Core fails closed with `device_repair_required` after an `Agent not found` response; a public identifier and fingerprint can never rotate a device credential.
+- Config sync uses the same permanent repair-required outcome and does not retry a retired public recovery endpoint.
 - Config sync now persists the sanitized client failure kind into `config-sync-health.json`; the pharmacy dashboard treats `http_401_Agent_not_found` as critical "Cloud auth rejected agent identity" while the agent is still heartbeating.
 - Credential recovery now writes `cloud-auth-health.json` with sanitized status, last error kind, recovery outcome, and restart request state; heartbeat accepts only those allowlisted fields, rejects free-form auth error text, and dashboard health marks failed recovery such as `http_404_Not_Found` as critical without storing raw cloud bodies.
 - Signed `collect_health_probe` results now include the same `cloudAuth` evidence, and both agent command ack storage plus pharmacy command detail views sanitize it down to code-style status/outcome fields.
@@ -159,13 +170,15 @@ Operational effect: a failed cloud registration no longer consumes the one-time 
 Problem: the cloud smoke gate covered pharmacy pages and APIs, but not the agent registration/auth/recovery boundary that decides whether a Windows install can be trusted.
 
 Fix:
-- The Suavo web post-deploy smoke runner now sends non-mutating synthetic requests to `/api/agent/heartbeat`, `/api/agent/config`, `/api/agent/sync`, `/api/agent/register`, `/api/agent/recover-key`, and `/api/agent/install-telemetry`.
+- The Suavo web post-deploy smoke runner covers the active agent routes; the retired `/api/agent/recover-key` route has its own contract test requiring `410 device_repair_required`.
 - Invalid registration uses a real-shaped `sai_` token plus the legacy `0000000000` NPI placeholder so old and new register paths both exercise the intended token validation branch.
-- The key-recovery smoke tolerates rate-limit `429` on repeated manual runs but still fails on `404` or `5xx`.
+- The retired key-recovery contract fails if the endpoint ever returns credentials or stops requiring device repair.
 - CI contract tests now assert the smoke workflow stays wired to both pharmacy and agent routes.
 - Dashboard runtime health now marks a heartbeating agent as degraded when config-sync evidence is missing and critical when config-sync evidence is unreadable.
 
-Operational effect: production can no longer pass a post-deploy smoke while the agent recovery endpoint is missing, the register RPC route is broken, or HMAC-gated routes are returning unexpected server errors.
+Operational effect: production cannot pass while registration is broken,
+HMAC-gated routes return unexpected server errors, or retired public credential
+recovery becomes reachable again.
 
 ## Still Not Done
 

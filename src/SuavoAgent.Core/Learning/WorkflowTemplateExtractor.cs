@@ -42,6 +42,7 @@ public sealed class WorkflowTemplateExtractor
     private readonly Func<PmsVersionFingerprint> _fingerprint;
     private readonly WorkflowTemplateThresholds _thresholds;
     private readonly ILogger _logger;
+    private readonly bool _captureOnly;
 
     public WorkflowTemplateExtractor(
         AgentStateDb db,
@@ -50,7 +51,8 @@ public sealed class WorkflowTemplateExtractor
         string processNameGlob,
         Func<PmsVersionFingerprint> fingerprintProvider,
         WorkflowTemplateThresholds thresholds,
-        ILogger<WorkflowTemplateExtractor>? logger = null)
+        ILogger<WorkflowTemplateExtractor>? logger = null,
+        bool captureOnly = false)
     {
         _db = db;
         _sessionId = sessionId;
@@ -59,6 +61,7 @@ public sealed class WorkflowTemplateExtractor
         _fingerprint = fingerprintProvider;
         _thresholds = thresholds;
         _logger = logger ?? NullLogger<WorkflowTemplateExtractor>.Instance;
+        _captureOnly = captureOnly;
     }
 
     public IReadOnlyList<WorkflowTemplate> ExtractAndPersist()
@@ -134,10 +137,7 @@ public sealed class WorkflowTemplateExtractor
         {
             // A corrupt routine row is dropped on EVERY run until repaired — log it
             // so the silent data loss is observable (was: bare `catch { return null; }`).
-            _logger.LogWarning(ex,
-                "Failed to deserialize PathJson for routine {RoutineHash}; skipping it. " +
-                "This row will be skipped on every extraction until repaired.",
-                routine.RoutineHash);
+            _logger.LogSafeWarning(ex);
             return null;
         }
 
@@ -197,8 +197,8 @@ public sealed class WorkflowTemplateExtractor
                 if (string.IsNullOrWhiteSpace(postTree))
                 {
                     _logger.LogWarning(
-                        "WorkflowTemplateExtractor: template dropped — writeback step {Ordinal} for routine {Routine} has no post-state anchor (terminal writeback, WritebackPostStateTreeHash unset)",
-                        i, routine.RoutineHash);
+                        "core.learning.template_missing_post_state steps={Steps}",
+                        i);
                     return null;
                 }
 
@@ -206,8 +206,8 @@ public sealed class WorkflowTemplateExtractor
                 if (postElements.Count == 0)
                 {
                     _logger.LogWarning(
-                        "WorkflowTemplateExtractor: template dropped — writeback step {Ordinal} for routine {Routine} has post-state tree {Tree} with zero observed elements",
-                        i, routine.RoutineHash, postTree);
+                        "core.learning.template_empty_post_state steps={Steps}",
+                        i);
                     return null;
                 }
                 expectedAfter = postElements
@@ -265,9 +265,7 @@ public sealed class WorkflowTemplateExtractor
                 // to 2.0.0 can MASK it (and may rank a learned template below a real
                 // v3+). Surface it instead of bumping silently (was: silent fallback).
                 _logger.LogWarning(
-                    "WorkflowTemplate {TemplateId} had an unparseable version '{Version}'; " +
-                    "reset to {Bumped}. Investigate possible version corruption.",
-                    existing.TemplateId, existing.TemplateVersion, version);
+                    "core.learning.template_version_invalid");
             }
         }
 
@@ -293,7 +291,9 @@ public sealed class WorkflowTemplateExtractor
             observationCount: obs,
             hasWriteback: hasWriteback,
             extractedAt: now,
-            extractedBy: "local-v3.12");
+            extractedBy: "local-v3.12",
+            captureOnly: _captureOnly,
+            sourceSessionId: _sessionId);
         _db.ResetTemplateLowConfidenceRuns(templateId);
 
         return new WorkflowTemplate(

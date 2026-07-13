@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Contracts.Cloud;
+using SuavoAgent.Contracts.Security;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using Xunit;
@@ -56,10 +57,18 @@ public sealed class AgentConfigClientTests
         Assert.Null(handler.Request.Content);
 
         var timestamp = Assert.Single(handler.Request.Headers.GetValues("x-agent-timestamp"));
+        var version = Assert.Single(handler.Request.Headers.GetValues("x-agent-auth-version"));
+        var nonce = Assert.Single(handler.Request.Headers.GetValues("x-agent-nonce"));
+        var contentSha256 = Assert.Single(handler.Request.Headers.GetValues("x-agent-content-sha256"));
         var signature = Assert.Single(handler.Request.Headers.GetValues("x-agent-signature"));
         var apiKey = Assert.Single(handler.Request.Headers.GetValues("x-agent-api-key"));
+        Assert.Equal("2", version);
         Assert.Equal("agent-secret", apiKey);
-        Assert.Equal(new HmacSigner("agent-secret").Sign(timestamp, string.Empty), signature);
+        Assert.Equal(AgentRequestSigner.ComputeBodySha256(string.Empty), contentSha256);
+        Assert.Equal(
+            new HmacSigner("agent-secret").Sign(
+                "GET", "/api/agent/config", timestamp, nonce, contentSha256),
+            signature);
     }
 
     [Fact]

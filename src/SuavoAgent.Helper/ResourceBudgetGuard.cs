@@ -111,7 +111,9 @@ public sealed class ResourceBudgetGuard
             catch (Exception ex)
             {
                 // The guard itself must never crash Helper. Log and keep polling.
-                _logger.Warning(ex, "ResourceBudgetGuard: sampling failed — will retry next interval");
+                _logger.Warning(
+                    "ResourceBudgetGuard: sampling failed — will retry next interval ({ExceptionType})",
+                    ex.GetType().Name);
             }
         }
 

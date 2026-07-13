@@ -34,7 +34,12 @@ public class SignedCommandVerifierTests
         var canonical = $"{command}|{agentId}|{fingerprint}|{ts}|{nonce}|{dataHash}";
         var sig = Convert.ToBase64String(
             _signingKey.SignData(Encoding.UTF8.GetBytes(canonical), HashAlgorithmName.SHA256));
-        return new SignedCommand(command, agentId, fingerprint, ts, nonce, keyId, sig, dataHash);
+        var expiresAt = SignedCommandVerifier.RequiresLiveExpiry(command)
+            ? DateTimeOffset.Parse(ts).AddMinutes(4).ToString("o")
+            : null;
+        return new SignedCommand(
+            command, agentId, fingerprint, ts, nonce, keyId, sig, dataHash,
+            expiresAt);
     }
 
     [Fact]
@@ -94,6 +99,20 @@ public class SignedCommandVerifierTests
         var cmd = CreateSignedCommand("force_sync");
         _verifier.Verify(cmd);
         Assert.False(_verifier.Verify(cmd).IsValid);
+    }
+
+    [Fact]
+    public void Deferred_nonce_is_retryable_until_terminal_commit_then_replay_blocked()
+    {
+        var cmd = CreateSignedCommand("install_pioneerrx_process_approval");
+
+        Assert.True(_verifier.Verify(cmd, consumeNonce: false).IsValid);
+        Assert.True(_verifier.Verify(cmd, consumeNonce: false).IsValid);
+        Assert.True(_verifier.TryConsumeVerifiedNonce(cmd.Nonce));
+        Assert.False(_verifier.TryConsumeVerifiedNonce(cmd.Nonce));
+        var replay = _verifier.Verify(cmd, consumeNonce: false);
+        Assert.False(replay.IsValid);
+        Assert.Equal("Nonce replay detected", replay.Reason);
     }
 
     [Fact]
@@ -185,7 +204,9 @@ public class SignedCommandVerifierTests
         var sig = Convert.ToBase64String(key2.SignData(
             Encoding.UTF8.GetBytes(canonical), HashAlgorithmName.SHA256));
 
-        var cmd = new SignedCommand("test", "agent-1", "fp-1", ts, nonce, "cmd-v2", sig);
+        var cmd = new SignedCommand(
+            "test", "agent-1", "fp-1", ts, nonce, "cmd-v2", sig,
+            ExpiresAt: DateTimeOffset.Parse(ts).AddMinutes(4).ToString("o"));
         var result = verifier.Verify(cmd);
         Assert.True(result.IsValid, result.Reason);
     }

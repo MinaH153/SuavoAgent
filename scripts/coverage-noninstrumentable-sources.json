@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "path": "src/SuavoAgent.Analyzers/AssemblyInfo.cs",
+      "reason": "Assembly metadata declaration has no executable sequence points.",
+      "sha256": "f0c1b03a046d6d02f0d5993ccf083dce9a06fdc0cac954e79e8bedc6fa8d9bbd"
+    },
+    {
+      "path": "src/SuavoAgent.Contracts/Adapters/IAdapterRegistry.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "a91fd078e75c3710644ad5b64afccc54fe303ede8258816731593951e440a317"
+    },
+    {
+      "path": "src/SuavoAgent.Contracts/Adapters/ILocalPmsAdapter.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "5193eac2a0f16a3540421d02548bb8c9a5cdddf160cd7c22ea1e6ba323dcb427"
+    },
+    {
+      "path": "src/SuavoAgent.Contracts/Annotations/OutboundPayloadAttribute.cs",
+      "reason": "Declarative attribute type has no executable sequence points.",
+      "sha256": "deecf3a1cd00200e36562a6f93979a7068c431a0121c9aad985e0a9772b1711b"
+    },
+    {
+      "path": "src/SuavoAgent.Contracts/Annotations/PhiDirectAttribute.cs",
+      "reason": "Declarative attribute type has no executable sequence points.",
+      "sha256": "5b74074f7ee769d439208b44c6ae22c6abec032a6511cdd6fe883cb313bb81ba"
+    },
+    {
+      "path": "src/SuavoAgent.Contracts/Behavioral/KeystrokeCategory.cs",
+      "reason": "Enum-only declarations have no executable sequence points.",
+      "sha256": "d6da341cfe884cb2e9fd5648c4a05ad92a29cd136ef417effdca22bbdb728e09"
+    },
+    {
+      "path": "src/SuavoAgent.Contracts/Canary/CanarySeverity.cs",
+      "reason": "Enum-only declaration has no executable sequence points.",
+      "sha256": "d9818f14de8023aa4ca7d1f3070f8934d9bb2a2873579f569bad4ea273255c8a"
+    },
+    {
+      "path": "src/SuavoAgent.Contracts/Discovery/RankerTier.cs",
+      "reason": "Enum-only declaration has no executable sequence points.",
+      "sha256": "47484fbed6b644110c6e2cce77596707a62ac95aa6cd932c2198965bfe7f5396"
+    },
+    {
+      "path": "src/SuavoAgent.Core/ActionGrammar/IVerb.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "40a0bf156537206b835c51e6dbc95c0e356ac9c7e4b4b44ea9cdafe191883351"
+    },
+    {
+      "path": "src/SuavoAgent.Core/ActionGrammar/Verbs/Actuation/IActuationGateway.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "e668c741c78f340b5d2c5feb63ebb4a96ca2361b83f4544cfa971393a304b45d"
+    },
+    {
+      "path": "src/SuavoAgent.Core/Discovery/IFileRanker.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "39fc3b4a8e9e38c5a01b75ef9c93e64f247cb19407e3ea62b550d42c18a4f5df"
+    },
+    {
+      "path": "src/SuavoAgent.Core/Discovery/IFileShapeSampler.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "108c974b26857f2f785a086a06c8ec70f0c4984fde0d8f270f5727a4de87b406"
+    },
+    {
+      "path": "src/SuavoAgent.Core/Discovery/IFilenameHeuristicScorer.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "6c6505898897912a6a34a4f283e25ba52532cd7a9ece79a8fea3db048265c451"
+    },
+    {
+      "path": "src/SuavoAgent.Core/Health/IBusinessHoursProvider.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "9ef089d1977a2b492640a431870f06942d9a46d9e246b6be7ccf3d6275a524c6"
+    },
+    {
+      "path": "src/SuavoAgent.Core/Reasoning/ICloudReasoning.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "6c210f341a45a4a62bcfbbd085ac8b1882ce31f584c937b0f411fee7a093e062"
+    },
+    {
+      "path": "src/SuavoAgent.Core/Reasoning/IVisionShadowReasoner.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "fa364212eec3253a11050e84aaeec2730d20b1f5eb6f630fc688b0008934212a"
+    },
+    {
+      "path": "src/SuavoAgent.Diagnostics/Config/CredentialKeys.cs",
+      "reason": "Constants-only declaration has no executable sequence points.",
+      "sha256": "7cd46b428c9074d12ef47b8ea19d2abb8e38c7e96aedd527a29b464f0a7259e7"
+    },
+    {
+      "path": "src/SuavoAgent.Diagnostics/Config/IEncryptedCredentialStore.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "badc828037a93aa9c9a0c0bbb5d9223207439d53477d4bd7a1411c489bb55320"
+    },
+    {
+      "path": "src/SuavoAgent.Helper/Companion/IPandaCompanionView.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "b8f3b61e5b797654fedf680413d4f65b6ad5f6c936ff305e76b4e6eb7589dec0"
+    },
+    {
+      "path": "src/SuavoAgent.Helper/PlatformSupport.cs",
+      "reason": "Assembly platform metadata has no executable sequence points.",
+      "sha256": "4d4d3fde8cf56b60a2ea28eaa6dce3565e5233dd4f0672164f9aa53af42aae8d"
+    },
+    {
+      "path": "src/SuavoAgent.Helper/Presence/IBubbleRenderer.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "416747e3d155006bff276e4da24c7698b8ae35f37e98403520874208ef118344"
+    },
+    {
+      "path": "src/SuavoAgent.Helper/Presence/IGlowRenderer.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "8587cdeaf69b7b00c9e9edde859bc7461272c6a9063411c1a56c0b464461bd57"
+    },
+    {
+      "path": "src/SuavoAgent.Helper/Presence/IPresenceRenderer.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "1cd55d10c3bc2b8e345d5d6e19d8d3afd7e1d65941107bf99a98de6c73689d8b"
+    },
+    {
+      "path": "src/SuavoAgent.Helper/Vision/IScreenCapture.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "a883da043604fe86aef2417739d011bd69d73eaf07a98ceec106e311e295a8ee"
+    },
+    {
+      "path": "src/SuavoAgent.Helper/Vision/IScreenExtractor.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "ecd5a7856e56bc4b7a49e78c9fc4499c1d75ee6f8a1eabf2d3f7781f48e83fa4"
+    },
+    {
+      "path": "src/SuavoAgent.Helper/Vision/IScreenStore.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "e0b2bfb877b4bc09d6db45823572fa24e523f4f0c8437620ad266eec79e1d71a"
+    },
+    {
+      "path": "src/SuavoAgent.Helper/Vision/IUiaElementExtractor.cs",
+      "reason": "Interface-only contract has no executable sequence points.",
+      "sha256": "7a3d086d00fc93cf2ebc79bc343d4e6afef8f96e0a0657b1bece1b7ca0fbde04"
+    }
+  ]
+}

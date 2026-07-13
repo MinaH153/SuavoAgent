@@ -76,7 +76,7 @@ public sealed class TabularShapeSampler : IFileShapeSampler
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "TabularShapeSampler failed on {Path}", candidate.AbsolutePath);
+            _logger?.LogSafeDebug(ex);
             return new FileCandidateSample(candidate, Shape: null, ErrorMessage: ex.GetType().Name);
         }
 

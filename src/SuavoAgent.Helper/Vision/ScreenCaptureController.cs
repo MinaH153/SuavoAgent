@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Serilog;
 using SuavoAgent.Contracts.Vision;
 
@@ -52,6 +53,14 @@ public sealed class ScreenCaptureController
 
         var screen = await _capture.CapturePrimaryAsync(ct);
         if (screen == null) return null;
+        var capturedProcess = ResolveCapturedProcessIdentity(screen.Value.Hwnd);
+        if (OperatingSystem.IsWindows() && screen.Value.Hwnd != 0 &&
+            capturedProcess is null)
+        {
+            _logger.Warning(
+                "ScreenCaptureController: captured window process unavailable — refusing frame");
+            return null;
+        }
 
         var storedId = await _store.StoreAsync(screen.Value, ct);
         if (storedId == null && !allowStoreFailure)
@@ -78,6 +87,25 @@ public sealed class ScreenCaptureController
             return null;
         }
 
+        // The UIA walk happens after pixel capture. Re-prove that Windows did
+        // not recycle the HWND to a different effective app while extraction
+        // was in flight; otherwise pixels and structure would describe two
+        // different processes.
+        var extractedProcess = ResolveCapturedProcessIdentity(screen.Value.Hwnd);
+        if (capturedProcess is not null && extractedProcess != capturedProcess)
+        {
+            _logger.Warning(
+                "ScreenCaptureController: captured window process changed during extraction — refusing frame");
+            if (storedId != null)
+                _ = await _store.DeleteAsync(storedId, ct);
+            return null;
+        }
+
+        frame = frame with
+        {
+            ProcessName = capturedProcess?.Name,
+        };
+
         _logger.Debug(
             "ScreenCaptureController: frame {FrameId} from storage {StoreId}: "
             + "{Regions} text regions, {Elements} elements, {LatencyMs}ms extract",
@@ -87,6 +115,34 @@ public sealed class ScreenCaptureController
 
         return new CaptureResult(storedId, frame);
     }
+
+    private static CapturedProcessIdentity? ResolveCapturedProcessIdentity(long hwnd)
+    {
+        if (!OperatingSystem.IsWindows() || hwnd == 0)
+            return null;
+        try
+        {
+            var processId = SuavoAgent.Helper.Actuation.SandboxWindowResolver
+                .EffectiveAppPid((nint)hwnd);
+            if (processId <= 0) return null;
+            using var process = Process.GetProcessById(processId);
+            var moduleName = process.MainModule?.ModuleName;
+            var name = string.IsNullOrWhiteSpace(moduleName)
+                ? process.ProcessName
+                : Path.GetFileName(moduleName);
+            return string.IsNullOrWhiteSpace(name)
+                ? null
+                : new CapturedProcessIdentity(processId, name);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.ComponentModel.Win32Exception or NotSupportedException
+            or OverflowException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record CapturedProcessIdentity(int ProcessId, string Name);
 }
 
 public sealed record CaptureResult(string? StorageId, ScreenFrame Frame);

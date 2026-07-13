@@ -43,25 +43,25 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- RFC 8785 canonicalization for vertical-config signature verification (mirrors Diagnostics). -->
-    <PackageReference Include="JsonCanonicalizer" Version="1.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
     <!-- Vertical-config signing keys — embedded trust store.
          Resource naming: vertical-config-signing-key-<key_id>.pub.pem -->
     <EmbeddedResource Include="Resources\vertical-config-signing-key-*.pub.pem" />
+    <EmbeddedResource Include="Legal\THIRD-PARTY-NOTICES.txt"
+                      LogicalName="SuavoAgent.Setup.Legal.THIRD-PARTY-NOTICES.txt" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="11.2.0" />
     <PackageReference Include="Avalonia.Desktop" Version="11.2.0" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.0" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.2.0" />
-    <PackageReference Include="Avalonia.Diagnostics" Version="11.2.0" Condition="'$(Configuration)' == 'Debug'" />
+    <!-- Avalonia 11.2 transitively requests 0.20.0; 0.21.3 is its compatible
+         security backport for GHSA-xrw6-gwf8-vvr9. Keep this explicit until
+         the Avalonia line carries a patched lower bound itself. -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
     <ProjectReference Include="..\SuavoAgent.Diagnostics\SuavoAgent.Diagnostics.csproj" />
   </ItemGroup>
 

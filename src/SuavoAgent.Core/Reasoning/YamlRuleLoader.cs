@@ -60,7 +60,7 @@ public sealed class YamlRuleLoader
                 throw new InvalidOperationException(
                     $"RuleLoader: required rules directory missing: {directory}");
             }
-            _logger.LogDebug("RuleLoader: optional directory {Dir} not present", directory);
+            _logger.LogDebug("core.rule_loader.optional_directory_absent");
             return Array.Empty<Rule>();
         }
 
@@ -74,13 +74,13 @@ public sealed class YamlRuleLoader
                 var text = File.ReadAllText(file);
                 var parsed = ParseYaml(text, file);
                 rules.AddRange(parsed);
-                _logger.LogDebug("RuleLoader: loaded {Count} rules from {File}", parsed.Count, Path.GetFileName(file));
+                _logger.LogDebug("core.rule_loader.file_loaded count={Count}", parsed.Count);
             }
             catch (Exception ex)
             {
                 // Fail-closed. One bad file = entire load fails.
                 throw new InvalidOperationException(
-                    $"RuleLoader: failed to parse {file} — {ex.Message}", ex);
+                    $"rule_file_parse_failed:{ex.GetType().Name}", ex);
             }
         }
 
@@ -125,12 +125,12 @@ public sealed class YamlRuleLoader
                 var text = reader.ReadToEnd();
                 var parsed = ParseYaml(text, name);
                 rules.AddRange(parsed);
-                _logger.LogDebug("RuleLoader: loaded {Count} rules from embedded {Resource}", parsed.Count, name);
+                _logger.LogDebug("core.rule_loader.resource_loaded count={Count}", parsed.Count);
             }
             catch (Exception ex) when (ex is not InvalidOperationException)
             {
                 throw new InvalidOperationException(
-                    $"RuleLoader: failed to read embedded {name} — {ex.Message}", ex);
+                    $"embedded_rule_read_failed:{ex.GetType().Name}", ex);
             }
         }
 
@@ -159,7 +159,7 @@ public sealed class YamlRuleLoader
         catch (Exception ex)
         {
             throw new InvalidOperationException(
-                $"RuleLoader: malformed YAML in {source ?? "input"} — {ex.Message}", ex);
+                $"rule_yaml_invalid:{ex.GetType().Name}", ex);
         }
 
         if (doc == null)

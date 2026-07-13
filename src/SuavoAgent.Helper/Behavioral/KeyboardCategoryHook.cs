@@ -199,7 +199,9 @@ public sealed class KeyboardCategoryHook : IDisposable
             }
             catch (Exception ex)
             {
-                _logger.Debug(ex, "KeyboardCategoryHook: callback error");
+                _logger.Debug(
+                    "KeyboardCategoryHook: callback error ({ExceptionType})",
+                    ex.GetType().Name);
             }
         }
 

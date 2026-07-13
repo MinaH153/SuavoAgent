@@ -68,6 +68,16 @@ public static class SandboxWindowResolver
         return fg != IntPtr.Zero && EffectiveAppPid(fg) == effectiveAppPid;
     }
 
+    /// <summary>Current foreground HWND only when its effective app PID matches.</summary>
+    public static IntPtr ForegroundWindowForProcess(int effectiveAppPid)
+    {
+        if (effectiveAppPid <= 0 || !OperatingSystem.IsWindows()) return IntPtr.Zero;
+        var foreground = GetForegroundWindow();
+        return foreground != IntPtr.Zero && EffectiveAppPid(foreground) == effectiveAppPid
+            ? foreground
+            : IntPtr.Zero;
+    }
+
     /// <summary>
     /// True iff <paramref name="processName"/> (image base name, no .exe) is an allowlisted sandbox app OR a
     /// known packaged alias of one (e.g. "CalculatorApp"/"Calculator" for the calc launcher). Pure data
@@ -75,7 +85,8 @@ public static class SandboxWindowResolver
     /// </summary>
     public static bool IsAllowlistedSandboxProcess(string? processName)
     {
-        if (string.IsNullOrWhiteSpace(processName)) return false;
+        if (string.IsNullOrWhiteSpace(processName) ||
+            ProtectedDesktopProcessClassifier.IsProtectedIdentity(processName)) return false;
         foreach (var kv in ActuationAllowlistedSandboxApps.ProcessNames)
         {
             if (string.Equals(kv.Key, processName, StringComparison.OrdinalIgnoreCase)) return true;

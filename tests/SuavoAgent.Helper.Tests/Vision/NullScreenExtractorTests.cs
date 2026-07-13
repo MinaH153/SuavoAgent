@@ -23,8 +23,8 @@ public class NullScreenExtractorTests
     }
 
     [Fact]
-    public void IsReady_True()
+    public void IsReady_False_BecauseNoOpIsNotRuntimeOcr()
     {
-        Assert.True(new NullScreenExtractor().IsReady);
+        Assert.False(new NullScreenExtractor().IsReady);
     }
 }

@@ -44,9 +44,10 @@ public sealed class VisionOptions
     public int MinIntervalMs { get; set; } = 1000;
 
     /// <summary>
-    /// Optional Tesseract OCR configuration. When Enabled=false OR required
-    /// binaries/traineddata aren't present, the pipeline falls back to
-    /// NullScreenExtractor (empty frames).
+    /// Optional Tesseract OCR configuration. Enabled=false is an explicit
+    /// UIA-only posture. When Enabled=true, the exact Setup-provisioned cohort
+    /// and native runtime are mandatory; missing/unusable OCR fails machine
+    /// vision closed and surfaces a PHI-free runtime code.
     /// </summary>
     public TesseractOptions Tesseract { get; set; } = new();
 
@@ -66,18 +67,18 @@ public sealed class VisionOptions
     public VisionShadowReasoningOptions ShadowReasoning { get; set; } = new();
 
     /// <summary>
-    /// Pushes each captured (already PHI-scrubbed) <c>ScreenFrame</c> to the
-    /// cloud so the pharmacy dashboard can render a live "what I'm seeing"
-    /// wireframe. Requires <see cref="Enabled"/>. Default off — opt-in per pharmacy.
+    /// Pushes geometry-only frame metadata to the cloud so the pharmacy dashboard
+    /// can render a live "what I'm seeing" wireframe. Requires <see cref="Enabled"/>.
+    /// Default off — opt-in per pharmacy.
     /// </summary>
     public VisionCloudFrameUploadOptions CloudFrameUpload { get; set; } = new();
 }
 
 /// <summary>
-/// Opt-in: when on, the capture worker POSTs each captured (scrubbed) ScreenFrame
-/// to <c>/api/agent/screen-frame</c> for the live dashboard view. ONLY the scrubbed
-/// structure (UI element bounds + scrubbed labels) leaves the box — never pixels,
-/// never patient data. The cloud re-sanitizes before storing/rendering.
+/// Opt-in: when on, the capture worker POSTs explicit metadata to
+/// <c>/api/agent/screen-frame</c>. Only dimensions, bounded geometry, a constant
+/// status, and allow-listed structural roles leave the box. OCR text, UI names,
+/// automation ids, titles, extractor output, pixels, and raw observations do not.
 /// </summary>
 public sealed class VisionCloudFrameUploadOptions
 {
@@ -140,19 +141,33 @@ public sealed class VisionPeriodicCaptureOptions
 }
 
 /// <summary>
-/// Tesseract OCR opt-in. Mirrors the Tier-2 native-libs pattern — we do NOT
-/// ship Tesseract binaries by default. Operators who want OCR drop the
-/// native libs and traineddata files at the configured paths.
+/// Tesseract OCR opt-in. Native code is never operator-placed or selected by
+/// arbitrary path: only an exact release-approved, content-addressed cohort
+/// may be loaded. No production cohort is currently approved.
 /// </summary>
 public sealed class TesseractOptions
 {
-    /// <summary>Default false. Enable requires operator to drop binaries.</summary>
+    /// <summary>Default false. Enable requires a release-approved native cohort.</summary>
     public bool Enabled { get; set; }
 
     /// <summary>
-    /// Directory containing tesseract.dll / leptonica-1.83.1.dll / etc. on
-    /// Windows. Required when Enabled=true. Extractor fails closed and
-    /// returns null on load if this isn't readable.
+    /// Authenticode-release-approved immutable cohort identity. A cloud command
+    /// may select it but cannot create it.
+    /// </summary>
+    public string? CohortId { get; set; }
+
+    /// <summary>SHA-256 of the exact reviewed native bundle.</summary>
+    public string? BundleSha256 { get; set; }
+
+    /// <summary>
+    /// SHA-256 of the canonical persisted per-file manifest. The Helper
+    /// compares this with its compiled release policy before every native load.
+    /// </summary>
+    public string? ManifestSha256 { get; set; }
+
+    /// <summary>
+    /// Content-addressed directory containing the exact reviewed native files.
+    /// It is derived locally from BundleSha256 and never accepted from cloud.
     /// </summary>
     public string? NativeLibraryPath { get; set; }
 

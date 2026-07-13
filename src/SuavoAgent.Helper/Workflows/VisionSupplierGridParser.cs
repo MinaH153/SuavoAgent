@@ -12,13 +12,10 @@ namespace SuavoAgent.Helper.Workflows;
 /// The vision read is the PRIMARY driver; the exact cost is CONFIRMED against the UIA read by
 /// <see cref="VisionExactReconciler"/> so an OCR misread never writes wrong pricing (money safety).
 ///
-/// Column semantics: Tesseract emits one region per text LINE, so a grid row can arrive either as a
-/// single region ("Mckesson 8.42 0.0099 Available") or as several per-cell regions on the same Y.
-/// We flatten each visual row (regions grouped by Y-overlap, ordered by X) to a token stream and
-/// classify: leading alphabetic tokens = supplier, decimal-point tokens = candidate costs, a trailing
-/// keyword = status. The row's per-unit cost is the SMALLEST positive decimal on the row (per-unit is
-/// always ≤ pack cost), which gives a consistent RANKING across rows; the exact value of the winner is
-/// then supplied by UIA at the verify step.
+/// Money semantics are fail-closed. Vision may rank a row only when OCR exposes exactly one recognized
+/// <c>Cost Per Unit</c> header cell and an independently bounded numeric cell aligned to that header.
+/// A line-wide OCR region cannot prove which decimal is Cost, Rebate, AWP, MAC, or Cost Per Unit and is
+/// therefore never used as money. The exact value of the winner is still confirmed by UIA before use.
 /// </summary>
 public static class VisionSupplierGridParser
 {
@@ -77,6 +74,8 @@ public static class VisionSupplierGridParser
         var result = new List<ParsedRow>();
         if (regions.Count == 0) return result;
 
+        var costColumn = ResolveCostPerUnitColumn(regions);
+
         // Cluster into rows by vertical overlap. Sort by Y-center; a region starts a new row when its
         // center falls below the current row's band (half the median region height as the join gap).
         var ordered = regions
@@ -100,18 +99,20 @@ public static class VisionSupplierGridParser
             }
             else
             {
-                result.Add(ClassifyRow(current));
+                result.Add(ClassifyRow(current, costColumn));
                 current = new List<TextRegion> { r };
                 bandCenter = c;
             }
         }
-        if (current.Count > 0) result.Add(ClassifyRow(current));
+        if (current.Count > 0) result.Add(ClassifyRow(current, costColumn));
 
         // Drop header/preamble rows that carry no cost — they can't be supplier rows.
         return result;
     }
 
-    private static ParsedRow ClassifyRow(List<TextRegion> rowRegions)
+    private static ParsedRow ClassifyRow(
+        List<TextRegion> rowRegions,
+        HorizontalBand? costColumn)
     {
         // Flatten the row to a token stream ordered left-to-right (region X, then token order).
         var tokens = rowRegions
@@ -122,14 +123,11 @@ public static class VisionSupplierGridParser
         var y = (int)rowRegions.Average(r => r.Bounds.Y);
         var confidence = rowRegions.Select(r => r.Confidence).DefaultIfEmpty(0).Average();
 
-        // per-unit cost = the smallest decimal-bearing cost on the row (per-unit ≤ pack cost).
-        decimal? perUnit = null;
-        foreach (var t in tokens)
-        {
-            if (!IsCostToken(t)) continue;
-            PricingGridReader.TryParseCost(t, out var c);
-            if (perUnit is null || c < perUnit) perUnit = c;
-        }
+        // Never infer money from "the smallest decimal on the row". PioneerRx places Cost, Rebate,
+        // AWP, and MAC beside Cost Per Unit, and any of them may be smaller. Only an independently
+        // bounded whole numeric cell whose center lies in the exact recognized header's x-band is
+        // admissible. Missing/ambiguous headers and multiple aligned numbers reject the row.
+        var perUnit = ReadCostPerUnitCell(rowRegions, costColumn);
 
         // The real PioneerRx grid puts Linked / Inventory Group / Name / NDC / UPC BEFORE the Supplier
         // column, so a naive "leading alpha before first cost" read swallows all of them. When the row
@@ -141,10 +139,132 @@ public static class VisionSupplierGridParser
         // the id (a layout whose supplier PRECEDES the id — e.g. a narrow grid that still carries an NDC).
         if (string.IsNullOrEmpty(supplier)) supplier = LeadingAlphaSupplier(tokens);
 
-        // status = any status keyword anywhere on the row; empty when none (treated as usable upstream).
-        var status = tokens.FirstOrDefault(IsStatusKeyword) ?? "";
+        // Status is a positive observation, never a token substring. Per-cell OCR must expose an
+        // entire cell equal to Available/Active. The legacy one-region-per-line shape may use only
+        // an exact final token and is rejected first when any negated/ineligible phrase is present.
+        // This prevents "Not Available" from being tokenized into a false eligible observation.
+        var status = ReadEligibleStatus(rowRegions, tokens);
 
         return new ParsedRow(supplier, perUnit, status, confidence, y, hasId);
+    }
+
+    private readonly record struct HorizontalBand(int Left, int Right, int HeaderBottom);
+
+    private static HorizontalBand? ResolveCostPerUnitColumn(IReadOnlyList<TextRegion> regions)
+    {
+        var exactHeaders = regions
+            .Where(region => IsExactCostPerUnitHeader(region.Text))
+            .ToList();
+        if (exactHeaders.Count > 1) return null;
+        if (exactHeaders.Count == 1)
+            return HeaderBand(exactHeaders[0]);
+
+        // Production Tesseract pricing extraction is word-granular so the
+        // parser can prove column membership. Reconstruct only the exact
+        // adjacent header phrase from three bounded words on one visual row.
+        // A line-wide region, a cross-column phrase, or duplicate matches
+        // remains ambiguous and fails closed.
+        var ordered = regions
+            .Where(region => region.Bounds.Width > 0 && region.Bounds.Height > 0)
+            .OrderBy(region => region.Bounds.Y + region.Bounds.Height / 2.0)
+            .ThenBy(region => region.Bounds.X)
+            .ToArray();
+        var candidates = new List<HorizontalBand>();
+        for (var index = 0; index + 2 < ordered.Length; index++)
+        {
+            var cost = ordered[index];
+            var per = ordered[index + 1];
+            var unit = ordered[index + 2];
+            if (!HeaderWord(cost.Text, "cost") ||
+                !HeaderWord(per.Text, "per") ||
+                !HeaderWord(unit.Text, "unit") ||
+                !SameHeaderRow(cost, per, unit) ||
+                !AdjacentHeaderWords(cost, per) ||
+                !AdjacentHeaderWords(per, unit))
+                continue;
+            candidates.Add(new HorizontalBand(
+                cost.Bounds.X,
+                checked(unit.Bounds.X + unit.Bounds.Width),
+                Math.Max(
+                    checked(cost.Bounds.Y + cost.Bounds.Height),
+                    Math.Max(
+                        checked(per.Bounds.Y + per.Bounds.Height),
+                        checked(unit.Bounds.Y + unit.Bounds.Height)))));
+        }
+        return candidates.Count == 1 ? candidates[0] : null;
+    }
+
+    private static HorizontalBand? HeaderBand(TextRegion header)
+    {
+        if (header.Bounds.Width <= 0 || header.Bounds.Height <= 0) return null;
+        return new HorizontalBand(
+            header.Bounds.X,
+            checked(header.Bounds.X + header.Bounds.Width),
+            checked(header.Bounds.Y + header.Bounds.Height));
+    }
+
+    private static bool HeaderWord(string value, string expected) =>
+        value.Trim().Trim('(', ')', '[', ']', ':', '.', '|')
+            .Equals(expected, StringComparison.OrdinalIgnoreCase);
+
+    private static bool SameHeaderRow(
+        TextRegion first,
+        TextRegion second,
+        TextRegion third)
+    {
+        var centers = new[]
+        {
+            first.Bounds.Y + first.Bounds.Height / 2.0,
+            second.Bounds.Y + second.Bounds.Height / 2.0,
+            third.Bounds.Y + third.Bounds.Height / 2.0,
+        };
+        var tolerance = Math.Max(
+            4.0,
+            new[] { first.Bounds.Height, second.Bounds.Height, third.Bounds.Height }
+                .Average() * 0.6);
+        return centers.Max() - centers.Min() <= tolerance;
+    }
+
+    private static bool AdjacentHeaderWords(TextRegion left, TextRegion right)
+    {
+        var gap = right.Bounds.X - checked(left.Bounds.X + left.Bounds.Width);
+        var maximumGap = Math.Max(
+            16,
+            Math.Max(left.Bounds.Height, right.Bounds.Height) * 3);
+        return gap is >= -2 && gap <= maximumGap;
+    }
+
+    private static bool IsExactCostPerUnitHeader(string text)
+    {
+        var normalized = string.Join(' ', text
+            .Trim()
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return normalized.Equals("Cost Per Unit", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("Cost (per unit)", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static decimal? ReadCostPerUnitCell(
+        IReadOnlyList<TextRegion> rowRegions,
+        HorizontalBand? costColumn)
+    {
+        if (costColumn is not { } band) return null;
+
+        decimal? value = null;
+        foreach (var region in rowRegions)
+        {
+            if (region.Bounds.Y < band.HeaderBottom) continue;
+            var centerX = region.Bounds.X + region.Bounds.Width / 2;
+            if (centerX < band.Left || centerX > band.Right) continue;
+
+            var cell = region.Text.Trim();
+            // Whole-cell identity is required. Whitespace means this is a line/compound region, not
+            // a bounded money cell, even if one token happens to parse as a decimal.
+            if (cell.Any(char.IsWhiteSpace) || !IsCostToken(cell)) continue;
+            PricingGridReader.TryParseCost(cell, out var parsed);
+            if (value is not null) return null;
+            value = parsed;
+        }
+        return value;
     }
 
     // supplier = leading alphabetic tokens up to (but not including) the first cost token; skip a token
@@ -207,8 +327,57 @@ public static class VisionSupplierGridParser
         token.Equals("Stock", StringComparison.OrdinalIgnoreCase)
         || token.Equals("Package", StringComparison.OrdinalIgnoreCase);
 
+    private static string ReadEligibleStatus(
+        IReadOnlyList<TextRegion> rowRegions,
+        IReadOnlyList<string> tokens)
+    {
+        var wholeRow = string.Join(' ', rowRegions
+            .OrderBy(region => region.Bounds.X)
+            .Select(region => region.Text));
+        if (ContainsIneligibleStatusPhrase(wholeRow))
+            return "";
+
+        foreach (var region in rowRegions)
+        {
+            var cell = TrimStatusPunctuation(region.Text);
+            if (IsExactEligibleStatus(cell)) return cell;
+        }
+
+        // Some OCR providers return the entire visual row as one region. Preserve that supported
+        // shape without scanning arbitrary tokens: only an exact trailing field is admissible.
+        if (rowRegions.Count != 1)
+            return "";
+
+        var trailing = tokens.Count == 0 ? "" : TrimStatusPunctuation(tokens[^1]);
+        return IsExactEligibleStatus(trailing) ? trailing : "";
+    }
+
+    private static bool IsExactEligibleStatus(string value) =>
+        value.Equals("Available", StringComparison.OrdinalIgnoreCase)
+        || value.Equals("Active", StringComparison.OrdinalIgnoreCase);
+
+    private static string TrimStatusPunctuation(string value) =>
+        value.Trim().Trim(',', ';', ':', '.', '|', '[', ']', '(', ')');
+
+    private static bool ContainsIneligibleStatusPhrase(string value)
+    {
+        var normalized = string.Join(' ', value
+            .Replace('-', ' ')
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        var compact = normalized.Replace(" ", "", StringComparison.Ordinal);
+        return normalized.Contains("not available", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("not active", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("do not use", StringComparison.OrdinalIgnoreCase)
+            || compact.Contains("notavailable", StringComparison.OrdinalIgnoreCase)
+            || compact.Contains("donotuse", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("unavailable", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("inactive", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("discontinued", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsStatusKeyword(string token) =>
-        token.Contains("available", StringComparison.OrdinalIgnoreCase)
+        token.Equals("active", StringComparison.OrdinalIgnoreCase)
+        || token.Contains("available", StringComparison.OrdinalIgnoreCase)
         || token.Contains("discontinued", StringComparison.OrdinalIgnoreCase)
         || token.Contains("unavailable", StringComparison.OrdinalIgnoreCase)
         || token.Contains("inactive", StringComparison.OrdinalIgnoreCase);

@@ -40,10 +40,8 @@ internal static class PioneerRxShadowFixtureExporter
                 .ToArray()
             : Array.Empty<FixturePatient>();
 
-        // Drug name appears cleartext in the legacy rxDeliveryQueue but is
-        // hashed (nameHash) in the canonical rxOrderCandidates. It is
-        // forbidden in candidate, required (as operational metadata) in
-        // queue.
+        // Raw drug names are forbidden everywhere. The canonical candidate carries only nameHash;
+        // the legacy rxDeliveryQueue path has been permanently removed.
         var drugNames = rows
             .Select(row => row.DrugName)
             .Where(value => !string.IsNullOrWhiteSpace(value))
@@ -53,8 +51,8 @@ internal static class PioneerRxShadowFixtureExporter
         // Directly-identifying patient PHI (name, phone, street address)
         // is forbidden EVERYWHERE on the agent→cloud sync wire as of
         // 2026-05-12 (Codex CRITICAL #15 / Track 3 invariant). The legacy
-        // queue no longer carries these fields; patient delivery details
-        // flow exclusively through SendPatientDetailsAsync.
+        // patient delivery details flow exclusively through the approved,
+        // signed-receipt SendApprovedPatientDetailsAsync path.
         var patientPhi = patients
             .SelectMany(patient => new[]
             {

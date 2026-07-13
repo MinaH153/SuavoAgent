@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using SuavoAgent.Contracts.Maintenance;
 
 namespace SuavoAgent.Setup;
 
@@ -13,15 +14,16 @@ internal static class BinaryDownloader
     internal const string RepoName = "SuavoAgent";
 
     // ECDSA P-256 public key for checksum signature verification (DER/SubjectPublicKeyInfo, Base64)
-    // Matches the private key at ~/.suavo/update-signing-p256.pem
+    // Matches the mode-600 offline private key at ~/.suavo/signing-key.pem.
     private const string PublicKeyBase64 =
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA==";
 
-    // ONE list of truth for every agent executable Setup must place. ServiceInstaller
+    // ONE list of truth for every runtime executable Setup must download. ServiceInstaller
     // refuses to register ANY service when a service binary is absent from the install
     // dir — the 2026-06-10 fresh-install brick was exactly this list missing
     // Watchdog.exe (published in the release, never downloaded) while the GUI still
-    // reported "Installation complete". WriteBinariesManifest hashes this same list.
+    // reported "Installation complete". InstalledCohort adds the locally staged signed
+    // maintenance host when the immutable on-disk manifest is written.
     private static readonly string[] Binaries =
     [
         "SuavoAgent.Core.exe",
@@ -33,8 +35,19 @@ internal static class BinaryDownloader
     /// <summary>Test seam — the canonical set of executables Setup downloads and verifies.</summary>
     internal static IReadOnlyList<string> RequiredBinaries => Binaries;
 
+    /// <summary>
+    /// Immutable installed cohort. The maintenance host is staged from the already-signed
+    /// running Setup PE rather than downloaded a second time, but it is still integrity-
+    /// bound in binaries.manifest and future signed OTA manifests.
+    /// </summary>
+    internal static IReadOnlyList<string> InstalledCohort =>
+        [.. Binaries, MaintenanceContract.ExecutableName];
+
     /// Maximum download size per binary (200 MB). Aborts if Content-Length exceeds this (H-4).
     private const long MaxDownloadBytes = 200 * 1024 * 1024;
+    private const long MaxFieldReleaseReceiptBytes = 64 * 1024;
+    internal const int MaxChecksumManifestBytes = 64 * 1024;
+    internal const int MaxChecksumSignatureBytes = 512;
 
     /// Retry schedule for transient HTTP failures (network errors + 5xx).
     /// GitHub release CDN occasionally throws transient 5xx during high traffic;
@@ -51,13 +64,14 @@ internal static class BinaryDownloader
     /// </summary>
     public static async Task<bool> DownloadAndVerifyAsync(string releaseTag, string installDir)
     {
-        // Primary: the exact pinned version. Fallback: releases/latest — covers an
-        // installer whose version was never published as a *stable* release (e.g. a
-        // version that only ever shipped as a prerelease), whose pinned URL would
-        // otherwise 404 forever. The checksums + binaries are always taken from the
-        // SAME base, so the ECDSA + SHA-256 verification stays consistent either way.
-        var pinnedUrl = $"https://github.com/{RepoOwner}/{RepoName}/releases/download/{releaseTag}";
-        var latestUrl = $"https://github.com/{RepoOwner}/{RepoName}/releases/latest/download";
+        // A setup session is pinned to one exact signed release. Falling back to "latest"
+        // silently changes the intended cohort and can cross a compatibility or approval boundary.
+        if (!IsValidReleaseTag(releaseTag))
+        {
+            ConsoleUI.WriteFail("The installer release identity is invalid; download a fresh installer from Suavo.");
+            return false;
+        }
+        var baseUrl = $"https://github.com/{RepoOwner}/{RepoName}/releases/download/{releaseTag}";
 
         Directory.CreateDirectory(installDir);
 
@@ -65,16 +79,36 @@ internal static class BinaryDownloader
         http.Timeout = TimeSpan.FromMinutes(10);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("SuavoSetup/1.0");
 
-        // Step 1: Download and verify checksums (pinned version, then latest).
-        var baseUrl = pinnedUrl;
-        var checksums = await DownloadAndVerifyChecksumsAsync(http, pinnedUrl, installDir);
-        if (checksums == null)
-        {
-            ConsoleUI.WriteInfo($"Release {releaseTag} not found — falling back to the latest published release.");
-            baseUrl = latestUrl;
-            checksums = await DownloadAndVerifyChecksumsAsync(http, latestUrl, installDir);
-        }
+        // Step 1: download and verify checksums for the exact pinned release only.
+        var checksums = await DownloadAndVerifyChecksumsAsync(http, baseUrl, installDir);
         if (checksums == null) return false;
+
+        if (!checksums.TryGetValue(
+                MaintenanceContract.FieldReleaseReceiptFileName,
+                out var receiptHash))
+        {
+            ConsoleUI.WriteFail("Signed field release receipt is missing - aborting");
+            return false;
+        }
+        var receiptPath = Path.Combine(
+            installDir,
+            MaintenanceContract.FieldReleaseReceiptFileName);
+        var receiptDownloaded = await RetryTransientAsync(
+            () => DownloadFileAsync(
+                http,
+                $"{baseUrl}/{MaintenanceContract.FieldReleaseReceiptFileName}",
+                receiptPath,
+                MaintenanceContract.FieldReleaseReceiptFileName,
+                MaxFieldReleaseReceiptBytes),
+            "download field release receipt");
+        if (!receiptDownloaded ||
+            new FileInfo(receiptPath).Length is <= 0 or > MaxFieldReleaseReceiptBytes ||
+            !HashMatches(receiptPath, receiptHash))
+        {
+            ConsoleUI.WriteFail("Signed field release receipt did not match this release - aborting");
+            Cleanup(receiptPath);
+            return false;
+        }
 
         // Step 2: Verify all expected binaries have checksum entries
         foreach (var bin in Binaries)
@@ -86,7 +120,8 @@ internal static class BinaryDownloader
             }
         }
 
-        // Step 3: Download each binary with progress
+        // Step 3: Download each runtime binary with progress. The maintenance host
+        // is staged from the already-signed running Setup PE after this completes.
         foreach (var bin in Binaries)
         {
             var url = $"{baseUrl}/{bin}";
@@ -120,6 +155,13 @@ internal static class BinaryDownloader
         return true;
     }
 
+    internal static bool IsValidReleaseTag(string? releaseTag) =>
+        !string.IsNullOrWhiteSpace(releaseTag) &&
+        System.Text.RegularExpressions.Regex.IsMatch(
+            releaseTag,
+            @"^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     /// <summary>
     /// Downloads checksums.sha256 and checksums.sha256.sig, verifies ECDSA signature,
     /// parses the checksum file into a dictionary.
@@ -135,16 +177,22 @@ internal static class BinaryDownloader
         try
         {
             var checksumBytes = await RetryTransientAsync(
-                () => http.GetByteArrayAsync($"{baseUrl}/checksums.sha256"),
+                () => DownloadBoundedBytesAsync(
+                    http,
+                    $"{baseUrl}/checksums.sha256",
+                    MaxChecksumManifestBytes,
+                    CancellationToken.None),
                 "download checksums.sha256");
-            await File.WriteAllBytesAsync(checksumPath, checksumBytes);
 
             // The release signs checksums.sha256 with `openssl dgst -sha256 -sign`,
             // which emits a BINARY, DER (ASN.1)-encoded ECDSA signature — not hex.
             var sigBytes = await RetryTransientAsync(
-                () => http.GetByteArrayAsync($"{baseUrl}/checksums.sha256.sig"),
+                () => DownloadBoundedBytesAsync(
+                    http,
+                    $"{baseUrl}/checksums.sha256.sig",
+                    MaxChecksumSignatureBytes,
+                    CancellationToken.None),
                 "download checksums.sha256.sig");
-            await File.WriteAllBytesAsync(sigPath, sigBytes);
 
             var valid = VerifyChecksumSignature(checksumBytes, sigBytes);
 
@@ -154,6 +202,12 @@ internal static class BinaryDownloader
                 Cleanup(checksumPath, sigPath);
                 return null;
             }
+
+            // Only authenticated metadata is persisted into the private stage.
+            // Each file lands through a write-through temporary and atomic rename;
+            // the outer catch removes both if the second write cannot complete.
+            await WriteVerifiedMetadataAsync(checksumPath, checksumBytes);
+            await WriteVerifiedMetadataAsync(sigPath, sigBytes);
 
             ConsoleUI.WriteOk("Checksum signature verified (ECDSA P-256)");
 
@@ -169,11 +223,80 @@ internal static class BinaryDownloader
 
             return checksums;
         }
-        catch (HttpRequestException ex)
+        catch (Exception ex) when (ex is HttpRequestException or
+                                   InvalidDataException or
+                                   IOException or
+                                   UnauthorizedAccessException or
+                                   CryptographicException)
         {
-            ConsoleUI.WriteFail($"Download failed: {ex.Message}");
+            ConsoleUI.WriteFail($"Release metadata download failed. Support code: {DownloadFailureCode(ex)}");
             Cleanup(checksumPath, sigPath);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads small release metadata through a strict header and streaming cap.
+    /// The cap is enforced even when the server omits or lies about Content-Length.
+    /// </summary>
+    internal static async Task<byte[]> DownloadBoundedBytesAsync(
+        HttpClient http,
+        string url,
+        int maxBytes,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(http);
+        ArgumentException.ThrowIfNullOrWhiteSpace(url);
+        if (maxBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBytes));
+
+        using var response = await http.GetAsync(
+            url,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+        if (response.Content.Headers.ContentLength is long declared &&
+            (declared <= 0 || declared > maxBytes))
+            throw new InvalidDataException("Release metadata declared an invalid size.");
+
+        await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var destination = new MemoryStream(Math.Min(maxBytes, 16 * 1024));
+        var buffer = new byte[Math.Min(maxBytes, 8 * 1024)];
+        var total = 0;
+        int read;
+        while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+        {
+            if (total > maxBytes - read)
+                throw new InvalidDataException("Release metadata exceeded its streaming size limit.");
+            destination.Write(buffer, 0, read);
+            total += read;
+        }
+        if (total == 0)
+            throw new InvalidDataException("Release metadata was empty.");
+        return destination.ToArray();
+    }
+
+    private static async Task WriteVerifiedMetadataAsync(string path, byte[] bytes)
+    {
+        var tempPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            await using (var stream = new FileStream(
+                             tempPath,
+                             FileMode.CreateNew,
+                             FileAccess.Write,
+                             FileShare.None,
+                             16 * 1024,
+                             FileOptions.WriteThrough))
+            {
+                await stream.WriteAsync(bytes);
+                await stream.FlushAsync();
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(tempPath, path, overwrite: true);
+        }
+        finally
+        {
+            Cleanup(tempPath);
         }
     }
 
@@ -195,8 +318,13 @@ internal static class BinaryDownloader
     /// Downloads a file with progress reporting.
     /// </summary>
     private static async Task<bool> DownloadFileAsync(
-        HttpClient http, string url, string destPath, string label)
+        HttpClient http,
+        string url,
+        string destPath,
+        string label,
+        long maxBytes = MaxDownloadBytes)
     {
+        var completed = false;
         try
         {
             using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
@@ -205,9 +333,9 @@ internal static class BinaryDownloader
             var totalBytes = response.Content.Headers.ContentLength ?? -1;
 
             // H-4: Abort if declared size exceeds 200 MB
-            if (totalBytes > MaxDownloadBytes)
+            if (totalBytes == 0 || totalBytes > maxBytes)
             {
-                ConsoleUI.WriteFail($"{label} too large ({totalBytes / (1024 * 1024)} MB > 200 MB limit) — aborting");
+                ConsoleUI.WriteFail($"{label} declared an invalid or oversized payload — aborting");
                 return false;
             }
 
@@ -224,9 +352,9 @@ internal static class BinaryDownloader
                 totalRead += bytesRead;
 
                 // Enforce size limit mid-stream — server may omit Content-Length
-                if (totalRead > MaxDownloadBytes)
+                if (totalRead > maxBytes)
                 {
-                    ConsoleUI.WriteFail($"{label} exceeded {MaxDownloadBytes / (1024 * 1024)} MB limit mid-stream — aborting");
+                    ConsoleUI.WriteFail($"{label} exceeded its streaming size limit — aborting");
                     return false;
                 }
 
@@ -234,20 +362,25 @@ internal static class BinaryDownloader
                     ConsoleUI.WriteProgress(label, totalRead, totalBytes);
             }
 
-            return true;
+            completed = totalRead > 0;
+            return completed;
         }
         catch (HttpRequestException ex) when (IsTransientHttpFailure(ex))
         {
             // Let transient failures (5xx / connection reset) propagate so RetryTransientAsync can
             // retry — swallowing them here (returning false) made the retry wrapper dead code, so a
             // single blip aborted the whole install with zero retries.
-            ConsoleUI.WriteInfo($"  {label} transient failure: {ex.Message}");
+            ConsoleUI.WriteInfo($"  {label} was temporarily unavailable. Retrying securely.");
             throw;
         }
         catch (Exception ex)
         {
-            ConsoleUI.WriteFail($"Download failed for {label}: {ex.Message}");
+            ConsoleUI.WriteFail($"Download failed for {label}. Support code: {DownloadFailureCode(ex)}");
             return false;
+        }
+        finally
+        {
+            if (!completed) Cleanup(destPath);
         }
     }
 
@@ -260,8 +393,14 @@ internal static class BinaryDownloader
 
     private static string ComputeSha256(string filePath)
     {
-        var bytes = File.ReadAllBytes(filePath);
-        var hash = SHA256.HashData(bytes);
+        using var stream = new FileStream(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            128 * 1024,
+            FileOptions.SequentialScan);
+        var hash = SHA256.HashData(stream);
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
@@ -273,34 +412,42 @@ internal static class BinaryDownloader
     /// but the GUI installer did NOT — so installing/reinstalling over existing binaries left a STALE
     /// manifest and the new Helper was rejected. (Live brick on Mina's box 2026-06-05.) This mirrors
     /// SelfUpdater's manifest shape exactly so OTA and install agree. Call AFTER all binaries are
-    /// placed and BEFORE the services start. Must NOT throw — a missing manifest fails the Broker
-    /// closed, so surface the error but let the caller decide.
+    /// placed and BEFORE the services start. The manifest is all-or-nothing: a partial cohort can
+    /// never be recorded as healthy because the missing executable would strand repair or recovery.
     /// </summary>
-    public static void WriteBinariesManifest(string installDir, string? manifestPathOverride = null)
+    public static bool WriteBinariesManifest(string installDir, string? manifestPathOverride = null)
     {
-        var entries = new List<string>();
-        foreach (var bin in Binaries)
-        {
-            var path = Path.Combine(installDir, bin);
-            if (!File.Exists(path)) continue; // e.g. a box without the Watchdog
-            entries.Add($"  \"{bin}\": \"{ComputeSha256(path)}\"");
-        }
-        if (entries.Count == 0)
-        {
-            ConsoleUI.WriteWarn("binaries.manifest NOT written — no binaries found in install dir");
-            return;
-        }
-
-        var json = "{\n" + string.Join(",\n", entries) + "\n}\n";
         var manifestPath = manifestPathOverride ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "SuavoAgent", "binaries.manifest");
+        var missing = InstalledCohort
+            .Where(bin => !File.Exists(Path.Combine(installDir, bin)))
+            .ToArray();
+        if (missing.Length > 0)
+        {
+            ConsoleUI.WriteWarn(
+                $"binaries.manifest NOT written — installed cohort is incomplete: {string.Join(", ", missing)}");
+            // Never leave a stale prior manifest beside a newly partial cohort. The Broker must
+            // fail closed if any external recovery attempt starts it after this installer aborts.
+            try { if (File.Exists(manifestPath)) File.Delete(manifestPath); } catch { }
+            return false;
+        }
+
+        var entries = new List<string>();
+        foreach (var bin in InstalledCohort)
+        {
+            var path = Path.Combine(installDir, bin);
+            entries.Add($"  \"{bin}\": \"{ComputeSha256(path)}\"");
+        }
+
+        var json = "{\n" + string.Join(",\n", entries) + "\n}\n";
         Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
         var tmp = manifestPath + ".tmp";
         File.WriteAllText(tmp, json, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         if (File.Exists(manifestPath)) File.Replace(tmp, manifestPath, null);
         else File.Move(tmp, manifestPath);
         ConsoleUI.WriteOk($"binaries.manifest written ({entries.Count} binaries) — Broker Helper-integrity root");
+        return true;
     }
 
     /// <summary>
@@ -324,7 +471,7 @@ internal static class BinaryDownloader
                 if (attempt < RetryDelays.Length)
                 {
                     ConsoleUI.WriteInfo(
-                        $"  {operationName} attempt {attempt + 1} failed ({ex.Message}); " +
+                        $"  {operationName} attempt {attempt + 1} was temporarily unavailable; " +
                         $"retrying in {RetryDelays[attempt].TotalSeconds:F0}s");
                     await Task.Delay(RetryDelays[attempt]);
                 }
@@ -332,9 +479,19 @@ internal static class BinaryDownloader
         }
 
         throw new HttpRequestException(
-            $"{operationName} failed after {RetryDelays.Length + 1} attempts: {lastEx?.Message}",
+            $"{operationName} failed after {RetryDelays.Length + 1} attempts.",
             lastEx);
     }
+
+    private static string DownloadFailureCode(Exception exception) => exception switch
+    {
+        HttpRequestException => "SETUP-DOWNLOAD-NETWORK",
+        InvalidDataException => "SETUP-DOWNLOAD-INVALID",
+        UnauthorizedAccessException => "SETUP-DOWNLOAD-ACCESS",
+        IOException => "SETUP-DOWNLOAD-IO",
+        CryptographicException => "SETUP-DOWNLOAD-TRUST",
+        _ => "SETUP-DOWNLOAD-FAILED",
+    };
 
     /// <summary>
     /// True for network-level failures (no status code) and HTTP 5xx responses.
@@ -355,6 +512,13 @@ internal static class BinaryDownloader
             var path = Path.Combine(installDir, bin);
             try { File.Delete(path); } catch { /* best effort */ }
         }
+        try
+        {
+            File.Delete(Path.Combine(
+                installDir,
+                MaintenanceContract.FieldReleaseReceiptFileName));
+        }
+        catch { /* best effort */ }
     }
 
     private static void Cleanup(params string[] paths)

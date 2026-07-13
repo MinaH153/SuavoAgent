@@ -29,13 +29,13 @@ public class SandboxExploreSafetyGateTests
     [Fact]
     public void Allows_ClickByLabel_InAllowlistedProcess()
     {
-        Assert.Equal(SafetyDecision.Allow, Gate(CleanGate()).GateAction(Click("notepad"), Obj).Decision);
         Assert.Equal(SafetyDecision.Allow, Gate(CleanGate()).GateAction(Click("calc.exe"), Obj).Decision);
     }
 
     [Fact]
     public void Denies_ClickByLabel_InNonAllowlistedProcess()
     {
+        Assert.Equal(SafetyDecision.Deny, Gate(CleanGate()).GateAction(Click("notepad"), Obj).Decision);
         Assert.Equal(SafetyDecision.Deny, Gate(CleanGate()).GateAction(Click("chrome"), Obj).Decision);
         Assert.Equal(SafetyDecision.Deny, Gate(CleanGate()).GateAction(Click("PioneerRx"), Obj).Decision);
     }
@@ -43,8 +43,8 @@ public class SandboxExploreSafetyGateTests
     [Fact]
     public void Denies_TypeAndPress_EvenInAllowlistedProcess_V1()
     {
-        var type = NextAction.Act("type_into_field", new Dictionary<string, object?> { ["text"] = "7", ["process_name"] = "notepad" });
-        var press = NextAction.Act("press_keys", new Dictionary<string, object?> { ["chords"] = "Enter", ["process_name"] = "notepad" });
+        var type = NextAction.Act("type_into_field", new Dictionary<string, object?> { ["text"] = "7", ["process_name"] = "calc.exe" });
+        var press = NextAction.Act("press_keys", new Dictionary<string, object?> { ["chords"] = "Enter", ["process_name"] = "calc.exe" });
         Assert.Equal(SafetyDecision.Deny, Gate(CleanGate()).GateAction(type, Obj).Decision);
         Assert.Equal(SafetyDecision.Deny, Gate(CleanGate()).GateAction(press, Obj).Decision);
     }
@@ -60,7 +60,7 @@ public class SandboxExploreSafetyGateTests
     public void GateForcedDryRun_DowngradesAllowedActionToDry()
     {
         var gs = new ActuationGateState(Enabled: true, DryRun: true, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null);
-        Assert.Equal(SafetyDecision.AllowDryRun, Gate(gs).GateAction(Click("notepad"), Obj).Decision);
+        Assert.Equal(SafetyDecision.AllowDryRun, Gate(gs).GateAction(Click("calc.exe"), Obj).Decision);
     }
 
     [Fact]

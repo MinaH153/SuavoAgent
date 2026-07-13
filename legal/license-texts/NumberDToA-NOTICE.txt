@@ -1,0 +1,22 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/****************************************************************
+ * The author of this software is David M. Gay.
+ * <p>
+ * Copyright (c) 1991, 2000, 2001 by Lucent Technologies.
+ * <p>
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose without fee is hereby granted, provided that this entire notice
+ * is included in all copies of any software which is or includes a copy
+ * or modification of this software and in all copies of the supporting
+ * documentation for such software.
+ * <p>
+ * THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS OR IMPLIED
+ * WARRANTY.  IN PARTICULAR, NEITHER THE AUTHOR NOR LUCENT MAKES ANY
+ * REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE MERCHANTABILITY
+ * OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
+ ***************************************************************/
+
+// Ported to C# from the Mozilla "Rhino" project by Anders Rundgren.

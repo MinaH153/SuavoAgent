@@ -17,7 +17,10 @@ namespace SuavoAgent.Helper.Tests.Security;
 public sealed class HoneytokenCorroboratorNeverLatchTests
 {
     private const string InstallDir = @"C:\Program Files\SuavoAgent";
-    private static readonly HoneytokenCorroborator Corroborator = new(InstallDir);
+    private static readonly HoneytokenCorroborator Corroborator = new(
+        InstallDir,
+        [@"C:\Windows\System32"],
+        _ => true);
 
     // --- The invariant: a NON-shell toucher NEVER latches, no matter the repeat count ---------
 

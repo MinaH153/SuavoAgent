@@ -8,7 +8,7 @@ namespace SuavoAgent.Setup.Gui.Services;
 /// Consent step. Serialized to <c>C:\ProgramData\SuavoAgent\consent-receipt.json</c>
 /// by the install orchestrator; <c>HeartbeatWorker</c> reads it and uploads the
 /// bytes verbatim on the first heartbeat. The on-disk schema is frozen to match
-/// <c>bootstrap.ps1</c> so the cloud side stays single-source-of-truth.
+/// the native installer so the cloud side stays single-source-of-truth.
 /// </summary>
 internal sealed record ConsentReceiptData(
     string AuthorizingName,
@@ -39,7 +39,7 @@ internal sealed record ConsentReceiptData(
     public string ToJson(string pharmacyId, string agentId, string installerVersion, string machineFingerprint)
     {
         var receipt = new Receipt(
-            consentVersion: "1.0",
+            consentVersion: "2.0",
             authorizingParty: new AuthorizingParty(AuthorizingName, AuthorizingTitle),
             businessState: BusinessState.Trim().ToUpperInvariant(),
             mandatoryNoticeState: MandatoryNoticeState,

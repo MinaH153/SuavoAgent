@@ -18,7 +18,7 @@ public record WritebackResult(
         => new(true, "already_at_target", txId, "idempotent", IsReplay: true);
 
     public static WritebackResult VerifiedWithDrift(Guid txId, string expected, string actual)
-        => new(true, "verified_with_drift", txId, $"expected={expected},actual={actual}");
+        => new(false, "post_verify_mismatch", null, "completed_date_mismatch");
 
     public static WritebackResult StatusConflict(string? observed)
         => new(false, "status_conflict", null, observed);
@@ -29,9 +29,16 @@ public record WritebackResult(
     public static WritebackResult PostVerifyMismatch(string? observed)
         => new(false, "post_verify_mismatch", null, observed);
 
-    public static WritebackResult SqlError(Exception ex)
-        => new(false, "sql_error", null, ex.Message);
+    public static WritebackResult SqlError()
+        => new(false, "sql_error", null, "sql_operation_failed");
 
     public static WritebackResult TriggerBlocked(string triggerName)
-        => new(false, "trigger_blocked", null, triggerName);
+        => new(false, "trigger_blocked", null, triggerName switch
+        {
+            "instead_of_trigger" => "instead_of_trigger",
+            "after_trigger_requires_signed_approval" => "after_trigger_requires_signed_approval",
+            "writeback_disabled" => "writeback_disabled",
+            "status_map_incomplete" => "status_map_incomplete",
+            _ => "trigger_policy_blocked",
+        });
 }

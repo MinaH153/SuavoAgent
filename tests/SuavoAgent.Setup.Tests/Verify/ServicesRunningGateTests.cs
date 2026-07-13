@@ -20,8 +20,12 @@ public class ServicesRunningGateTests
     }
 
     [Fact]
-    public void Watchdog_down_is_Warn_not_Fail()
-        => Assert.Equal(GateState.Warn, ServiceInstaller.ClassifyServices(true, true, false, true).State);
+    public void Watchdog_down_is_Fail()
+    {
+        var r = ServiceInstaller.ClassifyServices(true, true, false, true);
+        Assert.Equal(GateState.Fail, r.State);
+        Assert.Contains("Watchdog", r.Detail);
+    }
 
     [Fact]
     public void Helper_down_is_Warn_not_Fail()
@@ -39,4 +43,14 @@ public class ServicesRunningGateTests
         Assert.Equal(GateState.Fail, r.State);
         Assert.Contains("Broker", r.Detail);
     }
+
+    [Theory]
+    [InlineData(true, true, true, true)]
+    [InlineData(false, true, true, false)]
+    [InlineData(true, false, true, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(false, false, false, false)]
+    public void Required_service_cohort_controls_install_success(
+        bool core, bool broker, bool watchdog, bool expected)
+        => Assert.Equal(expected, ServiceInstaller.RequiredServicesRunning(core, broker, watchdog));
 }

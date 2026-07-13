@@ -1,0 +1,58 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <OutputName>SuavoAgent</OutputName>
+    <Platform>x64</Platform>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <DefaultCompressionLevel>high</DefaultCompressionLevel>
+    <Pedantic>true</Pedantic>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <SuppressValidation Condition="'$(OS)' != 'Windows_NT'">true</SuppressValidation>
+    <PayloadRoot Condition="'$(PayloadRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../publish'))</PayloadRoot>
+    <InstallerMetadataTimestampUtc Condition="'$(InstallerMetadataTimestampUtc)' == ''"></InstallerMetadataTimestampUtc>
+    <MetadataOutputDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/$(IntermediateOutputPath)installer-metadata'))</MetadataOutputDirectory>
+    <DotNetExecutable Condition="'$(DotNetHostPath)' != ''">$(DotNetHostPath)</DotNetExecutable>
+    <DotNetExecutable Condition="'$(DotNetExecutable)' == ''">dotnet</DotNetExecutable>
+    <MetadataToolProject>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../tools/SuavoAgent.Installer.Metadata/SuavoAgent.Installer.Metadata.csproj'))</MetadataToolProject>
+    <MetadataToolAssembly>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../tools/SuavoAgent.Installer.Metadata/bin/$(Configuration)/net8.0/SuavoAgent.Installer.Metadata.dll'))</MetadataToolAssembly>
+    <DefineConstants>SuavoAgentVersion=$(SuavoAgentVersion);PayloadRoot=$(PayloadRoot);MetadataRoot=$(MetadataOutputDirectory)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="7.0.0" />
+  </ItemGroup>
+
+  <Target Name="ValidateInstallerInputs" BeforeTargets="CoreCompile">
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(SuavoAgentVersion)', '^[0-9]+\.[0-9]+\.[0-9]+$')) != 'True'"
+           Text="SuavoAgentVersion is required and must use major.minor.patch." />
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(InstallerMetadataTimestampUtc)', '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{7}\+00:00$')) != 'True'"
+           Text="InstallerMetadataTimestampUtc is required as an explicit round-trip timestamp." />
+    <Error Condition="!Exists('$(PayloadRoot)/Core/SuavoAgent.Core.exe')"
+           Text="Core payload is missing from PayloadRoot." />
+    <Error Condition="!Exists('$(PayloadRoot)/Broker/SuavoAgent.Broker.exe')"
+           Text="Broker payload is missing from PayloadRoot." />
+    <Error Condition="!Exists('$(PayloadRoot)/Helper/SuavoAgent.Helper.exe')"
+           Text="Helper payload is missing from PayloadRoot." />
+    <Error Condition="!Exists('$(PayloadRoot)/Watchdog/SuavoAgent.Watchdog.exe')"
+           Text="Watchdog payload is missing from PayloadRoot." />
+    <Error Condition="!Exists('$(PayloadRoot)/Setup/SuavoSetup.exe')"
+           Text="Native maintenance payload is missing from PayloadRoot." />
+    <Error Condition="!Exists('$(PayloadRoot)/Core/appsettings.json')"
+           Text="Secret-free bootstrap appsettings is missing from PayloadRoot." />
+  </Target>
+
+  <Target Name="GenerateInstallerMetadata"
+          BeforeTargets="CoreCompile"
+          DependsOnTargets="ValidateInstallerInputs">
+    <MSBuild Projects="$(MetadataToolProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)" />
+    <Exec Command="&quot;$(DotNetExecutable)&quot; &quot;$(MetadataToolAssembly)&quot; --version &quot;$(SuavoAgentVersion)&quot; --timestamp &quot;$(InstallerMetadataTimestampUtc)&quot; --output-dir &quot;$(MetadataOutputDirectory)&quot; --binary &quot;SuavoAgent.Core.exe=$(PayloadRoot)/Core/SuavoAgent.Core.exe&quot; --binary &quot;SuavoAgent.Broker.exe=$(PayloadRoot)/Broker/SuavoAgent.Broker.exe&quot; --binary &quot;SuavoAgent.Helper.exe=$(PayloadRoot)/Helper/SuavoAgent.Helper.exe&quot; --binary &quot;SuavoAgent.Watchdog.exe=$(PayloadRoot)/Watchdog/SuavoAgent.Watchdog.exe&quot; --binary &quot;SuavoAgent.Maintenance.exe=$(PayloadRoot)/Setup/SuavoSetup.exe&quot;" />
+  </Target>
+
+  <!-- Safe to invoke before legal acceptance. Loading this no-op target forces
+       full MSBuild/WiX SDK project evaluation and catches malformed conditions. -->
+  <Target Name="EvaluateInstallerProject" />
+
+</Project>

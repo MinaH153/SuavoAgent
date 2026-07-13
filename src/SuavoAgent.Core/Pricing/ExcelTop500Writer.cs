@@ -30,7 +30,8 @@ public sealed class ExcelTop500Writer
         try
         {
             using var wb = new XLWorkbook();
-            var ws = wb.Worksheets.Add("Top Dispensed");
+            // Must remain inside the native workbook policy's approved sheet-name contract.
+            var ws = wb.Worksheets.Add("Top 500");
 
             ws.Cell(1, 1).Value = DrugHeader;
             ws.Cell(1, 2).Value = StrengthHeader;
@@ -57,7 +58,9 @@ public sealed class ExcelTop500Writer
         }
         catch (Exception ex)
         {
-            _logger.LogError("ExcelTop500Writer failed ({ErrorType})", ex.GetType().Name);
+            _logger.LogError(
+                "core.excel_top500_writer.failed exception_type={ExceptionType}",
+                ex.GetType().Name);
             return false;
         }
     }

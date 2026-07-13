@@ -8,7 +8,8 @@ namespace SuavoAgent.Contracts.Pricing;
 // Feature A's modality-agnostic seam is ISupplierPriceLookup: "given one NDC → cheapest supplier+cost",
 // implemented by SQL (primary), UIA (via Helper IPC), or fake (tests). These contracts are the EXACT
 // analog for Feature B: "given one (medication, plan) → the candidate NDCs each with acquisition cost +
-// expected reimbursement", which ProfitOptimizer (B1, already built) then judges via argmax(profit).
+// expected reimbursement", which ProfitOptimizer (B1, already built) then ranks by the explicit
+// reimbursement-minus-acquisition gross-margin proxy. That value is not net profit.
 //
 // Pure contracts (interfaces + records, no implementation). B2 = the SQL/UIA reader that satisfies
 // IPreferredNdcDataSource; B0's recon tells us which tables back it. The shape is fixed HERE so the box
@@ -20,7 +21,8 @@ namespace SuavoAgent.Contracts.Pricing;
 // ===================================================================================================
 
 /// <summary>
-/// Sent by Core to the reader: find the most-profitable NDC for one (medication, insurance plan) pair.
+/// Sent by Core to the reader: find the highest gross-margin-proxy NDC for one
+/// (medication, insurance plan) pair. Clinical interchangeability is an upstream pharmacist gate.
 /// The medication is identified by a drug-group key (the PioneerRx equivalents/GPI grouping the recon
 /// maps — B0 §B-Q4); the plan by its PioneerRx plan/payer id. <c>Patches</c> mirrors Feature A: the job's
 /// active learned selector corrections for the UIA modality (null/empty = builtin-only).
@@ -33,19 +35,64 @@ public record PreferredNdcRequest(
     IReadOnlyList<SelectorPatch>? Patches = null);
 
 /// <summary>
-/// One candidate NDC for the (medication, plan), as the reader surfaces it. Mirrors the per-NDC inputs
-/// ProfitOptimizer.NdcCandidate consumes. <c>AcquisitionCost</c> is the SOURCED cost (reuse Feature A's
-/// cheapest-available-supplier <c>CostPerUnit</c>, or the item's cost-used-for-profit — B0 §A-Q4 / §B-Q
-/// decides which Nadim reasons with). <c>Reimbursement</c> is the plan-specific expected pay (the new
-/// data path B0 maps). Both nullable + <c>Status</c> carried so the engine can fail closed on a missing
-/// number exactly as it fails closed on a non-positive cost — never a guessed profit.
+/// One candidate NDC for the (medication, plan), as the reader surfaces it. The two amounts are nullable
+/// so incomplete source data is represented honestly, but an otherwise-eligible candidate with either
+/// amount missing blocks the entire pair from becoming <c>OK</c>. Availability and plan eligibility are
+/// affirmative booleans: unknown is false, never implicitly usable. Amount basis, evidence provenance,
+/// evidence age, and historical sample count travel with the numbers so a caller cannot subtract unlike
+/// units or recommend from anonymous/stale evidence.
 /// </summary>
 public record PreferredNdcCandidate(
     string Ndc,
     string Manufacturer,
     decimal? AcquisitionCost,
     decimal? Reimbursement,
-    string Status);
+    bool Available,
+    bool Eligible,
+    PreferredNdcAmountBasis AcquisitionAmountBasis,
+    PreferredNdcAmountBasis ReimbursementAmountBasis,
+    PreferredNdcEvidenceProvenance AcquisitionEvidenceProvenance,
+    PreferredNdcEvidenceProvenance ReimbursementEvidenceProvenance,
+    DateTimeOffset? AcquisitionEvidenceAsOfUtc,
+    DateTimeOffset? ReimbursementEvidenceAsOfUtc,
+    int? HistoricalSampleCount);
+
+/// <summary>The denominator shared by acquisition and reimbursement. Profit is valid only when both
+/// amounts use the same explicit, non-unspecified basis.</summary>
+public enum PreferredNdcAmountBasis
+{
+    Unspecified = 0,
+    PerDispensedFill = 1,
+    PerPackage = 2,
+    PerUnit = 3,
+}
+
+/// <summary>The concrete source cohort that produced the evidence. This is separate from
+/// <see cref="ReimbursementBasis"/>: basis says how reimbursement was calculated; provenance says where
+/// the evidence came from. Unspecified provenance can never produce a recommendation.</summary>
+public enum PreferredNdcEvidenceProvenance
+{
+    Unspecified = 0,
+    PioneerRxAcquisitionCostExport = 1,
+    PioneerRxContractOrMacExport = 2,
+    PioneerRxAdjudicatedClaimsExport = 3,
+}
+
+/// <summary>Fixed local safety bounds for the offline report. These are admission/recommendation gates,
+/// not claims about PioneerRx data quality. Any value outside the envelope requires manual review.</summary>
+public static class PreferredNdcEvidencePolicy
+{
+    public const decimal MaximumAmount = 1_000_000m;
+    public const int MaximumDecimalScale = 4;
+    public const int MaximumCandidatesPerWorkbook = 10_000;
+    public const int MinimumHistoricalSampleCount = 10;
+    public const int MaximumHistoricalSampleCount = 1_000_000;
+    public static readonly TimeSpan MaximumEvidenceAge = TimeSpan.FromDays(30);
+    public static readonly TimeSpan MaximumFutureClockSkew = TimeSpan.FromMinutes(5);
+
+    public static bool IsCanonicalNdc11(string? value) =>
+        value is { Length: 11 } && value.All(character => character is >= '0' and <= '9');
+}
 
 /// <summary>How a reimbursement figure was obtained — sets the report's honesty framing (B0 §5.2: is
 /// reimbursement deterministic pre-claim, or only known after adjudication?). The pharmacist must know
@@ -97,10 +144,12 @@ public interface IPreferredNdcDataSource
 
 /// <summary>
 /// B3 — one line of the READ-ONLY report Nadim asked for ("run me a report and I'll do it manually"):
-/// for a (medication, plan), the most-profitable NDC the agent found and the numbers behind it, so the
-/// pharmacist can set it as the PioneerRx preferred item by hand. <c>Status</c> is explicit — "OK",
+/// for a (medication, plan), the highest reimbursement-minus-acquisition candidate and the numbers
+/// behind it, so the pharmacist can review it before setting the PioneerRx preferred item by hand.
+/// This is a gross-margin proxy, not net profit. <c>Status</c> is explicit — "OK",
 /// "NO_DATA" (reader found nothing), "NO_ELIGIBLE" (candidates present but none had a usable cost +
-/// reimbursement → fail-closed, no guess), or "ERROR:{why}". The dollar fields are null unless Status=OK.
+/// reimbursement → fail-closed, no guess), "MANUAL_REVIEW:NO_PROFITABLE_CANDIDATE" (all eligible
+/// choices have a non-positive proxy), or "ERROR:{why}". The dollar fields are null unless Status=OK.
 /// <c>Basis</c> carries the honesty framing (a live contract/MAC rate vs. an estimate from paid claims).
 /// </summary>
 public record PreferredNdcReportRow(
@@ -114,6 +163,12 @@ public record PreferredNdcReportRow(
     decimal? Profit,
     decimal? DeltaOverRunnerUp,
     ReimbursementBasis Basis,
+    PreferredNdcAmountBasis AmountBasis,
+    PreferredNdcEvidenceProvenance AcquisitionEvidenceProvenance,
+    PreferredNdcEvidenceProvenance ReimbursementEvidenceProvenance,
+    DateTimeOffset? AcquisitionEvidenceAsOfUtc,
+    DateTimeOffset? ReimbursementEvidenceAsOfUtc,
+    int? HistoricalSampleCount,
     int CandidatesConsidered);
 
 /// <summary>Explicit report statuses — a wrong preferred-NDC steers every future fill of that drug+plan
@@ -124,5 +179,10 @@ public static class PreferredNdcStatus
     public const string Ok = "OK";
     public const string NoData = "NO_DATA";
     public const string NoEligible = "NO_ELIGIBLE";
+    public const string ManualReviewIncompleteCandidateData = "MANUAL_REVIEW:INCOMPLETE_CANDIDATE_DATA";
+    public const string ManualReviewCandidateIdentityInvalid = "MANUAL_REVIEW:CANDIDATE_IDENTITY_INVALID";
+    public const string ManualReviewDuplicateNdc = "MANUAL_REVIEW:DUPLICATE_NDC";
+    public const string ManualReviewEvidenceInvalid = "MANUAL_REVIEW:EVIDENCE_INVALID";
+    public const string ManualReviewNoProfitableCandidate = "MANUAL_REVIEW:NO_PROFITABLE_CANDIDATE";
     public static string Error(string why) => $"ERROR:{why}";
 }

@@ -23,7 +23,11 @@ public sealed record SeedResponse(
     [property: JsonPropertyName("workflow_hints")] IReadOnlyList<SeedWorkflowHint>? WorkflowHints,
     [property: JsonPropertyName("workflow_templates")] IReadOnlyList<SeedWorkflowTemplate>? WorkflowTemplates = null,
     [property: JsonPropertyName("rx_queue_shape")] SeedRxQueueShape? RxQueueShape = null,
-    [property: JsonPropertyName("selector_patches")] IReadOnlyList<SeedSelectorPatch>? SelectorPatches = null);
+    [property: JsonPropertyName("selector_patches")] IReadOnlyList<SeedSelectorPatch>? SelectorPatches = null,
+    [property: JsonPropertyName("command_id")] string? CommandId = null,
+    [property: JsonPropertyName("device_key_id")] string? DeviceKeyId = null,
+    [property: JsonPropertyName("source_manifest_digest")] string? SourceManifestDigest = null,
+    [property: JsonPropertyName("expires_at")] string? ExpiresAt = null);
 
 /// <summary>
 /// Fleet-learned consensus rxQueue queue-shape — warm-starts a new pharmacy's
@@ -74,7 +78,8 @@ public sealed record SeedSelectorPatch(
     [property: JsonPropertyName("target")] SeedElementSignature Target,
     [property: JsonPropertyName("fallbacks")] IReadOnlyList<SeedElementSignature> Fallbacks,
     [property: JsonPropertyName("confidence")] double Confidence,
-    [property: JsonPropertyName("version")] int Version);
+    [property: JsonPropertyName("version")] int Version,
+    [property: JsonPropertyName("approved_by_role")] string? ApprovedByRole = null);
 
 public sealed record UiOverlap(
     [property: JsonPropertyName("matched")] int Matched,
@@ -111,11 +116,5 @@ public sealed record SeedWorkflowHint(
     [property: JsonPropertyName("avg_frequency")] double AvgFrequency,
     [property: JsonPropertyName("has_writeback_candidate")] bool HasWritebackCandidate,
     [property: JsonPropertyName("contributor_count")] int ContributorCount);
-
-public sealed record SeedConfirmRequest(
-    [property: JsonPropertyName("seed_digest")] string SeedDigest,
-    [property: JsonPropertyName("applied_at")] string AppliedAt,
-    [property: JsonPropertyName("correlations_applied")] int CorrelationsApplied,
-    [property: JsonPropertyName("correlations_skipped")] int CorrelationsSkipped);
 
 public sealed record GateResult(string Name, bool Passed, string Detail);

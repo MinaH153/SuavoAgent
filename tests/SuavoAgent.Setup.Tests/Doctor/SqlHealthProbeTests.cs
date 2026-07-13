@@ -18,11 +18,12 @@ public class SqlHealthProbeTests
     }
 
     [Fact]
-    public void Cert_not_trusted_is_Fail_with_trust_remediation()
+    public void Cert_not_trusted_is_Fail_with_exact_pin_remediation()
     {
         var r = Run("WRN SQL connection failed\n(SSL Provider) The certificate chain was issued by an authority that is not trusted");
         Assert.Equal(GateState.Fail, r.State);
-        Assert.Contains("SqlTrustServerCertificate", r.Detail);
+        Assert.Contains("enroll", r.Detail, System.StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SqlTrustServerCertificate=true", r.Detail, System.StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

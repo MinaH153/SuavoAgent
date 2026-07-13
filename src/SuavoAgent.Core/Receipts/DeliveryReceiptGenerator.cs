@@ -239,12 +239,11 @@ public sealed class DeliveryReceiptGenerator
             {
                 File.Delete(file);
                 purged++;
-                logger?.LogInformation("Purged expired receipt: {FileName} (created {Created})",
-                    fileInfo.Name, fileInfo.CreationTimeUtc);
+                logger?.LogInformation("core.delivery_receipt.expired_purged");
             }
             catch (Exception ex)
             {
-                logger?.LogWarning(ex, "Failed to purge receipt: {FileName}", fileInfo.Name);
+                logger?.LogSafeWarning(ex);
             }
         }
         return purged;

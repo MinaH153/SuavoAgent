@@ -14,27 +14,29 @@ public interface IWorkflowAuditClient
 }
 
 public sealed record WorkflowStepAuditEntry(
+    Guid EventId,
     string WorkflowRunId,
     int StepIndex,
     string VerbName,
     string VerbVersion,
-    bool DryRun,
+    bool RequestedDryRun,
     string Outcome,
     long? ExecDurationMs,
     string? ErrorKind,
-    string? ErrorDetail,
-    IReadOnlyDictionary<string, object?> Params,
-    IReadOnlyDictionary<string, object?>? BeforeState,
-    IReadOnlyDictionary<string, object?>? AfterState,
-    // Bug 21 (MinaH153/SuavoAgent#63): the actual dry-run state the Helper
-    // enforced — `request.DryRun || gate.IsDryRun`. <c>DryRun</c> above is
-    // the REQUESTED state (workflow definition); <c>EffectiveDryRun</c> is
-    // the TRUTH. Null when the verb did not emit a "dry_run" output key
-    // (read-only verbs, manifest-resolution failures, etc.). Operators
-    // join the workflow row's requested with this column to reconstruct
-    // chain of custody.
-    bool? EffectiveDryRun = null
-);
+    int ParamsFieldCount,
+    int? BeforeStateFieldCount,
+    int? AfterStateFieldCount,
+    // For actuating verbs the executor snapshots the local gate before
+    // dispatch and records request.DryRun || gate.DryRun even when dispatch
+    // fails before the Helper can return an output envelope. Read-only or
+    // unresolved verbs may legitimately leave this null.
+    bool? EffectiveDryRun = null)
+{
+    // Compatibility name retained for existing callers/tests. It is a
+    // boolean alias only; no raw workflow parameter or state value is ever
+    // carried by this audit contract.
+    public bool DryRun => RequestedDryRun;
+}
 
 public enum WorkflowRunOutcome
 {

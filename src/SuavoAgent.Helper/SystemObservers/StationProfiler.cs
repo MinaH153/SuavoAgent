@@ -39,7 +39,9 @@ public sealed class StationProfiler
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Station profile capture failed");
+            _logger.Warning(
+                "Station profile capture failed ({ExceptionType})",
+                ex.GetType().FullName);
         }
     }
 

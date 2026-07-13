@@ -45,6 +45,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
     private readonly ReasoningOptions _options;
     private readonly string _modelPath;
     private readonly ILogger<LLamaLocalInference> _logger;
+    private readonly Func<CancellationToken, Task<bool>>? _activationVerifier;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private static int s_nativeConfigured; // 0 = not yet, 1 = done
 
@@ -72,11 +73,13 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
     public LLamaLocalInference(
         IOptions<AgentOptions> agentOptions,
         string modelPath,
-        ILogger<LLamaLocalInference> logger)
+        ILogger<LLamaLocalInference> logger,
+        Func<CancellationToken, Task<bool>>? activationVerifier = null)
     {
         _options = agentOptions.Value.Reasoning;
         _modelPath = modelPath;
         _logger = logger;
+        _activationVerifier = activationVerifier;
     }
 
     public async Task<InferenceProposal?> ProposeAsync(InferenceRequest request, CancellationToken ct)
@@ -115,7 +118,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "LLamaLocalInference: grammar build failed");
+            _logger.LogSafeWarning(ex);
             Interlocked.Decrement(ref _activeInferences);
             return null;
         }
@@ -231,7 +234,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "LLamaLocalInference: inference error");
+            _logger.LogSafeWarning(ex);
             return null;
         }
         finally
@@ -377,11 +380,8 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 _ = consume.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
                     TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
                 _logger.LogWarning(
-                    "LLamaLocalInference.Chat: hard timeout after {Ms}ms, {Tokens} tokens produced — abandoning inference ({Diag})",
-                    sw.ElapsedMilliseconds, Volatile.Read(ref tokensOut),
-                    Volatile.Read(ref tokensOut) == 0
-                        ? "prefill-bound: model too slow to emit a first token (NOAVX?) — needs AVX2 libs or a shorter prompt"
-                        : "runaway generation — lower MaxTokens / raise repeat penalty");
+                    "core.local_inference.chat_timeout count={Count}",
+                    Volatile.Read(ref tokensOut));
                 return null;
             }
             await consume.ConfigureAwait(false); // observe completion / exceptions
@@ -394,7 +394,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "LLamaLocalInference.Chat: inference error");
+            _logger.LogSafeWarning(ex);
             return null;
         }
         finally
@@ -423,7 +423,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                 $"<|system|>\n{system}<|end|>\n<|user|>\n{user}<|end|>\n<|assistant|>\n",
             ChatPromptFormat.Qwen3Thinkless =>
                 // Qwen3 enable_thinking=false: plain ChatML + empty <think></think> prefill (training-matched,
-                // fewer generated tokens than /no_think). See InferencePromptBuilder.Build for the rationale.
+                // fewer generated tokens than /no_think). See InferencePromptBuilder.Build for the contract.
                 $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
             ChatPromptFormat.ChatML =>
                 $"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
@@ -439,9 +439,35 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
     {
         if (_weights != null && _executor != null) return true;
 
+        if (_activationVerifier is not null)
+        {
+            bool authorized;
+            try
+            {
+                authorized = await _activationVerifier(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogSafeError(exception);
+                Interlocked.Increment(ref _consecutiveLoadFailures);
+                return false;
+            }
+            if (!authorized)
+            {
+                _logger.LogError(
+                    "LLamaLocalInference: signed cohort activation proof rejected; refusing native/model load");
+                Interlocked.Increment(ref _consecutiveLoadFailures);
+                return false;
+            }
+        }
+
         if (!File.Exists(_modelPath))
         {
-            _logger.LogError("LLamaLocalInference: model file vanished at {Path}", _modelPath);
+            _logger.LogError("core.local_inference.model_missing");
             Interlocked.Increment(ref _consecutiveLoadFailures);
             return false;
         }
@@ -467,20 +493,18 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
                         .ToArray();
                     if (missingNatives.Length > 0)
                         _logger.LogWarning(
-                            "LLamaLocalInference: NativeLibraryPath {Path} is missing required native libs [{Missing}] — model load will fail (0.24.0 text-only needs ggml.dll, ggml-base.dll, ggml-cpu.dll, llama.dll; llava_shared.dll is optional, multimodal-only)",
-                            _options.NativeLibraryPath, string.Join(", ", missingNatives));
+                            "core.local_inference.native_libs_missing count={Count}",
+                            missingNatives.Length);
 
                     NativeLibraryConfig.All.WithLibrary(
                         File.Exists(llamaPath) ? llamaPath : null,
                         File.Exists(llavaPath) ? llavaPath : null);
-                    _logger.LogInformation(
-                        "LLamaLocalInference: native library path set to {Path}",
-                        _options.NativeLibraryPath);
+                    _logger.LogInformation("core.local_inference.native_path_configured");
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "LLamaLocalInference: failed to configure native library path");
+                _logger.LogSafeWarning(ex);
                 // Reset so a later call can try again
                 Interlocked.Exchange(ref s_nativeConfigured, 0);
             }
@@ -488,7 +512,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
 
         try
         {
-            _logger.LogInformation("LLamaLocalInference: loading model from {Path}", _modelPath);
+            _logger.LogInformation("core.local_inference.model_load_started");
             var sw = Stopwatch.StartNew();
 
             // Cap inference threads to protect PioneerRx on a 4-core i5: leaving cores free for the PMS
@@ -515,8 +539,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
 
             sw.Stop();
             _logger.LogInformation(
-                "LLamaLocalInference: model loaded in {Ms}ms ({ModelId})",
-                sw.ElapsedMilliseconds, ModelId);
+                "core.local_inference.model_loaded");
             return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -526,7 +549,7 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "LLamaLocalInference: model load failed");
+            _logger.LogSafeError(ex);
             _weights?.Dispose();
             _weights = null;
             _executor = null;

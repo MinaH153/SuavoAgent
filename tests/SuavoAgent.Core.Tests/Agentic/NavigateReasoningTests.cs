@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using SuavoAgent.Contracts.Behavioral;
 using SuavoAgent.Contracts.Reasoning;
 using SuavoAgent.Core.Agentic;
 using SuavoAgent.Core.Agentic.Adapters;
@@ -19,7 +20,7 @@ public sealed class NavigateReasoningTests
     private static BrainDecision Decision(params RuleActionSpec[] actions) => new()
     {
         Outcome = actions.Length > 0 ? MatchOutcome.Matched : MatchOutcome.NoMatch,
-        Tier = DecisionTier.CloudInference,
+        Tier = DecisionTier.Rules,
         Actions = actions,
         Reason = "test",
     };
@@ -37,12 +38,33 @@ public sealed class NavigateReasoningTests
     {
         var memory = ContextAccumulator.RecordObservation(
             ContextAccumulator.Start(Obj),
-            new PerceivedScreen("h", Scrubbed: true, new[] { "Save", "Cancel" }, "Rx Lookup"));
+            new PerceivedScreen(
+                "h",
+                Scrubbed: true,
+                new[] { "Save", "Cancel" },
+                "Rx Lookup",
+                ProcessName: "PioneerRx.exe",
+                ElementFingerprints:
+                [
+                    new ElementSignature("Button", "btnSave", "WpfButton"),
+                ],
+                StructuralElementStates:
+                [
+                    new StructuralElementObservation(
+                        new ElementSignature("Button", "btnSave", "WpfButton"),
+                        0xFF),
+                ],
+                CloudStructuralStateEligible: true));
 
         var ctx = NavigateReasoning.BuildContext(Obj, memory);
 
         Assert.Equal(NavigateReasoning.NavigateSkillId, ctx.SkillId);
         Assert.Equal("Rx Lookup", ctx.WindowTitle);
+        Assert.Equal("PioneerRx.exe", ctx.ProcessName);
+        Assert.Single(ctx.ElementFingerprints);
+        Assert.Single(ctx.StructuralElementStates);
+        Assert.True(ctx.CloudStructuralStateEligible);
+        Assert.Equal("locate", ctx.Flags["workflowPhase"]);
         Assert.Contains("Save", ctx.VisibleElements);
         Assert.NotNull(ctx.UserObjective);
         Assert.Contains("price these NDCs", ctx.UserObjective!);
@@ -59,9 +81,9 @@ public sealed class NavigateReasoningTests
 
         var ctx = NavigateReasoning.BuildContext(Obj, m);
 
-        Assert.True(ctx.Flags.ContainsKey("prior_actions"));
-        Assert.Contains("click_by_label", ctx.Flags["prior_actions"]);
-        Assert.Contains("Rejected", ctx.Flags["prior_actions"]);
+        Assert.False(ctx.Flags.ContainsKey("prior_actions"));
+        Assert.Contains("click_by_label", ctx.LocalReasoningTranscript);
+        Assert.Contains("Rejected", ctx.LocalReasoningTranscript);
     }
 
     // --- MapDecision ---------------------------------------------------------
@@ -78,6 +100,31 @@ public sealed class NavigateReasoningTests
     {
         var d = Decision(Spec(RuleActionType.Log, ("status", "COMPLETE")));
         Assert.Equal(NextActionKind.Done, NavigateReasoning.MapDecision(d).Kind);
+    }
+
+    [Fact]
+    public void MapDecision_ModelCompletionSignal_CannotEndRun()
+    {
+        var d = Decision(Spec(RuleActionType.Log, ("status", "complete"))) with
+        {
+            Tier = DecisionTier.CloudInference,
+        };
+
+        Assert.Equal(NextActionKind.Escalate, NavigateReasoning.MapDecision(d).Kind);
+    }
+
+    [Fact]
+    public void MapDecision_CloudActuation_CannotBypassTieredBrainGate()
+    {
+        var d = Decision(Spec(RuleActionType.Click, ("label", "Save"))) with
+        {
+            Tier = DecisionTier.CloudInference,
+        };
+
+        var action = NavigateReasoning.MapDecision(d);
+
+        Assert.Equal(NextActionKind.Escalate, action.Kind);
+        Assert.Equal("cloud_actuation_not_authorized", action.Rationale);
     }
 
     [Theory]
@@ -105,6 +152,18 @@ public sealed class NavigateReasoningTests
         Assert.Equal(NextActionKind.Escalate, NavigateReasoning.MapDecision(d).Kind);
     }
 
+    [Theory]
+    [InlineData(RuleActionType.Type)]
+    [InlineData(RuleActionType.PressKey)]
+    public void MapDecision_KeyboardAction_BindsFactoryResolvedTargetProcess(RuleActionType type)
+    {
+        var d = Decision(Spec(type, ("text", "hi"), ("process_name", "model-controlled.exe")));
+
+        var action = NavigateReasoning.MapDecision(d, processName: "notepad.exe");
+
+        Assert.Equal("notepad.exe", action.Parameters!["process_name"]);
+    }
+
     [Fact]
     public void MapDecision_OnlyMetaLog_WithoutCompletion_Escalates_NotAct_NotDone()
     {
@@ -119,7 +178,24 @@ public sealed class NavigateReasoningTests
         var action = NavigateReasoning.MapDecision(d);
 
         Assert.Equal(NextActionKind.Escalate, action.Kind);
-        Assert.Equal("no tier could decide", action.Rationale);
+        Assert.Equal("brain_decision_not_authorized", action.Rationale);
+    }
+
+    [Fact]
+    public void MapDecision_BlockedActuatingAction_NeverActs()
+    {
+        var d = new BrainDecision
+        {
+            Outcome = MatchOutcome.Blocked,
+            Tier = DecisionTier.OperatorRequired,
+            Actions = new[] { Spec(RuleActionType.Click, ("label", "Save")) },
+            Reason = "operator_confirmation_required",
+        };
+
+        var action = NavigateReasoning.MapDecision(d);
+
+        Assert.Equal(NextActionKind.Escalate, action.Kind);
+        Assert.Equal("brain_decision_not_authorized", action.Rationale);
     }
 
     [Fact]

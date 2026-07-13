@@ -30,7 +30,7 @@ public sealed class SqlHealthProbe
                 "SQL auth failing — the service account has no SQL login. Use SQL Auth or grant the account DB access.");
         if (Has("certificate chain") || Has("not trusted"))
             return new GateResult("SQL", GateState.Fail,
-                "SQL TLS cert not trusted — set Agent.SqlTrustServerCertificate=true (PioneerRx uses a self-signed cert).");
+                "SQL TLS certificate is not trusted — use Suavo Setup to enroll the exact PioneerRx SQL server certificate. Certificate bypass is forbidden.");
         if (Has("SQL schema fingerprint failed"))
             return new GateResult("SQL", GateState.Fail, "Connected DB is not PioneerRx (schema fingerprint failed).");
         if (Has("SQL connection failed"))

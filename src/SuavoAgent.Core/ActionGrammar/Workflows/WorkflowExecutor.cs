@@ -75,10 +75,7 @@ public sealed class WorkflowExecutor
         ArgumentNullException.ThrowIfNull(auditChain);
 
         _logger.LogInformation(
-            "WorkflowExecutor: starting run={RunId} workflow={Name}@{Version} steps={Count} dry_run={DryRun}",
-            definition.WorkflowRunId,
-            definition.WorkflowName,
-            definition.WorkflowVersion,
+            "core.workflow.started count={Count} dry_run={DryRun}",
             definition.Steps.Count,
             definition.DryRun);
 
@@ -91,11 +88,7 @@ public sealed class WorkflowExecutor
         // successful run.
         if (definition.Steps.Count == 0)
         {
-            _logger.LogError(
-                "WorkflowExecutor: refusing to execute run={RunId} with zero-step definition — workflow={Name}@{Version} (Bug 23 guard)",
-                definition.WorkflowRunId,
-                definition.WorkflowName,
-                definition.WorkflowVersion);
+            _logger.LogError("core.workflow.zero_steps_rejected");
             await _audit.PostRunCompletedAsync(definition.WorkflowRunId, WorkflowRunOutcome.Aborted, "no_steps_in_definition", ct).ConfigureAwait(false);
             return new WorkflowExecutionResult(WorkflowRunOutcome.Aborted, "no_steps_in_definition", 0, 0);
         }
@@ -111,7 +104,7 @@ public sealed class WorkflowExecutor
         {
             if (ct.IsCancellationRequested)
             {
-                _logger.LogWarning("WorkflowExecutor: cancellation requested mid-run={RunId} step={Idx}", definition.WorkflowRunId, pointer);
+                _logger.LogWarning("core.workflow.cancel_requested steps={Steps}", pointer);
                 await _audit.PostRunCompletedAsync(definition.WorkflowRunId, WorkflowRunOutcome.Aborted, "cooperative_cancel", CancellationToken.None);
                 return new WorkflowExecutionResult(WorkflowRunOutcome.Aborted, "cooperative_cancel", completedSteps, definition.Steps.Count);
             }
@@ -119,8 +112,9 @@ public sealed class WorkflowExecutor
             if (visitCounter[pointer] >= MaxStepRevisits)
             {
                 _logger.LogWarning(
-                    "WorkflowExecutor: cycle limit hit at step {Idx} (entered {Visits} times)",
-                    pointer, visitCounter[pointer]);
+                    "core.workflow.cycle_limit steps={Steps} attempts={Attempts}",
+                    pointer,
+                    visitCounter[pointer]);
                 await _audit.PostRunCompletedAsync(definition.WorkflowRunId, WorkflowRunOutcome.Aborted, "cycle_limit_exceeded", ct);
                 return new WorkflowExecutionResult(WorkflowRunOutcome.Aborted, "cycle_limit_exceeded", completedSteps, definition.Steps.Count);
             }
@@ -150,8 +144,9 @@ public sealed class WorkflowExecutor
             var conditionPasses = EvaluateCondition(step.Condition, previous, perStepHistory, stepIdIndex);
             if (!conditionPasses)
             {
-                _logger.LogInformation("WorkflowExecutor: step {Idx} ({Verb}) skipped by condition", pointer, step.Verb);
-                var skipped = await PostSkippedStepAsync(definition, pointer, step, ct);
+                _logger.LogInformation("core.workflow.step_skipped steps={Steps}", pointer);
+                var skipped = await PostSkippedStepAsync(
+                    definition, pointer, step, gate, ct);
                 perStepHistory[pointer] = skipped;
                 previous = skipped;
                 pointer++;
@@ -162,14 +157,28 @@ public sealed class WorkflowExecutor
             VerbDispatchResult dispatch;
             while (true)
             {
-                dispatch = await ExecuteStepAsync(definition, pointer, step, services, auditChain, charter, pharmacyId, actor, ct).ConfigureAwait(false);
+                dispatch = await ExecuteStepAsync(
+                        definition,
+                        pointer,
+                        step,
+                        gate,
+                        services,
+                        auditChain,
+                        charter,
+                        pharmacyId,
+                        actor,
+                        ct)
+                    .ConfigureAwait(false);
                 if (dispatch.Outcome == VerbDispatchOutcome.Success) break;
 
                 var retryDirective = step.OnFailure;
                 if (retryDirective is { Action: "retry" } && attempt < (retryDirective.RetryLimit ?? 1))
                 {
                     attempt++;
-                    _logger.LogInformation("WorkflowExecutor: retrying step {Idx} (attempt {Attempt})", pointer, attempt + 1);
+                    _logger.LogInformation(
+                        "core.workflow.step_retry steps={Steps} attempt={Attempt}",
+                        pointer,
+                        attempt + 1);
                     continue;
                 }
                 break;
@@ -194,11 +203,8 @@ public sealed class WorkflowExecutor
             if (terminal is not null)
             {
                 _logger.LogInformation(
-                    "WorkflowExecutor: terminating run={RunId} early via on_{Branch} directive: outcome={Outcome} reason={Reason}",
-                    definition.WorkflowRunId,
-                    dispatch.Outcome == VerbDispatchOutcome.Success ? "success" : "failure",
-                    terminal.Outcome,
-                    terminal.Reason);
+                    "core.workflow.terminated outcome={Outcome}",
+                    terminal.Outcome);
                 await _audit.PostRunCompletedAsync(definition.WorkflowRunId, terminal.Outcome, terminal.Reason, ct);
                 return new WorkflowExecutionResult(terminal.Outcome, terminal.Reason, completedSteps, definition.Steps.Count);
             }
@@ -214,6 +220,7 @@ public sealed class WorkflowExecutor
         WorkflowDefinitionDto definition,
         int stepIndex,
         WorkflowStepDto step,
+        SuavoAgent.Contracts.Ipc.ActuationGateState gate,
         IServiceProvider services,
         AuditChain auditChain,
         MissionCharter charter,
@@ -221,10 +228,26 @@ public sealed class WorkflowExecutor
         string actor,
         CancellationToken ct)
     {
+        // This stable random identity is created before registry resolution,
+        // parameter parsing, or any actuation. The durable publisher assigns
+        // the next contiguous per-run execution ordinal when it stages the
+        // completed structural receipt.
+        var eventId = Guid.NewGuid();
         var entry = _registry.Resolve(step.Verb, step.ManifestHash, out var failureReason);
         if (entry is null)
         {
-            await PostStepFailureAsync(definition.WorkflowRunId, stepIndex, step, "manifest_resolution_failed", failureReason, definition.DryRun, ct);
+            await PostStepFailureAsync(
+                    eventId,
+                    definition.WorkflowRunId,
+                    stepIndex,
+                    step,
+                    "manifest_resolution_failed",
+                    definition.DryRun,
+                    IsActuatingVerb(step.Verb)
+                        ? definition.DryRun || gate.DryRun
+                        : null,
+                    ct)
+                .ConfigureAwait(false);
             return new VerbDispatchResult(
                 InvocationId: $"{definition.WorkflowRunId}:{stepIndex}",
                 Verb: step.Verb,
@@ -234,6 +257,33 @@ public sealed class WorkflowExecutor
                 RollbackEnvelope: VerbRollbackEnvelope.None($"{definition.WorkflowRunId}:{stepIndex}"),
                 Output: new Dictionary<string, object?>(),
                 FailureReason: failureReason);
+        }
+
+        if (step.VerbVersion is { } requestedVersion &&
+            !string.Equals(requestedVersion, entry.Version, StringComparison.Ordinal))
+        {
+            await PostStepFailureAsync(
+                    eventId,
+                    definition.WorkflowRunId,
+                    stepIndex,
+                    step,
+                    "manifest_resolution_failed",
+                    definition.DryRun,
+                    IsActuatingVerb(step.Verb)
+                        ? definition.DryRun || gate.DryRun
+                        : null,
+                    ct)
+                .ConfigureAwait(false);
+            return new VerbDispatchResult(
+                InvocationId: $"{definition.WorkflowRunId}:{stepIndex}",
+                Verb: step.Verb,
+                Version: requestedVersion,
+                Outcome: VerbDispatchOutcome.Rejected,
+                Authz: null,
+                RollbackEnvelope: VerbRollbackEnvelope.None(
+                    $"{definition.WorkflowRunId}:{stepIndex}"),
+                Output: new Dictionary<string, object?>(),
+                FailureReason: "manifest_resolution_failed");
         }
 
         var parameters = ParseStepParameters(step.Params, entry.Metadata.Params);
@@ -262,35 +312,37 @@ public sealed class WorkflowExecutor
             VerbDispatchOutcome.Failed => "failed",
             _ => "unknown",
         };
-        var (errKind, errDetail) = dispatch.FailureReason is { } fr
-            ? SplitErrorReason(fr)
-            : (null, null);
+        var errKind = MapAuditErrorKind(dispatch.FailureReason);
+        var effectiveDryRun = ExtractEffectiveDryRun(dispatch.Output);
+        if (IsActuatingVerb(step.Verb))
+            effectiveDryRun ??= definition.DryRun || gate.DryRun;
 
         await _audit.PostStepAuditAsync(new WorkflowStepAuditEntry(
+            EventId: eventId,
             WorkflowRunId: definition.WorkflowRunId,
             StepIndex: stepIndex,
             VerbName: step.Verb,
             VerbVersion: entry.Version,
-            DryRun: definition.DryRun,
+            RequestedDryRun: definition.DryRun,
             Outcome: outcome,
-            ExecDurationMs: sw.ElapsedMilliseconds,
+            ExecDurationMs: BoundedDuration(sw.ElapsedMilliseconds),
             ErrorKind: errKind,
-            ErrorDetail: errDetail,
-            Params: parameters,
-            BeforeState: null,
-            AfterState: dispatch.Output is { Count: > 0 } ? dispatch.Output : null,
-            EffectiveDryRun: ExtractEffectiveDryRun(dispatch.Output)), ct).ConfigureAwait(false);
+            ParamsFieldCount: CountBoundedFields(parameters),
+            BeforeStateFieldCount: null,
+            AfterStateFieldCount: CountBoundedOptionalFields(dispatch.Output),
+            EffectiveDryRun: effectiveDryRun), ct).ConfigureAwait(false);
 
         return dispatch;
     }
 
     private async Task PostStepFailureAsync(
+        Guid eventId,
         string runId,
         int stepIndex,
         WorkflowStepDto step,
         string errKind,
-        string? errDetail,
         bool dryRun,
+        bool? effectiveDryRun,
         CancellationToken ct)
     {
         // Bug 21 follow-up (Codex review of #67 HIGH-1): this audit row used
@@ -301,46 +353,51 @@ public sealed class WorkflowExecutor
         // EffectiveDryRun stays null — no actuation primitive was attempted,
         // so there is no "effective" enforcement to record.
         await _audit.PostStepAuditAsync(new WorkflowStepAuditEntry(
+            EventId: eventId,
             WorkflowRunId: runId,
             StepIndex: stepIndex,
             VerbName: step.Verb,
-            VerbVersion: step.VerbVersion ?? "?",
-            DryRun: dryRun,
+            VerbVersion: NormalizeMachineVersion(step.VerbVersion),
+            RequestedDryRun: dryRun,
             Outcome: "rejected",
             ExecDurationMs: null,
             ErrorKind: errKind,
-            ErrorDetail: errDetail,
-            Params: ParseStepParameters(step.Params, new VerbParameterSchema(Array.Empty<VerbParameterSpec>())),
-            BeforeState: null,
-            AfterState: null), ct).ConfigureAwait(false);
+            ParamsFieldCount: CountStepParameterFields(step.Params),
+            BeforeStateFieldCount: null,
+            AfterStateFieldCount: null,
+            EffectiveDryRun: effectiveDryRun), ct).ConfigureAwait(false);
     }
 
     private async Task<StepHistoryEntry> PostSkippedStepAsync(
         WorkflowDefinitionDto definition,
         int stepIndex,
         WorkflowStepDto step,
+        SuavoAgent.Contracts.Ipc.ActuationGateState gate,
         CancellationToken ct)
     {
         await _audit.PostStepAuditAsync(new WorkflowStepAuditEntry(
+            EventId: Guid.NewGuid(),
             WorkflowRunId: definition.WorkflowRunId,
             StepIndex: stepIndex,
             VerbName: step.Verb,
-            VerbVersion: step.VerbVersion ?? "?",
-            DryRun: definition.DryRun,
+            VerbVersion: NormalizeMachineVersion(step.VerbVersion),
+            RequestedDryRun: definition.DryRun,
             Outcome: "skipped",
             ExecDurationMs: 0,
             ErrorKind: "condition_not_met",
-            ErrorDetail: $"condition.kind={step.Condition?.Kind} did not pass",
-            Params: ParseStepParameters(step.Params, new VerbParameterSchema(Array.Empty<VerbParameterSpec>())),
-            BeforeState: null,
-            AfterState: null), ct).ConfigureAwait(false);
+            ParamsFieldCount: CountStepParameterFields(step.Params),
+            BeforeStateFieldCount: null,
+            AfterStateFieldCount: null,
+            EffectiveDryRun: IsActuatingVerb(step.Verb)
+                ? definition.DryRun || gate.DryRun
+                : null), ct).ConfigureAwait(false);
         return new StepHistoryEntry(stepIndex, step.StepId, VerbDispatchOutcome.Rejected, new Dictionary<string, object?>())
         { Outcome = SkippedOutcome };
     }
 
     private async Task PostAbortAsync(string runId, string reason, CancellationToken ct)
     {
-        _logger.LogWarning("WorkflowExecutor: aborting run={RunId} reason={Reason}", runId, reason);
+        _logger.LogWarning("core.workflow.aborted");
         await _audit.PostRunCompletedAsync(runId, WorkflowRunOutcome.Aborted, reason, ct).ConfigureAwait(false);
     }
 
@@ -516,12 +573,76 @@ public sealed class WorkflowExecutor
         return dict;
     }
 
-    private static (string Kind, string Detail) SplitErrorReason(string reason)
+    private static readonly HashSet<string> AuditErrorKinds = new(StringComparer.Ordinal)
     {
-        var idx = reason.IndexOf(':');
-        return idx > 0
-            ? (reason[..idx].Trim(), reason[(idx + 1)..].Trim())
-            : ("error", reason);
+        "authz_denied",
+        "condition_not_met",
+        "execution_exception",
+        "execution_failed",
+        "execution_timeout",
+        "manifest_resolution_failed",
+        "parameter_validation_failed",
+        "postcondition_exception",
+        "postcondition_failed",
+        "precondition_exception",
+        "precondition_failed",
+        "rollback_capture_exception",
+    };
+
+    private static readonly HashSet<string> ActuatingVerbs = new(StringComparer.Ordinal)
+    {
+        "click_by_label",
+        "click_by_signature",
+        "launch_sandbox_app",
+        "pioneerrx_click",
+        "pioneerrx_writeback_rx_delivery",
+        "press_keys",
+        "type_into_field",
+    };
+
+    private static string? MapAuditErrorKind(string? rawReason)
+    {
+        if (string.IsNullOrEmpty(rawReason)) return null;
+        var separator = rawReason.IndexOf(':');
+        var prefix = (separator > 0 ? rawReason[..separator] : rawReason).Trim();
+        return AuditErrorKinds.Contains(prefix) ? prefix : "execution_failed";
+    }
+
+    private static bool IsActuatingVerb(string verb) => ActuatingVerbs.Contains(verb);
+
+    private static long? BoundedDuration(long durationMs) =>
+        durationMs is >= 0 and <= 600_000 ? durationMs : null;
+
+    private static int CountBoundedFields(IReadOnlyDictionary<string, object?> fields)
+    {
+        if (fields.Count > 64)
+            throw new InvalidDataException("Workflow structural field count exceeds the audit contract.");
+        return fields.Count;
+    }
+
+    private static int? CountBoundedOptionalFields(
+        IReadOnlyDictionary<string, object?> fields)
+    {
+        if (fields.Count == 0) return null;
+        return fields.Count <= 64 ? fields.Count : null;
+    }
+
+    private static int CountStepParameterFields(JsonElement raw)
+    {
+        if (raw.ValueKind != JsonValueKind.Object) return 0;
+        var count = raw.EnumerateObject().Count();
+        if (count > 64)
+            throw new InvalidDataException("Workflow structural field count exceeds the audit contract.");
+        return count;
+    }
+
+    private static string NormalizeMachineVersion(string? version)
+    {
+        if (string.IsNullOrEmpty(version)) return "?";
+        if (version.Length > 60 || !char.IsLetterOrDigit(version[0]) ||
+            version.Any(ch => !char.IsLetterOrDigit(ch) && ch is not '.' and not '_' and not '+' and not '-'))
+            return "?";
+        return version;
     }
 
     // Bug 21: actuation verbs (LaunchSandboxApp, PressKeys, TypeIntoField,

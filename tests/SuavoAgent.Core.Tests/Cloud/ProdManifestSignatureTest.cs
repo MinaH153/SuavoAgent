@@ -37,14 +37,9 @@ public class ProdManifestSignatureTest
     }
 
     [Fact]
-    public void ProdManifest_ParsesIntoWellFormedRecord()
+    public void LegacyProdManifest_IsCryptographicallyAuthenticButNoLongerQueueable()
     {
         var m = UpdateManifest.Parse(Manifest);
-        Assert.NotNull(m);
-        Assert.Equal("3.11.1", m!.Version);
-        Assert.True(m.MatchesRuntime("net8.0", "win-x64"));
-        Assert.EndsWith("SuavoAgent.Core.exe", m.CoreUrl);
-        Assert.EndsWith("SuavoAgent.Helper.exe", m.HelperUrl);
-        Assert.EndsWith("SuavoAgent.Broker.exe", m.BrokerUrl);
+        Assert.Null(m);
     }
 }

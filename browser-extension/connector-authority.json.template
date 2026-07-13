@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 2,
+  "revision": 1,
+  "issuedAt": "__RFC3339_ISSUED_AT__",
+  "expiresAt": "__RFC3339_EXPIRES_AT_MAX_31_DAYS__",
+  "keyId": "__TRUSTED_CLOUD_AUTHORITY_KEY_ID__",
+  "allowedExtensions": [
+    {
+      "browser": "Chrome",
+      "extensionId": "__PUBLISHED_CHROME_EXTENSION_ID__",
+      "origin": "chrome-extension://__PUBLISHED_CHROME_EXTENSION_ID__/",
+      "browserExecutablePath": "__CANONICAL_PROTECTED_MACHINE_CHROME_EXE_PATH__"
+    },
+    {
+      "browser": "Edge",
+      "extensionId": "__PUBLISHED_EDGE_EXTENSION_ID__",
+      "origin": "chrome-extension://__PUBLISHED_EDGE_EXTENSION_ID__/",
+      "browserExecutablePath": "__CANONICAL_PROTECTED_MACHINE_EDGE_EXE_PATH__"
+    }
+  ],
+  "signature": "__P256_IEEE_P1363_BASE64URL_SIGNATURE__"
+}

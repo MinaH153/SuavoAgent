@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Options;
 using Serilog;
+using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Vision;
 
 namespace SuavoAgent.Helper.Vision;
 
@@ -14,10 +16,13 @@ namespace SuavoAgent.Helper.Vision;
 ///
 ///   Tesseract reachable  +  Windows UIA  → CompositeScreenExtractor
 ///   Tesseract reachable  +  no UIA       → TesseractScreenExtractor
-///   Tesseract missing    +  Windows UIA  → CompositeScreenExtractor (Null+UIA)
-///   Tesseract missing    +  no UIA       → NullScreenExtractor
+///   Tesseract disabled   +  Windows UIA  → CompositeScreenExtractor (Null+UIA)
+///   Tesseract disabled   +  no UIA       → NullScreenExtractor
 ///
-/// Every case is wrapped in PhiScrubbingExtractor.
+/// Configured OCR NEVER falls back to Null/UIA. Its exact Setup-provisioned
+/// cohort and native runtime must verify and warm successfully, otherwise the
+/// factory throws a static-code failure and the pipeline is visibly degraded.
+/// Every successful case is wrapped in PhiScrubbingExtractor.
 /// </summary>
 public static class ScrubbedExtractorFactory
 {
@@ -33,15 +38,42 @@ public static class ScrubbedExtractorFactory
     /// Picks the richest available extractor given the config and platform.
     /// Always wraps in PhiScrubbingExtractor.
     /// </summary>
-    public static IScreenExtractor Create(IOptions<AgentOptions> options, ILogger logger)
+    public static IScreenExtractor Create(
+        IOptions<AgentOptions> options,
+        ILogger logger,
+        VisionRuntimeStatusTracker? runtimeStatus = null)
     {
         var tess = options.Value.Vision.Tesseract;
 
         // --- Text extraction tier (Tesseract or Null) ---------------------------
         IScreenExtractor textInner;
-        if (tess.Enabled && TesseractIsReachable(tess, logger))
+        if (tess.Enabled)
         {
-            textInner = new TesseractScreenExtractor(options, logger);
+            if (!TesseractNativeCohortPolicy.VerifyInstalled(tess) ||
+                !TesseractIsReachable(tess, logger))
+            {
+                runtimeStatus?.RecordFailure(VisionRuntimeCodes.OcrCohortVerificationFailed);
+                throw new VisionRuntimeUnavailableException(
+                    VisionRuntimeCodes.OcrCohortVerificationFailed);
+            }
+
+            var tesseract = new TesseractScreenExtractor(options, logger, runtimeStatus);
+            try
+            {
+                if (!tesseract.WarmUpAsync(CancellationToken.None)
+                        .GetAwaiter().GetResult())
+                {
+                    throw new VisionRuntimeUnavailableException(
+                        tesseract.LastFailureCode ??
+                        VisionRuntimeCodes.OcrRuntimeInitializationFailed);
+                }
+            }
+            catch (NativeOcrTimeoutException)
+            {
+                throw new VisionRuntimeUnavailableException(
+                    VisionRuntimeCodes.OcrRuntimeTimeout);
+            }
+            textInner = tesseract;
             logger.Information("ScrubbedExtractorFactory: Tesseract selected ({Lang})", tess.Language);
         }
         else
@@ -57,7 +89,10 @@ public static class ScrubbedExtractorFactory
         if (OperatingSystem.IsWindows())
         {
             uiaInner = new FlaUiElementExtractor(logger);
-            combined = new CompositeScreenExtractor(textInner, uiaInner);
+            combined = new CompositeScreenExtractor(
+                textInner,
+                uiaInner,
+                requireTextSuccess: tess.Enabled);
         }
         else
         {
@@ -76,8 +111,7 @@ public static class ScrubbedExtractorFactory
         if (string.IsNullOrWhiteSpace(tess.TessdataPath) || !Directory.Exists(tess.TessdataPath))
         {
             logger.Warning(
-                "Tesseract enabled but TessdataPath {Path} doesn't exist — falling back to Null",
-                tess.TessdataPath);
+                "Tesseract enabled but its data directory is unavailable");
             return false;
         }
 
@@ -85,8 +119,7 @@ public static class ScrubbedExtractorFactory
         if (!File.Exists(trained))
         {
             logger.Warning(
-                "Tesseract enabled but {Path} missing — falling back to Null",
-                trained);
+                "Tesseract enabled but traineddata is unavailable");
             return false;
         }
 

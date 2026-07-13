@@ -5,19 +5,27 @@ using SuavoAgent.Contracts.Behavioral;
 
 namespace SuavoAgent.Helper.SystemObservers;
 
+internal sealed record ForegroundWindowContext(
+    string ProcessName,
+    nint WindowHandle,
+    string? WindowTitle);
+
 public sealed class ForegroundTracker : IDisposable
 {
     private readonly BehavioralEventBuffer _buffer;
     private readonly string _pharmacySalt;
     private readonly ILogger _logger;
     private string? _currentProcessName;
+    private nint _currentWindowHandle;
+    private string? _currentTitleHash;
     private DateTimeOffset _focusStart;
+    private DateTimeOffset _lastObserverNotification;
     private volatile bool _disposed;
-    private Action<string, string?>? _onAppFocused;
+    private Action<ForegroundWindowContext>? _onAppFocused;
 
     public int TransitionCount { get; private set; }
 
-    public void OnAppFocusChanged(Action<string, string?> callback) => _onAppFocused = callback;
+    internal void OnAppFocusChanged(Action<ForegroundWindowContext> callback) => _onAppFocused = callback;
 
     public ForegroundTracker(BehavioralEventBuffer buffer, string pharmacySalt, ILogger logger)
     {
@@ -25,6 +33,7 @@ public sealed class ForegroundTracker : IDisposable
         _pharmacySalt = pharmacySalt;
         _logger = logger;
         _focusStart = DateTimeOffset.UtcNow;
+        _lastObserverNotification = DateTimeOffset.MinValue;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -33,7 +42,12 @@ public sealed class ForegroundTracker : IDisposable
         while (!ct.IsCancellationRequested && !_disposed)
         {
             try { PollForeground(); }
-            catch (Exception ex) { _logger.Debug(ex, "ForegroundTracker poll error"); }
+            catch (Exception ex)
+            {
+                _logger.Debug(
+                    "ForegroundTracker poll error ({ExceptionType})",
+                    ex.GetType().FullName);
+            }
             await Task.Delay(2000, ct);
         }
     }
@@ -49,49 +63,68 @@ public sealed class ForegroundTracker : IDisposable
         if (pid == 0) return;
 
         string processName;
-        try { processName = Process.GetProcessById((int)pid).ProcessName; }
+        try
+        {
+            using var process = Process.GetProcessById((int)pid);
+            processName = process.ProcessName;
+        }
         catch { return; }
 
-        if (processName == _currentProcessName) return;
-
         var now = DateTimeOffset.UtcNow;
-        var duration = (long)(now - _focusStart).TotalMilliseconds;
-        var prevProcess = _currentProcessName;
-
+        string? rawTitle = null;
         string? titleHash = null;
         try
         {
-            var sb = new System.Text.StringBuilder(256);
+            var sb = new System.Text.StringBuilder(1024);
             GetWindowText(hwnd, sb, sb.Capacity);
-            var title = sb.ToString();
-            if (!string.IsNullOrEmpty(title))
-                titleHash = UiaPropertyScrubber.HmacHash(title, _pharmacySalt);
+            rawTitle = sb.ToString();
+            if (!string.IsNullOrEmpty(rawTitle))
+                titleHash = UiaPropertyScrubber.HmacHash(rawTitle, _pharmacySalt);
         }
         catch { }
 
+        // Same-process tab, document, and window changes are observations too.
+        // Comparing HWND + title hash fixes the prior process-only blind spot.
+        if (processName == _currentProcessName
+            && hwnd == _currentWindowHandle
+            && string.Equals(titleHash, _currentTitleHash, StringComparison.Ordinal))
+        {
+            if (now - _lastObserverNotification >= TimeSpan.FromSeconds(30))
+            {
+                _lastObserverNotification = now;
+                NotifyObservers(new ForegroundWindowContext(processName, hwnd, rawTitle));
+            }
+            return;
+        }
+
+        var duration = (long)(now - _focusStart).TotalMilliseconds;
+        var prevProcess = _currentProcessName;
+
         _currentProcessName = processName;
+        _currentWindowHandle = hwnd;
+        _currentTitleHash = titleHash;
         _focusStart = now;
+        _lastObserverNotification = now;
 
         if (prevProcess != null)
         {
             _buffer.Enqueue(BehavioralEvent.AppFocusChange(prevProcess, processName, titleHash, duration));
             TransitionCount++;
+        }
 
-            // Extract domain if this is a browser (for BrowserDomainObserver)
-            string? extractedDomain = null;
-            try
-            {
-                var sb2 = new System.Text.StringBuilder(256);
-                GetWindowText(hwnd, sb2, sb2.Capacity);
-                var rawTitle = sb2.ToString();
-                if (BrowserDomainObserver.IsBrowserProcess(processName))
-                    extractedDomain = BrowserDomainObserver.ExtractDomain(rawTitle);
-            }
-            catch { }
+        // Raw title remains inside Helper and is never serialized. Browser
+        // observers deliberately receive no title-derived URL signal.
+        NotifyObservers(new ForegroundWindowContext(processName, hwnd, rawTitle));
+    }
 
-            // Notify registered observers
-            try { _onAppFocused?.Invoke(processName, extractedDomain); }
-            catch { } // observer errors must not crash the tracker
+    private void NotifyObservers(ForegroundWindowContext context)
+    {
+        try { _onAppFocused?.Invoke(context); }
+        catch (Exception ex)
+        {
+            _logger.Warning(
+                "ForegroundTracker observer callback failed ({ExceptionType})",
+                ex.GetType().FullName);
         }
     }
 

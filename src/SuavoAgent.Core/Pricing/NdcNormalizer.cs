@@ -55,16 +55,15 @@ public static class NdcNormalizer
             return NormalizeHyphenated(trimmed);
 
         if (!trimmed.All(char.IsDigit))
-            return NormalizeOutcome.Fail($"Non-digit characters: '{trimmed}'");
+            return NormalizeOutcome.Fail("ndc_contains_non_digit_characters");
 
         return trimmed.Length switch
         {
             11 => new NormalizeOutcome(true, trimmed, NdcShape.Digits11, null),
             10 => NormalizeOutcome.Fail(
-                "Ambiguous 10-digit NDC — source format (4-4-2 / 5-3-2 / 5-4-2) unknown. " +
-                "Store the on-label hyphenated form or confirm the format.",
+                "Ambiguous 10-digit NDC",
                 NdcShape.Digits10),
-            _ => NormalizeOutcome.Fail($"Unexpected length {trimmed.Length} for unhyphenated NDC"),
+            _ => NormalizeOutcome.Fail("unexpected_unhyphenated_ndc_length"),
         };
     }
 
@@ -72,10 +71,10 @@ public static class NdcNormalizer
     {
         var parts = trimmed.Split('-');
         if (parts.Length != 3)
-            return NormalizeOutcome.Fail($"Hyphenated NDC must have 3 segments, got {parts.Length}");
+            return NormalizeOutcome.Fail("invalid_hyphenated_ndc_segment_count");
 
         if (parts.Any(p => p.Length == 0 || !p.All(char.IsDigit)))
-            return NormalizeOutcome.Fail($"Hyphenated NDC segments must be digits: '{trimmed}'");
+            return NormalizeOutcome.Fail("invalid_hyphenated_ndc_characters");
 
         var a = parts[0].Length;
         var b = parts[1].Length;
@@ -90,8 +89,7 @@ public static class NdcNormalizer
         };
 
         if (shape == NdcShape.Invalid)
-            return NormalizeOutcome.Fail(
-                $"Unsupported NDC segment lengths {a}-{b}-{c} — expected 4-4-2, 5-3-2, or 5-4-2");
+            return NormalizeOutcome.Fail("unsupported_hyphenated_ndc_shape");
 
         return new NormalizeOutcome(true, labeler + product + package, shape, null);
     }

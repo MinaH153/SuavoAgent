@@ -9,7 +9,8 @@ public enum BehavioralEventType
     KeystrokeCategory,
     AppFocusChange,
     SessionChange,
-    StationProfile
+    StationProfile,
+    ObserverStatus
 }
 
 /// <summary>
@@ -147,6 +148,16 @@ public sealed record BehavioralEvent
             TreeHash = profileJson,
             OccurrenceCount = 1,
             Timestamp = DateTimeOffset.UtcNow
+        };
+
+    public static BehavioralEvent ObserverStatus(string observer, string status) =>
+        new()
+        {
+            Type = BehavioralEventType.ObserverStatus,
+            Subtype = observer,
+            ElementId = status,
+            OccurrenceCount = 1,
+            Timestamp = DateTimeOffset.UtcNow,
         };
 
     /// <summary>Returns a new event with Seq assigned (immutable copy).</summary>

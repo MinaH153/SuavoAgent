@@ -2,6 +2,7 @@ using Serilog;
 using Serilog.Core;
 using Serilog.Events;
 using SuavoAgent.Helper;
+using SuavoAgent.Helper.Actuation;
 using Xunit;
 
 namespace SuavoAgent.Helper.Tests;
@@ -14,7 +15,7 @@ namespace SuavoAgent.Helper.Tests;
 public class PioneerRxInstallDetectorForceAttachTests
 {
     [Fact]
-    public void ShouldPollForPms_WhenForceEnvSet_ReturnsTrue_WithoutRealInstall()
+    public void ForceEnvironmentVariable_CannotEnableAttachWithoutSignedApproval()
     {
         // Only meaningful on non-Windows CI, where IsInstalled() is guaranteed false —
         // so a true result here can ONLY come from the override, not a stray real install.
@@ -25,8 +26,9 @@ public class PioneerRxInstallDetectorForceAttachTests
             var sink = new CapturingSink();
             var log = new LoggerConfiguration().MinimumLevel.Verbose().WriteTo.Sink(sink).CreateLogger();
 
-            Assert.True(PioneerRxInstallDetector.ShouldPollForPms(log));
-            Assert.Contains(sink.Messages, m => m.Contains("forced", StringComparison.OrdinalIgnoreCase));
+            var trust = new PioneerRxProcessTrustVerifier(
+                PioneerRxApprovalLoadResult.Denied("pioneerrx_not_approved"));
+            Assert.False(PioneerRxInstallDetector.ShouldPollForPms(log, trust));
         });
     }
 
@@ -34,7 +36,9 @@ public class PioneerRxInstallDetectorForceAttachTests
     public void ShouldPollForPms_WhenEnvUnset_FallsBackToIsInstalled()
     {
         if (OperatingSystem.IsWindows()) return; // non-Windows: IsInstalled() is false
-        WithEnv(null, () => Assert.False(PioneerRxInstallDetector.ShouldPollForPms(SilentLogger())));
+        var trust = new PioneerRxProcessTrustVerifier(
+            PioneerRxApprovalLoadResult.Denied("pioneerrx_not_approved"));
+        WithEnv(null, () => Assert.False(PioneerRxInstallDetector.ShouldPollForPms(SilentLogger(), trust)));
     }
 
     [Fact]
@@ -43,7 +47,21 @@ public class PioneerRxInstallDetectorForceAttachTests
         if (OperatingSystem.IsWindows()) return;
         // Guard against a loose truthy check leaking the override on "true"/"0"/"yes".
         foreach (var v in new[] { "0", "true", "yes", "" })
-            WithEnv(v, () => Assert.False(PioneerRxInstallDetector.ShouldPollForPms(SilentLogger())));
+        {
+            var trust = new PioneerRxProcessTrustVerifier(
+                PioneerRxApprovalLoadResult.Denied("pioneerrx_not_approved"));
+            WithEnv(v, () => Assert.False(PioneerRxInstallDetector.ShouldPollForPms(SilentLogger(), trust)));
+        }
+    }
+
+    [Fact]
+    public void DetectionProbeException_FailsClosed()
+    {
+        var installed = PioneerRxInstallDetector.IsInstalledFromProbes(
+            _ => throw new IOException("synthetic"),
+            _ => "ignored",
+            SilentLogger());
+        Assert.False(installed);
     }
 
     private static void WithEnv(string? value, Action body)

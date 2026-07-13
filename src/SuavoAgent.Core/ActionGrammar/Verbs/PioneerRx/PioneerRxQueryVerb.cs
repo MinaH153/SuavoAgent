@@ -1,6 +1,3 @@
-using Microsoft.Extensions.DependencyInjection;
-using SuavoAgent.Core.Adapters;
-
 namespace SuavoAgent.Core.ActionGrammarV1.Verbs.PioneerRx;
 
 /// <summary>
@@ -53,50 +50,21 @@ public sealed class PioneerRxQueryVerb : IVerb
             Justification: "Read-only PMS query; rows scrubbed by adapter before egress")
     );
 
-    public Task<VerbPreconditionResult> CheckPreconditionsAsync(VerbContext ctx, CancellationToken ct)
-    {
-        if (!ctx.Parameters.TryGetValue("query_kind", out var qk) || qk is not string qks
-            || (qks is not "ndc" and not "rx_number" and not "patient_identifier"))
-        {
-            return Task.FromResult(VerbPreconditionResult.Fail(
-                "query_kind_invalid",
-                "query_kind must be one of: ndc | rx_number | patient_identifier"));
-        }
-        if (!ctx.Parameters.TryGetValue("query_arg", out var qa) || qa is not string qas || string.IsNullOrWhiteSpace(qas))
-        {
-            return Task.FromResult(VerbPreconditionResult.Fail(
-                "query_arg_non_empty", "query_arg must be a non-empty string"));
-        }
-        if (ctx.Services.GetService<IPharmacyReadAdapter>() is null)
-        {
-            return Task.FromResult(VerbPreconditionResult.Fail(
-                "adapter_missing", "IPharmacyReadAdapter not registered"));
-        }
-        return Task.FromResult(VerbPreconditionResult.Ok());
-    }
+    public Task<VerbPreconditionResult> CheckPreconditionsAsync(VerbContext ctx, CancellationToken ct) =>
+        Task.FromResult(VerbPreconditionResult.Fail(
+            "capability_unavailable",
+            "PioneerRx query capability is unavailable until a real routed query is implemented"));
 
     public Task<VerbRollbackEnvelope> CaptureRollbackAsync(VerbContext ctx, CancellationToken ct) =>
         Task.FromResult(VerbRollbackEnvelope.None(ctx.InvocationId));
 
-    public Task<VerbExecutionResult> ExecuteAsync(VerbContext ctx, CancellationToken ct)
-    {
-        // Phase 5.3 scaffold — wires verb metadata + dispatcher + audit chain
-        // end-to-end. Live PMS query path lands when the writeback BAA
-        // amendment is signed at Better Life and the verb is promoted from
-        // tier='sandbox' (current) to tier='pilot' in the catalog.
-        //
-        // The verb succeeds with a synthetic result so dry-run dispatches
-        // exercise the full audit/preconcition/postcondition chain — but no
-        // PHI is ever queried.
-        return Task.FromResult(VerbExecutionResult.Ok(new Dictionary<string, object?>
-        {
-            ["rows_returned"] = 0,
-            ["schema_signature"] = "scaffold-no-op",
-        }));
-    }
+    public Task<VerbExecutionResult> ExecuteAsync(VerbContext ctx, CancellationToken ct) =>
+        Task.FromResult(VerbExecutionResult.Fail("capability_unavailable"));
 
     public Task<VerbPostconditionResult> VerifyPostconditionsAsync(
         VerbContext ctx,
         VerbExecutionResult executionResult,
-        CancellationToken ct) => Task.FromResult(VerbPostconditionResult.Ok());
+        CancellationToken ct) => Task.FromResult(VerbPostconditionResult.Fail(
+            "capability_unavailable",
+            "PioneerRx query did not execute"));
 }

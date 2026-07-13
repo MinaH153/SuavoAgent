@@ -9,8 +9,9 @@ namespace SuavoAgent.Contracts.Learning;
 /// only to record what was actually on screen.
 ///
 /// PHI boundary: ControlType / AutomationId / ClassName ONLY. Never Name / Value / Text /
-/// HelpText / ItemStatus — those are the YELLOW/RED tier and may carry PHI. No string field
-/// on this record can hold patient data; the corpus built from it is PHI-negative by type.
+/// HelpText / ItemStatus — those are the YELLOW/RED tier and may carry PHI. These are still
+/// ordinary strings, so the type does not make the corpus PHI-negative by itself. The local
+/// exporter and cloud ingest must both reject non-structural or PHI-shaped values.
 /// </summary>
 public sealed record ObservedElement(
     string ControlType,
@@ -64,7 +65,8 @@ public enum SelectorFailureKind
 /// structural atoms it saw. Emitted by the Helper during a pricing run, ridden back to Core on
 /// <c>SupplierPriceResult.Observations</c>, and uploaded to the fleet corpus. The learning signal
 /// is the (StepId, Outcome, FailureKind) tuple plus the observed structural candidates — never a
-/// human string, NDC, or exception message.
+/// human string, NDC, or exception message. Cloud upload independently enforces the bounded
+/// structural grammar before any candidate leaves the workstation.
 /// </summary>
 public sealed record SelectorObservation(
     SelectorStepId StepId,

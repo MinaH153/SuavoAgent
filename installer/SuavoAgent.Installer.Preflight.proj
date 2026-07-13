@@ -1,0 +1,23 @@
+<Project>
+
+  <!--
+    This probe deliberately does not set AcceptEula. Restore and the explicit
+    no-op target force both WiX SDK projects through MSBuild evaluation, catching
+    malformed Condition expressions before any licensed WiX compilation runs.
+  -->
+  <ItemGroup>
+    <InstallerProject Include="$(MSBuildThisFileDirectory)SuavoAgent.Msi/SuavoAgent.Msi.wixproj" />
+    <InstallerProject Include="$(MSBuildThisFileDirectory)SuavoAgent.Bundle/SuavoAgent.Bundle.wixproj" />
+  </ItemGroup>
+
+  <Target Name="RestoreAndEvaluate">
+    <MSBuild Projects="@(InstallerProject)"
+             Targets="Restore"
+             BuildInParallel="false"
+             Properties="RestoreLockedMode=true" />
+    <MSBuild Projects="@(InstallerProject)"
+             Targets="EvaluateInstallerProject"
+             BuildInParallel="false" />
+  </Target>
+
+</Project>

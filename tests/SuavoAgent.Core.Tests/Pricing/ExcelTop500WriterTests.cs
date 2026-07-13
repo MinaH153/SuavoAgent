@@ -30,6 +30,7 @@ public class ExcelTop500WriterTests : IDisposable
 
         var writer = new ExcelTop500Writer(NullLogger<ExcelTop500Writer>.Instance);
         Assert.True(writer.Write(path, rows));
+        PricingWorkbookContentPolicy.Validate(path);
 
         // The pricing loop's own reader must consume it: find the NDC column + every NDC.
         var reader = new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance);

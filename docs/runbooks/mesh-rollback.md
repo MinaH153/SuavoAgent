@@ -1,5 +1,12 @@
 # Runbook: Mesh ruleset rollback
 
+> **INTERNAL BREAK-GLASS PROCEDURE — never a customer instruction.** The local
+> command examples below expose a product gap in the historical ruleset rollback
+> path; they do not satisfy the native Windows experience. Normal rollback must
+> be issued and audited through the dashboard. If that native control is not
+> available for the affected build, keep the customer out of the terminal,
+> isolate the rollout, and escalate to authorized security engineering.
+
 **Severity:** P0 (rolling back active prod state)
 **Triggered by:** agent regression observed AFTER an OTA ruleset adoption
 that requires reverting to the previously embedded ruleset.

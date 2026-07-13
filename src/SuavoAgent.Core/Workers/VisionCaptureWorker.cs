@@ -1,4 +1,6 @@
+using System.Collections.Frozen;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -35,6 +37,16 @@ namespace SuavoAgent.Core.Workers;
 /// </summary>
 public sealed class VisionCaptureWorker : BackgroundService
 {
+    private const int CloudFrameMaxItems = 300;
+    private const int CloudFrameMaxDimension = 20_000;
+    private static readonly FrozenSet<string> CloudFrameRoles = new[]
+    {
+        "button", "checkbox", "combobox", "dialog", "document", "edit",
+        "element", "group", "image", "link", "list", "listitem", "menu",
+        "menuitem", "pane", "radio", "row", "table", "tab", "text",
+        "toolbar", "tree", "window",
+    }.ToFrozenSet(StringComparer.Ordinal);
+
     private readonly ILogger<VisionCaptureWorker> _logger;
     private readonly AgentOptions _agentOptions;
     private readonly IOptionsMonitor<VisionOptions> _visionOptions;
@@ -89,8 +101,7 @@ public sealed class VisionCaptureWorker : BackgroundService
                 // capture_failed / not_foreground / vision_unavailable, so
                 // unexpected exceptions reaching here are network/serialization
                 // edge cases worth logging but not crashing for.
-                _logger.LogWarning(ex,
-                    "VisionCaptureWorker tick error — continuing");
+                _logger.LogSafeWarning(ex);
             }
 
             try
@@ -272,16 +283,19 @@ public sealed class VisionCaptureWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "VisionCaptureWorker: shadow reasoning skipped (non-fatal)");
+            _logger.LogSafeDebug(ex);
         }
     }
 
     /// <summary>
-    /// Best-effort: deserialize the already-scrubbed ScreenFrame the Helper returned and POST it
-    /// to <c>/api/agent/screen-frame</c> so the pharmacy dashboard can render a live wireframe.
+    /// Best-effort: deserialize the local ScreenFrame, project it into a metadata-only contract,
+    /// and POST that projection to <c>/api/agent/screen-frame</c>. The cloud payload contains only
+    /// dimensions, bounded geometry, a constant status, and allow-listed roles. OCR text, element
+    /// names, automation ids, extractor ids, titles, confidence, and raw observations never enter
+    /// the serializer.
     /// Honors <see cref="VisionCloudFrameUploadOptions.SamplingInterval"/>. The HMAC envelope
-    /// identifies the pharmacy + agent server-side, so the payload is just the scrubbed frame —
-    /// no pixels, no patient data. Never throws into the capture/audit path.
+    /// identifies the pharmacy + agent server-side. No pixels or patient data are included.
+    /// Never throws into the capture/audit path.
     /// </summary>
     private async Task TryUploadFrameToCloudAsync(IpcResponse response, VisionOptions options, CancellationToken ct)
     {
@@ -300,13 +314,90 @@ public sealed class VisionCaptureWorker : BackgroundService
             if (frame == null)
                 return;
 
-            await _cloud!.PostSignedAsync("/api/agent/screen-frame", new { frame }, ct);
+            var metadata = CreateCloudFrameMetadata(frame, _clock.GetUtcNow());
+            if (metadata == null)
+            {
+                _logger.LogWarning("core.vision.cloud_frame_metadata_rejected");
+                return;
+            }
+
+            await _cloud!.PostSignedAsync("/api/agent/screen-frame", new { frame = metadata }, ct);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "VisionCaptureWorker: cloud frame upload skipped (non-fatal)");
+            _logger.LogSafeDebug(ex);
         }
     }
+
+    private static CloudFrameMetadata? CreateCloudFrameMetadata(
+        ScreenFrame frame,
+        DateTimeOffset capturedAt)
+    {
+        if (frame.Width is <= 0 or > CloudFrameMaxDimension ||
+            frame.Height is <= 0 or > CloudFrameMaxDimension)
+            return null;
+
+        var regions = frame.TextRegions
+            .Take(CloudFrameMaxItems)
+            .Select(region => CreateCloudBounds(region.Bounds))
+            .Where(bounds => bounds is not null)
+            .Select(bounds => new CloudFrameRegion(bounds!))
+            .ToArray();
+        var elements = frame.Elements
+            .Take(CloudFrameMaxItems)
+            .Select(element =>
+            {
+                var bounds = CreateCloudBounds(element.Bounds);
+                if (bounds is null) return null;
+                var candidateRole = element.Role?.Trim().ToLowerInvariant() ?? "";
+                var role = CloudFrameRoles.Contains(candidateRole) ? candidateRole : "element";
+                return new CloudFrameElement(role, bounds);
+            })
+            .Where(element => element is not null)
+            .Select(element => element!)
+            .ToArray();
+
+        return new CloudFrameMetadata(
+            Guid.NewGuid().ToString("D"),
+            capturedAt.ToUniversalTime(),
+            "captured",
+            frame.Width,
+            frame.Height,
+            regions,
+            elements);
+    }
+
+    private static CloudFrameBounds? CreateCloudBounds(Rect bounds)
+    {
+        if (bounds.X is < 0 or > CloudFrameMaxDimension ||
+            bounds.Y is < 0 or > CloudFrameMaxDimension ||
+            bounds.Width is <= 0 or > CloudFrameMaxDimension ||
+            bounds.Height is <= 0 or > CloudFrameMaxDimension)
+            return null;
+        return new CloudFrameBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height);
+    }
+
+    private sealed record CloudFrameMetadata(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("capturedAt")] DateTimeOffset CapturedAt,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("width")] int Width,
+        [property: JsonPropertyName("height")] int Height,
+        [property: JsonPropertyName("regions")] IReadOnlyList<CloudFrameRegion> Regions,
+        [property: JsonPropertyName("elements")] IReadOnlyList<CloudFrameElement> Elements);
+
+    private sealed record CloudFrameRegion(
+        [property: JsonPropertyName("bounds")] CloudFrameBounds Bounds);
+
+    private sealed record CloudFrameElement(
+        [property: JsonPropertyName("role")] string Role,
+        [property: JsonPropertyName("bounds")] CloudFrameBounds Bounds);
+
+    private sealed record CloudFrameBounds(
+        [property: JsonPropertyName("x")] int X,
+        [property: JsonPropertyName("y")] int Y,
+        [property: JsonPropertyName("width")] int Width,
+        [property: JsonPropertyName("height")] int Height);
 
     private void AppendCaptureOutcome(
         string commandId,

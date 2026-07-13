@@ -105,7 +105,7 @@ public sealed class TieredBrain
         var ruleResult = _rules.Evaluate(ctx, shadowMode);
         if (ruleResult.Outcome == MatchOutcome.Matched)
         {
-            _logger.LogDebug("TieredBrain: Tier 1 matched rule {Id}", ruleResult.MatchedRule!.Id);
+            _logger.LogDebug("core.reasoning.tier1_rule_matched");
             return new BrainDecision
             {
                 Outcome = MatchOutcome.Matched,
@@ -118,7 +118,7 @@ public sealed class TieredBrain
         if (ruleResult.Outcome == MatchOutcome.Blocked)
         {
             // Blocked by a precondition (autonomousOk=false gate) — short-circuit.
-            _logger.LogInformation("TieredBrain: precondition blocked — {Reason}", ruleResult.Reason);
+            _logger.LogInformation("core.reasoning.precondition_blocked");
             return new BrainDecision
             {
                 Outcome = MatchOutcome.Blocked,
@@ -144,7 +144,7 @@ public sealed class TieredBrain
         };
 
         InferenceProposal? proposal = null;
-        string tier2Reason = "Local inference disabled";
+        string tier2Reason = "local_model_unavailable";
         var tier2Source = DecisionTier.LocalInference;
 
         if (_localInference.IsReady)
@@ -153,7 +153,7 @@ public sealed class TieredBrain
             {
                 proposal = await _localInference.ProposeAsync(request, ct);
                 if (proposal == null)
-                    tier2Reason = "Local inference returned no proposal";
+                    tier2Reason = "local_model_no_proposal";
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -165,14 +165,14 @@ public sealed class TieredBrain
             catch (OperationCanceledException)
             {
                 _logger.LogWarning("TieredBrain: Tier 2 timed out");
-                tier2Reason = "Local inference timed out";
+                tier2Reason = "local_model_timeout";
             }
             catch (Exception ex)
             {
                 // Defense-in-depth: the interface contract says don't throw, but if
                 // an implementation does, we must not crash the caller.
-                _logger.LogWarning(ex, "TieredBrain: Tier 2 threw unexpectedly");
-                tier2Reason = "Local inference error";
+                _logger.LogSafeWarning(ex);
+                tier2Reason = "local_model_error";
             }
         }
         else
@@ -194,6 +194,8 @@ public sealed class TieredBrain
         {
             try
             {
+                if (proposal is not null)
+                    tier2Reason = "local_model_low_confidence";
                 var cloudProposal = await _cloudReasoning.ProposeAsync(request, tier2Reason, ct);
                 if (cloudProposal != null)
                 {
@@ -216,7 +218,7 @@ public sealed class TieredBrain
             {
                 // ICloudReasoning.ProposeAsync is contractually fail-closed;
                 // this catch is defense-in-depth only.
-                _logger.LogWarning(ex, "TieredBrain: Tier 3 threw unexpectedly");
+                _logger.LogSafeWarning(ex);
             }
         }
 
@@ -232,6 +234,19 @@ public sealed class TieredBrain
 
         // --- Verifier (mandatory for every Tier 2/3 proposal) ------------------
         var verification = _verifier.Verify(proposal, request);
+        if (tier2Source == DecisionTier.CloudInference &&
+            ActionVerifier.Destructive.Contains(proposal.Action.Type) &&
+            verification.Outcome != VerificationOutcome.Rejected)
+        {
+            // A cloud model may recommend a write, but it never earns actuation
+            // authority from model confidence or a global Tier-2 setting. The
+            // operator/autonomy ledger remains the only promotion boundary.
+            verification = new VerificationResult
+            {
+                Outcome = VerificationOutcome.OperatorApprovalRequired,
+                Reason = "cloud_destructive_action_requires_approval",
+            };
+        }
 
         switch (verification.Outcome)
         {
@@ -247,7 +262,7 @@ public sealed class TieredBrain
                         Tier = tier2Source,
                         Proposal = proposal,
                         Verification = verification,
-                        Reason = $"Shadow mode — approved proposal not executed",
+                        Reason = "model_proposal_shadowed",
                     };
                 }
 
@@ -265,13 +280,11 @@ public sealed class TieredBrain
                 };
 
             case VerificationOutcome.OperatorApprovalRequired:
-                _logger.LogInformation(
-                    "TieredBrain: Tier 2 → operator approval: {Reason}", verification.Reason);
+                _logger.LogInformation("core.reasoning.operator_approval_required");
                 return new BrainDecision
                 {
                     Outcome = MatchOutcome.Blocked,
                     Tier = DecisionTier.OperatorRequired,
-                    Actions = new[] { proposal.Action },
                     Proposal = proposal,
                     Verification = verification,
                     Reason = verification.Reason,
@@ -279,8 +292,7 @@ public sealed class TieredBrain
 
             case VerificationOutcome.Rejected:
             default:
-                _logger.LogWarning(
-                    "TieredBrain: Tier 2 proposal rejected — {Reason}", verification.Reason);
+                _logger.LogWarning("core.reasoning.proposal_rejected");
                 return new BrainDecision
                 {
                     Outcome = MatchOutcome.NoMatch,

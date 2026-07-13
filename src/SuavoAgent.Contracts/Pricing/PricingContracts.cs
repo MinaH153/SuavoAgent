@@ -11,7 +11,18 @@ public record NdcPricingRequest(
     string JobId,
     int RowIndex,
     string Ndc,
-    IReadOnlyList<SelectorPatch>? Patches = null);
+    IReadOnlyList<SelectorPatch>? Patches = null,
+    string? PmsFingerprint = null,
+    string? ScreenSignatureV1 = null);
+
+/// <summary>
+/// PHI-free live structural identity captured by Helper immediately before a
+/// UIA/vision pricing run. Core binds this exact screen to the persisted input
+/// identity and every selector request in that run.
+/// </summary>
+public sealed record PricingScreenObservationContext(
+    int ProcessId,
+    string ScreenSignatureV1);
 
 /// <summary>
 /// Returned by Helper to Core after reading the Pricing tab for one NDC.
@@ -36,7 +47,22 @@ public record SupplierPriceResult(
     string? ErrorMessage,
     IReadOnlyList<SelectorObservation>? Observations = null,
     decimal? BaselineCostPerUnit = null,
-    decimal? Quantity = null);
+    decimal? Quantity = null,
+    int OmittedSelectorObservations = 0);
+
+/// <summary>Stable, PHI-free safety failures shared by Helper and Core.</summary>
+public static class PricingSafetyErrors
+{
+    public const string ActuationGateClosedPrefix = "actuation_gate_closed:";
+
+    public static string ActuationGateClosed(string? rejectionCode)
+        => ActuationGateClosedPrefix + (string.IsNullOrWhiteSpace(rejectionCode)
+            ? "unknown"
+            : rejectionCode.Trim().ToLowerInvariant());
+
+    public static bool IsActuationGateClosed(string? error)
+        => error?.StartsWith(ActuationGateClosedPrefix, StringComparison.Ordinal) == true;
+}
 
 /// <summary>
 /// Persisted in AgentStateDb; describes a full pricing job run.
@@ -46,13 +72,16 @@ public record PricingJobSpec(
     string ExcelPath,
     string NdcColumn,
     string SupplierColumn,
-    string CostColumn);
+    string CostColumn,
+    string? ApprovalId = null,
+    string? GrantDigest = null);
 
 public static class PricingJobDefaults
 {
     public const string NdcColumn = "NDC";
     public const string SupplierColumn = "Best Supplier";
-    public const string CostColumn = "Best Cost";
+    public const string CostColumn = "Best Cost Per Unit";
+    public const string AmbiguousLegacyCostColumn = "Best Cost";
     public const string LegacySupplierColumn = "Supplier";
     public const string LegacyCostColumn = "Cost (per unit)";
 }

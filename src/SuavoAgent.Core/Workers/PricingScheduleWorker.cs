@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
@@ -17,7 +19,8 @@ namespace SuavoAgent.Core.Workers;
 /// 500-row batch). When <see cref="PricingScheduleOptions.Enabled"/> is true and a
 /// <see cref="PricingScheduleOptions.WorkbookPath"/> is set, this worker runs the configured workbook
 /// through the SqlFirst pricing pipeline once per day at <see cref="PricingScheduleOptions.RunAtLocalTime"/>
-/// with NO cockpit command.
+/// as a local observation-only job. With no signed cockpit command there is no
+/// cloud publication authority and no success receipt is staged or uploaded.
 ///
 /// <para>
 /// PRECEDENCE-1 SAFETY: this worker is SqlFirst-ONLY. The injected executor is the read-only
@@ -41,7 +44,6 @@ public sealed class PricingScheduleWorker : BackgroundService, IDisposable
     private readonly ILogger<PricingScheduleWorker> _logger;
     private readonly IOptionsMonitor<AgentOptions> _options;
     private readonly IPricingJobExecutor? _executor;
-    private readonly PricingJobCloudUploader? _uploader;
     private readonly TimeProvider _clock;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
@@ -59,7 +61,6 @@ public sealed class PricingScheduleWorker : BackgroundService, IDisposable
         _logger = logger;
         _options = options;
         _executor = executor;
-        _uploader = uploader;
         _clock = clock ?? TimeProvider.System;
     }
 
@@ -114,7 +115,7 @@ public sealed class PricingScheduleWorker : BackgroundService, IDisposable
             catch (Exception ex)
             {
                 // A single failed run must not kill the daily loop; the next day's run still fires.
-                _logger.LogWarning(ex, "PricingScheduleWorker: run tick error — continuing");
+                _logger.LogSafeWarning(ex);
             }
         }
 
@@ -146,51 +147,54 @@ public sealed class PricingScheduleWorker : BackgroundService, IDisposable
             return PricingScheduleRunOutcome.Skipped("no_workbook");
 
         var fullPath = Path.GetFullPath(sched.WorkbookPath.Trim());
+        var workbookToken = WorkbookAuditToken(fullPath);
+        var workbookExtension = SafeWorkbookExtension(fullPath);
         if (!File.Exists(fullPath))
         {
             _logger.LogWarning(
-                "PricingScheduleWorker: configured workbook does not exist — skipping run ({Path})", fullPath);
+                "core.pricing_schedule.workbook_missing workbook_token={WorkbookToken} extension={Extension}",
+                workbookToken,
+                workbookExtension);
             return PricingScheduleRunOutcome.Skipped("workbook_missing");
         }
 
         // Single-flight across scheduled runs: never let two timer-driven runs overlap (a fresh fire
         // while a slow run is still going just skips). This gate does NOT cover a concurrent manual
         // cockpit run — that path has its own gate in HeartbeatWorker. Cross-trigger overlap on the
-        // SAME workbook is safe only because ExcelPricingWriter sibling output is timestamped to the
-        // second ({stem}-priced-yyyyMMdd-HHmmss); a true sub-second collision on the identical file is a
-        // pre-existing writer property, not introduced here, and astronomically unlikely for a 02:00 batch.
+        // SAME workbook is safe because ExcelPricingWriter uses collision-resistant output identities
+        // and atomic no-overwrite publication.
         if (!await _gate.WaitAsync(0, ct))
             return PricingScheduleRunOutcome.Skipped("already_running");
 
         try
         {
-            var spec = new PricingJobSpec(
-                Guid.NewGuid().ToString("N"),
-                fullPath,
-                sched.NdcColumn,
-                sched.SupplierColumn,
-                sched.CostColumn);
+            var spec = (_executor is SqlFirstPricingJobExecutor
+                    ? TryRecoverScheduledJob(opts, fullPath)
+                    : null)
+                ?? new PricingJobSpec(
+                    Guid.NewGuid().ToString("N"),
+                    fullPath,
+                    sched.NdcColumn,
+                    sched.SupplierColumn,
+                    sched.CostColumn);
 
             _logger.LogInformation(
-                "PricingScheduleWorker: starting autonomous SqlFirst pricing run {JobId} on {Path}",
-                spec.JobId, fullPath);
+                "core.pricing_schedule.run_started job_id={JobId} workbook_token={WorkbookToken} extension={Extension}",
+                spec.JobId,
+                workbookToken,
+                workbookExtension);
 
             var result = await _executor.RunAsync(spec, ct);
-
-            // Surface the autonomous run in the cloud cockpit — the savings ledger AND the downloadable
-            // price list ("Files I made for you") — exactly like a cockpit-triggered run. commandId is
-            // null because no operator command exists. Best-effort: the priced workbook is already
-            // written and UploadAsync swallows its own (non-cancellation) errors, so a cloud hiccup never
-            // fails the local run. Mirrors HeartbeatWorker's post-run upload.
-            if (_uploader is not null)
-                await _uploader.UploadAsync(spec, result, commandId: null, ct);
 
             if (result.Ok)
             {
                 _logger.LogInformation(
                     "PricingScheduleWorker: run {JobId} completed — {Completed}/{Total} priced, {Failed} failed",
                     spec.JobId, result.Progress.CompletedItems, result.Progress.TotalItems, result.Progress.FailedItems);
-                return new PricingScheduleRunOutcome(PricingScheduleRunStatus.Completed, "ok", result.Progress);
+                return new PricingScheduleRunOutcome(
+                    PricingScheduleRunStatus.Completed,
+                    "observation_only",
+                    result.Progress);
             }
 
             _logger.LogWarning(
@@ -218,6 +222,39 @@ public sealed class PricingScheduleWorker : BackgroundService, IDisposable
         }
     }
 
+    private PricingJobSpec? TryRecoverScheduledJob(AgentOptions options, string fullPath)
+    {
+        // The concrete SQL executor owns the same AgentStateDb, but the scheduler intentionally
+        // receives only IPricingJobExecutor. Recovery is therefore performed inside the executor
+        // for manual/auto paths; a scheduled local run exposes its recovery hook through the
+        // concrete executor without granting cloud-command authority.
+        return (_executor as SqlFirstPricingJobExecutor)?.GetRecoverableSpec(
+            new PricingJobSpec(
+                "recovery-probe",
+                fullPath,
+                options.PricingSchedule.NdcColumn,
+                options.PricingSchedule.SupplierColumn,
+                options.PricingSchedule.CostColumn),
+            commandId: null);
+    }
+
+    internal static string WorkbookAuditToken(string canonicalPath)
+    {
+        var normalized = Path.GetFullPath(canonicalPath).Normalize(NormalizationForm.FormC);
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(normalized));
+        return Convert.ToHexString(digest).ToLowerInvariant()[..16];
+    }
+
+    private static string SafeWorkbookExtension(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return extension.Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+            ? "xlsx"
+            : extension.Equals(".xlsm", StringComparison.OrdinalIgnoreCase)
+                ? "xlsm"
+                : "unknown";
+    }
+
     public override void Dispose()
     {
         _gate.Dispose();
@@ -241,7 +278,7 @@ public enum PricingScheduleRunStatus
 /// <summary>
 /// Outcome of one autonomous pricing-schedule run attempt. <see cref="Reason"/> is a stable machine
 /// code ("disabled", "not_sqlfirst", "no_executor", "no_workbook", "workbook_missing", "already_running",
-/// "ok", or an executor error) so a skip is observable rather than silent.
+/// "observation_only", or an executor error) so a skip is observable rather than silent.
 /// </summary>
 public sealed record PricingScheduleRunOutcome(
     PricingScheduleRunStatus Status,

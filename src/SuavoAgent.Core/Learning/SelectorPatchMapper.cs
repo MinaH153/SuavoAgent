@@ -33,7 +33,8 @@ public static class SelectorPatchMapper
 
             return new SelectorPatch(
                 p.PatchId, p.SkillId, step, p.PmsFingerprint, p.ScreenSignature,
-                target, fallbacks, p.Confidence, provenance, p.Version);
+                target, fallbacks, p.Confidence, provenance, p.Version,
+                string.IsNullOrWhiteSpace(p.ApprovedByRole) ? null : p.ApprovedByRole.Trim());
         }
         catch
         {

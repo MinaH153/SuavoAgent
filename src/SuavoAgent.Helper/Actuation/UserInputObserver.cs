@@ -168,7 +168,9 @@ public sealed class UserInputObserver : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "OnKeyboardEvent failed (continuing)");
+            _logger.Warning(
+                "OnKeyboardEvent failed (continuing; errorType={ErrorType})",
+                ex.GetType().Name);
         }
 
         return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
@@ -198,7 +200,9 @@ public sealed class UserInputObserver : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "OnMouseEvent failed (continuing)");
+            _logger.Warning(
+                "OnMouseEvent failed (continuing; errorType={ErrorType})",
+                ex.GetType().Name);
         }
 
         return CallNextHookEx(_mouseHook, nCode, wParam, lParam);

@@ -83,11 +83,99 @@ public sealed class ActuationGateTests
     }
 
     [Fact]
+    public void PauseUntilResumed_IsIndefiniteAndReversible()
+    {
+        var gate = Build(enabled: true);
+        gate.PauseUntilResumed();
+
+        Assert.Equal(DateTimeOffset.MaxValue, gate.Snapshot().PausedUntilUtc);
+        Assert.Equal(ActuationRejectionCodes.GatePaused, gate.CheckOrReject()!.RejectionCode);
+
+        gate.ClearPause();
+        Assert.Null(gate.CheckOrReject());
+    }
+
+    [Fact]
     public void SetDryRun_TogglesObservedFlag()
     {
         var gate = Build(enabled: true, dryRun: true);
         Assert.True(gate.IsDryRun);
         gate.SetDryRun(false);
         Assert.False(gate.IsDryRun);
+    }
+
+    [Fact]
+    public void CheckLiveOrReject_RejectsDryRunAtomically()
+    {
+        var gate = Build(enabled: true, dryRun: true);
+
+        var rejection = gate.CheckLiveOrReject();
+
+        Assert.Equal(ActuationRejectionCodes.GateDryRun, rejection!.RejectionCode);
+        Assert.True(rejection.DryRun);
+    }
+
+    [Fact]
+    public void CheckLiveOrReject_AllowsOnlyFullyOpenGate()
+    {
+        var gate = Build(enabled: true, dryRun: false);
+
+        Assert.Null(gate.CheckLiveOrReject());
+
+        gate.NotifyUserInputDetected("keyboard");
+        Assert.Equal(ActuationRejectionCodes.GatePaused, gate.CheckLiveOrReject()!.RejectionCode);
+    }
+
+    [Theory]
+    [InlineData("disabled", ActuationRejectionCodes.GateDisabled)]
+    [InlineData("paused", ActuationRejectionCodes.GatePaused)]
+    [InlineData("dry_run", ActuationRejectionCodes.GateDryRun)]
+    [InlineData("compromised", ActuationRejectionCodes.CompromiseDetected)]
+    [InlineData("killed", ActuationRejectionCodes.KillSwitchTripped)]
+    public void ExecuteLiveMutationOrReject_InvokesZeroMutations_WhenAnyAxisIsClosed(
+        string axis,
+        string expectedCode)
+    {
+        var gate = Build(enabled: true, dryRun: false);
+        switch (axis)
+        {
+            case "disabled": gate.SetEnabled(false, "test"); break;
+            case "paused": gate.PauseUntilResumed(); break;
+            case "dry_run": gate.SetDryRun(true); break;
+            case "compromised": gate.RecordHoneytokenCompromise("degrade", "test"); break;
+            case "killed": gate.TripKillSwitch("test"); break;
+        }
+        var mutations = 0;
+
+        var rejection = gate.ExecuteLiveMutationOrReject(() => mutations++);
+
+        Assert.Equal(expectedCode, rejection!.RejectionCode);
+        Assert.Equal(0, mutations);
+    }
+
+    [Fact]
+    public async Task ExecuteLiveMutationOrReject_OrdersPauseAfterInFlightPrimitive_ThenStopsNextPrimitive()
+    {
+        var gate = Build(enabled: true, dryRun: false);
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var mutations = 0;
+        var first = Task.Run(() => gate.ExecuteLiveMutationOrReject(() =>
+        {
+            Interlocked.Increment(ref mutations);
+            entered.Set();
+            release.Wait();
+        }));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+        var pause = Task.Run(gate.PauseUntilResumed);
+        Assert.False(pause.IsCompleted);
+        release.Set();
+        Assert.Null(await first);
+        await pause;
+
+        var second = gate.ExecuteLiveMutationOrReject(() => Interlocked.Increment(ref mutations));
+
+        Assert.Equal(ActuationRejectionCodes.GatePaused, second!.RejectionCode);
+        Assert.Equal(1, mutations);
     }
 }

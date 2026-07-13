@@ -40,6 +40,10 @@ public sealed class InferencePromptBuilderFormatTests
         Assert.Contains("<|assistant|>", prompt);
         Assert.DoesNotContain("<|start_header_id|>", prompt); // no Llama-3 tokens for TinyLlama
         Assert.DoesNotContain("<|eot_id|>", prompt);
+        Assert.Contains("\"rationaleCode\"", prompt);
+        Assert.DoesNotContain("\"rationale\":", prompt);
+        foreach (var code in Enum.GetValues<InferenceRationaleCode>())
+            Assert.Contains(code.ToWireValue(), prompt);
     }
 
     [Fact]

@@ -23,7 +23,7 @@ public class VerticalConfigParseTests
     public void Absent_field_yields_null_raw()
     {
         var data = JsonNode.Parse("""{"apiKey":"k"}""")!.AsObject();
-        var p = InstallTokenService.ParseVerticalConfigFromData(data);
+        var p = VerticalConfigPayloadParser.Parse(data);
         Assert.Null(p.Raw);
         Assert.Null(p.Dto);
     }
@@ -33,7 +33,7 @@ public class VerticalConfigParseTests
     public void Malformed_field_keeps_raw_but_null_dto_never_throws()
     {
         var data = JsonNode.Parse("""{"verticalConfig":"not-an-object","verticalConfigSignature":"sig"}""")!.AsObject();
-        var p = InstallTokenService.ParseVerticalConfigFromData(data);
+        var p = VerticalConfigPayloadParser.Parse(data);
         Assert.NotNull(p.Raw);
         Assert.Null(p.Dto);
         Assert.Equal("sig", p.Signature);
@@ -44,7 +44,7 @@ public class VerticalConfigParseTests
     public void Valid_field_parses_dto_and_carries_sig_and_keyid()
     {
         var data = JsonNode.Parse("""{"verticalConfig":{"vertical":"default","complianceMode":"none","systemConnector":"none","connectorLabel":"your system","redactionProfileId":"none","framing":{"productNoun":"SuavoAgent","systemNoun":"your system","businessNoun":"business","idLabel":"License ID"},"compliance":{"baaRequired":false,"consentCopyId":"terms-v1"}},"verticalConfigSignature":"sig","verticalConfigKeyId":"vertical-v1"}""")!.AsObject();
-        var p = InstallTokenService.ParseVerticalConfigFromData(data);
+        var p = VerticalConfigPayloadParser.Parse(data);
         Assert.NotNull(p.Dto);
         Assert.Equal("none", p.Dto!.ComplianceMode);
         Assert.Equal("vertical-v1", p.KeyId);
@@ -53,7 +53,7 @@ public class VerticalConfigParseTests
     [Fact]
     public void ParseVerticalConfigFromData_null_data_returns_all_null()
     {
-        var p = InstallTokenService.ParseVerticalConfigFromData(null);
+        var p = VerticalConfigPayloadParser.Parse(null);
         Assert.Null(p.Raw);
         Assert.Null(p.Dto);
         Assert.Null(p.Signature);

@@ -125,7 +125,7 @@ public sealed class TieredBrainReasoner : IReasoner
         try { template = _stateDb.FindActiveTemplateByScreenSignatures(signatures); }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "learned-template assist: lookup failed (offer suppressed)");
+            _logger.LogSafeWarning(ex);
             return null;
         }
         if (template is null) return null;

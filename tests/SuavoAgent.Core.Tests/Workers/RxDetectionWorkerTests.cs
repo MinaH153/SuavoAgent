@@ -12,7 +12,7 @@ using Xunit;
 
 namespace SuavoAgent.Core.Tests.Workers;
 
-public class RxDetectionWorkerTests : IDisposable
+public partial class RxDetectionWorkerTests : IDisposable
 {
     private readonly string _dbPath;
     private readonly AgentStateDb _stateDb;
@@ -129,7 +129,7 @@ public class RxDetectionWorkerTests : IDisposable
     }
 
     [Fact]
-    public void SerializeRxBatch_LegacyQueue_NeverShipsPhiFields()
+    public void SerializeRxBatch_LegacyFlag_CannotEmitLegacyQueueOrRawRxDrugMetadata()
     {
         // Track 3 invariant (Codex CRITICAL #15, closed 2026-05-12):
         // the legacy rxDeliveryQueue used to ship patientFirstName /
@@ -147,16 +147,11 @@ public class RxDetectionWorkerTests : IDisposable
 
         var json = RxDetectionWorker.SerializeRxBatch(batch, includeLegacyDeliveryQueue: true);
         var doc = JsonDocument.Parse(json);
-        var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
-
-        Assert.False(rx.TryGetProperty("patientFirstName", out _));
-        Assert.False(rx.TryGetProperty("patientLastInitial", out _));
-        Assert.False(rx.TryGetProperty("patientPhone", out _));
-        Assert.False(rx.TryGetProperty("deliveryAddress1", out _));
-        Assert.False(rx.TryGetProperty("deliveryAddress2", out _));
-        Assert.False(rx.TryGetProperty("deliveryCity", out _));
-        Assert.False(rx.TryGetProperty("deliveryState", out _));
-        Assert.False(rx.TryGetProperty("deliveryZip", out _));
+        var data = doc.RootElement.GetProperty("data");
+        Assert.False(data.TryGetProperty("rxDeliveryQueue", out _));
+        var payload = doc.RootElement.GetRawText();
+        Assert.DoesNotContain("12345", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("Amoxicillin", payload, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -180,29 +175,21 @@ public class RxDetectionWorkerTests : IDisposable
 
         var json = RxDetectionWorker.SerializeRxBatch(batch, "", patientMap, includeLegacyDeliveryQueue: true);
         var doc = JsonDocument.Parse(json);
-        var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
+        var candidate = doc.RootElement.GetProperty("data").GetProperty("rxOrderCandidates")[0];
+        Assert.False(candidate.TryGetProperty("patientDelivery", out _));
+        Assert.DoesNotContain(
+            candidate.GetProperty("fieldConfidence").EnumerateObject(),
+            property => property.Name.StartsWith("patientDelivery", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            candidate.GetProperty("fieldProvenance").EnumerateObject(),
+            property => property.Name.StartsWith("patientDelivery", StringComparison.Ordinal));
 
-        Assert.False(rx.TryGetProperty("patientFirstName", out _));
-        Assert.False(rx.TryGetProperty("patientLastInitial", out _));
-        Assert.False(rx.TryGetProperty("patientPhone", out _));
-        Assert.False(rx.TryGetProperty("deliveryAddress1", out _));
-        Assert.False(rx.TryGetProperty("deliveryAddress2", out _));
-        Assert.False(rx.TryGetProperty("deliveryCity", out _));
-        Assert.False(rx.TryGetProperty("deliveryState", out _));
-        Assert.False(rx.TryGetProperty("deliveryZip", out _));
-
-        // Operational fields still present.
-        Assert.Equal("Amoxicillin 500mg", rx.GetProperty("drugName").GetString());
-
-        // Directly-identifying PHI from the patient map (name, phone,
-        // street address) must not surface anywhere in the serialized
-        // payload. City/state/zip5 are documented carryover in the
-        // canonical rxOrderCandidates path (delivery routing metadata,
-        // de-identified by Safe Harbor when paired with name-hash).
         var payload = doc.RootElement.GetRawText();
         Assert.DoesNotContain("John", payload);
         Assert.DoesNotContain("6195551234", payload);
         Assert.DoesNotContain("123 Main St", payload);
+        Assert.DoesNotContain("El Cajon", payload);
+        Assert.DoesNotContain("92020", payload);
     }
 
     [Fact]
@@ -219,15 +206,14 @@ public class RxDetectionWorkerTests : IDisposable
         var root = doc.RootElement;
 
         Assert.Equal("rx_delivery_queue", root.GetProperty("snapshotType").GetString());
-        var queue = root.GetProperty("data").GetProperty("rxDeliveryQueue");
-        Assert.Equal(1, queue.GetArrayLength());
-
-        var rx = queue[0];
+        var data = root.GetProperty("data");
+        Assert.False(data.TryGetProperty("rxDeliveryQueue", out _));
+        var rx = data.GetProperty("rxOrderCandidates")[0];
         var expectedHash = PhiScrubber.HmacHash("12345", "[no-hmac-salt]");
-        Assert.Equal(expectedHash, rx.GetProperty("rxNumber").GetString());
-        Assert.Equal("Amoxicillin 500mg", rx.GetProperty("drugName").GetString());
-        Assert.Equal("00093-3109-01", rx.GetProperty("ndc").GetString());
-        Assert.Equal(30m, rx.GetProperty("quantity").GetDecimal());
+        Assert.Equal(expectedHash, rx.GetProperty("rxHash").GetString());
+        Assert.Equal("00093-3109-01", rx.GetProperty("medication").GetProperty("ndc").GetString());
+        Assert.Equal(30m, rx.GetProperty("medication").GetProperty("quantity").GetDecimal());
+        Assert.DoesNotContain("Amoxicillin", rx.GetRawText(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -249,11 +235,11 @@ public class RxDetectionWorkerTests : IDisposable
 
         var json = RxDetectionWorker.SerializeRxBatch(rxs, "test-salt", includeLegacyDeliveryQueue: true);
         var doc = JsonDocument.Parse(json);
-        var rx = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue")[0];
+        var rx = doc.RootElement.GetProperty("data").GetProperty("rxOrderCandidates")[0];
 
         var expectedHash = PhiScrubber.HmacHash("12345", "test-salt");
-        Assert.Equal(expectedHash, rx.GetProperty("rxNumber").GetString());
-        Assert.NotEqual("12345", rx.GetProperty("rxNumber").GetString());
+        Assert.Equal(expectedHash, rx.GetProperty("rxHash").GetString());
+        Assert.NotEqual("12345", rx.GetProperty("rxHash").GetString());
     }
 
     [Fact]
@@ -306,13 +292,54 @@ public class RxDetectionWorkerTests : IDisposable
         var localEvidenceId = provenance.GetProperty("evidenceId").GetString();
         Assert.Matches("^rxh-[a-f0-9]{16}-[0-9]{10}$", localEvidenceId);
         Assert.DoesNotContain("12345", localEvidenceId);
-        Assert.Equal("missingPatientIdentity", candidate.GetProperty("warnings")[0].GetString());
-        Assert.Equal("missingDeliveryAddress", candidate.GetProperty("warnings")[1].GetString());
-        Assert.Equal("missingZip5", candidate.GetProperty("warnings")[2].GetString());
-        Assert.True(candidate.GetProperty("confidence").GetDouble() < 1.0);
+        Assert.Empty(candidate.GetProperty("warnings").EnumerateArray());
+        Assert.Equal(1.0d, candidate.GetProperty("confidence").GetDouble(), precision: 3);
         Assert.True(candidate.GetProperty("fieldProvenance").TryGetProperty("rxHash", out var rxProv));
         Assert.Equal("sql", rxProv.GetProperty("source").GetString());
         Assert.Equal("phi-direct-hmac", rxProv.GetProperty("classification").GetString());
+    }
+
+    [Fact]
+    public void SerializeRxBatch_RepeatedPollsReuseDailyFillEvidenceAndRotateNextDay()
+    {
+        var first = new RxMetadata(
+            "RX-STABLE-1",
+            "Lisinopril",
+            "00093-7180-01",
+            new DateTime(2026, 7, 9, 14, 30, 0),
+            30m,
+            Guid.Parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+            DateTimeOffset.Parse("2026-07-10T12:00:01Z"),
+            FillNumber: 2);
+        var laterPoll = first with { DetectedAt = DateTimeOffset.Parse("2026-07-10T19:45:59Z") };
+
+        using var firstDoc = JsonDocument.Parse(RxDetectionWorker.SerializeRxBatch([first], "stable-salt"));
+        using var laterDoc = JsonDocument.Parse(RxDetectionWorker.SerializeRxBatch([laterPoll], "stable-salt"));
+        var firstProvenance = firstDoc.RootElement.GetProperty("data").GetProperty("rxOrderCandidates")[0]
+            .GetProperty("provenance");
+        var laterProvenance = laterDoc.RootElement.GetProperty("data").GetProperty("rxOrderCandidates")[0]
+            .GetProperty("provenance");
+
+        Assert.Equal(
+            firstProvenance.GetProperty("evidenceId").GetString(),
+            laterProvenance.GetProperty("evidenceId").GetString());
+        Assert.NotEqual(
+            firstProvenance.GetProperty("capturedAtUtc").GetString(),
+            laterProvenance.GetProperty("capturedAtUtc").GetString());
+
+        var nextFill = laterPoll with { FillNumber = 3 };
+        using var nextFillDoc = JsonDocument.Parse(RxDetectionWorker.SerializeRxBatch([nextFill], "stable-salt"));
+        Assert.NotEqual(
+            firstProvenance.GetProperty("evidenceId").GetString(),
+            nextFillDoc.RootElement.GetProperty("data").GetProperty("rxOrderCandidates")[0]
+                .GetProperty("provenance").GetProperty("evidenceId").GetString());
+
+        var nextDay = laterPoll with { DetectedAt = DateTimeOffset.Parse("2026-07-11T00:00:01Z") };
+        using var nextDayDoc = JsonDocument.Parse(RxDetectionWorker.SerializeRxBatch([nextDay], "stable-salt"));
+        Assert.NotEqual(
+            firstProvenance.GetProperty("evidenceId").GetString(),
+            nextDayDoc.RootElement.GetProperty("data").GetProperty("rxOrderCandidates")[0]
+                .GetProperty("provenance").GetProperty("evidenceId").GetString());
     }
 
     [Fact]
@@ -361,7 +388,7 @@ public class RxDetectionWorkerTests : IDisposable
     }
 
     [Fact]
-    public void SerializeRxBatch_CandidateIncludesPatientProvenanceAndFullConfidenceWhenDeliveryFieldsExist()
+    public void SerializeRxBatch_PreApprovalCandidateExcludesAllPatientAndLocationDetailsEvenWhenProvided()
     {
         var rxs = new List<RxMetadata>
         {
@@ -395,19 +422,20 @@ public class RxDetectionWorkerTests : IDisposable
         Assert.DoesNotContain("7605551234", serializedCandidate);
         Assert.DoesNotContain("Metformin", serializedCandidate);
 
-        var patientDelivery = candidate.GetProperty("patientDelivery");
-        Assert.Equal(PhiScrubber.HmacHash("sarah m", "test-salt"), patientDelivery.GetProperty("nameHash").GetString());
-        Assert.Equal(PhiScrubber.HmacHash("456 oak ave", "test-salt"), patientDelivery.GetProperty("addressLine1Hash").GetString());
-        Assert.Equal(PhiScrubber.HmacHash("7605551234", "test-salt"), patientDelivery.GetProperty("phoneHash").GetString());
-        Assert.Equal("Victorville", patientDelivery.GetProperty("city").GetString());
-        Assert.Equal("CA", patientDelivery.GetProperty("state").GetString());
-        Assert.Equal("92392", patientDelivery.GetProperty("zip5").GetString());
-        Assert.False(patientDelivery.GetProperty("zip4Present").GetBoolean());
-        Assert.Empty(patientDelivery.GetProperty("missingAddressFlags").EnumerateArray());
+        Assert.False(candidate.TryGetProperty("patientDelivery", out _));
+        Assert.DoesNotContain("Victorville", serializedCandidate, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"state\":\"CA\"", serializedCandidate, StringComparison.Ordinal);
+        Assert.DoesNotContain("92392", serializedCandidate, StringComparison.Ordinal);
+        Assert.DoesNotContain("patientDelivery", serializedCandidate, StringComparison.Ordinal);
+        Assert.DoesNotContain("missingAddress", serializedCandidate, StringComparison.OrdinalIgnoreCase);
+    }
 
-        Assert.True(candidate.GetProperty("fieldProvenance").TryGetProperty("patientDelivery.nameHash", out var patientProv));
-        Assert.Equal("phi-direct", patientProv.GetProperty("classification").GetString());
-        Assert.Equal("sql_patient_detail", patientProv.GetProperty("sourceDetail").GetString());
+    [Fact]
+    public void RxOrderCandidateContract_HasNoPatientDeliveryProperty()
+    {
+        Assert.DoesNotContain(
+            typeof(RxOrderCandidate).GetProperties(),
+            property => string.Equals(property.Name, "PatientDelivery", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -545,25 +573,18 @@ public class RxDetectionWorkerTests : IDisposable
 
         // Verify: batch persisted and retrievable
         var pending = _stateDb.GetPendingBatches();
-        Assert.Equal(1, pending.Count);
+        Assert.Single(pending);
 
-        // Verify: round-tripped JSON preserves operational fields only.
-        // Track 3 invariant — even when the legacy queue is enabled, PHI
-        // is absent (SerializeRxBatch_LegacyQueue_NeverShipsPhiFields).
+        // Verify: the inert legacy flag cannot resurrect rxDeliveryQueue in persisted retries.
         var doc = JsonDocument.Parse(pending[0].Payload);
-        var queue = doc.RootElement.GetProperty("data").GetProperty("rxDeliveryQueue");
-        Assert.Equal(2, queue.GetArrayLength());
-
-        var rx1 = queue[0];
-        Assert.Equal(PhiScrubber.HmacHash("99001", "test-salt"), rx1.GetProperty("rxNumber").GetString());
-        Assert.Equal("Metformin 500mg", rx1.GetProperty("drugName").GetString());
-        Assert.False(rx1.TryGetProperty("patientFirstName", out _));
-        Assert.False(rx1.TryGetProperty("deliveryAddress1", out _));
-
-        var rx2 = queue[1];
-        Assert.Equal(PhiScrubber.HmacHash("99002", "test-salt"), rx2.GetProperty("rxNumber").GetString());
-        Assert.False(rx2.TryGetProperty("patientFirstName", out _));
-        Assert.False(rx2.TryGetProperty("deliveryAddress1", out _));
+        var data = doc.RootElement.GetProperty("data");
+        Assert.False(data.TryGetProperty("rxDeliveryQueue", out _));
+        var candidates = data.GetProperty("rxOrderCandidates");
+        Assert.Equal(2, candidates.GetArrayLength());
+        Assert.Equal(PhiScrubber.HmacHash("99001", "test-salt"), candidates[0].GetProperty("rxHash").GetString());
+        Assert.Equal(PhiScrubber.HmacHash("99002", "test-salt"), candidates[1].GetProperty("rxHash").GetString());
+        Assert.False(candidates[0].TryGetProperty("patientDelivery", out _));
+        Assert.False(candidates[1].TryGetProperty("patientDelivery", out _));
 
         // Per-name PHI absence at the persisted-payload level — catches any
         // future caller that smuggles PHI into the legacy shape via another
@@ -574,6 +595,8 @@ public class RxDetectionWorkerTests : IDisposable
         Assert.DoesNotContain("7605551234", raw);
         Assert.DoesNotContain("456 Oak Ave", raw);
         Assert.DoesNotContain("789 Pine St", raw);
+        Assert.DoesNotContain("Metformin", raw);
+        Assert.DoesNotContain("Atorvastatin", raw);
     }
 
     [Fact]
@@ -595,7 +618,7 @@ public class RxDetectionWorkerTests : IDisposable
 
         // Verify batch is pending
         var pending = _stateDb.GetPendingBatches();
-        Assert.Equal(1, pending.Count);
+        Assert.Single(pending);
         var batchId = pending[0].Id;
 
         // Simulate successful cloud sync on retry (RetryPendingBatchesAsync calls DeleteBatch on success)
@@ -603,7 +626,7 @@ public class RxDetectionWorkerTests : IDisposable
 
         // Verify batch is cleared — exactly what RetryPendingBatchesAsync does after TrySyncPayloadToCloudAsync returns true
         var afterRetry = _stateDb.GetPendingBatches();
-        Assert.Equal(0, afterRetry.Count);
+        Assert.Empty(afterRetry);
     }
 
     [Fact]
@@ -641,18 +664,19 @@ public class RxDetectionWorkerTests : IDisposable
 
         // Batch should be dead-lettered and no longer appear in pending
         var pending = _stateDb.GetPendingBatches();
-        Assert.Equal(0, pending.Count);
+        Assert.Empty(pending);
         Assert.Equal(1, _stateDb.GetDeadLetterCount());
     }
 
     [Fact]
-    public void CanaryDetection_UsesAuditedPatientEnrichmentAfterSchemaPass()
+    public void CanaryDetection_PersistsProtectedCorrelationWithoutPreApprovalPatientQuery()
     {
         var source = ReadRepoFile("src/SuavoAgent.Core/Workers/RxDetectionWorker.cs");
 
-        Assert.Contains("EnrichPatientDetailsAsync(result.Rxs, hmacSalt, ct)", source);
-        Assert.Contains("EnrichPatientDetailsAsync(detection.Rxs, hmacSalt, ct)", source);
-        Assert.Contains("Trigger: \"rx_detection_worker.enrich_for_delivery_sync\"", source);
+        Assert.Contains("PersistRxCorrelations(result.Rxs, hmacSalt)", source);
+        Assert.Contains("PersistRxCorrelations(detection.Rxs, hmacSalt)", source);
+        Assert.DoesNotContain("EnrichPatientDetailsAsync", source);
+        Assert.DoesNotContain("PullPatientForRxAsync", source);
     }
 
     [Fact]
@@ -665,12 +689,12 @@ public class RxDetectionWorkerTests : IDisposable
     }
 
     [Fact]
-    public void LiveDetection_GatesLegacyPhiQueueBehindExplicitOption()
+    public void LiveDetection_LegacyOptionCannotCreateLegacyWireShape()
     {
         var source = ReadRepoFile("src/SuavoAgent.Core/Workers/RxDetectionWorker.cs");
 
-        Assert.DoesNotContain("includeLegacyDeliveryQueue: true);", source);
-        Assert.Contains("includeLegacyDeliveryQueue: _options.EnableLegacyPhiDeliveryQueueSync", source);
+        Assert.DoesNotContain("data[\"rxDeliveryQueue\"]", source);
+        Assert.Contains("includeLegacyDeliveryQueue is intentionally inert", source);
     }
 
     [Fact]
@@ -682,7 +706,7 @@ public class RxDetectionWorkerTests : IDisposable
         // pre-2026-05-12 legacy rxDeliveryQueue. Re-introducing one would
         // re-open the wire-tap exposure that cloud-side
         // sanitizeSnapshotData silently papered over. PHI delivery
-        // details flow exclusively through SendPatientDetailsAsync
+        // details flow exclusively through SendApprovedPatientDetailsAsync
         // (typed PatientDetailsPayload, signed-command-driven path).
         var source = ReadRepoFile("src/SuavoAgent.Core/Workers/RxDetectionWorker.cs");
 
@@ -715,82 +739,4 @@ public class RxDetectionWorkerTests : IDisposable
         try { File.Delete(_dbPath); } catch { }
     }
 
-    // Bug 12 — on a host with no PioneerRx installed (Queen, dev workstations,
-    // any non-Windows runner) RunCycleAsync must short-circuit instead of
-    // burning a 30s SqlConnection.OpenAsync timeout + a warning log every
-    // ~6 minutes. The detector returns false on non-Windows, so this test
-    // exercises the no-PMS path on every CI architecture without a Windows
-    // fixture.
-    [Fact]
-    public async Task RunCycle_NoPmsHost_SkipsSqlConnectWithoutAttempt()
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            // On Windows we can't guarantee PioneerRx is absent without a
-            // clean-room VM. The cross-platform invariant carries the
-            // contract; skip when running on a host that might have the PMS.
-            return;
-        }
-
-        var services = new ServiceCollection();
-        var sp = services.BuildServiceProvider();
-        var options = Options.Create(new AgentOptions
-        {
-            SqlServer = "127.0.0.1,9", // intentionally unreachable
-            SqlDatabase = "PioneerPharmacySystem",
-            LearningMode = true,
-        });
-
-        var worker = new RxDetectionWorker(
-            NullLogger<RxDetectionWorker>.Instance,
-            NullLoggerFactory.Instance,
-            options, _stateDb, sp);
-
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        // RunCycleAsync is internal; reachable via InternalsVisibleTo.
-        // Use a short cancel budget so a missing short-circuit would fail
-        // loud — a real SqlConnection.OpenAsync attempt takes ~30s.
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        try
-        {
-            await worker.RunCycleAsync(cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            // The cycle's 60s "skipping detection" Task.Delay will trip the
-            // cancel after the short-circuit; that's expected and proves we
-            // never blocked on an actual SQL connect.
-        }
-        sw.Stop();
-
-        Assert.False(worker.IsSqlConnected);
-        Assert.True(worker.LoggedNoPmsOnce,
-            "expected no-PMS short-circuit to log once");
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(15),
-            $"RunCycleAsync took {sw.Elapsed} — short-circuit must skip the 30s SQL connect timeout");
-    }
-
-    [Fact]
-    public async Task RunCycle_NoPmsHost_LogsOnceAcrossMultipleCycles()
-    {
-        if (OperatingSystem.IsWindows()) return;
-
-        var services = new ServiceCollection();
-        var sp = services.BuildServiceProvider();
-        var options = Options.Create(new AgentOptions { LearningMode = true });
-
-        var worker = new RxDetectionWorker(
-            NullLogger<RxDetectionWorker>.Instance,
-            NullLoggerFactory.Instance,
-            options, _stateDb, sp);
-
-        for (var i = 0; i < 3; i++)
-        {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            try { await worker.RunCycleAsync(cts.Token); }
-            catch (OperationCanceledException) { }
-        }
-
-        Assert.True(worker.LoggedNoPmsOnce);
-    }
 }

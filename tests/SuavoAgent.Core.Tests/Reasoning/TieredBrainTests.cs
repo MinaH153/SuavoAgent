@@ -68,7 +68,7 @@ public class TieredBrainTests
         var decision = await brain.DecideAsync(Ctx("s1"));
 
         Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
-        Assert.Contains("no proposal", decision.Reason);
+        Assert.Equal("local_model_no_proposal", decision.Reason);
     }
 
     [Fact]
@@ -130,7 +130,9 @@ public class TieredBrainTests
 
         Assert.Equal(MatchOutcome.Blocked, decision.Outcome);
         Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
-        Assert.Contains("AutoExecuteTier2Destructive", decision.Verification!.Reason);
+        Assert.Equal(
+            "model_destructive_action_requires_approval",
+            decision.Verification!.Reason);
     }
 
     // --- Precondition short-circuit -----------------------------------------
@@ -182,7 +184,7 @@ public class TieredBrainTests
         Assert.Equal(MatchOutcome.NoMatch, decision.Outcome);
         Assert.Equal(DecisionTier.LocalInference, decision.Tier);
         Assert.NotNull(decision.Proposal);
-        Assert.Contains("Shadow", decision.Reason);
+        Assert.Equal("model_proposal_shadowed", decision.Reason);
     }
 
     // --- Allowed-actions narrowing passes through ----------------------------
@@ -200,7 +202,7 @@ public class TieredBrainTests
 
         Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
         Assert.Equal(VerificationOutcome.Rejected, decision.Verification!.Outcome);
-        Assert.Contains("not allowed", string.Join(" ", decision.Verification.FailedChecks));
+        Assert.Contains("action_not_allowed", decision.Verification.FailedChecks);
     }
 
     // --- Tier 3 cloud escalation --------------------------------------------
@@ -239,6 +241,31 @@ public class TieredBrainTests
         Assert.Equal(DecisionTier.CloudInference, decision.Tier);
         Assert.Equal(1, cloud.CallCount);
         Assert.Equal(0.92, decision.Proposal!.Confidence);
+    }
+
+    [Fact]
+    public async Task Decide_Tier3Destructive_NeverAutoExecutes()
+    {
+        var local = new MockLocalInference();
+        local.Responses.Enqueue(null);
+        var cloud = new MockCloudReasoning();
+        cloud.EnqueueApproved(RuleActionType.Click, 1.0, ("name", "Save"));
+        var brain = Brain(
+            rules: Array.Empty<Rule>(),
+            mock: local,
+            autoExecuteDestructive: true,
+            cloud: cloud);
+
+        var decision = await brain.DecideAsync(
+            Ctx("s1", visible: new[] { "Save" }),
+            allowedTier2Actions: new HashSet<RuleActionType> { RuleActionType.Click });
+
+        Assert.Equal(MatchOutcome.Blocked, decision.Outcome);
+        Assert.Equal(DecisionTier.OperatorRequired, decision.Tier);
+        Assert.Equal(
+            "cloud_destructive_action_requires_approval",
+            decision.Verification!.Reason);
+        Assert.Empty(decision.Actions);
     }
 
     [Fact]

@@ -1,14 +1,22 @@
 # Authenticode signing runbook
 
+> **INTERNAL RELEASE ENGINEERING.** Commands in this file are for controlled CI
+> and certificate operations, never for a customer workstation. The approved
+> customer lifecycle is `docs/sales/windows-agent-lifecycle.md`.
+
 SuavoAgent binaries are signed with an **SSL.com EV Code Signing Certificate**
 bound to **SSL.com eSigner cloud HSM** (no physical token). The cert lives in
 SSL.com's FIPS 140-2 validated cloud key vault; signing happens via the
 `sslcom/actions-codesigner` GitHub Action in CI. No self-hosted runner is
 required.
 
-The release and hotfix workflows **fail closed** unless `SIGNING_ENABLED=true`
-and all four `ES_*` secrets are configured. Flip the gate only once the
-secrets are populated and a smoke tag has signed successfully.
+The release and hotfix workflows **fail closed** unless their protected
+`suavoagent-production-signing` environment has approved reviewers, all four
+`ES_*` secrets, the exact Authenticode signer-certificate SHA-256 allowlist,
+and the OIDC/AWS KMS configuration for the non-exportable `ota-update-v1`
+key. It also requires recorded WiX Open Source Maintenance Fee EULA acceptance
+and the reviewed VC++ prerequisite URL. Flip the gate only after that
+environment is configured and reviewed.
 
 ## SmartScreen reputation & certificate continuity — READ THIS
 
@@ -39,7 +47,8 @@ zero, with no transfer path.** The continuity of *this* cert (order
 same reputation model (no instant trust) and switching would discard the
 reputation this cert is building. Reconsider only at a natural renewal.
 
-**Free shot:** file a WDSI software-developer submission for `SuavoSetup.exe` at
+**Free shot:** file a WDSI software-developer submission for the signed
+`SuavoAgent-Setup-vX.Y.Z-win-x64.exe` bundle at
 <https://www.microsoft.com/en-us/wdsi/filesubmission> (low effort, uncertain
 payoff; re-submit per new version/hash).
 
@@ -115,9 +124,18 @@ On GitHub → **MinaH153/SuavoAgent → Settings → Secrets and variables → A
 | Secret | `ES_CREDENTIAL_ID` | GUID from step 2 |
 | Secret | `ES_TOTP_SECRET` | Base32 string from step 1 |
 | Variable | `SIGNING_ENABLED` | `true` |
+| Variable | `AUTHENTICODE_SIGNER_SHA256` | Exact 64-hex SHA-256 digest of each approved signer certificate, comma-separated during rotation |
+| Variable | `AWS_SIGNING_ROLE_ARN` | Least-privilege OIDC role allowed only to get/sign with the OTA KMS key |
+| Variable | `AWS_SIGNING_REGION` | Region containing the OTA KMS key |
+| Variable | `OTA_KMS_KEY_ID` | Non-exportable P-256 `ota-update-v1` KMS key ARN |
+| Variable | `OTA_KMS_PUBLIC_KEY_DER_BASE64` | Reviewed SPKI DER that exactly matches the runtime-pinned OTA key |
+| Variable | `WIX_OSMF_EULA_ACCEPTED` | Exactly `true` only after the legal owner records acceptance of the WiX 7 OSMF EULA |
+| Variable | `VC_REDIST_X64_URL` | HTTPS URL for the reviewed Microsoft VC++ 14.44.35211.0 x64 prerequisite whose SHA-256 is pinned in the workflow |
 
-The existing `SIGNING_KEY_PEM` secret stays as-is — it signs `checksums.sha256`
-and the OTA update manifest, not the binaries themselves.
+Delete the retired `SIGNING_KEY_PEM` secret after confirming no older workflow
+references it. Exportable PEM release signing is forbidden. Brain model and
+brain native manifests use two additional, independent non-exportable roots;
+neither may reuse the OTA key or each other.
 
 The deprecated `SIGNING_CERT_THUMBPRINT` and `SIGNING_TIMESTAMP_URL`
 variables/secrets are no longer referenced by either workflow; safe to delete.
@@ -131,17 +149,23 @@ git push origin v3.13.99-esigner-smoke
 
 Watch the Actions run. Expected sequence:
 
-- `release-signing-preflight` (ubuntu) — verifies all four `ES_*` secrets are
-  set, fails fast if any are missing
-- `bootstrap-windows-smoke` (windows) — parse-checks `bootstrap.ps1` under PS 5.1
-- `build` (ubuntu) — `dotnet publish` for each of the 5 binaries
-- `sign_windows` (ubuntu) — 5 sequential calls to `sslcom/actions-codesigner@develop`,
-  one per binary; each call talks to SSL.com's cloud HSM over HTTPS and signs
-  the binary in-place
-- `windows-release-smoke` (windows) — expands the zip and asserts every binary
-  passes `Get-AuthenticodeSignature -RequireAuthenticodeSignature`
-- `release` (ubuntu) — generates checksums, signs the manifest, publishes the
-  GitHub Release
+- `release-signing-preflight` (ubuntu) — waits for protected-environment review
+  and verifies eSigner, exact signer digest, OIDC role, and KMS inputs
+- `production-shell-boundary` (ubuntu) — rejects a script-based production or
+  customer lifecycle
+- `build` (ubuntu) — builds, tests, and publishes the declared Windows cohort
+- `sign_windows` (ubuntu) — 5 sequential calls to the commit-pinned SSL.com
+  code-signing action, one per binary; each call talks to SSL.com's cloud HSM
+  over HTTPS and signs the binary in-place
+- `build_msi` / `sign_msi` — builds the WiX MSI from the immutable signed
+  five-binary cohort, then signs the MSI through the protected publisher key
+- `build_bundle` / `sign_bundle` — embeds that already-signed MSI and the exact
+  hash-pinned VC++ runtime in a native Burn installer without rebuilding the MSI
+- `windows-release-smoke` (windows) — verifies the signed bundle and MSI,
+  silently installs the MSI, proves all required services were registered,
+  uninstalls it, scans with Defender, and checks the internal signed cohort
+- `release` (ubuntu) — assumes the least-privilege AWS role through OIDC, asks
+  KMS to sign checksums/OTA bytes, emits provenance attestations, and publishes
 
 Download `SuavoAgent.Core.exe` from the release → Properties → Digital
 Signatures. You should see `MKM Technologies LLC` with a valid timestamp.
@@ -155,11 +179,18 @@ gh release delete v3.13.99-esigner-smoke --yes
 
 ### 5. Verify SmartScreen on a fresh Windows machine
 
-Download the `.cmd` installer from a pharmacy signup page and run it on a
-Windows machine that has never seen the agent. The UAC prompt should read
-`Verified publisher: MKM Technologies LLC` instead of `Publisher unknown`.
+Download `SuavoAgent-Setup-vX.Y.Z-win-x64.exe` from the authenticated pharmacy
+dashboard on a Windows machine that has never seen the agent. Check
+**Properties → Digital Signatures**, then open it. The signature must be valid
+and the UAC prompt must read `Verified publisher: MKM Technologies LLC`, not
+`Publisher unknown`.
 
-## Local signing on a Windows dev box (optional)
+Complete the native install, diagnostics, repair, update, and uninstall checks
+in `docs/hardening/release-gate.md`. SmartScreen may still show a reputation
+warning for a new certificate; that does not permit bypassing a missing or
+invalid publisher signature.
+
+## Local signing on a Windows dev box (optional; internal engineering only)
 
 If you want `publish.ps1 -CertThumbprint <SHA1>` to sign locally on a Windows
 dev machine without going through CI, install
@@ -227,9 +258,12 @@ auto-renewal in the release pipeline before expiry.
 - `.github/workflows/hotfix.yml` — manual-dispatch hotfix pipeline
 - `scripts/Test-QueenShipPreflight.ps1` — local Queen build-readiness probe
   (signing checks now skipped by default; only the EV cert thumbprint check
-  remains, and only fires on Windows boxes with CKA installed)
+  remains, and only fires on Windows boxes with CKA installed). This is internal
+  release engineering tooling, never a customer install or support step.
 - `Directory.Build.props` — PE metadata (Company, Copyright, Version)
-- `bootstrap.ps1` — client installer; verifies `checksums.sha256` signature
-  (separate ECDSA P-256 key, `SIGNING_KEY_PEM`)
+- `installer/SuavoAgent.Msi/` and `installer/SuavoAgent.Bundle/` — customer MSI
+  and native Burn installer
+- `src/SuavoAgent.Setup/` — signed GUI and staged native maintenance host
+- `docs/sales/windows-agent-lifecycle.md` — approved customer lifecycle
 - Memory: `ssl-com-ev-cert-validation-submitted.md`,
   `session-end-2026-05-15-mesh-end-to-end-shipped.md`

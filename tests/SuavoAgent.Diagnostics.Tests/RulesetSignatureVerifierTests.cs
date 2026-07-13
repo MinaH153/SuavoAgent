@@ -384,7 +384,7 @@ public class RulesetVersionIntTests
 
 /// <summary>
 /// RFC 8785 golden vectors (Comp 2.2 part 5). Both the agent (via the
-/// `JsonCanonicalizer` NuGet) and the cloud Edge Function (Comp 2A, via
+/// pinned vendored WebPKI reference source) and the cloud Edge Function (Comp 2A, via
 /// the `canonicalize` npm package) MUST produce identical output for these
 /// inputs. Any drift between the two libraries breaks signature
 /// verification, so these tests are the wire-compat gate.
@@ -414,7 +414,7 @@ public class RFC8785GoldenVectorTests
     public void Canonicalize_serialises_integer_floats_without_trailing_zero()
     {
         // RFC 8785 / ECMAScript ToString: 1.0 → "1", not "1.0".
-        // (JsonCanonicalizer NuGet conforms.)
+        // (The pinned vendored WebPKI reference implementation conforms.)
         var canonical = RulesetSignatureVerifier.CanonicalizeJsonString("""{"x":1.0}""");
         Assert.Equal("""{"x":1}""", canonical);
     }

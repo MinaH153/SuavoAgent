@@ -1,4 +1,5 @@
 using SuavoAgent.Helper.Security;
+using SuavoAgent.Contracts.Models;
 using Xunit;
 
 namespace SuavoAgent.Helper.Tests.Security;
@@ -13,7 +14,10 @@ public sealed class HoneytokenCorroboratorTests
 {
     private const string InstallDir = @"C:\Program Files\SuavoAgent";
 
-    private static readonly HoneytokenCorroborator Corroborator = new(InstallDir);
+    private static readonly HoneytokenCorroborator Corroborator = new(
+        InstallDir,
+        [@"C:\Windows\System32"],
+        _ => true);
 
     // --- Allowlist → OBSERVE (zero gate change) ------------------------------
 
@@ -26,6 +30,7 @@ public sealed class HoneytokenCorroboratorTests
     {
         var r = Corroborator.Corroborate(name, exe, priorTouchCount: 0);
         Assert.Equal(CorroborationLevel.Observe, r.Level);
+        Assert.Equal(HoneytokenReasonLabels.AgentProcess, r.ReasonLabel);
     }
 
     [Theory]
@@ -38,6 +43,7 @@ public sealed class HoneytokenCorroboratorTests
     {
         var r = Corroborator.Corroborate(name, exePath: $@"C:\Windows\System32\{name}.exe", priorTouchCount: 0);
         Assert.Equal(CorroborationLevel.Observe, r.Level);
+        Assert.Equal(HoneytokenReasonLabels.SystemProcess, r.ReasonLabel);
     }
 
     [Fact]
@@ -46,6 +52,7 @@ public sealed class HoneytokenCorroboratorTests
         // A process NAMED like the agent but running from elsewhere is an impostor → not allowlisted.
         var r = Corroborator.Corroborate("SuavoAgent.Helper", @"C:\Temp\SuavoAgent.Helper.exe", priorTouchCount: 0);
         Assert.Equal(CorroborationLevel.Degrade, r.Level);
+        Assert.Equal(HoneytokenReasonLabels.UnexpectedProcess, r.ReasonLabel);
     }
 
     // --- Non-allowlisted, non-sensitive → DEGRADE (reversible) ---------------
@@ -55,6 +62,7 @@ public sealed class HoneytokenCorroboratorTests
     {
         var r = Corroborator.Corroborate("explorer", @"C:\Windows\explorer.exe", priorTouchCount: 0);
         Assert.Equal(CorroborationLevel.Degrade, r.Level);
+        Assert.Equal(HoneytokenReasonLabels.UnexpectedProcess, r.ReasonLabel);
     }
 
     [Fact]
@@ -64,6 +72,7 @@ public sealed class HoneytokenCorroboratorTests
         // never observe (observe is only for KNOWN-safe), never instant apoptosis.
         var r = Corroborator.Corroborate(processName: "", exePath: null, priorTouchCount: 0);
         Assert.Equal(CorroborationLevel.Degrade, r.Level);
+        Assert.Equal(HoneytokenReasonLabels.UnknownProcess, r.ReasonLabel);
     }
 
     // --- Escalation → APOPTOSIS (denylist shells ONLY — see HoneytokenCorroboratorNeverLatchTests) -----
@@ -89,22 +98,23 @@ public sealed class HoneytokenCorroboratorTests
     {
         var r = Corroborator.Corroborate(name, $@"C:\Windows\System32\{name}.exe", priorTouchCount: 0);
         Assert.Equal(CorroborationLevel.Apoptosis, r.Level);
+        Assert.Equal(HoneytokenReasonLabels.SensitiveShell, r.ReasonLabel);
     }
 
-    // --- PHI-safe reason label (always) -------------------------------------
+    // --- Fixed PHI-negative reason label (always) --------------------------
 
-    [Theory]
-    [InlineData("powershell", @"C:\x\powershell.exe", 0)]
-    [InlineData("explorer", @"C:\x\explorer.exe", 0)]
-    [InlineData("a name with spaces & symbols!", null, 0)] // hostile/odd name
-    [InlineData("SuavoAgent.Helper", @"C:\Program Files\SuavoAgent\SuavoAgent.Helper.exe", 0)]
-    public void ReasonLabel_AlwaysPhiSafe(string name, string? exe, int prior)
+    [Fact]
+    public void PatientNamedExecutable_NeverEntersReasonLabel()
     {
-        var r = Corroborator.Corroborate(name, exe, prior);
-        Assert.NotNull(r.ReasonLabel);
-        Assert.True(r.ReasonLabel.Length <= 32, $"label too long: {r.ReasonLabel}");
-        // Locked to lowercase: SafeName always lowercases, so the test charset must be lowercase-only —
-        // a permissive [A-Za-z] would silently accept an uppercase regression (HIPAA §164.312(b) audit).
-        Assert.Matches("^[a-z0-9._-]+$", r.ReasonLabel); // safe charset only — no spaces/contents/PHI
+        const string patientLikeProcess = "Jane_Doe_01-15-1990";
+
+        var r = Corroborator.Corroborate(
+            patientLikeProcess,
+            @"C:\Temp\Jane_Doe_01-15-1990.exe",
+            priorTouchCount: 0);
+
+        Assert.Equal(HoneytokenReasonLabels.UnexpectedProcess, r.ReasonLabel);
+        Assert.DoesNotContain("jane", r.ReasonLabel, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("1990", r.ReasonLabel, StringComparison.Ordinal);
     }
 }

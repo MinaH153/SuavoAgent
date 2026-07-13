@@ -8,7 +8,7 @@ namespace SuavoAgent.Setup.Tests;
 /// <summary>
 /// Guards the Agree button enable/disable logic — the last safety rail before
 /// monitoring software is authorized on a workstation. Missing name, state,
-/// terms checkbox, or (in CT/DE/NY) the mandatory-notice checkbox must keep
+/// terms checkbox, or employee-notice checkbox must keep
 /// the button disabled.
 /// </summary>
 public sealed class ConsentViewModelTests
@@ -44,14 +44,15 @@ public sealed class ConsentViewModelTests
     }
 
     [Fact]
-    public void Agree_enabled_for_non_mandatory_state_with_terms_and_minimum_fields()
+    public void Agree_blocked_for_every_hipaa_state_when_notice_unchecked()
     {
         var vm = NewVm();
         vm.Name = "Jane";
         vm.StateCode = "CA";
         vm.AgreedToTerms = true;
 
-        Assert.True(vm.AgreeCommand.CanExecute(null));
+        Assert.True(vm.RequiresEmployeeNotice);
+        Assert.False(vm.AgreeCommand.CanExecute(null));
     }
 
     [Fact]
@@ -89,6 +90,7 @@ public sealed class ConsentViewModelTests
         vm.Title = "  Owner  ";
         vm.StateCode = "  ca  ";
         vm.AgreedToTerms = true;
+        vm.AgreedToNotice = true;
 
         Assert.True(vm.AgreeCommand.CanExecute(null));
         vm.AgreeCommand.Execute(null);
@@ -110,6 +112,7 @@ public sealed class ConsentViewModelTests
         vm.Name = "Jane";
         vm.StateCode = "CA";
         vm.AgreedToTerms = true;
+        vm.AgreedToNotice = true;
         vm.AgreeCommand.Execute(null);
 
         Assert.Equal("Authorized Representative", ctx.Consent!.AuthorizingTitle);
@@ -139,6 +142,10 @@ public sealed class ConsentViewModelTests
 
         vm.StateCode = "CA";
         vm.AgreedToTerms = true;
+        Assert.Contains("employee-notice", vm.MissingHint);
+        Assert.False(vm.AgreeCommand.CanExecute(null));
+
+        vm.AgreedToNotice = true;
         Assert.Equal(string.Empty, vm.MissingHint); // complete -> hint disappears
         Assert.True(vm.AgreeCommand.CanExecute(null));
     }

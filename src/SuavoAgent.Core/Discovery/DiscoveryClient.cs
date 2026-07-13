@@ -49,28 +49,24 @@ public sealed class DiscoveryClient
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "DiscoveryClient: IPC send failed for job {JobId}", jobId);
+            _logger.LogSafeWarning(ex);
             return DiscoveryOutcome.Failed(new DiscoveryFailure(DiscoveryFailureReason.IpcUnavailable));
         }
 
         if (response is null)
         {
-            _logger.LogWarning("DiscoveryClient: no response from Helper for job {JobId}", jobId);
+            _logger.LogWarning("core.discovery.helper_timeout");
             return DiscoveryOutcome.Failed(new DiscoveryFailure(DiscoveryFailureReason.HelperTimeout));
         }
         if (response.Id != request.Id)
         {
-            _logger.LogWarning(
-                "DiscoveryClient: response id mismatch (sent {Sent} got {Got}) — pipe desync guard",
-                request.Id, response.Id);
+            _logger.LogWarning("core.discovery.ipc_desync");
             return DiscoveryOutcome.Failed(
                 new DiscoveryFailure(DiscoveryFailureReason.IpcDesync, HelperVersionSuspect: true));
         }
         if (response.Status != IpcStatus.Ok)
         {
-            _logger.LogWarning(
-                "DiscoveryClient: Helper returned {Status} {Code}: {Message}",
-                response.Status, response.Error?.Code, response.Error?.Message);
+            _logger.LogWarning("core.discovery.helper_error");
             return DiscoveryOutcome.Failed(new DiscoveryFailure(
                 DiscoveryFailureReason.HelperError,
                 IpcStatus: response.Status,
@@ -78,7 +74,7 @@ public sealed class DiscoveryClient
         }
         if (response.Data is null)
         {
-            _logger.LogWarning("DiscoveryClient: Helper returned OK with no data for job {JobId}", jobId);
+            _logger.LogWarning("core.discovery.empty_payload");
             return DiscoveryOutcome.Failed(new DiscoveryFailure(DiscoveryFailureReason.NoData));
         }
 
@@ -87,7 +83,7 @@ public sealed class DiscoveryClient
             var result = JsonSerializer.Deserialize<FileDiscoveryResult>(response.Data.Value);
             if (result is null)
             {
-                _logger.LogWarning("DiscoveryClient: Helper response deserialized to null for job {JobId}", jobId);
+                _logger.LogWarning("core.discovery.deserialize_null");
                 return DiscoveryOutcome.Failed(
                     new DiscoveryFailure(DiscoveryFailureReason.DeserializeError, HelperVersionSuspect: true));
             }
@@ -95,7 +91,7 @@ public sealed class DiscoveryClient
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "DiscoveryClient: failed to deserialize FileDiscoveryResult");
+            _logger.LogSafeWarning(ex);
             return DiscoveryOutcome.Failed(
                 new DiscoveryFailure(DiscoveryFailureReason.DeserializeError, HelperVersionSuspect: true));
         }

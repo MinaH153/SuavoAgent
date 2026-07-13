@@ -7,9 +7,18 @@ namespace SuavoAgent.Core.Tests.Cloud;
 
 public class SeedClientTests
 {
-    private static SeedResponse MakeResponse(string digest = "digest-1", string phase = "pattern") =>
-        new(digest, 1, phase, new[] { "schema" }, null,
-            null, Array.Empty<SeedQueryShape>(), Array.Empty<SeedStatusMapping>(), null);
+    private const string CommandId = "11111111-1111-4111-8111-111111111111";
+    private static readonly string DefaultDigest = new('a', 64);
+    private static readonly string DeviceKeyId = new('b', 64);
+    private static readonly string SourceDigest = new('c', 64);
+
+    private static SeedResponse MakeResponse(string? digest = null, string phase = "pattern") =>
+        new(digest ?? DefaultDigest, 1, phase, new[] { "schema" }, null,
+            null, Array.Empty<SeedQueryShape>(), Array.Empty<SeedStatusMapping>(), null,
+            CommandId: CommandId,
+            DeviceKeyId: DeviceKeyId,
+            SourceManifestDigest: SourceDigest,
+            ExpiresAt: DateTimeOffset.UtcNow.AddHours(1).ToString("O"));
 
     [Fact]
     public async Task PullAsync_PostsToCorrectEndpoint()
@@ -41,29 +50,47 @@ public class SeedClientTests
     [Fact]
     public async Task PullAsync_DeserializesResponse()
     {
-        var expected = MakeResponse("digest-abc", "model");
+        var expectedDigest = new string('d', 64);
+        var expected = MakeResponse(expectedDigest, "model");
         var client = new SeedClient(new FakePostSigner((_, _) => JsonSerializer.SerializeToElement(expected)));
 
         var req = new SeedRequest("PioneerRx", "model", "fp-1", "ver-1", new[] { "t1", "t2" }, null);
         var result = await client.PullAsync(req, CancellationToken.None);
 
         Assert.NotNull(result);
-        Assert.Equal("digest-abc", result!.SeedDigest);
+        Assert.Equal(expectedDigest, result!.SeedDigest);
         Assert.Equal("model", result.Phase);
     }
 
     [Fact]
-    public async Task ConfirmAsync_PostsToCorrectEndpoint()
+    public async Task ConfirmAsync_PostsDeviceBoundReceiptToVerifiedEndpoint()
     {
         string? capturedPath = null;
-        var client = new SeedClient(new FakePostSigner((path, _) =>
+        object? capturedPayload = null;
+        var receipt = new SeedApplicationDeviceReceipt(
+            1, CommandId,
+            "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333",
+            DeviceKeyId, DefaultDigest, 1, "pattern", SourceDigest,
+            "learn-session", "2026-07-11T08:00:00.0000000Z", 5, 2, 1);
+        var signed = new SignedDeviceReceipt<SeedApplicationDeviceReceipt>(
+            receipt, DeviceKeyId, new string('S', 86), new string('e', 64));
+        var client = new SeedClient(new FakePostSigner((path, payload) =>
         {
             capturedPath = path;
-            return JsonSerializer.SerializeToElement(new { ok = true });
+            capturedPayload = payload;
+            return JsonSerializer.SerializeToElement(new
+            {
+                success = true,
+                status = "applied",
+                commandId = CommandId,
+                idempotent = false,
+            });
         }));
 
-        await client.ConfirmAsync(new SeedConfirmRequest("d-1", "2026-04-14T00:00:00Z", 5, 2), CancellationToken.None);
+        Assert.True(await client.ConfirmAsync(signed, CancellationToken.None));
         Assert.Equal("/api/agent/seed/confirm", capturedPath);
+        Assert.NotNull(capturedPayload);
     }
 }
 

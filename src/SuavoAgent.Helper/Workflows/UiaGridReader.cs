@@ -26,11 +26,22 @@ public sealed class UiaGridReader
     private readonly ILogger _logger;
     private readonly TimeSpan _gridLoadTimeout;
     private readonly int _settleMs;
+    private readonly Action _ensureLiveActuation;
+    private readonly Action<Action> _executeLiveMutation;
 
-    public UiaGridReader(ILogger logger, TimeSpan gridLoadTimeout, int settleMs = 900)
+    public UiaGridReader(
+        ILogger logger,
+        TimeSpan gridLoadTimeout,
+        Action ensureLiveActuation,
+        Action<Action> executeLiveMutation,
+        int settleMs = 900)
     {
-        _logger = logger;
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _gridLoadTimeout = gridLoadTimeout;
+        _ensureLiveActuation = ensureLiveActuation
+            ?? throw new ArgumentNullException(nameof(ensureLiveActuation));
+        _executeLiveMutation = executeLiveMutation
+            ?? throw new ArgumentNullException(nameof(executeLiveMutation));
         _settleMs = settleMs;
     }
 
@@ -45,6 +56,7 @@ public sealed class UiaGridReader
         var deadline = DateTime.UtcNow + _gridLoadTimeout;
         while (DateTime.UtcNow < deadline)
         {
+            _ensureLiveActuation();
             var grid = root.FindFirstDescendant(cf.ByControlType(ControlType.Table))
                 ?? root.FindFirstDescendant(cf.ByControlType(ControlType.DataGrid));
             if (grid != null) return grid;
@@ -75,6 +87,7 @@ public sealed class UiaGridReader
         var byId = new Dictionary<string, AutomationElement>();
         void Harvest()
         {
+            _ensureLiveActuation();
             int i = 0;
             foreach (var r in grid.FindAllChildren(cf.ByControlType(ControlType.DataItem)))
             {
@@ -93,6 +106,7 @@ public sealed class UiaGridReader
         int lastCount = byId.Count, stable = 0;
         while (DateTime.UtcNow < deadline)
         {
+            _ensureLiveActuation();
             if (expectedRowCount > 0 && byId.Count >= expectedRowCount) break;
 
             bool scrolled = false;
@@ -102,7 +116,9 @@ public sealed class UiaGridReader
                 try { pct = scroll!.VerticalScrollPercent.ValueOrDefault; } catch { }
                 if (pct < 99.9)
                 {
-                    try { scroll!.Scroll(ScrollAmount.NoAmount, ScrollAmount.LargeIncrement); scrolled = true; } catch { }
+                    _executeLiveMutation(() =>
+                        scroll!.Scroll(ScrollAmount.NoAmount, ScrollAmount.LargeIncrement));
+                    scrolled = true;
                 }
             }
 
@@ -166,18 +182,17 @@ public sealed class UiaGridReader
             var missing = specs.Where(s => s.Required && !idx.ContainsKey(s.Key)).Select(s => s.Key).ToList();
             if (missing.Count > 0)
             {
-                _logger.Warning("UiaGridReader: required columns not resolved by header name: [{Missing}] — failing closed",
-                    string.Join(", ", missing));
+                _logger.Warning("UiaGridReader: {Count} required columns were unresolved; failing closed",
+                    missing.Count);
                 return null;
             }
 
-            _logger.Debug("UiaGridReader: resolved columns [{Resolved}]",
-                string.Join(", ", idx.Select(kv => $"{kv.Key}=col {kv.Value}")));
+            _logger.Debug("UiaGridReader resolved {Count} structural columns", idx.Count);
             return idx;
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.Warning(ex, "UiaGridReader: column resolution error — failing closed (no ordinal fallback)");
+            _logger.Warning("UiaGridReader column resolution failed locally; failing closed");
             return null;
         }
     }

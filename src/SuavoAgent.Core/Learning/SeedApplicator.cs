@@ -64,7 +64,7 @@ public sealed class SeedApplicator
             }
         }
 
-        _db.InsertAppliedSeed(response.SeedDigest, "pattern", now, applied, 0);
+        _db.InsertAppliedSeed(response.SeedDigest, "pattern", now, applied, 0, sessionId);
         _db.CommitTransaction(txn);
         return new(applied, AlreadyApplied: false);
     }
@@ -106,7 +106,7 @@ public sealed class SeedApplicator
 
         if (response.Correlations is not { } correlations)
         {
-            _db.InsertAppliedSeed(response.SeedDigest, "model", now, 0, 0);
+            _db.InsertAppliedSeed(response.SeedDigest, "model", now, 0, 0, sessionId);
             _db.CommitTransaction(txn);
             return new(0, 0, AlreadyApplied: false);
         }
@@ -133,7 +133,7 @@ public sealed class SeedApplicator
             applied++;
         }
 
-        _db.InsertAppliedSeed(response.SeedDigest, "model", now, applied, skipped);
+        _db.InsertAppliedSeed(response.SeedDigest, "model", now, applied, skipped, sessionId);
         _db.CommitTransaction(txn);
         return new(applied, skipped, AlreadyApplied: false);
     }

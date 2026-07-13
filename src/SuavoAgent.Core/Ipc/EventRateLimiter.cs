@@ -18,8 +18,10 @@ public sealed class EventRateLimiter
         _windowStart = Environment.TickCount64;
     }
 
-    public bool TryAcquire()
+    public bool TryAcquire(int eventCount = 1)
     {
+        if (eventCount <= 0) throw new ArgumentOutOfRangeException(nameof(eventCount));
+
         lock (_lock)
         {
             var now = Environment.TickCount64;
@@ -29,13 +31,13 @@ public sealed class EventRateLimiter
                 _windowStart = now;
             }
 
-            if (_count >= _maxPerSecond)
+            if (eventCount > _maxPerSecond || _count > _maxPerSecond - eventCount)
             {
-                _droppedTotal++;
+                _droppedTotal += eventCount;
                 return false;
             }
 
-            _count++;
+            _count += eventCount;
             return true;
         }
     }

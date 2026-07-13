@@ -15,6 +15,10 @@ public class ActionGrammarTests
         Assert.True(ActionGrammar.LooksWellFormed(grammar));
         Assert.Contains("root ::= proposal", grammar);
         Assert.Contains("\"\\\"Click\\\"\"", grammar);
+        Assert.Contains("\\\"rationaleCode\\\"", grammar);
+        Assert.DoesNotContain("\\\"rationale\\\":", grammar);
+        foreach (var code in Enum.GetValues<InferenceRationaleCode>())
+            Assert.Contains($"\"\\\"{code.ToWireValue()}\\\"\"", grammar);
     }
 
     [Fact]

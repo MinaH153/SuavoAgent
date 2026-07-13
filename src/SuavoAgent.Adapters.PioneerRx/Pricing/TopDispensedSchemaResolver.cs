@@ -12,9 +12,9 @@ namespace SuavoAgent.Adapters.PioneerRx.Pricing;
 /// the pricing discovery's <see cref="CatalogItemJoin"/> for the item table + id + NDC columns, so
 /// this only has to find the extra descriptive/classification columns.
 ///
-/// <para><b>Fail-closed:</b> returns null unless a drug-name column AND the Brand/Generic column
-/// (the mandatory "generics only" gate) are resolved — never emits a spec that would price the wrong
-/// population. Rx-not-OTC and No-Schedule columns are optional (their gates apply only when found).</para>
+/// <para>The resolver records missing Rx/OTC or schedule columns as null so discovery diagnostics stay
+/// explicit. <see cref="SqlTopDispensedQueryBuilder"/> then refuses execution with fixed reason codes;
+/// it never silently broadens Nadim's requested Generic + Rx + No-Schedule population.</para>
 ///
 /// <para>Operator overrides win over heuristics for non-standard installs; the *Value fields say what
 /// "generic"/"Rx"/"no schedule" equal in this pharmacy's data (defaults Generic / Rx / 0). Final
@@ -72,7 +72,10 @@ public static class TopDispensedSchemaResolver
             RxOtcColumn: rxOtc,
             RxValue: rxOtc is null ? null : (Blank(overrides?.RxValue) ?? DefaultRxValue),
             ScheduleColumn: schedule,
-            NoScheduleValue: schedule is null ? null : (Blank(overrides?.NoScheduleValue) ?? DefaultNoScheduleValue));
+            NoScheduleValue: schedule is null ? null : (Blank(overrides?.NoScheduleValue) ?? DefaultNoScheduleValue),
+            BrandGenericColumnShape: ShapeFor(itemCols, brandGeneric),
+            RxOtcColumnShape: ShapeFor(itemCols, rxOtc),
+            ScheduleColumnShape: ShapeFor(itemCols, schedule));
     }
 
     private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
@@ -86,5 +89,22 @@ public static class TopDispensedSchemaResolver
             if (match != null) return match;
         }
         return null;
+    }
+
+    private static PricingSqlColumnShape? ShapeFor(
+        IEnumerable<InventoryColumnInfo> columns,
+        string? name)
+    {
+        if (name is null) return null;
+        var column = columns.FirstOrDefault(candidate =>
+            candidate.ColumnName.Equals(name, StringComparison.OrdinalIgnoreCase));
+        return column is null
+            ? null
+            : new PricingSqlColumnShape(
+                column.DataType,
+                column.MaxLength,
+                column.Precision,
+                column.Scale,
+                column.IsNullable);
     }
 }

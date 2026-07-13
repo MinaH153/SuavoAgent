@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "signatureAlgorithm": "ECDSA_P256_SHA256_IEEE_P1363",
+  "policyDigestLengthPrefix": "uint32_little_endian",
+  "publicKeySpkiBase64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE9roQryLbbodhgOiwwHOUxh6ufbShoKF51blbPc37PoGN/2rV4g5M8REjyBr/QiX6jQjrbXI/+HCHM11AzqSW0g==",
+  "policyDigest": "9bb068ee855bc438e19b9a727e6402a7aeb0ed954f2b5a3bd52ae84a6e43a762",
+  "proposal": {
+    "json": {
+      "schemaVersion": 1,
+      "proposalId": "11111111-1111-4111-8111-111111111111",
+      "proposalDigest": "a57991162fe3328fd637e9a7c82b7930c4f09d16f756698a3e47a8ec4eff9507",
+      "pharmacyId": "pharmacy-golden",
+      "agentId": "agent-golden",
+      "machineFingerprint": "machine-golden",
+      "modality": "sql",
+      "schemaDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "statusPolicyDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "costBasis": "cost_per_unit",
+      "policyDigest": "9bb068ee855bc438e19b9a727e6402a7aeb0ed954f2b5a3bd52ae84a6e43a762",
+      "snapshotContract": "source_policy_snapshot_v1",
+      "freshnessSeconds": 43200,
+      "observedAtUtc": "2026-07-13T12:00:00.0000000+00:00",
+      "expiresAtUtc": "2026-07-14T12:00:00.0000000+00:00"
+    },
+    "canonical": "suavo.pricing-approval-proposal.v1|1|11111111-1111-4111-8111-111111111111|pharmacy-golden|agent-golden|machine-golden|sql|1111111111111111111111111111111111111111111111111111111111111111|2222222222222222222222222222222222222222222222222222222222222222|cost_per_unit|9bb068ee855bc438e19b9a727e6402a7aeb0ed954f2b5a3bd52ae84a6e43a762|source_policy_snapshot_v1|43200|2026-07-13T12:00:00.0000000+00:00|2026-07-14T12:00:00.0000000+00:00",
+    "digest": "a57991162fe3328fd637e9a7c82b7930c4f09d16f756698a3e47a8ec4eff9507"
+  },
+  "proposalReceipt": {
+    "json": {
+      "schemaVersion": 1,
+      "proposalId": "11111111-1111-4111-8111-111111111111",
+      "proposalDigest": "a57991162fe3328fd637e9a7c82b7930c4f09d16f756698a3e47a8ec4eff9507",
+      "pharmacyId": "pharmacy-golden",
+      "agentId": "agent-golden",
+      "machineFingerprint": "machine-golden",
+      "receivedAtUtc": "2026-07-13T12:01:00.0000000+00:00",
+      "keyId": "pricing-golden-key-v1",
+      "signature": "T3PTpFAqYWbiUazho0RrvC94zsP4lCnAC8WXlReH9QF4s5sCp2TTm9lZQ5exZr9a6wRMEx97sdqtdeCwh4mQWw=="
+    },
+    "canonical": "suavo.pricing-approval-proposal-receipt.v1|1|11111111-1111-4111-8111-111111111111|a57991162fe3328fd637e9a7c82b7930c4f09d16f756698a3e47a8ec4eff9507|pharmacy-golden|agent-golden|machine-golden|2026-07-13T12:01:00.0000000+00:00",
+    "digest": "d22b068c2083a46894d0e1323e858a1bc658f2089ee87656d67a8d834f54ec02"
+  },
+  "grant": {
+    "json": {
+      "schemaVersion": 1,
+      "approvalId": "22222222-2222-4222-8222-222222222222",
+      "proposalId": "11111111-1111-4111-8111-111111111111",
+      "proposalDigest": "a57991162fe3328fd637e9a7c82b7930c4f09d16f756698a3e47a8ec4eff9507",
+      "pharmacyId": "pharmacy-golden",
+      "agentId": "agent-golden",
+      "machineFingerprint": "machine-golden",
+      "approverId": "pic-golden",
+      "approvedByRole": "pharmacist_in_charge",
+      "modality": "sql",
+      "schemaDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "statusPolicyDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "costBasis": "cost_per_unit",
+      "policyDigest": "9bb068ee855bc438e19b9a727e6402a7aeb0ed954f2b5a3bd52ae84a6e43a762",
+      "snapshotContract": "source_policy_snapshot_v1",
+      "freshnessSeconds": 43200,
+      "issuedAtUtc": "2026-07-13T12:02:00.0000000+00:00",
+      "expiresAtUtc": "2027-07-13T12:02:00.0000000+00:00",
+      "keyId": "pricing-golden-key-v1",
+      "signature": "Jti/cjdUz+xsZIDgkYkHe0nlxBfAlVZ0fBNXrnAzZ6Q8Zm66uC+4+w1GQVbXPZnBeXE58KjZfrV1TtzumZbdLg=="
+    },
+    "canonical": "suavo.pricing-approval-grant.v1|1|22222222-2222-4222-8222-222222222222|11111111-1111-4111-8111-111111111111|a57991162fe3328fd637e9a7c82b7930c4f09d16f756698a3e47a8ec4eff9507|pharmacy-golden|agent-golden|machine-golden|pic-golden|pharmacist_in_charge|sql|1111111111111111111111111111111111111111111111111111111111111111|2222222222222222222222222222222222222222222222222222222222222222|cost_per_unit|9bb068ee855bc438e19b9a727e6402a7aeb0ed954f2b5a3bd52ae84a6e43a762|source_policy_snapshot_v1|43200|2026-07-13T12:02:00.0000000+00:00|2027-07-13T12:02:00.0000000+00:00",
+    "digest": "9c6a3f5384f695a68305664e3f88f64ffc255e058b8545a464365d7ff8a2e33f"
+  },
+  "revocation": {
+    "json": {
+      "schemaVersion": 1,
+      "revocationId": "33333333-3333-4333-8333-333333333333",
+      "approvalId": "22222222-2222-4222-8222-222222222222",
+      "proposalId": "11111111-1111-4111-8111-111111111111",
+      "proposalDigest": "a57991162fe3328fd637e9a7c82b7930c4f09d16f756698a3e47a8ec4eff9507",
+      "pharmacyId": "pharmacy-golden",
+      "agentId": "agent-golden",
+      "machineFingerprint": "machine-golden",
+      "policyDigest": "9bb068ee855bc438e19b9a727e6402a7aeb0ed954f2b5a3bd52ae84a6e43a762",
+      "reasonCode": "pic_revoked",
+      "revokedAtUtc": "2026-08-01T09:30:00.0000000+00:00",
+      "keyId": "pricing-golden-key-v1",
+      "signature": "TzPYGXLtdZQr0KhmJPRzWL2KgAzxfUhHzQ0dRmdDeawzsmkgIHDsSDSJxXX7G5vlKxws6osE3IZvWlRQoUpSrQ=="
+    },
+    "canonical": "suavo.pricing-approval-revocation.v1|1|33333333-3333-4333-8333-333333333333|22222222-2222-4222-8222-222222222222|11111111-1111-4111-8111-111111111111|a57991162fe3328fd637e9a7c82b7930c4f09d16f756698a3e47a8ec4eff9507|pharmacy-golden|agent-golden|machine-golden|9bb068ee855bc438e19b9a727e6402a7aeb0ed954f2b5a3bd52ae84a6e43a762|pic_revoked|2026-08-01T09:30:00.0000000+00:00",
+    "digest": "463455bc9e626cfe0685d681e73f493f6fda4f381afe96e87a9a86270c9d39f4"
+  }
+}

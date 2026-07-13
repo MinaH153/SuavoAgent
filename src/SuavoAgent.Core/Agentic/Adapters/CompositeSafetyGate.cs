@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Core.Autonomy;
@@ -7,14 +8,14 @@ namespace SuavoAgent.Core.Agentic.Adapters;
 
 /// <summary>Deployment safety posture for a navigate run.</summary>
 /// <param name="EnableTaskAutonomy">Master switch — false ⇒ every destructive action stays supervised.</param>
-/// <param name="LivePms">True when the foreground target is a live PMS (never-blind hazard applies).</param>
 /// <param name="ExecutorMode">SqlFirst (read-only, safe) vs UiaFirst (drives the live desktop).</param>
 /// <param name="AllowLiveActuation">Explicit opt-in to drive a live PMS via UiaFirst.</param>
 public sealed record NavigateSafetyOptions(
     bool EnableTaskAutonomy,
-    bool LivePms,
     PricingExecutorMode ExecutorMode,
-    bool AllowLiveActuation);
+    bool AllowLiveActuation,
+    IReadOnlySet<string>? OperatorApprovedScopes = null,
+    Func<AgentObjective, NextAction, string, AutonomyEvidenceScope?>? AutonomyScopeFactory = null);
 
 /// <summary>
 /// Production <see cref="ISafetyGate"/>. Composes the Helper-reported actuation gate state
@@ -43,16 +44,45 @@ public sealed class CompositeSafetyGate : ISafetyGate
     }
 
     public SafetyVerdict Preflight(AgentObjective objective)
-        => NavigateSafety.EvaluatePreflight(
-            _gateState(), _now(), _options.LivePms, _options.ExecutorMode, _options.AllowLiveActuation);
+        => NavigateSafety.EvaluatePreflight(_gateState(), _now());
 
     public SafetyVerdict GateAction(NextAction action, AgentObjective objective)
     {
-        // Only consult the autonomy ledger for destructive actions (avoid a DB read otherwise).
-        var mayRunUnsupervised = NavigateSafety.IsDestructive(action)
-            && _ledger.MayRunUnsupervised(objective.TaskKey, objective.PharmacyId, _options.EnableTaskAutonomy);
+        var gateState = _gateState();
+        var targetProcess = NavigateSafety.TargetProcess(action);
+        if (NavigateSafety.IsDestructive(action) && string.IsNullOrWhiteSpace(targetProcess))
+        {
+            // App-less autonomy is not autonomy: a task/action grant without an
+            // app identity could be replayed against whichever window happens to
+            // own focus. OperatorApproved does not bypass this binding.
+            return SafetyVerdict.Denied("target_process_unresolved");
+        }
+        var targetVerdict = NavigateSafety.EvaluateTarget(
+            gateState,
+            _now(),
+            targetProcess,
+            _options.ExecutorMode,
+            _options.AllowLiveActuation);
+        if (targetVerdict.Decision == SafetyDecision.Deny) return targetVerdict;
 
-        return NavigateSafety.EvaluateGateAction(action, mayRunUnsupervised, _gateState()?.DryRun ?? false);
+        // Only consult the autonomy ledger for destructive actions (avoid a DB read otherwise).
+        var scope = TaskAutonomyScope.Build(
+            objective.TaskKey,
+            targetProcess ?? "active_target",
+            action.Verb ?? action.Kind.ToString(),
+            _options.ExecutorMode);
+        var exactEvidenceScope = _options.AutonomyScopeFactory?.Invoke(
+            objective,
+            action,
+            targetProcess ?? "active_target");
+        var mayRunUnsupervised = NavigateSafety.IsDestructive(action) &&
+            (_options.OperatorApprovedScopes?.Contains(scope) == true ||
+             exactEvidenceScope is not null && _ledger.MayRunUnsupervised(
+                 exactEvidenceScope,
+                 objective.PharmacyId,
+                 _options.EnableTaskAutonomy));
+
+        return NavigateSafety.EvaluateGateAction(action, mayRunUnsupervised, gateState?.DryRun ?? false);
     }
 
     public bool AssertScrubbed(PerceivedScreen screen) => screen.Scrubbed;

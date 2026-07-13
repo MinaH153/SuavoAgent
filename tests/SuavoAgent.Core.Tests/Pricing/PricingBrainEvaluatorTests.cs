@@ -229,7 +229,8 @@ public class PricingBrainEvaluatorTests
     {
         // TieredBrain's contract is non-throwing — it catches Tier-2 errors
         // internally and returns OperatorRequired. The evaluator should
-        // translate that to Continue so the pricing loop keeps running.
+        // translate that to Continue because the deterministic pricing path is
+        // still authoritative and the model has authorized no action.
         var mock = new MockLocalInference { ThrowOnPropose = true };
         var evaluator = Evaluator(mock: mock);
 
@@ -254,7 +255,7 @@ public class PricingBrainEvaluatorTests
 
         Assert.True(decision.ShouldHalt);
         Assert.Equal(DecisionTier.Rules, decision.Tier);
-        Assert.Contains("pipe-desync", decision.Reason);
+        Assert.Equal("rule_matched", decision.Reason);
     }
 
     [Fact]
@@ -269,7 +270,7 @@ public class PricingBrainEvaluatorTests
 
         Assert.True(decision.ShouldHalt);
         Assert.Equal(DecisionTier.Rules, decision.Tier);
-        Assert.Contains("severe-streak", decision.Reason);
+        Assert.Equal("rule_matched", decision.Reason);
     }
 
     [Fact]

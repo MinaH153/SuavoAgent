@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using System.Runtime.Versioning;
 
 namespace SuavoAgent.Adapters.PioneerRx;
 
@@ -8,11 +9,8 @@ namespace SuavoAgent.Adapters.PioneerRx;
 /// agent-only pilots). Pre-fix, RxDetectionWorker would burn one 30s connect
 /// timeout every ~6 minutes on these hosts, logging a warning each time.
 ///
-/// Returns true if either a known PioneerRx install path exists on disk OR a
-/// known registry key resolves on Windows. Non-Windows hosts always return
-/// false (the PMS only ships on Windows). Errors are fail-open (return true)
-/// so a transient permissions hiccup doesn't accidentally suppress polling on
-/// a real pharmacy box.
+/// Detection distinguishes installed, absent, and indeterminate. Probe errors never activate PMS
+/// capability and are surfaced separately from a clean absence.
 ///
 /// Mirror of <see cref="SuavoAgent.Helper.PioneerRxInstallDetector"/> intended
 /// for cross-project consumption — Helper's copy stays for its own attach
@@ -21,6 +19,8 @@ namespace SuavoAgent.Adapters.PioneerRx;
 /// </summary>
 public static class PioneerRxInstallDetector
 {
+    public enum DetectionStatus { Installed, NotInstalled, Indeterminate }
+    public sealed record DetectionResult(DetectionStatus Status, string Code);
     private static readonly string[] KnownPaths =
     [
         @"C:\Program Files (x86)\New Tech Computer Systems\PioneerRx",
@@ -35,56 +35,69 @@ public static class PioneerRxInstallDetector
         @"SOFTWARE\New Tech Computer Systems",
     ];
 
-    public static bool IsInstalled(ILogger logger)
+    public static bool IsInstalled(ILogger logger) =>
+        Detect(logger).Status == DetectionStatus.Installed;
+
+    public static DetectionResult Detect(ILogger logger)
     {
         if (!OperatingSystem.IsWindows())
         {
-            return false;
+            return new DetectionResult(DetectionStatus.NotInstalled, "platform_not_windows");
         }
 
+        return DetectFromProbes(path => File.Exists(path), ReadRegistryInstallPath, logger);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string? ReadRegistryInstallPath(string key)
+    {
+        using var registryKey = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(key);
+        return registryKey?.GetValue("InstallPath") as string;
+    }
+
+    internal static DetectionResult DetectFromProbes(
+        Func<string, bool> fileExists,
+        Func<string, string?> registryInstallPath,
+        ILogger logger)
+    {
+        var probeFailed = false;
         try
         {
             foreach (var path in KnownPaths)
             {
                 var exe = Path.Combine(path, "PioneerPharmacy.exe");
-                if (File.Exists(exe))
+                if (fileExists(exe))
                 {
-                    logger.LogInformation("PioneerRx detected on disk: {Path}", path);
-                    return true;
+                    logger.LogInformation("PioneerRx installation footprint detected");
+                    return new DetectionResult(DetectionStatus.Installed, "executable_present");
                 }
             }
-
-            return ProbeRegistry(logger);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            logger.LogWarning(ex, "PioneerRx install detection failed — assuming installed (fail-open)");
-            return true;
+            probeFailed = true;
+            logger.LogWarning("PioneerRx filesystem install probe failed");
         }
-    }
 
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static bool ProbeRegistry(ILogger logger)
-    {
         foreach (var regKey in RegistryKeys)
         {
             try
             {
-                using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(regKey);
-                var installPath = key?.GetValue("InstallPath") as string;
+                var installPath = registryInstallPath(regKey);
                 if (!string.IsNullOrEmpty(installPath))
                 {
-                    logger.LogInformation(
-                        "PioneerRx detected via registry: {Key} -> {Path}",
-                        regKey, installPath);
-                    return true;
+                    logger.LogInformation("PioneerRx registry footprint detected");
+                    return new DetectionResult(DetectionStatus.Installed, "registry_present");
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                logger.LogDebug(ex, "PioneerRx registry probe failed for {Key} (non-fatal)", regKey);
+                probeFailed = true;
+                logger.LogWarning("A PioneerRx registry install probe failed");
             }
         }
-        return false;
+        return probeFailed
+            ? new DetectionResult(DetectionStatus.Indeterminate, "probe_failed")
+            : new DetectionResult(DetectionStatus.NotInstalled, "footprint_absent");
     }
 }

@@ -1,0 +1,428 @@
+{
+  "schemaVersion": 1,
+  "evidence": [
+    {
+      "repository": "https://github.com/AvaloniaUI/Avalonia",
+      "sourceRevision": "68ab391c0a3653e0722638e29fcbd9633c7fd386",
+      "upstreamPath": "licence.md",
+      "upstreamUrl": "https://raw.githubusercontent.com/AvaloniaUI/Avalonia/68ab391c0a3653e0722638e29fcbd9633c7fd386/licence.md",
+      "retainedFile": "legal/package-license-texts/Avalonia-11.2.0-LICENSE.md",
+      "sha256": "213814d306090074d234d760239ff0f67eb9b8d20eefb4d5631bb39dbe0b769b",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Avalonia", "version": "11.2.0", "licenseExpression": "MIT"},
+        {"name": "Avalonia.Desktop", "version": "11.2.0", "licenseExpression": "MIT"},
+        {"name": "Avalonia.FreeDesktop", "version": "11.2.0", "licenseExpression": "MIT"},
+        {"name": "Avalonia.Native", "version": "11.2.0", "licenseExpression": "MIT"},
+        {"name": "Avalonia.Remote.Protocol", "version": "11.2.0", "licenseExpression": "MIT"},
+        {"name": "Avalonia.Skia", "version": "11.2.0", "licenseExpression": "MIT"},
+        {"name": "Avalonia.Themes.Fluent", "version": "11.2.0", "licenseExpression": "MIT"},
+        {"name": "Avalonia.Win32", "version": "11.2.0", "licenseExpression": "MIT"},
+        {"name": "Avalonia.X11", "version": "11.2.0", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet",
+      "sourceRevision": "f8172402e711c043a59bef81bba2609cf1fb9f46",
+      "upstreamPath": "LICENSE.txt",
+      "upstreamUrl": "https://raw.githubusercontent.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet/f8172402e711c043a59bef81bba2609cf1fb9f46/LICENSE.txt",
+      "retainedFile": "legal/package-license-texts/IdentityModel-8.16.0-LICENSE.txt",
+      "sha256": "cba03f5387b05405e56b688376421acae396136af4b5116738dc6e5160f87ddd",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Microsoft.IdentityModel.Abstractions", "version": "8.16.0", "licenseExpression": "MIT"},
+        {"name": "Microsoft.IdentityModel.JsonWebTokens", "version": "8.16.0", "licenseExpression": "MIT"},
+        {"name": "Microsoft.IdentityModel.Logging", "version": "8.16.0", "licenseExpression": "MIT"},
+        {"name": "Microsoft.IdentityModel.Protocols", "version": "8.16.0", "licenseExpression": "MIT"},
+        {"name": "Microsoft.IdentityModel.Protocols.OpenIdConnect", "version": "8.16.0", "licenseExpression": "MIT"},
+        {"name": "Microsoft.IdentityModel.Tokens", "version": "8.16.0", "licenseExpression": "MIT"},
+        {"name": "System.IdentityModel.Tokens.Jwt", "version": "8.16.0", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/ClosedXML/ClosedXML",
+      "sourceRevision": "3dfd3414f3aa32fa8ffee7124478ca9ac5fe6945",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/ClosedXML/ClosedXML/3dfd3414f3aa32fa8ffee7124478ca9ac5fe6945/LICENSE",
+      "retainedFile": "legal/package-license-texts/ClosedXML-0.104.2-LICENSE.txt",
+      "sha256": "3071658fba9a054edce74e756314ba926fe3ffe5c6622f209d21a0c8f1d2a99e",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "ClosedXML", "version": "0.104.2", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/ClosedXML/ClosedXML.Parser",
+      "sourceRevision": "aaf2ade77aa160d7e929088320eab562b2df6851",
+      "upstreamPath": "LICENSE.txt",
+      "upstreamUrl": "https://raw.githubusercontent.com/ClosedXML/ClosedXML.Parser/aaf2ade77aa160d7e929088320eab562b2df6851/LICENSE.txt",
+      "retainedFile": "legal/package-license-texts/ClosedXML.Parser-1.2.0-LICENSE.txt",
+      "sha256": "7133dfd8c1167ffa77389859013ac5bf2d184639f5a291a00d33b0b7d7b84df3",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "ClosedXML.Parser", "version": "1.2.0", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/Humanizr/Humanizer",
+      "sourceRevision": "3ebc38de585fc641a04b0e78ed69468453b0f8a1",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/Humanizr/Humanizer/3ebc38de585fc641a04b0e78ed69468453b0f8a1/LICENSE",
+      "retainedFile": "legal/package-license-texts/Humanizer-2.14.1-LICENSE.txt",
+      "sha256": "e24ec7f2eea5c5f4b3e2c08308109ba99b49b4b56ea7ff0e0a178f2bdd4bbce8",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Humanizer.Core", "version": "2.14.1", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/Microsoft/perfview",
+      "sourceRevision": "60c3232083cc6ec3676a27f7db13d57c48fad566",
+      "sourceRef": "refs/tags/v3.2.4",
+      "upstreamPath": "LICENSE.TXT",
+      "upstreamUrl": "https://raw.githubusercontent.com/Microsoft/perfview/60c3232083cc6ec3676a27f7db13d57c48fad566/LICENSE.TXT",
+      "retainedFile": "legal/package-license-texts/TraceEvent-3.2.4-LICENSE.txt",
+      "sha256": "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310",
+      "packageRevisionEvidence": "release-tag",
+      "packages": [
+        {"name": "Microsoft.Diagnostics.Tracing.TraceEvent", "version": "3.2.4", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/SciSharp/LLamaSharp",
+      "sourceRevision": "52022286881d56ffeb7b4abbbed6e7669a475a56",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/SciSharp/LLamaSharp/52022286881d56ffeb7b4abbbed6e7669a475a56/LICENSE",
+      "retainedFile": "legal/package-license-texts/SciSharp-LLamaSharp-0.24.0-LICENSE.txt",
+      "sha256": "52e74038a69e948314106225360faee6159dae61f96a3a76fd0f3c2c3066c4f4",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "LLamaSharp", "version": "0.24.0", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/SixLabors/Fonts",
+      "sourceRevision": "32bef42997adb10268369ca149777f00e4241ce9",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/SixLabors/Fonts/32bef42997adb10268369ca149777f00e4241ce9/LICENSE",
+      "retainedFile": "legal/package-license-texts/SixLabors.Fonts-1.0.0-LICENSE.txt",
+      "sha256": "f38dc2765451fd2b19d7e0f47ed655f3a1cb889b28341ea6266efd75d8425a6f",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "SixLabors.Fonts", "version": "1.0.0", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/aaubry/YamlDotNet",
+      "sourceRevision": "ae480660f4fb26f3eb0b41c1d1fcf21c0e9d9e73",
+      "upstreamPath": "LICENSE.txt",
+      "upstreamUrl": "https://raw.githubusercontent.com/aaubry/YamlDotNet/ae480660f4fb26f3eb0b41c1d1fcf21c0e9d9e73/LICENSE.txt",
+      "retainedFile": "legal/package-license-texts/YamlDotNet-16.3.0-LICENSE.txt",
+      "sha256": "daea8b7f1b2bab48ea12ad50b0ce91634669d99d7dd0cb64aed8dffeeef69ed3",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "YamlDotNet", "version": "16.3.0", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/andersnm/ExcelNumberFormat",
+      "sourceRevision": "38c6a71919ad3895e3ba61d7a888012670d26303",
+      "sourceRef": "refs/tags/v1.1.0",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/andersnm/ExcelNumberFormat/38c6a71919ad3895e3ba61d7a888012670d26303/LICENSE",
+      "retainedFile": "legal/package-license-texts/ExcelNumberFormat-1.1.0-LICENSE.txt",
+      "sha256": "6650b0063a39e7dced886e53c6dac66fcd909beb8b9abb868452c9b621fa2018",
+      "packageRevisionEvidence": "release-tag",
+      "packages": [
+        {"name": "ExcelNumberFormat", "version": "1.1.0", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/charlesw/tesseract",
+      "sourceRevision": "2c993543f7fa66576a8890a6c4ab053c4598aaed",
+      "sourceRef": "refs/tags/5.2.0",
+      "upstreamPath": "LICENSE.txt",
+      "upstreamUrl": "https://raw.githubusercontent.com/charlesw/tesseract/2c993543f7fa66576a8890a6c4ab053c4598aaed/LICENSE.txt",
+      "retainedFile": "legal/package-license-texts/Tesseract-5.2.0-LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "packageRevisionEvidence": "release-tag",
+      "packages": [
+        {"name": "Tesseract", "version": "5.2.0", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/dotnet-state-machine/stateless",
+      "sourceRevision": "eff879c58baa1c8e40a4c994b2511fa9033f10ab",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/dotnet-state-machine/stateless/eff879c58baa1c8e40a4c994b2511fa9033f10ab/LICENSE",
+      "retainedFile": "legal/package-license-texts/Stateless-5.20.1-LICENSE.txt",
+      "sha256": "0fce32b1600dc7566dd0ecdc08c06a786946648e2decae5c268f34c28ab5cf39",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Stateless", "version": "5.20.1", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/dotnet/Open-XML-SDK",
+      "sourceRevision": "f9e6ad7524e22b6b1f932deabc9055201b7870c0",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/dotnet/Open-XML-SDK/f9e6ad7524e22b6b1f932deabc9055201b7870c0/LICENSE",
+      "retainedFile": "legal/package-license-texts/Open-XML-SDK-3.1.1-LICENSE.txt",
+      "sha256": "ed03ba352313a4ba7019d5bed4bd3218ac17f3e44442a3bb1aaff54dcca9a2bc",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "DocumentFormat.OpenXml", "version": "3.1.1", "licenseExpression": "MIT"},
+        {"name": "DocumentFormat.OpenXml.Framework", "version": "3.1.1", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/dotnet/SqlClient",
+      "sourceRevision": "8c70cec98444338ddb0b97be94c34fde93970241",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/dotnet/SqlClient/8c70cec98444338ddb0b97be94c34fde93970241/LICENSE",
+      "retainedFile": "legal/package-license-texts/SqlClient-7.0.2-LICENSE.txt",
+      "sha256": "9fa73cb72fb654d029c9214f0e3eec32c301a0c23be71b50fe3910e61553fa34",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Microsoft.Data.SqlClient", "version": "7.0.2", "licenseExpression": "MIT"},
+        {"name": "Microsoft.Data.SqlClient.Extensions.Abstractions", "version": "7.0.2", "licenseExpression": "MIT"},
+        {"name": "Microsoft.Data.SqlClient.Internal.Logging", "version": "7.0.2", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/dotnet/diagnostics",
+      "sourceRevision": "8c08c89a0643d31db91e119b1adb463be3e0ffe5",
+      "upstreamPath": "LICENSE.TXT",
+      "upstreamUrl": "https://raw.githubusercontent.com/dotnet/diagnostics/8c08c89a0643d31db91e119b1adb463be3e0ffe5/LICENSE.TXT",
+      "retainedFile": "legal/package-license-texts/Diagnostics-0.2.510501-LICENSE.txt",
+      "sha256": "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Microsoft.Diagnostics.NETCore.Client", "version": "0.2.510501", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/dotnet/dotnet",
+      "sourceRevision": "a612c2a1056fe3265387ae3ff7c94eba1505caf9",
+      "upstreamPath": "LICENSE.TXT",
+      "upstreamUrl": "https://raw.githubusercontent.com/dotnet/dotnet/a612c2a1056fe3265387ae3ff7c94eba1505caf9/LICENSE.TXT",
+      "retainedFile": "legal/package-license-texts/Microsoft.Data.Sqlite.Core-10.0.5-LICENSE.txt",
+      "sha256": "ae48df11a335dc1a615f4f938b69cba73bcf4485c4f97af49b38efb0f216353b",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Microsoft.Data.Sqlite.Core", "version": "10.0.5", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/dotnet/dotnet",
+      "sourceRevision": "47fb725acf5d7094af51aebbb5b7e5c44a3b2a77",
+      "upstreamPath": "LICENSE.TXT",
+      "upstreamUrl": "https://raw.githubusercontent.com/dotnet/dotnet/47fb725acf5d7094af51aebbb5b7e5c44a3b2a77/LICENSE.TXT",
+      "retainedFile": "legal/package-license-texts/Microsoft.Win32.SystemEvents-10.0.6-LICENSE.txt",
+      "sha256": "ae48df11a335dc1a615f4f938b69cba73bcf4485c4f97af49b38efb0f216353b",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Microsoft.Win32.SystemEvents", "version": "10.0.6", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/dotnet/extensions",
+      "sourceRevision": "5575f4b614224e87479673782506c59dafb9e319",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/dotnet/extensions/5575f4b614224e87479673782506c59dafb9e319/LICENSE",
+      "retainedFile": "legal/package-license-texts/Microsoft.Extensions.AI.Abstractions-9.5.0-preview.1.25262.9-LICENSE.txt",
+      "sha256": "47f0ad8ba753eae5de6178291cd8f38bbb42d2368b177f8e11714ad17c701275",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Microsoft.Extensions.AI.Abstractions", "version": "9.5.0-preview.1.25262.9", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/dotnet/sqlclient",
+      "sourceRevision": "b9dd969d586982252b910df57cf0b2d8cdf6ea9b",
+      "sourceRef": "refs/tags/MSS_v1.0.0",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/dotnet/sqlclient/b9dd969d586982252b910df57cf0b2d8cdf6ea9b/LICENSE",
+      "retainedFile": "legal/package-license-texts/Microsoft.SqlServer.Server-1.0.0-LICENSE.txt",
+      "sha256": "9fa73cb72fb654d029c9214f0e3eec32c301a0c23be71b50fe3910e61553fa34",
+      "packageRevisionEvidence": "release-tag",
+      "packages": [
+        {"name": "Microsoft.SqlServer.Server", "version": "1.0.0", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/ericsink/SQLitePCL.raw",
+      "sourceRevision": "fe99a5c9ea3bdb07c431b3945eed5c3e4f548e1a",
+      "sourceRef": "refs/tags/v2.1.11",
+      "upstreamPath": "LICENSE.TXT",
+      "upstreamUrl": "https://raw.githubusercontent.com/ericsink/SQLitePCL.raw/fe99a5c9ea3bdb07c431b3945eed5c3e4f548e1a/LICENSE.TXT",
+      "retainedFile": "legal/package-license-texts/SQLitePCLRaw-2.1.11-LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "packageRevisionEvidence": "release-tag",
+      "packages": [
+        {"name": "SQLitePCLRaw.bundle_e_sqlcipher", "version": "2.1.11", "licenseExpression": "Apache-2.0"},
+        {"name": "SQLitePCLRaw.core", "version": "2.1.11", "licenseExpression": "Apache-2.0"},
+        {"name": "SQLitePCLRaw.lib.e_sqlcipher", "version": "2.1.11", "licenseExpression": "Apache-2.0"},
+        {"name": "SQLitePCLRaw.provider.e_sqlcipher", "version": "2.1.11", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/getsentry/sentry-dotnet",
+      "sourceRevision": "47d3dbfd1d0084a786e03d0f042c1b72fa572b0b",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/getsentry/sentry-dotnet/47d3dbfd1d0084a786e03d0f042c1b72fa572b0b/LICENSE",
+      "retainedFile": "legal/package-license-texts/Sentry-4.13.0-LICENSE.txt",
+      "sha256": "3588f0247d4abff4278cd27f7e10da87ff072a7f2e8840e3b574c9bae62e1d59",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Sentry", "version": "4.13.0", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/json-everything/json-everything",
+      "sourceRevision": "96e1ccfe6e233199ece276b7bc7328b1bfeac07e",
+      "sourceRef": "refs/tags/schema-v7.2.3^{}",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/json-everything/json-everything/96e1ccfe6e233199ece276b7bc7328b1bfeac07e/LICENSE",
+      "retainedFile": "legal/package-license-texts/JsonSchema.Net-7.2.3-LICENSE.txt",
+      "sha256": "baebca0309090f4eca1b7a82c836cc91e48b2b92139c2280fb0ff69af922c2ae",
+      "packageRevisionEvidence": "release-tag",
+      "packages": [
+        {"name": "JsonSchema.Net", "version": "7.2.3", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/kekekeks/MicroCom",
+      "sourceRevision": "7e773759cfc1012a5d080d4129c4718a662884b0",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/kekekeks/MicroCom/7e773759cfc1012a5d080d4129c4718a662884b0/LICENSE",
+      "retainedFile": "legal/package-license-texts/MicroCom.Runtime-0.11.0-LICENSE.txt",
+      "sha256": "6ee769c9ac4dac9abb16b98b1341e9528ff9f4ab685481410d3376d14148f3a9",
+      "packageRevisionEvidence": "pinned-upstream-license",
+      "packages": [
+        {"name": "MicroCom.Runtime", "version": "0.11.0", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/serilog/serilog",
+      "sourceRevision": "573a62874260d7a1708f620076b5469f69bc79b3",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/serilog/serilog/573a62874260d7a1708f620076b5469f69bc79b3/LICENSE",
+      "retainedFile": "legal/package-license-texts/Serilog-4.0.0-LICENSE.txt",
+      "sha256": "73ba74dfaa520b49a401b5d21459a8523a146f3b7518a833eea5efa85130bf68",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Serilog", "version": "4.0.0", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/serilog/serilog",
+      "sourceRevision": "999d686d1830edde15ccb1d94c7bff313ec7d7a0",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/serilog/serilog/999d686d1830edde15ccb1d94c7bff313ec7d7a0/LICENSE",
+      "retainedFile": "legal/package-license-texts/Serilog-3.1.1-LICENSE.txt",
+      "sha256": "73ba74dfaa520b49a401b5d21459a8523a146f3b7518a833eea5efa85130bf68",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Serilog", "version": "3.1.1", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/serilog/serilog-extensions-hosting",
+      "sourceRevision": "11a23e34f1c7aaafa5703dd7639ba6dc1171c7f6",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/serilog/serilog-extensions-hosting/11a23e34f1c7aaafa5703dd7639ba6dc1171c7f6/LICENSE",
+      "retainedFile": "legal/package-license-texts/Serilog.Extensions.Hosting-8.0.0-LICENSE.txt",
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Serilog.Extensions.Hosting", "version": "8.0.0", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/serilog/serilog-extensions-logging",
+      "sourceRevision": "2138e8cad250ef15369a26ba577d61a8b4f0912e",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/serilog/serilog-extensions-logging/2138e8cad250ef15369a26ba577d61a8b4f0912e/LICENSE",
+      "retainedFile": "legal/package-license-texts/Serilog.Extensions.Logging-8.0.0-LICENSE.txt",
+      "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Serilog.Extensions.Logging", "version": "8.0.0", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/serilog/serilog-sinks-console",
+      "sourceRevision": "33be844b0c991239ea5cef076d7f43e72ed44f77",
+      "sourceRef": "refs/tags/v5.0.1",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/serilog/serilog-sinks-console/33be844b0c991239ea5cef076d7f43e72ed44f77/LICENSE",
+      "retainedFile": "legal/package-license-texts/Serilog.Sinks.Console-5.0.1-LICENSE.txt",
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+      "packageRevisionEvidence": "release-tag",
+      "packages": [
+        {"name": "Serilog.Sinks.Console", "version": "5.0.1", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/serilog/serilog-sinks-console",
+      "sourceRevision": "4c9a7b6946dfd2d7f07a792c40bb3d46af835ee9",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/serilog/serilog-sinks-console/4c9a7b6946dfd2d7f07a792c40bb3d46af835ee9/LICENSE",
+      "retainedFile": "legal/package-license-texts/Serilog.Sinks.Console-6.0.0-LICENSE.txt",
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Serilog.Sinks.Console", "version": "6.0.0", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/serilog/serilog-sinks-file",
+      "sourceRevision": "7eb21bd4d35d0b8b7d13e6a15851c9903ea9a468",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/serilog/serilog-sinks-file/7eb21bd4d35d0b8b7d13e6a15851c9903ea9a468/LICENSE",
+      "retainedFile": "legal/package-license-texts/Serilog.Sinks.File-5.0.0-LICENSE.txt",
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Serilog.Sinks.File", "version": "5.0.0", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/serilog/serilog-sinks-file",
+      "sourceRevision": "c7b9bc3d87f9bb98572a52286135efda1e608ad6",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/serilog/serilog-sinks-file/c7b9bc3d87f9bb98572a52286135efda1e608ad6/LICENSE",
+      "retainedFile": "legal/package-license-texts/Serilog.Sinks.File-6.0.0-LICENSE.txt",
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Serilog.Sinks.File", "version": "6.0.0", "licenseExpression": "Apache-2.0"}
+      ]
+    },
+    {
+      "repository": "https://github.com/tmds/Tmds.DBus",
+      "sourceRevision": "8cb04f66c330b64244e996ff68f685f27f7381a0",
+      "upstreamPath": "COPYING",
+      "upstreamUrl": "https://raw.githubusercontent.com/tmds/Tmds.DBus/8cb04f66c330b64244e996ff68f685f27f7381a0/COPYING",
+      "retainedFile": "legal/package-license-texts/Tmds.DBus.Protocol-0.21.3-COPYING.txt",
+      "sha256": "aca3b49277abcc7886ccb2f115603a9f5b15fc3f96019a10c00f2974098b210c",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "Tmds.DBus.Protocol", "version": "0.21.3", "licenseExpression": "MIT"}
+      ]
+    },
+    {
+      "repository": "https://github.com/viceroypenguin/RBush",
+      "sourceRevision": "b8690322abac35d835baa2fdca4a3918ed77a910",
+      "upstreamPath": "LICENSE",
+      "upstreamUrl": "https://raw.githubusercontent.com/viceroypenguin/RBush/b8690322abac35d835baa2fdca4a3918ed77a910/LICENSE",
+      "retainedFile": "legal/package-license-texts/RBush-4.0.0-LICENSE.txt",
+      "sha256": "f6bfae3ff6477fbca0c850f115da170516b1c633a98619ea5dcc6720dcdcb288",
+      "packageRevisionEvidence": "nuspec-repository-commit",
+      "packages": [
+        {"name": "RBush", "version": "4.0.0", "licenseExpression": "MIT"}
+      ]
+    }
+  ]
+}

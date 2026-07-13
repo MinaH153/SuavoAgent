@@ -1,4 +1,5 @@
 using SuavoAgent.Helper.Actuation;
+using SuavoAgent.Contracts.Models;
 
 namespace SuavoAgent.Helper.Security;
 
@@ -25,6 +26,7 @@ public sealed class ApoptosisOrchestrator
 
     public void OnCompromise(CorroborationResult result)
     {
+        var reasonLabel = HoneytokenReasonLabels.Normalize(result.ReasonLabel);
         switch (result.Level)
         {
             case CorroborationLevel.Observe:
@@ -32,14 +34,14 @@ public sealed class ApoptosisOrchestrator
 
             case CorroborationLevel.Degrade:
                 _gate.SetDryRun(true);
-                _gate.SetEnabled(false, $"honeytoken_degrade:{result.ReasonLabel}");
-                _gate.RecordHoneytokenCompromise("degrade", result.ReasonLabel);
+                _gate.SetEnabled(false, $"honeytoken_degrade:{reasonLabel}");
+                _gate.RecordHoneytokenCompromise("degrade", reasonLabel);
                 break;
 
             case CorroborationLevel.Apoptosis:
                 _gate.SetDryRun(true); // reversible window first
-                _gate.TripKillSwitch($"honeytoken_compromise:{result.ReasonLabel}"); // then latch
-                _gate.RecordHoneytokenCompromise("apoptosis", result.ReasonLabel);
+                _gate.TripKillSwitch($"honeytoken_compromise:{reasonLabel}"); // then latch
+                _gate.RecordHoneytokenCompromise("apoptosis", reasonLabel);
                 break;
         }
     }

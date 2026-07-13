@@ -17,11 +17,8 @@ namespace SuavoAgent.Core.Agentic;
 /// four production adapters, resolving their dependencies from the app container. Built per-run
 /// because the actuation envelope (charter, audit chain, deadline) is run-scoped.
 ///
-/// v1 gate-state note: Core has no IPC to read the live Helper actuation gate, so Preflight uses a
-/// permissive synthetic state — it still enforces never-blind-on-live-PMS (config Core already has)
-/// and the dry-run default, while the AUTHORITATIVE kill-switch / pause enforcement remains Helper-side
-/// ActuationGate.CheckOrReject at act time (it rejects mid-run, so the loop sees Rejected and escalates).
-/// A dedicated get_actuation_gate_state IPC for richer Core-side fail-fast preflight is a follow-up.
+/// The caller supplies the Helper-reported actuation-gate snapshot read over authenticated IPC.
+/// An unavailable snapshot fails preflight closed; Helper remains the authoritative mid-run gate.
 /// </summary>
 public static class NavigateLoopFactory
 {
@@ -31,6 +28,7 @@ public static class NavigateLoopFactory
         MissionCharter charter,
         AuditChain audit,
         DateTimeOffset deadlineUtc,
+        ActuationGateState? helperGateState,
         PhysarumPolicyOptions? policyOptions = null,
         ISafetyGate? safetyOverride = null)
     {
@@ -68,8 +66,7 @@ public static class NavigateLoopFactory
         // (Codex Q3 invariant: it is never DI-registered as the shared ISafetyGate). Live commands fall
         // through to the autonomy-graduated CompositeSafetyGate.
         var safety = safetyOverride ?? new CompositeSafetyGate(
-            gateState: () => new ActuationGateState(
-                Enabled: true, DryRun: false, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null),
+            gateState: () => helperGateState,
             ledger: services.GetRequiredService<TaskAutonomyLedger>(),
             options: safetyOptions);
 

@@ -29,6 +29,14 @@ public sealed class HttpModelProvisioner : IModelManager
 
     public async Task<ModelVerificationResult> VerifyAsync(CancellationToken ct)
     {
+        var publisher = ValidatePublisher();
+        if (!publisher.IsValid)
+            return new ModelVerificationResult(
+                false,
+                _options.ModelPath,
+                null,
+                $"publisher authorization rejected ({publisher.Code})");
+
         if (string.IsNullOrWhiteSpace(_options.ModelPath))
             return new ModelVerificationResult(false, null, null, "ModelPath not configured");
 
@@ -64,6 +72,10 @@ public sealed class HttpModelProvisioner : IModelManager
 
     private async Task<(bool ok, string message)> TryDownloadAsync(CancellationToken ct)
     {
+        var publisher = ValidatePublisher();
+        if (!publisher.IsValid)
+            return (false, $"publisher authorization rejected ({publisher.Code})");
+
         var dest = _options.ModelPath!;
         var tmp = dest + ".download";
         try
@@ -71,8 +83,7 @@ public sealed class HttpModelProvisioner : IModelManager
             var dir = Path.GetDirectoryName(dest);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
-            _logger.LogInformation("Auto-provisioning local model from {Url} → {Path} (one-time download)",
-                _options.ModelUrl, dest);
+            _logger.LogInformation("core.model.download_started");
 
             // A GGUF is GBs over a pharmacy's connection — generous timeout, streamed to disk so we
             // never hold the whole file in memory on an 8 GB box.
@@ -86,10 +97,40 @@ public sealed class HttpModelProvisioner : IModelManager
             if (!response.IsSuccessStatusCode)
                 return (false, $"model download HTTP {(int)response.StatusCode}");
 
+            var expectedSize = _options.ModelSizeBytes!.Value;
+            if (response.Content.Headers.ContentLength is long contentLength &&
+                contentLength != expectedSize)
+                return (false, "model download declared size mismatch");
+
             await using (var src = await response.Content.ReadAsStreamAsync(ct))
-            await using (var dst = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+            await using (var dst = new FileStream(
+                             tmp,
+                             FileMode.Create,
+                             FileAccess.Write,
+                             FileShare.None,
+                             1 << 20,
+                             FileOptions.WriteThrough))
             {
-                await src.CopyToAsync(dst, 1 << 20, ct);
+                var buffer = new byte[1 << 20];
+                long written = 0;
+                int read;
+                while ((read = await src.ReadAsync(buffer, ct)) > 0)
+                {
+                    if (written > expectedSize - read)
+                    {
+                        TryDelete(tmp);
+                        return (false, "model download exceeded signed size");
+                    }
+                    await dst.WriteAsync(buffer.AsMemory(0, read), ct);
+                    written += read;
+                }
+                await dst.FlushAsync(ct);
+                dst.Flush(flushToDisk: true);
+                if (written != expectedSize)
+                {
+                    TryDelete(tmp);
+                    return (false, "model download size mismatch");
+                }
             }
 
             // Verify the temp file BEFORE moving it into place — a corrupt/tampered download must never
@@ -108,16 +149,15 @@ public sealed class HttpModelProvisioner : IModelManager
                 _logger.LogWarning("ModelSha256 not set — downloaded model integrity NOT verified.");
             }
 
-            if (File.Exists(dest)) TryDelete(dest);
-            File.Move(tmp, dest);
-            _logger.LogInformation("Local model provisioned at {Path}", dest);
+            File.Move(tmp, dest, overwrite: false);
+            _logger.LogInformation("core.model.provisioned");
             return (true, "downloaded");
         }
         catch (Exception ex)
         {
             TryDelete(tmp);
-            _logger.LogWarning(ex, "Model auto-provision failed (reasoning stays off; agent unaffected)");
-            return (false, $"download error: {ex.Message}");
+            _logger.LogSafeWarning(ex);
+            return (false, $"model_download_exception:{ex.GetType().Name}");
         }
     }
 
@@ -130,20 +170,29 @@ public sealed class HttpModelProvisioner : IModelManager
         }
         try
         {
+            if (new FileInfo(_options.ModelPath!).Length != _options.ModelSizeBytes)
+                return new ModelVerificationResult(
+                    false,
+                    _options.ModelPath,
+                    null,
+                    "signed model size mismatch — fail-closed");
             var actual = await ComputeSha256Async(_options.ModelPath!, ct);
             if (!string.Equals(actual, _options.ModelSha256, StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogError("Model hash mismatch at {Path}. Expected {Expected}, got {Actual}. Fail-closed.",
-                    _options.ModelPath, _options.ModelSha256, actual);
+                _logger.LogError("core.model.hash_mismatch");
                 return new ModelVerificationResult(false, _options.ModelPath, actual, "SHA-256 mismatch — fail-closed");
             }
-            _logger.LogInformation("Model verified at {Path} (SHA-256 {Hash})", _options.ModelPath, actual);
+            _logger.LogInformation("core.model.verified");
             return new ModelVerificationResult(true, _options.ModelPath, actual, "verified");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Model hash verification failed for {Path}", _options.ModelPath);
-            return new ModelVerificationResult(false, _options.ModelPath, null, $"hash verification error: {ex.Message}");
+            _logger.LogSafeError(ex);
+            return new ModelVerificationResult(
+                false,
+                _options.ModelPath,
+                null,
+                $"model_hash_verification_exception:{ex.GetType().Name}");
         }
     }
 
@@ -154,6 +203,13 @@ public sealed class HttpModelProvisioner : IModelManager
         var hash = await sha.ComputeHashAsync(stream, ct);
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
+
+    private SuavoAgent.Contracts.Reasoning.BrainCohortValidationResult ValidatePublisher() =>
+        _options.ValidatePublisherInstallation(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent"),
+            DateTimeOffset.UtcNow);
 
     private static void TryDelete(string path)
     {

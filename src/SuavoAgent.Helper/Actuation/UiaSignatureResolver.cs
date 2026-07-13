@@ -29,7 +29,13 @@ public sealed class UiaSignatureResolver : IDisposable
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<UiaSignatureResolver>();
     }
 
-    public ResolvedTarget? Resolve(string controlType, string automationId, string? className, string processName, TimeSpan timeout)
+    public ResolvedTarget? Resolve(
+        string controlType,
+        string automationId,
+        string? className,
+        string processName,
+        TimeSpan timeout,
+        Func<int, bool>? processGuard = null)
     {
         if (string.IsNullOrWhiteSpace(controlType) || string.IsNullOrWhiteSpace(automationId) || string.IsNullOrWhiteSpace(processName))
             return null;
@@ -49,6 +55,7 @@ public sealed class UiaSignatureResolver : IDisposable
                 {
                     foreach (var proc in procs)
                     {
+                        if (processGuard is not null && !processGuard(proc.Id)) continue;
                         var resolved = TryResolveInProcess(proc, controlType, automationId, className);
                         if (resolved is not null)
                             return resolved with { ProcessName = processName };
@@ -63,8 +70,8 @@ public sealed class UiaSignatureResolver : IDisposable
             Thread.Sleep(150);
         }
 
-        _logger.Warning("UiaSignatureResolver: ({Control}|{AutomationId}) not found in '{Process}' within {TimeoutMs}ms",
-            controlType, automationId, processName, (int)timeout.TotalMilliseconds);
+        _logger.Warning("UiaSignatureResolver did not find the requested structural target within {TimeoutMs}ms",
+            (int)timeout.TotalMilliseconds);
         return null;
     }
 
@@ -83,11 +90,11 @@ public sealed class UiaSignatureResolver : IDisposable
 
             var cx = (int)(rect.Left + rect.Width / 2);
             var cy = (int)(rect.Top + rect.Height / 2);
-            return new ResolvedTarget(cx, cy, automationId, proc.ProcessName, proc.Id);
+            return new ResolvedTarget(cx, cy, "structural_target", "approved_target", proc.Id);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.Debug(ex, "UiaSignatureResolver: resolve failed for pid={Pid}", proc.Id);
+            _logger.Debug("UiaSignatureResolver failed while reading an approved UI tree");
             return null;
         }
     }

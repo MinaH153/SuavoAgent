@@ -1,0 +1,42 @@
+{
+  "fixtureSchemaVersion": 3,
+  "contractDomain": "suavo-brain-cohort-v3",
+  "identityDomain": "suavo-brain-cohort-id-v2",
+  "nowUtc": "2026-07-11T12:00:00.000Z",
+  "testOnlyTrustedKeys": {
+    "model": {
+      "keyId": "brain-model-golden-v1",
+      "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0hP46T4IuVwcwlc9W60Pz+aBK327qlrXoqBSWtwJ08M+kibkzW/1aNb8ex9T7hbqQnGiHnmE9Q8gLH38gYUZeQ=="
+    },
+    "native": {
+      "keyId": "brain-native-golden-v1",
+      "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENzGsyso82th0Du5mEA9FPyJEP0Rz0kD0jSRl1SBwQD0Fce5X72RteJnZchTpFj9ekcFSe6lnCkxPkU0E+sE7mg=="
+    }
+  },
+  "identityCanonical": "suavo-brain-cohort-id-v2|qwen3-1.7b-q4_k_m|https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/e8e713d99f327fd01e47f1992a910a9e4cacf312/Qwen3-1.7B-Q4_K_M.gguf|228fb5627f7510b8b3516cdb6435e4b0d2a2bf330fe5b0ab19284a3570a8bb1f|1107408544|https://api.nuget.org/v3-flatcontainer/llamasharp.backend.cpu/0.24.0/llamasharp.backend.cpu.0.24.0.nupkg|47120fed200482ab364b9d225271172ccbf2ac7713ad388e4e7fe7d89fdedb0a|21485108|nuget-llamasharp-backend-cpu-noavx-v1|4096|512",
+  "canonical": "suavo-brain-cohort-v3|3|ca7f5cf2d1835202e9772139f2b87f1e52fe5a27d2aa728255a6604f877b34a9|qwen3-1.7b-q4_k_m|https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/e8e713d99f327fd01e47f1992a910a9e4cacf312/Qwen3-1.7B-Q4_K_M.gguf|228fb5627f7510b8b3516cdb6435e4b0d2a2bf330fe5b0ab19284a3570a8bb1f|1107408544|https://api.nuget.org/v3-flatcontainer/llamasharp.backend.cpu/0.24.0/llamasharp.backend.cpu.0.24.0.nupkg|47120fed200482ab364b9d225271172ccbf2ac7713ad388e4e7fe7d89fdedb0a|21485108|nuget-llamasharp-backend-cpu-noavx-v1|4096|512|2026-07-11T11:00:00.000Z|2026-08-10T11:00:00.000Z|brain-model-golden-v1|brain-native-golden-v1",
+  "modelCanonical": "suavo-brain-model-v1|3|ca7f5cf2d1835202e9772139f2b87f1e52fe5a27d2aa728255a6604f877b34a9|qwen3-1.7b-q4_k_m|https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/e8e713d99f327fd01e47f1992a910a9e4cacf312/Qwen3-1.7B-Q4_K_M.gguf|228fb5627f7510b8b3516cdb6435e4b0d2a2bf330fe5b0ab19284a3570a8bb1f|1107408544|4096|512|2026-07-11T11:00:00.000Z|2026-08-10T11:00:00.000Z|brain-model-golden-v1",
+  "nativeCanonical": "suavo-brain-native-v1|3|ca7f5cf2d1835202e9772139f2b87f1e52fe5a27d2aa728255a6604f877b34a9|https://api.nuget.org/v3-flatcontainer/llamasharp.backend.cpu/0.24.0/llamasharp.backend.cpu.0.24.0.nupkg|47120fed200482ab364b9d225271172ccbf2ac7713ad388e4e7fe7d89fdedb0a|21485108|nuget-llamasharp-backend-cpu-noavx-v1|2026-07-11T11:00:00.000Z|2026-08-10T11:00:00.000Z|brain-native-golden-v1",
+  "manifest": {
+    "schemaVersion": 3,
+    "cohortId": "ca7f5cf2d1835202e9772139f2b87f1e52fe5a27d2aa728255a6604f877b34a9",
+    "modelId": "qwen3-1.7b-q4_k_m",
+    "modelUrl": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/e8e713d99f327fd01e47f1992a910a9e4cacf312/Qwen3-1.7B-Q4_K_M.gguf",
+    "modelSha256": "228fb5627f7510b8b3516cdb6435e4b0d2a2bf330fe5b0ab19284a3570a8bb1f",
+    "modelSizeBytes": 1107408544,
+    "nativeLibsUrl": "https://api.nuget.org/v3-flatcontainer/llamasharp.backend.cpu/0.24.0/llamasharp.backend.cpu.0.24.0.nupkg",
+    "nativeLibsSha256": "47120fed200482ab364b9d225271172ccbf2ac7713ad388e4e7fe7d89fdedb0a",
+    "nativeLibsSizeBytes": 21485108,
+    "contextSize": 4096,
+    "maxOutputTokens": 512,
+    "issuedAtUtc": "2026-07-11T11:00:00.000Z",
+    "expiresAtUtc": "2026-08-10T11:00:00.000Z",
+    "keyId": "",
+    "signature": "",
+    "modelKeyId": "brain-model-golden-v1",
+    "modelSignature": "49a5c46aeb2755b90f17736cb42c102ed9276243bb72b29e105a1a64cd53947a2ae4e431b52f04372266937f508a4c2d12cfc14e41bd94391c59625c0339e65f",
+    "nativeKeyId": "brain-native-golden-v1",
+    "nativeSignature": "29f69189ce9ce973130d237788afeef174a43f1d88b8b520f419b840be318738f4d38307a1070c99fc70df2f0e9bf2b67815126acc32df7deb5a38157ab81d36",
+    "nativePackageKind": "nuget-llamasharp-backend-cpu-noavx-v1"
+  }
+}

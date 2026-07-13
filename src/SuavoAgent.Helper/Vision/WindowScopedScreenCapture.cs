@@ -13,13 +13,13 @@ namespace SuavoAgent.Helper.Vision;
 /// Window-scoped capture via Win32 <c>PrintWindow(hwnd)</c>. Captures ONLY the pixels
 /// belonging to the one specified window — no other window's content can leak even if
 /// it is visible behind/beside the target. This is the HIPAA-critical difference from
-/// <see cref="GdiScreenCapture"/>, which BitBlts the whole primary-screen framebuffer
-/// (so a PMS / banking / email window behind a foreground sandbox app would be captured).
+/// framebuffer capture, which could include a PMS / banking / email window behind
+/// or beside the intended application.
 ///
-/// Use ONLY for the explore_sandbox path on a NON-PHI box, with the target HWND resolved
-/// from the allowlisted sandbox app that a preceding <c>launch_sandbox_app</c> established
-/// (<c>SendInputDriver.ActiveTargetHwnd</c>). The caller MUST NOT pass the PioneerRx HWND
-/// or any PHI-bearing window — the HWND IS the isolation boundary here.
+/// Authorized callers are: (1) explore_sandbox on a NON-PHI box, with the target HWND
+/// resolved from the allowlisted sandbox app; and (2) live PMS vision through
+/// <see cref="ApprovedPmsForegroundWindowCapture"/>, which supplies a dynamic authorizer
+/// that re-proves the exact foreground HWND, PID, and signed PioneerRx process identity.
 ///
 /// UWP note: Win11 Calculator's visible HWND is owned by ApplicationFrameHost; PrintWindow
 /// with <c>PW_RENDERFULLCONTENT</c> forces DWM to render the composited content into the HDC.
@@ -37,16 +37,23 @@ public sealed class WindowScopedScreenCapture : IScreenCapture
     // PID that owned _targetHwnd when this capturer was built (IPC-validated as an allowlisted sandbox app).
     // Re-checked immediately before PrintWindow to close the HWND-reuse TOCTOU. 0 = skip (tests only).
     private readonly int _expectedPid;
-    // Monotonic tick count (matches GdiScreenCapture, Codex M-4) — immune to NTP/DST.
+    private readonly Func<IntPtr, int, bool>? _authorizeImmediatelyBeforePrintWindow;
+    // Monotonic tick count (Codex M-4) — immune to NTP/DST.
     private long _lastCaptureTicks = -1;
     private readonly object _rateLock = new();
 
-    public WindowScopedScreenCapture(IOptions<AgentOptions> options, ILogger logger, IntPtr targetHwnd, int expectedPid = 0)
+    public WindowScopedScreenCapture(
+        IOptions<AgentOptions> options,
+        ILogger logger,
+        IntPtr targetHwnd,
+        int expectedPid = 0,
+        Func<IntPtr, int, bool>? authorizeImmediatelyBeforePrintWindow = null)
     {
         _options = options.Value.Vision;
         _logger = logger;
         _targetHwnd = targetHwnd;
         _expectedPid = expectedPid;
+        _authorizeImmediatelyBeforePrintWindow = authorizeImmediatelyBeforePrintWindow;
     }
 
     public bool IsAvailable => _options.Enabled && OperatingSystem.IsWindows() && _targetHwnd != IntPtr.Zero;
@@ -96,14 +103,14 @@ public sealed class WindowScopedScreenCapture : IScreenCapture
                         // allowlisted) PID IMMEDIATELY before each PrintWindow — same thread, no await, no GDI
                         // setup in between. Windows reuses HWND values; a reused HWND would have a different
                         // owner PID → refuse. This is the practical floor (PrintWindow itself takes no PID).
-                        if (EffectiveAppPidMismatch()) return null;
+                        if (EffectiveAppPidMismatch() || DynamicAuthorizationFailed()) return null;
 
                         // PW_RENDERFULLCONTENT forces DWM to render the full composited window content
                         // (needed for DWM-composited / UWP apps). Fall back to flag 0 (pre-Win8.1) before
                         // giving up — re-checking the owner PID again before the fallback call.
                         if (!PrintWindow(_targetHwnd, hdc, PW_RENDERFULLCONTENT))
                         {
-                            if (EffectiveAppPidMismatch()) return null;
+                            if (EffectiveAppPidMismatch() || DynamicAuthorizationFailed()) return null;
                             if (!PrintWindow(_targetHwnd, hdc, 0))
                             {
                                 _logger.Warning("WindowScopedScreenCapture: PrintWindow failed for 0x{Hwnd:X}",
@@ -131,7 +138,9 @@ public sealed class WindowScopedScreenCapture : IScreenCapture
             }
             catch (Exception ex)
             {
-                _logger.Warning(ex, "WindowScopedScreenCapture: capture failed");
+                _logger.Warning(
+                    "WindowScopedScreenCapture: capture failed ({ErrorType})",
+                    ex.GetType().Name);
                 return null;
             }
         }, ct);
@@ -151,6 +160,14 @@ public sealed class WindowScopedScreenCapture : IScreenCapture
         _logger.Warning(
             "WindowScopedScreenCapture: effective app pid changed (now={Now}, expected={Exp}) for 0x{Hwnd:X} — refusing",
             now, _expectedPid, _targetHwnd.ToInt64());
+        return true;
+    }
+
+    private bool DynamicAuthorizationFailed()
+    {
+        if (_authorizeImmediatelyBeforePrintWindow is null) return false;
+        if (_authorizeImmediatelyBeforePrintWindow(_targetHwnd, _expectedPid)) return false;
+        _logger.Information("WindowScopedScreenCapture: dynamic target authorization failed — refusing");
         return true;
     }
 

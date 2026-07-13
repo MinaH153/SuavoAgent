@@ -1,7 +1,9 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
+using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Core.Workers;
 using SuavoAgent.Contracts.Ipc;
@@ -75,10 +77,60 @@ public class WritebackProcessorTests : IDisposable
         Assert.Equal(WritebackState.Queued, pending[0].State);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("0123456789abcdef0123456789abcdef")]
+    public void Diagnostics_NeverEmitIdentifiersOrHashes(string? hmacSecret)
+    {
+        var logger = new CaptureLogger<WritebackProcessor>();
+        var processor = new WritebackProcessor(
+            logger,
+            _db,
+            _pipe,
+            Options.Create(new AgentOptions
+            {
+                AgentId = "agent-diagnostic-sentinel",
+                HmacSalt = hmacSecret,
+            }));
+        const string session = "session-diagnostic-sentinel";
+        const string task = "task-diagnostic-sentinel";
+        const string rx = "987654321";
+
+        processor.SetSessionId(session);
+        processor.EnqueueWriteback(task, rx);
+
+        var publicFallbackHash = PhiScrubber.HmacHash(rx, "[no-hmac-salt]");
+        var configuredHash = hmacSecret is null ? null : PhiScrubber.HmacHash(rx, hmacSecret);
+        var rendered = string.Join('\n', logger.Messages);
+
+        Assert.DoesNotContain(session, rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain(task, rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain(rx, rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain(publicFallbackHash, rendered, StringComparison.Ordinal);
+        if (configuredHash is not null)
+            Assert.DoesNotContain(configuredHash, rendered, StringComparison.Ordinal);
+    }
+
     public void Dispose()
     {
         _pipe.Dispose();
         _db.Dispose();
         try { File.Delete(_dbPath); } catch { }
+    }
+
+    private sealed class CaptureLogger<T> : ILogger<T>
+    {
+        public List<string> Messages { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Messages.Add(formatter(state, exception));
     }
 }

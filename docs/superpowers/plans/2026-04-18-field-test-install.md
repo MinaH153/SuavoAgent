@@ -1,5 +1,10 @@
 # Field Test — Install SuavoAgent on Your Rig
 
+> **ARCHIVED / DO NOT USE — historical field-test plan only.** The bootstrap,
+> manual configuration, service-control, and uninstall commands below are
+> retained as design history. Do not use them on a current build or customer
+> workstation. Use `docs/USE-ON-PERSONAL-LAPTOP.md` for the signed native test.
+
 **Goal:** verify the full agent boots cleanly on your personal Windows machine, runs the heartbeat loop, and proves the tiered-brain wiring is live. Tier-2 local inference is optional for this test — the plumbing (install, service start, heartbeat, rule engine, IPC) matters more than the LLM itself.
 
 ---

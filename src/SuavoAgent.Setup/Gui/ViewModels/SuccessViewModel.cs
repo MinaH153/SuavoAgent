@@ -19,6 +19,12 @@ internal sealed class SuccessViewModel
             : ctx.Config.Reasoning is { IsProvisionable: true }
                 ? "finishing up in the background"
                 : "configures automatically once available";
+        Headline = ctx.ConfigureInstalledCohort
+            ? "SuavoAgent is connected"
+            : "SuavoAgent is installed";
+        Detail = ctx.ConfigureInstalledCohort
+            ? "The signed Windows installation is now paired, healthy, and ready in the background."
+            : "The agent now runs quietly in the background, observing and automating your workflows.";
         // Land the operator on the pharmacy-facing SuavoAgent surface — NOT /dashboard,
         // which is the admin/platform Command Center a pharmacy user can't access ("no admin
         // access on this account"). The person who just installed is a pharmacy user, so the
@@ -46,6 +52,8 @@ internal sealed class SuccessViewModel
     public string AgentId { get; }
     public string SqlSummary { get; }
     public string BrainSummary { get; }
+    public string Headline { get; }
+    public string Detail { get; }
     public string DashboardUrl { get; }
 
     public ICommand OpenDashboardCommand { get; }

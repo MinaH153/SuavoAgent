@@ -2,6 +2,7 @@ using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
 using SuavoAgent.Contracts.Ipc;
 
 namespace SuavoAgent.Core.Ipc;
@@ -48,7 +49,7 @@ public sealed class IpcPipeServer : IDisposable
     private readonly string _pipeName;
     private readonly ILogger<IpcPipeServer> _logger;
     private readonly Func<IpcRequest, Task<IpcResponse>> _handler;
-    private readonly Func<uint, bool>? _isBrokerAttestedHelper;
+    private readonly Func<IpcBrokerAttestationEvidence, bool>? _isBrokerAttestedHelper;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
     private bool _isConnected;
@@ -60,7 +61,7 @@ public sealed class IpcPipeServer : IDisposable
         string pipeName,
         Func<IpcRequest, Task<IpcResponse>> handler,
         ILogger<IpcPipeServer> logger,
-        Func<uint, bool>? isBrokerAttestedHelper = null)
+        Func<IpcBrokerAttestationEvidence, bool>? isBrokerAttestedHelper = null)
     {
         _pipeName = pipeName;
         _handler = handler;
@@ -83,7 +84,7 @@ public sealed class IpcPipeServer : IDisposable
             {
                 pipe = CreateSecurePipe(_pipeName);
 
-                _logger.LogDebug("Waiting for Helper connection on pipe {Name}...", _pipeName);
+                _logger.LogDebug("core.ipc.waiting_for_helper");
                 await pipe.WaitForConnectionAsync(ct);
 
                 // Verify connecting process is a known SuavoAgent binary
@@ -116,22 +117,27 @@ public sealed class IpcPipeServer : IDisposable
                             }
                             catch (Exception ex)
                             {
-                                _logger.LogDebug(ex, "IPC: process image path unreadable for PID {Pid}; checking Broker attestation", clientPid);
+                                _logger.LogSafeDebug(ex);
                                 clientPath = null;
                             }
                         }
+
+                        IpcBrokerAttestationEvidence? brokerEvidence = null;
+                        if (string.IsNullOrWhiteSpace(clientPath) &&
+                            TryBuildBrokerEvidence(clientProc, clientPid, out var evidence))
+                            brokerEvidence = evidence;
 
                         var verification = IpcPeerVerifier.Verify(
                             processName: clientName,
                             processId: clientPid,
                             executablePath: clientPath,
                             coreBaseDirectory: AppContext.BaseDirectory,
+                            brokerEvidence: brokerEvidence,
                             isBrokerAttestedHelper: _isBrokerAttestedHelper);
 
                         if (!verification.Accepted)
                         {
-                            _logger.LogWarning("IPC: rejected connection from {Name} (PID {Pid}) — {Reason}",
-                                clientName, clientPid, verification.RejectionReason);
+                            _logger.LogWarning("core.ipc.connection_rejected");
                             IpcRejectionStats.Record(verification.RejectionReason ?? "verification_failed");
                             pipe.Disconnect();
                             continue;
@@ -139,14 +145,12 @@ public sealed class IpcPipeServer : IDisposable
 
                         if (verification.AcceptedByBrokerAttestation)
                         {
-                            _logger.LogInformation(
-                                "IPC: accepted Broker-attested Helper PID {Pid} after Windows denied process image path",
-                                clientPid);
+                            _logger.LogInformation("core.ipc.broker_attestation_accepted");
                         }
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "IPC: Could not verify client process — rejecting");
+                        _logger.LogSafeWarning(ex);
                         IpcRejectionStats.Record($"verification_exception:{ex.GetType().Name}");
                         pipe.Disconnect();
                         continue;
@@ -154,7 +158,7 @@ public sealed class IpcPipeServer : IDisposable
                 }
 
                 _isConnected = true;
-                _logger.LogInformation("Helper connected on pipe {Name}", _pipeName);
+                _logger.LogInformation("core.ipc.helper_connected");
 
                 await HandleConnection(pipe, ct);
             }
@@ -164,7 +168,7 @@ public sealed class IpcPipeServer : IDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Pipe connection error");
+                _logger.LogSafeWarning(ex);
                 _isConnected = false;
                 await Task.Delay(1000, ct);
             }
@@ -180,15 +184,16 @@ public sealed class IpcPipeServer : IDisposable
     {
         while (!ct.IsCancellationRequested && pipe.IsConnected)
         {
+            IpcRequest? request = null;
             try
             {
                 var json = await IpcFraming.ReadFrameAsync(pipe, ct);
                 if (json == null) break; // Client disconnected
 
-                var request = JsonSerializer.Deserialize<IpcRequest>(json);
+                request = JsonSerializer.Deserialize<IpcRequest>(json);
                 if (request == null) continue;
 
-                _logger.LogDebug("IPC received: {Command} [{Id}]", request.Command, request.Id);
+                _logger.LogDebug("core.ipc.request_received");
 
                 var response = await _handler(request);
                 var responseJson = JsonSerializer.Serialize(response);
@@ -205,7 +210,35 @@ public sealed class IpcPipeServer : IDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "IPC message handling error");
+                _logger.LogWarning(
+                    "IPC message handling error ({ExceptionType}); closing connection",
+                    ex.GetType().FullName);
+                if (request is not null && pipe.IsConnected)
+                {
+                    try
+                    {
+                        var failure = new IpcResponse(
+                            request.Id,
+                            IpcStatus.InternalError,
+                            request.Command,
+                            null,
+                            new IpcError(
+                                "handler_failed",
+                                "Core could not persist the request; reconnect and retry.",
+                                true,
+                                0));
+                        await IpcFraming.WriteFrameAsync(
+                            pipe,
+                            JsonSerializer.Serialize(failure),
+                            ct);
+                    }
+                    catch
+                    {
+                        // The connection is closed below; the client retries
+                        // the unchanged envelope after reconnecting.
+                    }
+                }
+                break;
             }
         }
 
@@ -226,9 +259,38 @@ public sealed class IpcPipeServer : IDisposable
         _cts?.Dispose();
     }
 
+    private static bool TryBuildBrokerEvidence(
+        System.Diagnostics.Process process,
+        uint processId,
+        out IpcBrokerAttestationEvidence evidence)
+    {
+        evidence = default;
+        try
+        {
+            var helperPath = Path.Combine(AppContext.BaseDirectory, "SuavoAgent.Helper.exe");
+            if (!File.Exists(helperPath)) return false;
+            if (!SuavoAgent.Diagnostics.Maintenance.AuthenticodePublisherVerifier
+                    .Verify(helperPath).IsTrusted)
+                return false;
+            using var stream = new FileStream(
+                helperPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var sha256 = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            var startedAt = new DateTimeOffset(process.StartTime.ToUniversalTime());
+            var sessionId = checked((uint)process.SessionId);
+            evidence = new(processId, sessionId, startedAt, sha256);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>
-    /// Creates a named pipe with ACL restricted to SYSTEM + LocalService.
-    /// Prevents arbitrary local processes from connecting.
+    /// Creates the observation/event pipe for its only real clients: the
+    /// LocalSystem supervisor and the logged-on interactive Helper. Core is
+    /// the server and already owns the created handle, so shared LocalService
+    /// and NetworkService client grants are unnecessary horizontal access.
     /// Falls back to default security on non-Windows platforms (build/test).
     /// </summary>
     private static NamedPipeServerStream CreateSecurePipe(string pipeName)
@@ -236,31 +298,19 @@ public sealed class IpcPipeServer : IDisposable
         if (OperatingSystem.IsWindows())
         {
             var security = new System.IO.Pipes.PipeSecurity();
-            security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
-                new System.Security.Principal.SecurityIdentifier(
-                    System.Security.Principal.WellKnownSidType.LocalSystemSid, null),
-                System.IO.Pipes.PipeAccessRights.FullControl,
-                System.Security.AccessControl.AccessControlType.Allow));
-            security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
-                new System.Security.Principal.SecurityIdentifier(
-                    System.Security.Principal.WellKnownSidType.LocalServiceSid, null),
-                System.IO.Pipes.PipeAccessRights.FullControl,
-                System.Security.AccessControl.AccessControlType.Allow));
-            // Broker runs as NetworkService — needs full pipe access.
-            security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
-                new System.Security.Principal.SecurityIdentifier(
-                    System.Security.Principal.WellKnownSidType.NetworkServiceSid, null),
-                System.IO.Pipes.PipeAccessRights.FullControl,
-                System.Security.AccessControl.AccessControlType.Allow));
-            // Helper runs as the logged-on interactive user (launched by Broker via CreateProcessAsUser).
-            // Interactive SID (S-1-5-4) covers physical + RDP sessions but excludes service accounts,
-            // network logons, and anonymous logons — strictly narrower than AuthenticatedUser.
-            // Binary identity is still pinned via MainModule path check in the listen loop.
-            security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
-                new System.Security.Principal.SecurityIdentifier(
-                    System.Security.Principal.WellKnownSidType.InteractiveSid, null),
-                System.IO.Pipes.PipeAccessRights.ReadWrite,
-                System.Security.AccessControl.AccessControlType.Allow));
+            foreach (var sidValue in ObservationPipeAllowedSidValues())
+            {
+                // Helper runs as the logged-on interactive user (S-1-5-4).
+                // SYSTEM retains full control for supervisor diagnostics; the
+                // Helper gets only the duplex rights needed for framed IPC.
+                var rights = string.Equals(sidValue, "S-1-5-4", StringComparison.Ordinal)
+                    ? System.IO.Pipes.PipeAccessRights.ReadWrite
+                    : System.IO.Pipes.PipeAccessRights.FullControl;
+                security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(sidValue),
+                    rights,
+                    System.Security.AccessControl.AccessControlType.Allow));
+            }
 
             return NamedPipeServerStreamAcl.Create(
                 pipeName, PipeDirection.InOut, 1,
@@ -272,6 +322,12 @@ public sealed class IpcPipeServer : IDisposable
             pipeName, PipeDirection.InOut, 1,
             PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
     }
+
+    internal static IReadOnlyList<string> ObservationPipeAllowedSidValues() =>
+    [
+        "S-1-5-18", // LocalSystem
+        "S-1-5-4",  // Interactive
+    ];
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]

@@ -1,0 +1,9 @@
+{
+  "name": "com.mkm.suavo.browser_observer",
+  "description": "Suavo privacy-minimal active-tab hostname observer",
+  "path": "__ABSOLUTE_SIGNED_NATIVE_HOST_PATH__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://__PUBLISHED_CHROME_EXTENSION_ID__/"
+  ]
+}

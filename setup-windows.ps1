@@ -1,3 +1,4 @@
+# INTERNAL ENGINEERING ONLY — not packaged, published, or supported for customers.
 # SuavoAgent v2 — Windows Development Setup
 # Run this in PowerShell (Admin) on the Windows 11 VM
 # The Mac shared folder should be accessible at \\Mac\Home\Documents\SuavoAgent

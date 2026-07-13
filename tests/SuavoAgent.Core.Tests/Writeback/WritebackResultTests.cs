@@ -24,12 +24,13 @@ public class WritebackResultTests
     }
 
     [Fact]
-    public void VerifiedWithDrift_IsSuccessWithDetails()
+    public void VerifiedWithDrift_IsFailureWithoutRawTimestamps()
     {
         var r = WritebackResult.VerifiedWithDrift(Guid.NewGuid(), "2026-04-13", "2026-04-14");
-        Assert.True(r.Success);
-        Assert.Equal("verified_with_drift", r.Outcome);
-        Assert.Contains("expected=2026-04-13", r.Details);
+        Assert.False(r.Success);
+        Assert.Equal("post_verify_mismatch", r.Outcome);
+        Assert.Equal("completed_date_mismatch", r.Details);
+        Assert.Null(r.TransactionId);
     }
 
     [Fact]
@@ -57,11 +58,11 @@ public class WritebackResultTests
     }
 
     [Fact]
-    public void SqlError_CapturesMessage()
+    public void SqlError_UsesFixedPhiSafeDetail()
     {
-        var r = WritebackResult.SqlError(new InvalidOperationException("connection closed"));
+        var r = WritebackResult.SqlError();
         Assert.False(r.Success);
-        Assert.Contains("connection closed", r.Details);
+        Assert.Equal("sql_operation_failed", r.Details);
     }
 
     [Fact]
@@ -70,6 +71,6 @@ public class WritebackResultTests
         var r = WritebackResult.TriggerBlocked("trg_rx_audit");
         Assert.False(r.Success);
         Assert.Equal("trigger_blocked", r.Outcome);
-        Assert.Equal("trg_rx_audit", r.Details);
+        Assert.Equal("trigger_policy_blocked", r.Details);
     }
 }

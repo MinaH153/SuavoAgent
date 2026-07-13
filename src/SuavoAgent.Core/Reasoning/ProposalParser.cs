@@ -1,4 +1,6 @@
+using System.Collections.Frozen;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using SuavoAgent.Contracts.Reasoning;
 
 namespace SuavoAgent.Core.Reasoning;
@@ -22,12 +24,16 @@ namespace SuavoAgent.Core.Reasoning;
 ///     "parameters": { "name": "Save" }
 ///   },
 ///   "confidence": 0.95,
-///   "rationale": "Save button visible and skill expects to save."
+///   "rationaleCode": "target_present"
 /// }
 /// </code>
 /// </summary>
 public static class ProposalParser
 {
+    private static readonly Regex ParameterKeyPattern = new(
+        @"^[A-Za-z][A-Za-z0-9_]{0,31}$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     public static InferenceProposal? TryParse(string json, string modelId, long latencyMs)
     {
         if (string.IsNullOrWhiteSpace(json)) return null;
@@ -51,28 +57,38 @@ public static class ProposalParser
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object) return null;
+            if (!HasExactKeys(root, "action", "confidence", "rationaleCode"))
+                return null;
 
             // --- action ---------------------------------------------------------
             if (!root.TryGetProperty("action", out var actionEl) ||
-                actionEl.ValueKind != JsonValueKind.Object)
+                !HasExactKeys(actionEl, "type", "parameters"))
                 return null;
 
             if (!actionEl.TryGetProperty("type", out var typeEl) ||
                 typeEl.ValueKind != JsonValueKind.String ||
-                !Enum.TryParse<RuleActionType>(typeEl.GetString(), out var actionType))
+                !Enum.TryParse<RuleActionType>(typeEl.GetString(), out var actionType) ||
+                Enum.GetName(actionType) != typeEl.GetString())
                 return null;
 
-            var parameters = new Dictionary<string, string>();
-            if (actionEl.TryGetProperty("parameters", out var paramsEl) &&
-                paramsEl.ValueKind == JsonValueKind.Object)
+            if (!actionEl.TryGetProperty("parameters", out var paramsEl) ||
+                paramsEl.ValueKind != JsonValueKind.Object)
+                return null;
+            var parameters = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var kv in paramsEl.EnumerateObject())
             {
-                foreach (var kv in paramsEl.EnumerateObject())
-                {
-                    if (kv.Value.ValueKind == JsonValueKind.String)
-                        parameters[kv.Name] = kv.Value.GetString() ?? "";
-                }
+                var value = kv.Value.ValueKind == JsonValueKind.String
+                    ? kv.Value.GetString()
+                    : null;
+                if (parameters.Count >= 16 ||
+                    !ParameterKeyPattern.IsMatch(kv.Name) ||
+                    kv.Value.ValueKind != JsonValueKind.String ||
+                    value is null || value.Length > 200 ||
+                    !parameters.TryAdd(kv.Name, value))
+                    return null;
             }
+            if (!InferenceActionParameterContract.IsExact(actionType, parameters))
+                return null;
 
             // --- confidence ----------------------------------------------------
             // Guard ValueKind first: TryGetDouble THROWS (not returns false) on a
@@ -82,29 +98,27 @@ public static class ProposalParser
                 !confEl.TryGetDouble(out var confidence))
                 return null;
 
-            if (confidence < 0.0 || confidence > 1.0) return null;
+            if (!double.IsFinite(confidence) || confidence < 0.0 || confidence > 1.0)
+                return null;
 
-            // --- rationale (optional) ------------------------------------------
-            string? rationale = null;
-            if (root.TryGetProperty("rationale", out var ratEl) &&
-                ratEl.ValueKind == JsonValueKind.String)
-            {
-                rationale = ratEl.GetString();
-                // Cap rationale so a runaway model can't blow audit log size.
-                if (rationale != null && rationale.Length > 500)
-                    rationale = rationale[..500];
-            }
+            // --- fixed rationale code (required) -------------------------------
+            if (!root.TryGetProperty("rationaleCode", out var rationaleEl) ||
+                rationaleEl.ValueKind != JsonValueKind.String ||
+                !InferenceRationaleCodeCodec.TryParseWireValue(
+                    rationaleEl.GetString(), out var rationaleCode))
+                return null;
 
             return new InferenceProposal
             {
                 Action = new RuleActionSpec
                 {
                     Type = actionType,
-                    Parameters = parameters,
+                    Parameters = parameters.ToFrozenDictionary(
+                        StringComparer.Ordinal),
                 },
                 Confidence = confidence,
                 ModelId = modelId,
-                Rationale = rationale,
+                RationaleCode = rationaleCode,
                 LatencyMs = latencyMs,
             };
         }
@@ -114,6 +128,17 @@ public static class ProposalParser
             // caller can escalate rather than crash.
             return null;
         }
+    }
+
+    private static bool HasExactKeys(JsonElement element, params string[] expected)
+    {
+        if (element.ValueKind != JsonValueKind.Object) return false;
+        var names = element.EnumerateObject()
+            .Select(property => property.Name)
+            .ToArray();
+        return names.Length == expected.Length &&
+            names.Distinct(StringComparer.Ordinal).Count() == names.Length &&
+            names.ToHashSet(StringComparer.Ordinal).SetEquals(expected);
     }
 
     /// <summary>

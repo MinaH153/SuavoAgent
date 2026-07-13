@@ -127,9 +127,13 @@ internal sealed class ConsentViewModel : ViewModelBase
         }
     }
 
-    /// <summary>Employee notice only applies in HIPAA mode and mandatory states.</summary>
-    public bool RequiresEmployeeNotice =>
-        ShowHipaaDisclosure && ConsentReceiptData.RequiresMandatoryNotice(_state ?? string.Empty);
+    /// <summary>
+    /// Every HIPAA deployment requires a completed employee notice before
+    /// observation can be authorized. State classification still drives the
+    /// stronger statutory banner and receipt metadata, but it cannot weaken
+    /// the product-wide transparency gate.
+    /// </summary>
+    public bool RequiresEmployeeNotice => ShowHipaaDisclosure;
 
     public string NoticeBannerText
     {
@@ -139,8 +143,8 @@ internal sealed class ConsentViewModel : ViewModelBase
             if (ConsentReceiptData.RequiresMandatoryNotice(up))
                 return $"{up} requires written employee notice before monitoring. Confirm distribution.";
             if (ConsentReceiptData.IsHighRisk(up))
-                return $"{up} has strong privacy protections. Employee notice strongly recommended.";
-            return string.Empty;
+                return $"{up} has strong privacy protections. Distribute the completed notice before monitoring.";
+            return "Suavo requires a completed employee notice before HIPAA observation.";
         }
     }
 

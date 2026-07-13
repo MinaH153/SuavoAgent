@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using SuavoAgent.Contracts.Models;
 
 namespace SuavoAgent.Helper.Security;
 
@@ -88,7 +89,15 @@ public sealed class HoneytokenReflex
                 }
             }
 
-            var result = _corroborator.Corroborate(toucher.ProcessName, toucher.ExePath, priorTouchCount);
+            var rawResult = _corroborator.Corroborate(
+                toucher.ProcessName,
+                toucher.ExePath,
+                priorTouchCount);
+            var result = rawResult with
+            {
+                ReasonLabel = HoneytokenReasonLabels.Normalize(
+                    rawResult.ReasonLabel),
+            };
             _orchestrator.OnCompromise(result);
             _onSignal?.Invoke(result);
         }

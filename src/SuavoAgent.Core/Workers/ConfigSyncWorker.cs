@@ -117,7 +117,7 @@ public sealed class ConfigSyncWorker : ResilientHostedService
             {
                 _opts.ConsecutiveFailures++;
                 errorKind = ex.GetType().Name;
-                _logger.LogWarning(ex, "ConfigSyncWorker: iteration failed (continuing)");
+                _logger.LogSafeWarning(ex);
             }
             finally
             {
@@ -134,7 +134,7 @@ public sealed class ConfigSyncWorker : ResilientHostedService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "ConfigSyncWorker: health write failed");
+                    _logger.LogSafeDebug(ex);
                 }
             }
 
@@ -152,7 +152,7 @@ public sealed class ConfigSyncWorker : ResilientHostedService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "ConfigSyncWorker: ruleset poll failed (continuing)");
+                    _logger.LogSafeWarning(ex);
                 }
             }
 
@@ -188,7 +188,7 @@ public sealed class ConfigSyncWorker : ResilientHostedService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "ConfigSyncWorker: ruleset store init failed");
+            _logger.LogSafeWarning(ex);
             return;
         }
 
@@ -311,8 +311,7 @@ public sealed class ConfigSyncWorker : ResilientHostedService
         catch (Exception ex)
         {
             saved = false;
-            _logger.LogWarning(ex,
-                "ConfigSyncWorker: ruleset save failed (in-memory swap will still occur)");
+            _logger.LogSafeWarning(ex);
             Wire.ReportInvariant("ruleset.disk_write_failed",
                 new Dictionary<string, string>
                 {

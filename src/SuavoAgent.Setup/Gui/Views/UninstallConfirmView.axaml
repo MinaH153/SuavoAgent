@@ -23,7 +23,7 @@
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="34" FontWeight="Light"
                        HorizontalAlignment="Center"/>
-            <TextBlock Text="This removes SuavoAgent and all local data on this computer."
+            <TextBlock Text="Removal requires signed approval from an authorized pharmacy administrator in the Suavo dashboard. No local file is changed until that authority is present."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"
                        HorizontalAlignment="Center"
@@ -41,7 +41,7 @@
                 CornerRadius="{DynamicResource SuavoRadiusLarge}"
                 Padding="22,16">
             <StackPanel Spacing="10">
-                <TextBlock Text="The following will be stopped and deleted:"
+                <TextBlock Text="Authorized removal and evidence retention scope:"
                            Foreground="{DynamicResource SuavoTextSubtleBrush}"
                            FontSize="12"/>
                 <StackPanel Spacing="6">
@@ -54,19 +54,19 @@
                         <TextBlock Grid.Column="1" Text="{Binding InstallPath}" Foreground="{DynamicResource SuavoTextBrush}" FontSize="12" FontFamily="Consolas,Menlo,monospace"/>
                     </Grid>
                     <Grid ColumnDefinitions="130,*">
-                        <TextBlock Grid.Column="0" Text="Local data" Foreground="{DynamicResource SuavoTextSubtleBrush}" FontSize="12"/>
+                        <TextBlock Grid.Column="0" Text="Evidence source" Foreground="{DynamicResource SuavoTextSubtleBrush}" FontSize="12"/>
                         <TextBlock Grid.Column="1" Text="{Binding DataPath}" Foreground="{DynamicResource SuavoTextBrush}" FontSize="12" FontFamily="Consolas,Menlo,monospace"/>
                     </Grid>
                 </StackPanel>
-                <TextBlock Text="This cannot be undone. Learned templates, audit logs, and saved credentials on this machine are erased."
-                           Foreground="{DynamicResource SuavoDangerBrush}"
+                <TextBlock Text="Audit logs and required evidence move to an Administrators + SYSTEM-only retention quarantine. Operational credentials are removed."
+                           Foreground="{DynamicResource SuavoTextMutedBrush}"
                            FontSize="12"
                            TextWrapping="Wrap"/>
             </StackPanel>
         </Border>
 
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="12" Margin="0,28,0,0">
-            <Button Content="Uninstall now"
+            <Button Content="Verify approval &amp; uninstall"
                     Command="{Binding ConfirmCommand}"
                     Padding="24,12"
                     Background="{DynamicResource SuavoDangerBrush}"

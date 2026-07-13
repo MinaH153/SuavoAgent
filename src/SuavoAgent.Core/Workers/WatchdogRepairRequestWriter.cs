@@ -1,66 +1,72 @@
+using System.Text;
 using System.Text.Json;
+using SuavoAgent.Contracts.Maintenance;
+using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Health;
 
 namespace SuavoAgent.Core.Workers;
 
+/// <summary>
+/// Persists the exact, already-verified cloud repair command for an independent
+/// LocalSystem verification pass. This handoff never invents or normalizes a
+/// payload: the original raw JSON is bound to the original command signature.
+/// </summary>
 internal static class WatchdogRepairRequestWriter
 {
-    /// Closed set of repair reasons that may be persisted to the watchdog
-    /// request file. Defense-in-depth against PHI ending up in the reason
-    /// field (the watchdog redacts as a last line, but we reject up front
-    /// so the operator gets clear feedback instead of a silent re-map).
     internal static readonly string[] AllowedReasons =
-    [
-        "remote_command",
-        "watchdog_critical",
-        "cloud_stale",
-        "install_repair",
-        "runtime_health_missing",
-        "operator_requested",
-    ];
+        RemoteRepairContract.AllowedReasons.OrderBy(value => value, StringComparer.Ordinal).ToArray();
 
     public enum ReasonValidation
     {
-        /// Caller omitted reason — defaulted to "remote_command".
         Defaulted,
-        /// Reason matched the allowed set verbatim.
         Accepted,
-        /// Reason was provided but isn't in the allowed set. Caller must NACK.
         Rejected,
     }
 
     public static string Queue(
         string? configuredPath,
-        string? commandId,
-        string reason,
-        string? agentId)
+        SignedCommand command,
+        string rawDataJson,
+        DateTimeOffset? requestedAtUtc = null)
     {
+        if (command.Command is not ("repair" or "repair_agent"))
+            throw new InvalidDataException("Only a signed repair command may cross the watchdog boundary");
+        if (!RemoteRepairContract.TryReadMinimumNecessaryData(
+                rawDataJson,
+                out var commandId,
+                out var reason,
+                out var expiresAt))
+            throw new InvalidDataException("Repair command data is not minimum necessary");
+        if (!string.Equals(command.ExpiresAt, expiresAt, StringComparison.Ordinal))
+            throw new InvalidDataException("Repair authority does not match the signed payload");
+
+        var expectedHash = RemoteCommandTrust.ComputeSha256Hex(rawDataJson);
+        if (!FixedTimeHexEquals(expectedHash, command.DataHash))
+            throw new InvalidDataException("Repair command data no longer matches the signed envelope");
+
+        var request = new RemoteRepairRequest(
+            RemoteRepairContract.SchemaVersion,
+            command.Command,
+            command.AgentId,
+            command.MachineFingerprint,
+            command.Timestamp,
+            command.Nonce,
+            command.KeyId,
+            command.Signature,
+            rawDataJson,
+            command.DataHash,
+            commandId,
+            reason,
+            (requestedAtUtc ?? DateTimeOffset.UtcNow).ToString("O"));
+        var json = RemoteRepairContract.Serialize(request);
+        var bytes = new UTF8Encoding(false, true).GetBytes(json);
+        if (bytes.Length <= 0 || bytes.Length > RemoteRepairContract.MaxRequestBytes)
+            throw new InvalidDataException("Repair handoff exceeds its bounded contract");
+
         var requestPath = string.IsNullOrWhiteSpace(configuredPath)
-            ? Path.Combine(RuntimeHealthEvidence.ProgramDataRoot, "watchdog-repair-request.json")
-            : configuredPath;
-
-        var directory = Path.GetDirectoryName(requestPath);
-        if (!string.IsNullOrWhiteSpace(directory))
-            Directory.CreateDirectory(directory);
-
-        var payload = new Dictionary<string, object?>
-        {
-            ["schemaVersion"] = 1,
-            ["commandId"] = SanitizeToken(commandId, "unknown"),
-            ["reason"] = NormalizeReason(reason),
-            ["requestedAt"] = DateTimeOffset.UtcNow.ToString("o"),
-            ["agentId"] = agentId ?? "",
-            ["source"] = "signed_remote_repair",
-        };
-
-        var json = JsonSerializer.Serialize(payload);
-        var tmp = $"{requestPath}.tmp";
-        File.WriteAllText(tmp, json);
-        if (File.Exists(requestPath))
-            File.Replace(tmp, requestPath, null);
-        else
-            File.Move(tmp, requestPath);
-
+            ? Path.Combine(RuntimeHealthEvidence.ProgramDataRoot, RemoteRepairContract.RequestFileName)
+            : Path.GetFullPath(configuredPath);
+        WriteAtomic(requestPath, bytes);
         return requestPath;
     }
 
@@ -70,48 +76,105 @@ internal static class WatchdogRepairRequestWriter
             reasonEl.ValueKind != JsonValueKind.String)
             return "remote_command";
 
-        return NormalizeReason(reasonEl.GetString());
+        var value = reasonEl.GetString();
+        return string.IsNullOrWhiteSpace(value) ? "remote_command" : value;
     }
 
-    /// Bug 20 — surface unrecognized reasons to the caller instead of
-    /// silently re-mapping to "remote_command". Returns the JSON value
-    /// (raw, unsanitized) when present so error messages can echo the
-    /// rejected token back to the operator. `null` means the field was
-    /// missing or non-string (callers default to "remote_command").
     public static (string? raw, ReasonValidation result) InspectReason(JsonElement dataEl)
     {
-        if (!dataEl.TryGetProperty("reason", out var reasonEl) ||
-            reasonEl.ValueKind != JsonValueKind.String)
+        if (!dataEl.TryGetProperty("reason", out var reasonEl))
             return (null, ReasonValidation.Defaulted);
+        if (reasonEl.ValueKind != JsonValueKind.String)
+            return (null, ReasonValidation.Rejected);
 
         var raw = reasonEl.GetString();
         if (string.IsNullOrWhiteSpace(raw))
-            return (raw, ReasonValidation.Defaulted);
+            return (null, ReasonValidation.Rejected);
 
-        var sanitized = SanitizeToken(raw, "");
-        return Array.IndexOf(AllowedReasons, sanitized) >= 0
-            ? (sanitized, ReasonValidation.Accepted)
+        return RemoteRepairContract.AllowedReasons.Contains(raw)
+            ? (raw, ReasonValidation.Accepted)
             : (raw, ReasonValidation.Rejected);
     }
 
-    private static string NormalizeReason(string? value)
+    private static void WriteAtomic(string path, ReadOnlySpan<byte> bytes)
     {
-        var reason = SanitizeToken(value, "remote_command");
-        return Array.IndexOf(AllowedReasons, reason) >= 0
-            ? reason
-            : "remote_command";
+        var directory = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(directory))
+            throw new InvalidDataException("Repair request path has no parent directory");
+        if (FileSystemEntryExists(directory))
+            RejectReparsePoint(directory, requireDirectory: true);
+        else
+            Directory.CreateDirectory(directory);
+        RejectReparsePoint(directory, requireDirectory: true);
+
+        if (FileSystemEntryExists(path))
+            RejectReparsePoint(path, requireDirectory: false);
+
+        var temporaryPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using (var stream = new FileStream(
+                       temporaryPath,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None,
+                       bufferSize: 4096,
+                       FileOptions.WriteThrough))
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+
+            // MoveFileEx/rename replaces the destination directory entry itself; it never opens
+            // or follows an existing link target. The explicit checks above still reject links
+            // so an attempted boundary redirection is visible instead of silently repaired.
+            File.Move(temporaryPath, path, overwrite: true);
+            RejectReparsePoint(path, requireDirectory: false);
+        }
+        finally
+        {
+            try { File.Delete(temporaryPath); } catch { }
+        }
     }
 
-    private static string SanitizeToken(string? value, string fallback)
+    private static bool FileSystemEntryExists(string path)
     {
-        if (string.IsNullOrWhiteSpace(value))
-            return fallback;
+        try
+        {
+            _ = File.GetAttributes(path);
+            return true;
+        }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+    }
 
-        var chars = value
-            .Where(ch => char.IsLetterOrDigit(ch) || ch is '_' or '-' or '.')
-            .Take(80)
-            .ToArray();
+    private static void RejectReparsePoint(string path, bool requireDirectory)
+    {
+        var attributes = File.GetAttributes(path);
+        var isDirectory = (attributes & FileAttributes.Directory) != 0;
+        if ((attributes & FileAttributes.ReparsePoint) != 0 || isDirectory != requireDirectory)
+            throw new InvalidDataException("Repair handoff paths must be regular non-reparse entries");
 
-        return chars.Length == 0 ? fallback : new string(chars);
+        if (!OperatingSystem.IsWindows())
+        {
+            FileSystemInfo info = requireDirectory
+                ? new DirectoryInfo(path)
+                : new FileInfo(path);
+            if (info.LinkTarget is not null)
+                throw new InvalidDataException("Repair handoff paths must not be symbolic links");
+        }
+    }
+
+    private static bool FixedTimeHexEquals(string? left, string? right)
+    {
+        if (left is null || right is null ||
+            left.Length != 64 || right.Length != 64 ||
+            !left.All(Uri.IsHexDigit) || !right.All(Uri.IsHexDigit))
+            return false;
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            Convert.FromHexString(left),
+            Convert.FromHexString(right));
     }
 }

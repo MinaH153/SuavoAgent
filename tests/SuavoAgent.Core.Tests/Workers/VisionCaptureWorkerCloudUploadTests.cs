@@ -16,10 +16,9 @@ using Xunit;
 namespace SuavoAgent.Core.Tests.Workers;
 
 /// <summary>
-/// CloudFrameUpload: when enabled, VisionCaptureWorker POSTs the scrubbed ScreenFrame to
-/// /api/agent/screen-frame for the live dashboard view. When disabled (default), nothing
-/// leaves the box. (End-to-end — agent online, Vision on, dashboard render — is validated
-/// on a real box; this covers the gate + wiring.)
+/// CloudFrameUpload: when enabled, VisionCaptureWorker POSTs metadata-only geometry and
+/// allow-listed roles to /api/agent/screen-frame. Label-bearing ScreenFrame fields must
+/// never enter the cloud serializer. When disabled (default), nothing leaves the box.
 /// </summary>
 public class VisionCaptureWorkerCloudUploadTests : IDisposable
 {
@@ -74,16 +73,43 @@ public class VisionCaptureWorkerCloudUploadTests : IDisposable
             _ipc,
             cloud: cloud);
 
-    private void RespondWithFrame()
+    private void RespondWithFrame(ScreenFrame? frame = null)
     {
-        var frame = new ScreenFrame
+        frame ??= new ScreenFrame
         {
-            Id = "f",
+            Id = "Jane Doe frame RX-839201",
             CapturedAt = DateTimeOffset.UnixEpoch,
-            Width = 1,
-            Height = 1,
-            ExtractorId = "t",
-            TextRegions = new[] { new TextRegion { Text = "Pricing", Bounds = new Rect(0, 0, 1, 1), Confidence = 0.9 } },
+            Width = 100,
+            Height = 100,
+            ExtractorId = "Oxycodone at 123 Main Street",
+            TextRegions = new[]
+            {
+                new TextRegion
+                {
+                    Text = "Jane Doe takes Oxycodone RX-839201 at 123 Main Street",
+                    Bounds = new Rect(0, 0, 10, 10),
+                    Confidence = 0.9,
+                },
+            },
+            Elements = new[]
+            {
+                new VisualElement
+                {
+                    Role = "Button",
+                    Name = "Open Jane Doe",
+                    AutomationId = "patient-rx-839201",
+                    Bounds = new Rect(10, 10, 20, 20),
+                    Confidence = 0.8,
+                },
+                new VisualElement
+                {
+                    Role = "Jane Doe",
+                    Name = "123 Main Street",
+                    AutomationId = "Oxycodone",
+                    Bounds = new Rect(20, 20, 20, 20),
+                    Confidence = 0.7,
+                },
+            },
         };
         var data = JsonSerializer.SerializeToElement(
             new { storageId = "s1", frame },
@@ -92,7 +118,7 @@ public class VisionCaptureWorkerCloudUploadTests : IDisposable
     }
 
     [Fact]
-    public async Task Enabled_PostsScrubbedFrameToScreenFrameEndpoint()
+    public async Task Enabled_PostsOnlyGeometryStatusAndAllowListedRoles()
     {
         RespondWithFrame();
         var cloud = new FakePostSigner();
@@ -102,6 +128,35 @@ public class VisionCaptureWorkerCloudUploadTests : IDisposable
         Assert.Equal(1, cloud.Calls);
         Assert.Equal("/api/agent/screen-frame", cloud.LastPath);
         Assert.NotNull(cloud.LastPayload);
+
+        var json = JsonSerializer.Serialize(cloud.LastPayload);
+        foreach (var forbidden in new[]
+                 {
+                     "Jane Doe", "Oxycodone", "123 Main Street", "RX-839201",
+                     "patient-rx-839201", "textRegions", "TextRegions", "name", "Name",
+                     "automationId", "AutomationId", "extractorId", "ExtractorId",
+                     "confidence", "Confidence", "rawObservation", "windowTitle",
+                 })
+            Assert.DoesNotContain(forbidden, json, StringComparison.OrdinalIgnoreCase);
+
+        using var document = JsonDocument.Parse(json);
+        var frame = document.RootElement.GetProperty("frame");
+        Assert.Equal(
+            new[] { "capturedAt", "elements", "height", "id", "regions", "status", "width" },
+            frame.EnumerateObject().Select(property => property.Name).Order().ToArray());
+        Assert.Equal("captured", frame.GetProperty("status").GetString());
+
+        var region = frame.GetProperty("regions")[0];
+        Assert.Equal(new[] { "bounds" }, region.EnumerateObject().Select(property => property.Name).ToArray());
+
+        var elements = frame.GetProperty("elements");
+        Assert.Equal("button", elements[0].GetProperty("role").GetString());
+        Assert.Equal("element", elements[1].GetProperty("role").GetString());
+        Assert.All(
+            elements.EnumerateArray(),
+            element => Assert.Equal(
+                new[] { "bounds", "role" },
+                element.EnumerateObject().Select(property => property.Name).Order().ToArray()));
     }
 
     [Fact]
@@ -111,6 +166,24 @@ public class VisionCaptureWorkerCloudUploadTests : IDisposable
         var cloud = new FakePostSigner();
 
         await Build(uploadEnabled: false, cloud).TickAsync(CancellationToken.None);
+
+        Assert.Equal(0, cloud.Calls);
+    }
+
+    [Fact]
+    public async Task InvalidFrameDimensions_FailClosedWithoutCloudPost()
+    {
+        RespondWithFrame(new ScreenFrame
+        {
+            Id = "Jane Doe",
+            CapturedAt = DateTimeOffset.UnixEpoch,
+            Width = 0,
+            Height = 100,
+            ExtractorId = "Oxycodone",
+        });
+        var cloud = new FakePostSigner();
+
+        await Build(uploadEnabled: true, cloud).TickAsync(CancellationToken.None);
 
         Assert.Equal(0, cloud.Calls);
     }

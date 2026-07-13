@@ -100,16 +100,13 @@ public sealed class PricingBrainEvaluator
         catch (OperationCanceledException)
         {
             _logger.LogDebug(
-                "PricingBrainEvaluator: per-row budget ({Budget}) exceeded for NDC {Ndc}",
-                PerRowBudget, row.NdcNormalized);
+                "core.pricing_brain.timeout");
             return PricingBrainDecision.Continue(DecisionTier.OperatorRequired, "brain timeout");
         }
         catch (Exception ex)
         {
             // Defense in depth — TieredBrain is contractually non-throwing.
-            _logger.LogWarning(ex,
-                "PricingBrainEvaluator: unexpected error for NDC {Ndc}; continuing",
-                row.NdcNormalized);
+            _logger.LogSafeWarning(ex);
             return PricingBrainDecision.Continue(DecisionTier.OperatorRequired, "brain error");
         }
     }
@@ -171,15 +168,14 @@ public sealed class PricingBrainEvaluator
 
     private static PricingBrainDecision Translate(BrainDecision decision)
     {
+        if (decision.Outcome == MatchOutcome.Blocked)
+            return PricingBrainDecision.Halt(decision.Tier, decision.Reason);
+
         var anyHalt = decision.Actions.Any(a =>
             a.Type == RuleActionType.Escalate ||
             a.Type == RuleActionType.AskOperator);
 
         if (anyHalt)
-            return PricingBrainDecision.Halt(decision.Tier, decision.Reason);
-
-        // Precondition block = environment not safe for autonomous pricing.
-        if (decision.Outcome == MatchOutcome.Blocked && decision.Tier == DecisionTier.Precondition)
             return PricingBrainDecision.Halt(decision.Tier, decision.Reason);
 
         return PricingBrainDecision.Continue(decision.Tier, decision.Reason);

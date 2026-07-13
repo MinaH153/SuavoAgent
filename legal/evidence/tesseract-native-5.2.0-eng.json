@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "id": "tesseract-native-5.2.0-eng",
+  "evidenceType": "nuget-repository-signed-package-plus-pinned-upstream-data",
+  "sourceRevision": "2c993543f7fa66576a8890a6c4ab053c4598aaed",
+  "artifactUrl": "https://api.nuget.org/v3-flatcontainer/tesseract/5.2.0/tesseract.5.2.0.nupkg",
+  "artifactSha256": "202d82fc7c7d8384df7da57206d5e1f456ccdabd648c46e67cdfaa3a911d4795",
+  "artifactSizeBytes": 5697774,
+  "license": "Apache-2.0 AND BSD-2-Clause",
+  "packageId": "Tesseract",
+  "packageVersion": "5.2.0",
+  "packageOwner": "charlesw",
+  "owners": ["charlesw"],
+  "packageSourceRevision": "2c993543f7fa66576a8890a6c4ab053c4598aaed",
+  "packageTagObject": "ab4ed28df58463ac753901d3b492eef265efd6a6",
+  "packageUrl": "https://api.nuget.org/v3-flatcontainer/tesseract/5.2.0/tesseract.5.2.0.nupkg",
+  "packageCatalogUrl": "https://api.nuget.org/v3/catalog0/data/2022.11.30.09.09.22/tesseract.5.2.0.json",
+  "packageSha256": "202d82fc7c7d8384df7da57206d5e1f456ccdabd648c46e67cdfaa3a911d4795",
+  "packageSizeBytes": 5697774,
+  "embeddedSignatureSha256": "a8ea24dda88024b8073d075a409adc4fb387708b3de8a294a34fff01f6b3377f",
+  "signatureType": "Repository",
+  "serviceIndex": "https://api.nuget.org/v3/index.json",
+  "repositoryCertificateSha256": "5a2901d6ada3d18260b9c6dfe2133c95d74b9eef6ae0e5dc334c8454d1477df4",
+  "nativeFiles": [
+    {
+      "path": "x64/leptonica-1.82.0.dll",
+      "sha256": "dfcb3e6ed0b16bc55bfdbcf53543cfe42a354b87c3e35bd3a95eebf005d73e76",
+      "sizeBytes": 4168192
+    },
+    {
+      "path": "x64/tesseract50.dll",
+      "sha256": "de4d04ec75095374d98f5dd7a60d14d7e2e0f76589db693eccf7ae658be8cb2b",
+      "sizeBytes": 2788352
+    }
+  ],
+  "trainedData": {
+    "repository": "https://github.com/tesseract-ocr/tessdata_fast",
+    "tag": "4.1.0",
+    "tagObject": "a8ba5063ab8013372a20e300da0c97ee46b92b07",
+    "sourceRevision": "65727574dfcd264acbb0c3e07860e4e9e9b22185",
+    "artifactPath": "eng.traineddata",
+    "artifactUrl": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/65727574dfcd264acbb0c3e07860e4e9e9b22185/eng.traineddata",
+    "artifactSha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+    "artifactSizeBytes": 4113088
+  },
+  "leptonica": {
+    "repository": "https://github.com/DanBloomberg/leptonica",
+    "version": "1.82.0",
+    "sourceRevision": "f4138265b390f1921b9891d6669674d3157887d8"
+  },
+  "licenseBundleSha256": "e3ad0717ba98848ddb6fb4b7b12bcb54b64640dd561eed6a84620e7ac4c122fb",
+  "licenseFiles": [
+    {
+      "path": "legal/package-license-texts/Tesseract-5.2.0-LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "source": "https://raw.githubusercontent.com/charlesw/tesseract/2c993543f7fa66576a8890a6c4ab053c4598aaed/LICENSE.txt",
+      "sourceRevision": "2c993543f7fa66576a8890a6c4ab053c4598aaed"
+    },
+    {
+      "path": "legal/license-texts/Leptonica-BSD-2-Clause.txt",
+      "sha256": "4d3065116f182e29760af0c901d5dbb2e1e16c42765dfc24e69b26805e2acb1e",
+      "upstreamSha256": "87829abb5bbb00b55a107365da89e9a33f86c4250169e5a1e5588505be7d5806",
+      "source": "https://raw.githubusercontent.com/DanBloomberg/leptonica/f4138265b390f1921b9891d6669674d3157887d8/leptonica-license.txt",
+      "sourceRevision": "f4138265b390f1921b9891d6669674d3157887d8",
+      "normalization": "retained copy removes one trailing blank line only"
+    }
+  ]
+}

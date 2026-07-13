@@ -28,7 +28,7 @@ namespace SuavoAgent.Diagnostics;
 /// Canonicalization is RFC 8785 ONLY in v1.0 (Codex chunk A CRITICAL
 /// RESOLVED — no custom fallback; drift between cloud + agent produces
 /// signed-but-rejected bundles). <see cref="CanonicalizeForSigning"/> invokes
-/// the real <c>JsonCanonicalizer</c> reference implementation; the cloud side
+/// the pinned vendored WebPKI reference implementation; the cloud side
 /// uses the matching <c>canonicalize</c> npm package, both gated on the RFC 8785
 /// Appendix B golden vectors.
 /// </para>
@@ -217,7 +217,8 @@ public sealed class RulesetSignatureVerifier : IRulesetVerifier
     /// <para>
     /// Comp 2.2 part 5 — Codex chunk A CRITICAL RESOLVED. The placeholder
     /// is gone; this now invokes the <c>JsonCanonicalizer</c> reference
-    /// implementation (NuGet, v1.0.0). Cloud-side (Comp 2A) uses the
+    /// implementation from cyberphone/json-canonicalization commit
+    /// 19d51d7fe467d4706a3ff08adf8a748f29fc21e0. Cloud-side (Comp 2A) uses the
     /// matching <c>canonicalize</c> npm package; both consume the same
     /// RFC 8785 Appendix B test vectors as a wire-compat gate.
     /// </para>
@@ -227,7 +228,7 @@ public sealed class RulesetSignatureVerifier : IRulesetVerifier
     /// <item><see cref="JsonSerializer.Serialize"/> emits the bundle's
     /// payload-shape JSON (property names per
     /// <see cref="JsonPropertyNameAttribute"/>, null-omitting).</item>
-    /// <item><c>JsonCanonicalizer.GetEncodedString()</c> applies RFC 8785:
+    /// <item><see cref="Rfc8785Canonicalizer"/> applies RFC 8785:
     /// sorts object members by UTF-16 code-unit order, normalises numbers
     /// via ECMAScript ToString, escapes strings per RFC 8259 §7.</item>
     /// </list>
@@ -237,7 +238,7 @@ public sealed class RulesetSignatureVerifier : IRulesetVerifier
     internal static string CanonicalizeForSigning(RulesetV1 ruleset)
     {
         var payloadJson = JsonSerializer.Serialize(ruleset, PayloadJsonOptions);
-        return new global::Org.Webpki.JsonCanonicalizer.JsonCanonicalizer(payloadJson).GetEncodedString();
+        return Rfc8785Canonicalizer.Canonicalize(payloadJson);
     }
 
     /// <summary>
@@ -245,8 +246,8 @@ public sealed class RulesetSignatureVerifier : IRulesetVerifier
     /// vector tests). Production code calls
     /// <see cref="CanonicalizeForSigning(RulesetV1)"/> instead.
     /// </summary>
-    internal static string CanonicalizeJsonString(string json)
-        => new global::Org.Webpki.JsonCanonicalizer.JsonCanonicalizer(json).GetEncodedString();
+    internal static string CanonicalizeJsonString(string json) =>
+        Rfc8785Canonicalizer.Canonicalize(json);
 
     private static readonly JsonSerializerOptions PayloadJsonOptions = new()
     {

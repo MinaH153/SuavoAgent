@@ -113,7 +113,9 @@ public sealed class EncryptedScreenStore : IScreenStore
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "EncryptedScreenStore: store failed");
+            _logger.Warning(
+                "EncryptedScreenStore: store failed ({ErrorType})",
+                ex.GetType().Name);
             return null;
         }
     }
@@ -125,7 +127,7 @@ public sealed class EncryptedScreenStore : IScreenStore
             // Sanitize id against path traversal BEFORE using as a filename.
             if (string.IsNullOrWhiteSpace(id) || id.Contains('/') || id.Contains('\\') || id.Contains(".."))
             {
-                _logger.Warning("EncryptedScreenStore: rejected load for id {Id} (unsafe chars)", id);
+                _logger.Warning("EncryptedScreenStore: rejected load for unsafe id");
                 return null;
             }
 
@@ -142,9 +144,7 @@ public sealed class EncryptedScreenStore : IScreenStore
             // under a different id is rejected.
             if (!string.Equals(parsed.Id, id, StringComparison.Ordinal))
             {
-                _logger.Warning(
-                    "EncryptedScreenStore: envelope id mismatch — filename '{FileId}' vs envelope '{EnvId}'; refusing load",
-                    id, parsed.Id);
+                _logger.Warning("EncryptedScreenStore: envelope id mismatch — refusing load");
                 return null;
             }
 
@@ -154,8 +154,7 @@ public sealed class EncryptedScreenStore : IScreenStore
             var actualHash = Convert.ToHexString(SHA256.HashData(png)).ToLowerInvariant();
             if (!string.Equals(actualHash, parsed.PngSha256, StringComparison.OrdinalIgnoreCase))
             {
-                _logger.Warning(
-                    "EncryptedScreenStore: payload hash mismatch for {Id}; refusing load", id);
+                _logger.Warning("EncryptedScreenStore: payload hash mismatch — refusing load");
                 return null;
             }
 
@@ -163,7 +162,9 @@ public sealed class EncryptedScreenStore : IScreenStore
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "EncryptedScreenStore: load failed for {Id}", id);
+            _logger.Warning(
+                "EncryptedScreenStore: load failed ({ErrorType})",
+                ex.GetType().Name);
             return null;
         }
     }
@@ -183,7 +184,9 @@ public sealed class EncryptedScreenStore : IScreenStore
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "EncryptedScreenStore: delete failed for {Id}", id);
+            _logger.Warning(
+                "EncryptedScreenStore: delete failed ({ErrorType})",
+                ex.GetType().Name);
             return false;
         }
     }
@@ -275,7 +278,9 @@ public sealed class EncryptedScreenStore : IScreenStore
                         try { f.Delete(); removed++; files.Remove(f); }
                         catch (Exception ex)
                         {
-                            _logger.Debug(ex, "Purge: delete failed for {Name}", f.Name);
+                            _logger.Debug(
+                                "EncryptedScreenStore: retention purge delete failed ({ErrorType})",
+                                ex.GetType().Name);
                         }
                     }
                 }
@@ -289,7 +294,9 @@ public sealed class EncryptedScreenStore : IScreenStore
                 try { oldest.Delete(); removed++; }
                 catch (Exception ex)
                 {
-                    _logger.Debug(ex, "Purge: delete failed for {Name}", oldest.Name);
+                    _logger.Debug(
+                        "EncryptedScreenStore: purge delete failed ({ErrorType})",
+                        ex.GetType().Name);
                 }
                 files.RemoveAt(0);
             }
@@ -300,7 +307,9 @@ public sealed class EncryptedScreenStore : IScreenStore
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "EncryptedScreenStore: purge error");
+            _logger.Warning(
+                "EncryptedScreenStore: purge error ({ErrorType})",
+                ex.GetType().Name);
         }
         return removed;
     }
@@ -404,8 +413,7 @@ public sealed class EncryptedScreenStore : IScreenStore
 
         dirInfo.SetAccessControl(security);
         _logger.Information(
-            "EncryptedScreenStore: directory {Path} locked to SYSTEM + Admins + {User} (no ChangePermissions, no TakeOwnership)",
-            _directory, currentUser.Name);
+            "EncryptedScreenStore: capture directory locked to SYSTEM, Administrators, and the Helper user without ACL takeover rights");
     }
 
     private sealed class ScreenEnvelope

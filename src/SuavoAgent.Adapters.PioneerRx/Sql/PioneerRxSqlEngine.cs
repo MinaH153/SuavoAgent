@@ -2,6 +2,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using SuavoAgent.Contracts.Canary;
 using SuavoAgent.Contracts.Models;
+using SuavoAgent.Contracts.Security;
 
 namespace SuavoAgent.Adapters.PioneerRx.Sql;
 
@@ -21,9 +22,13 @@ public sealed class PioneerRxSqlEngine : IDisposable
     public Guid? ConnectionId => _connection?.ClientConnectionId;
 
     public PioneerRxSqlEngine(string server, string database, ILogger<PioneerRxSqlEngine> logger,
-        string? sqlUser = null, string? sqlPassword = null, bool trustServerCertificate = false)
+        string? sqlUser = null, string? sqlPassword = null, bool trustServerCertificate = false,
+        string? serverCertificatePath = null, string? serverCertificateSha256 = null)
     {
         _logger = logger;
+        if (trustServerCertificate)
+            throw new InvalidOperationException(
+                "SQL activation rejected: server certificate chain and hostname validation are required");
 
         var csb = new SqlConnectionStringBuilder();
         csb.DataSource = server;
@@ -32,11 +37,21 @@ public sealed class PioneerRxSqlEngine : IDisposable
         csb.ConnectTimeout = 30;
         csb.MaxPoolSize = 1;
         csb.MinPoolSize = 0;
-        // Use indexer for Encrypt/TrustServerCertificate (cross-compile safe)
-        csb["Encrypt"] = "true";
-        csb["TrustServerCertificate"] = trustServerCertificate.ToString();
-        if (trustServerCertificate)
-            _logger.LogWarning("SQL TrustServerCertificate=true — MITM risk on untrusted networks (HIPAA 164.312(e)(1))");
+        // Mandatory supports exact ServerCertificate pinning without requiring TDS 8.
+        csb["Encrypt"] = "Mandatory";
+        csb["TrustServerCertificate"] = "false";
+        if (serverCertificatePath is null ^ serverCertificateSha256 is null)
+            throw new InvalidOperationException("SQL certificate pin path and digest must be supplied together");
+        if (serverCertificatePath is not null)
+        {
+            if (!PioneerRxSqlCertificatePinContract.TryVerifyFile(
+                    serverCertificatePath,
+                    serverCertificateSha256!,
+                    DateTimeOffset.UtcNow,
+                    out var pinCode))
+                throw new InvalidOperationException(pinCode);
+            csb["ServerCertificate"] = serverCertificatePath;
+        }
 
         if (!string.IsNullOrEmpty(sqlUser) && !string.IsNullOrEmpty(sqlPassword))
         {
@@ -83,7 +98,9 @@ public sealed class PioneerRxSqlEngine : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "SQL connection failed");
+            _logger.LogWarning(
+                "SQL connection failed (type={ExceptionType})",
+                ex.GetType().Name);
             _connection?.Dispose();
             _connection = null;
             return false;
@@ -114,7 +131,9 @@ public sealed class PioneerRxSqlEngine : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Schema fingerprint query failed");
+            _logger.LogWarning(
+                "Schema fingerprint query failed (type={ExceptionType})",
+                ex.GetType().Name);
             return false;
         }
     }
@@ -189,7 +208,9 @@ WHERE Description IN ({statusParams})";
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Status GUID discovery failed — detection disabled until SQL is reachable and status table is queryable");
+            _logger.LogError(
+                "Status GUID discovery failed — detection disabled until SQL is reachable and status table is queryable (type={ExceptionType})",
+                ex.GetType().Name);
         }
 
         return Array.Empty<Guid>();
@@ -235,7 +256,9 @@ ORDER BY Description";
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "All-status GUID discovery failed");
+            _logger.LogWarning(
+                "All-status GUID discovery failed (type={ExceptionType})",
+                ex.GetType().Name);
         }
 
         // Satisfy the compiler — unreachable but required by the original method signature split
@@ -566,7 +589,9 @@ ORDER BY full_name, ORDINAL_POSITION";
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Schema discovery failed");
+            _logger.LogWarning(
+                "Schema discovery failed (type={ExceptionType})",
+                ex.GetType().Name);
         }
 
         return result;

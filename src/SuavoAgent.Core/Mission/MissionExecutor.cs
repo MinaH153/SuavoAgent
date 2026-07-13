@@ -147,12 +147,13 @@ public sealed class MissionExecutor
                     metadata: new Dictionary<string, object?>
                     {
                         ["step_id"] = step.StepId,
-                        ["error"] = mex.Message,
+                        ["error_code"] = "mission_binding_failed",
+                        ["exception_type"] = mex.GetType().Name,
                     });
                 var completed = DateTimeOffset.UtcNow;
                 return AuditPlanFailure(
                     audit, goal, plan, missionId, startedAt, completed, stepResults,
-                    reason: mex.Message,
+                    reason: $"mission_binding_failed:{mex.GetType().Name}",
                     outcome: MissionOutcome.PlanFailed);
             }
 

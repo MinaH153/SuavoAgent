@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Serilog;
+using SuavoAgent.Contracts.Maintenance;
 using SuavoAgent.Diagnostics;
 using SuavoAgent.Watchdog;
 
@@ -18,7 +19,7 @@ Wire.AttachUnhandledHooks(WireComponent.Watchdog, new WireOptions
     EnableSentry = true,
 });
 
-// Crash sink: last-resort unhandled-exception handler that persists to the
+// Crash sink: last-resort unhandled-exception handler that persists a PHI-safe
 // shared SuavoAgent log directory. Same contract as Broker/Core — the service
 // must leave an audit trail even when the host dies before Serilog is ready.
 // Kept alongside Wire so a Wire-init failure still leaves a plaintext audit.
@@ -29,12 +30,27 @@ static string WatchdogCrashDir()
     try { Directory.CreateDirectory(dir); } catch { }
     return dir;
 }
-static void WriteWatchdogCrash(string stage, Exception ex)
+static string SafeExceptionType(Exception? exception)
+{
+    var name = exception?.GetType().Name ?? "NonExceptionFailure";
+    return new string(name
+        .Take(96)
+        .Select(ch => char.IsAsciiLetterOrDigit(ch) ? ch : '_')
+        .ToArray());
+}
+static string SafeCrashStage(string stage) => stage switch
+{
+    "UnhandledException" => "unhandled_exception",
+    "UnobservedTaskException" => "unobserved_task_exception",
+    "Main" => "main",
+    _ => "unknown",
+};
+static void WriteWatchdogCrash(string stage, Exception? exception)
 {
     try
     {
-        var line = $"[{DateTimeOffset.Now:O}] [{stage}] {ex.GetType().FullName}: {ex.Message}"
-                   + Environment.NewLine + ex.ToString() + Environment.NewLine + Environment.NewLine;
+        var line = $"[{DateTimeOffset.UtcNow:O}] code=watchdog.{SafeCrashStage(stage)}.fatal " +
+                   $"exception_type={SafeExceptionType(exception)}{Environment.NewLine}";
         File.AppendAllText(
             Path.Combine(WatchdogCrashDir(), "watchdog-crash.log"),
             line,
@@ -44,7 +60,7 @@ static void WriteWatchdogCrash(string stage, Exception ex)
 }
 
 AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-    WriteWatchdogCrash("UnhandledException", e.ExceptionObject as Exception ?? new Exception(e.ExceptionObject?.ToString() ?? "unknown"));
+    WriteWatchdogCrash("UnhandledException", e.ExceptionObject as Exception);
 TaskScheduler.UnobservedTaskException += (_, e) =>
     WriteWatchdogCrash("UnobservedTaskException", e.Exception);
 
@@ -62,8 +78,7 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    Log.Information("SuavoAgent.Watchdog starting — account={Account}, pid={Pid}",
-        Environment.UserName, Environment.ProcessId);
+    Log.Information("watchdog.process_started");
     Log.Information("IsWindowsService={IsService}", WindowsServiceHelpers.IsWindowsService());
 
     // Empty builder: Watchdog has no configuration file dependency. Mirrors
@@ -81,15 +96,43 @@ try
     builder.Services.AddSingleton<IServiceCommand, ServiceCommand>();
     builder.Services.AddSingleton(sp =>
     {
-        var bootstrap = Environment.GetEnvironmentVariable("SUAVO_BOOTSTRAP_PS1")
-                        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                                        "SuavoAgent", "bootstrap.ps1");
-        // Restart-request lives in the install dir (alongside the OTA sentinel), whose ACL
-        // denies interactive-user writes — Core writes it post-swap, the Watchdog consumes it.
+        var updateRoot = UpdateActivationContract.DefaultUpdateRoot();
+        var maintenanceRoot = UpdateActivationContract.DefaultMaintenanceRoot();
+        var identity = WatchdogInstallIdentityReader.TryRead(exeDir);
+        // Core writes the signed repair handoff in its LocalService data root. Watchdog treats
+        // that file as untrusted and independently verifies identity, freshness, payload hash,
+        // and the production command signature before privileged maintenance can run.
         return new WatchdogOptions
         {
-            BootstrapPath = bootstrap,
-            RestartRequestPath = Path.Combine(exeDir, "watchdog-restart-request.json"),
+            UpdateRoot = updateRoot,
+            ActivationRequestPath = Path.Combine(
+                updateRoot,
+                UpdateActivationContract.ActivationRequestFileName),
+            ReplayLedgerPath = Path.Combine(
+                updateRoot,
+                UpdateActivationContract.CoordinatorDirectoryName,
+                UpdateActivationContract.ReplayLedgerFileName),
+            ExpectedAgentId = identity?.AgentId,
+            ExpectedMachineFingerprint = identity?.MachineFingerprint,
+            CurrentVersion = identity?.Version,
+            MaintenanceRoot = maintenanceRoot,
+            RepairRequestPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent",
+                RemoteRepairContract.RequestFileName),
+            RemoteRepairReplayLedgerPath = Path.Combine(
+                maintenanceRoot,
+                RemoteRepairContract.ReplayLedgerFileName),
+            PioneerRxApprovalRequestPath =
+                PioneerRxApprovalMaintenanceContract.DefaultRequestPath(),
+            PioneerRxApprovalBootstrapRequestPath =
+                PioneerRxApprovalBootstrapContract.DefaultRequestPath(),
+            ActiveClaimPath = Path.Combine(
+                maintenanceRoot,
+                UpdateActivationContract.ActiveClaimFileName),
+            ActivationCompletionPath = Path.Combine(
+                maintenanceRoot,
+                UpdateActivationContract.CompletionFileName),
         };
     });
     builder.Services.AddHostedService<WatchdogWorker>();
@@ -100,7 +143,13 @@ try
 }
 catch (Exception ex)
 {
-    try { Log.Fatal(ex, "Watchdog terminated unexpectedly"); } catch { }
+    try
+    {
+        Log.Fatal(
+            "watchdog.main.fatal exception_type={ExceptionType}",
+            SafeExceptionType(ex));
+    }
+    catch { }
     WriteWatchdogCrash("Main", ex);
     Environment.Exit(1);
 }

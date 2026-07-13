@@ -1,3 +1,6 @@
+using System.Collections.Frozen;
+using System.Collections.Immutable;
+
 namespace SuavoAgent.Helper.Actuation;
 
 /// <summary>
@@ -23,11 +26,12 @@ public static class PackagedAppAliases
     // Notepad's process is still "Notepad", which the bare launcher name matches (GetProcessesByName
     // is case-insensitive). Calculator genuinely differs — calc.exe hands off to Calculator /
     // CalculatorApp — so it must be listed.
-    private static readonly IReadOnlyDictionary<string, string[]> Map =
-        new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenDictionary<string, ImmutableArray<string>> Map =
+        new Dictionary<string, ImmutableArray<string>>(StringComparer.OrdinalIgnoreCase)
         {
-            ["calc"] = new[] { "Calculator", "CalculatorApp" },
-        };
+            ["calc"] = ImmutableArray.Create("Calculator", "CalculatorApp"),
+            ["calculator"] = ImmutableArray.Create("calc", "CalculatorApp"),
+        }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Candidate process names to search for after launching <paramref name="processExe"/>, most

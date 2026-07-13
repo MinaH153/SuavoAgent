@@ -9,7 +9,6 @@ namespace SuavoAgent.Contracts.Models;
 public sealed record RxOrderCandidate(
     string RxHash,
     RxOrderMedication Medication,
-    RxOrderPatientDelivery PatientDelivery,
     RxOrderCandidateProvenance Provenance,
     double Confidence,
     IReadOnlyDictionary<string, double> FieldConfidence,
@@ -31,17 +30,6 @@ public sealed record RxOrderMedication(
     bool CounselingRequired,
     string Priority,
     string TemperatureRequirement);
-
-public sealed record RxOrderPatientDelivery(
-    string? NameHash,
-    string? AddressLine1Hash,
-    string? AddressLine2Hash,
-    string? City,
-    string? State,
-    string? Zip5,
-    bool Zip4Present,
-    string? PhoneHash,
-    IReadOnlyList<RxMissingAddressFlag> MissingAddressFlags);
 
 public sealed record RxOrderCandidateProvenance(
     string? PharmacyId,
@@ -76,14 +64,4 @@ public enum RxOrderCandidateWarning
     SchemaCanaryColumn,
     SchemaCanaryIndex,
     SchemaCanaryType
-}
-
-public enum RxMissingAddressFlag
-{
-    MissingName,
-    MissingPhone,
-    MissingAddressLine1,
-    MissingCity,
-    MissingState,
-    MissingZip5
 }

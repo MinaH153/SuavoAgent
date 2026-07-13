@@ -35,10 +35,10 @@ public sealed class PricingSchemaDiscovery
         {
             columns = await FetchColumnsAsync(conn, ct);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.LogWarning(ex, "PricingSchemaDiscovery: metadata query failed");
-            return PricingDiscoveryOutcome.Fail($"Metadata query failed: {ex.Message}");
+            _logger.LogWarning("PricingSchemaDiscovery: metadata query failed");
+            return PricingDiscoveryOutcome.Fail("Metadata query failed");
         }
 
         _logger.LogInformation(
@@ -64,7 +64,8 @@ public sealed class PricingSchemaDiscovery
     {
         const string sql = @"
 SELECT s.name AS SchemaName, t.name AS TableName, c.name AS ColumnName,
-       tp.name AS DataTypeName, c.is_nullable AS IsNullable
+       tp.name AS DataTypeName, c.is_nullable AS IsNullable,
+       c.max_length AS MaxLength, c.precision AS Precision, c.scale AS Scale
 FROM sys.tables t
 JOIN sys.schemas s ON s.schema_id = t.schema_id
 JOIN sys.columns c ON c.object_id = t.object_id
@@ -88,7 +89,10 @@ ORDER BY s.name, t.name, c.column_id;";
                 TableName: reader.GetString(1),
                 ColumnName: reader.GetString(2),
                 DataType: reader.GetString(3),
-                IsNullable: reader.GetBoolean(4)));
+                IsNullable: reader.GetBoolean(4),
+                MaxLength: Convert.ToInt32(reader.GetValue(5)),
+                Precision: Convert.ToInt32(reader.GetValue(6)),
+                Scale: Convert.ToInt32(reader.GetValue(7))));
         }
         return rows;
     }

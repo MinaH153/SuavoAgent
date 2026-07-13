@@ -1,38 +1,53 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using SuavoAgent.Contracts.Maintenance;
+using SuavoAgent.Contracts.Models;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Learning;
+using SuavoAgent.Core.State;
+using SuavoAgent.Core.Workers;
 
 namespace SuavoAgent.Core.Cloud;
 
-public interface IPostSigner
+public sealed partial class SuavoCloudClient : IPostSigner, IDisposable
 {
-    Task<JsonElement?> PostSignedAsync(string path, object payload, CancellationToken ct);
+    private const int MaxSignedResponseBytes = 128 * 1024;
+    private const int MaxErrorResponseBytes = 16 * 1024;
+    private sealed record VerifiedResponse(
+        JsonElement Body,
+        string KeyId,
+        string SignatureBase64,
+        string CanonicalBodySha256,
+        string CanonicalBodyJson);
 
-    /// <summary>
-    /// Like PostSignedAsync but also verifies the response body's ECDSA signature (H-11).
-    /// Returns null if the response is unsigned or signature verification fails.
-    /// </summary>
-    Task<JsonElement?> PostSignedVerifiedAsync(string path, object payload, string publicKeyDer, CancellationToken ct);
-}
-
-public sealed class SuavoCloudClient : IPostSigner, IDisposable
-{
+    private static readonly Regex OffsetTimestamp = new(
+        @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly HttpClient _http;
     private readonly HmacSigner _signer;
     private readonly AgentOptions _options;
+    private readonly string _callbackResponsePublicKeyDer;
+
+    public string? BoundAgentInstanceId => _options.AgentId;
+    public string? BoundPharmacyId => _options.PharmacyId;
 
     public SuavoCloudClient(AgentOptions options)
         : this(options, CreateHandler(options))
     {
     }
 
-    internal SuavoCloudClient(AgentOptions options, HttpMessageHandler handler)
+    internal SuavoCloudClient(
+        AgentOptions options,
+        HttpMessageHandler handler,
+        string? callbackResponsePublicKeyDer = null)
     {
         _options = options;
         _signer = new HmacSigner(options.ApiKey ?? throw new InvalidOperationException("ApiKey is required"));
+        _callbackResponsePublicKeyDer = callbackResponsePublicKeyDer
+            ?? RemoteCommandTrust.CommandV1PublicKeyDer;
 
         var uri = new Uri(options.CloudUrl);
         if (uri.Scheme != Uri.UriSchemeHttps)
@@ -43,7 +58,10 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
 
     private static HttpMessageHandler CreateHandler(AgentOptions options)
     {
-        var handler = new HttpClientHandler();
+        // A redirect is a different request target and therefore requires a
+        // new signature/nonce. HttpClient's transparent redirect path cannot
+        // re-sign, so credentialed agent transports reject redirects instead.
+        var handler = new HttpClientHandler { AllowAutoRedirect = false };
         if (!string.IsNullOrEmpty(options.CloudCertPin))
         {
             handler.ServerCertificateCustomValidationCallback = (message, cert, chain, errors) =>
@@ -69,42 +87,317 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         return await PostSignedAsync("/api/agent/sync", payload, ct);
     }
 
-    /// <summary>
-    /// Ships PHI to /api/agent/patient-details — driver-needed delivery
-    /// fields only. The <see cref="SuavoAgent.Contracts.Models.PatientDetailsPayload"/>
-    /// type is the deliberate compile-time contract: any new PHI field that
-    /// reaches cloud has to land in that record first, which makes the diff
-    /// impossible to miss in code review (Codex 2026-04-26 hardening).
-    ///
-    /// The Rx number itself is NEVER sent in cleartext alongside the hash;
-    /// only <c>rxNumberHash</c> ships, and the payload record deliberately
-    /// omits a RxNumber field.
-    /// </summary>
-    /// <returns><c>true</c> if PHI was dispatched; <c>false</c> if egress is
-    /// gated off (fail-closed) and nothing left the box.</returns>
-    public async Task<bool> SendPatientDetailsAsync(
-        string rxNumber,
-        SuavoAgent.Contracts.Models.PatientDetailsPayload details,
-        string commandId,
+    internal async Task<bool> SyncRxDeviceBoundAsync(
+        object payload,
+        SignedDeviceReceipt<RxSourceDeviceReceipt> signed,
         CancellationToken ct)
     {
-        // Precedence-1 fail-closed gate (2026-06-04). The cloud
-        // /api/agent/patient-details route does not exist in the canonical tree
-        // and OutboundPhiGuard exempts the path, so an unguarded POST shipped
-        // unscrubbed patient PHI to a 404 (edge/proxy logs). Do NOT touch the
-        // wire until the audited route + typed contract + phi_egress_audit exist
-        // (plan Stage A1). Log is PHI-safe: no patient fields, no Rx number.
+        var response = await PostSignedAsync("/api/agent/sync", payload, ct)
+            .ConfigureAwait(false);
+        if (response is null || response.Value.ValueKind != JsonValueKind.Object ||
+            !response.Value.TryGetProperty("success", out var success) ||
+            success.ValueKind != JsonValueKind.True ||
+            !response.Value.TryGetProperty("data", out var data) ||
+            data.ValueKind != JsonValueKind.Object ||
+            !data.TryGetProperty("stored", out var stored) ||
+            stored.ValueKind != JsonValueKind.True ||
+            !TryReadString(data, "batchDigest", out var batchDigest) ||
+            !TryReadString(data, "sourceKeyId", out var keyId) ||
+            !TryReadString(data, "sourceBindingId", out var sourceBindingId) ||
+            !data.TryGetProperty("sourceCounter", out var counter) ||
+            counter.ValueKind != JsonValueKind.Number ||
+            !counter.TryGetInt64(out var sourceCounter))
+            return false;
+        return string.Equals(
+                   batchDigest,
+                   signed.Receipt.BatchDigest,
+                   StringComparison.Ordinal) &&
+               string.Equals(keyId, signed.KeyId, StringComparison.Ordinal) &&
+               string.Equals(
+                   sourceBindingId,
+                   signed.Receipt.SourceBindingId,
+                   StringComparison.Ordinal) &&
+               sourceCounter == signed.Receipt.Counter;
+    }
+
+    internal sealed record PomActivationCloudReceipt(
+        string CommandId,
+        string Status,
+        string? SourceBindingId,
+        bool Idempotent);
+
+    internal async Task<PomActivationCloudReceipt?> SendPomActivationReceiptAsync(
+        SignedDeviceReceipt<PomActivationDeviceReceipt> signed,
+        CancellationToken ct)
+    {
+        var response = await PostSignedAsync(
+            "/api/agent/pom/activation-receipt",
+            new
+            {
+                receipt = JsonSerializer.SerializeToElement(
+                    signed.Receipt,
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                keyId = signed.KeyId,
+                signature = signed.Signature,
+            },
+            ct).ConfigureAwait(false);
+        if (response is null || response.Value.ValueKind != JsonValueKind.Object ||
+            !response.Value.TryGetProperty("success", out var success) ||
+            success.ValueKind != JsonValueKind.True ||
+            !response.Value.TryGetProperty("data", out var data) ||
+            data.ValueKind != JsonValueKind.Object ||
+            !TryReadString(data, "commandId", out var commandId) ||
+            !TryReadString(data, "status", out var status) ||
+            !data.TryGetProperty("idempotent", out var idempotent) ||
+            idempotent.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            return null;
+        string? sourceBindingId = null;
+        if (data.TryGetProperty("sourceBindingId", out var source) &&
+            source.ValueKind == JsonValueKind.String)
+            sourceBindingId = source.GetString();
+        if (!string.Equals(commandId, signed.Receipt.CommandId, StringComparison.Ordinal) ||
+            status is not ("executed" or "failed") ||
+            (status == "executed" && !IsCanonicalUuid(sourceBindingId ?? "")))
+            return null;
+        return new(commandId, status, sourceBindingId, idempotent.GetBoolean());
+    }
+
+    /// <summary>
+    /// Sends the approved, minimum-necessary delivery fields for one exact hash-only candidate.
+    /// The raw Rx number is not accepted by this API and therefore cannot cross the cloud boundary.
+    /// A successful HTTP status is insufficient: the exact response bytes must carry a valid
+    /// command-key signature and the receipt must bind the command/candidate/pharmacy identifiers.
+    /// </summary>
+    internal async Task<PatientDetailsCallbackReceipt?> SendApprovedPatientDetailsAsync(
+        ApprovedPatientFetchCommand command,
+        PatientDetailsPayload details,
+        CancellationToken ct)
+    {
         if (!_options.EnableAuditedPatientDetailsEgress)
         {
             Serilog.Log.Warning(
                 "patient-details egress is fail-closed (EnableAuditedPatientDetailsEgress=false); "
-                + "audited cloud route not yet built — patient PHI NOT sent (commandId {CommandId}).",
-                commandId);
-            return false;
+                + "approved patient PHI was NOT sent (commandId {CommandId}).",
+                command.CommandId);
+            return null;
         }
 
-        var rxNumberHash = Learning.PhiScrubber.HmacHash(rxNumber, _options.HmacSalt ?? "[no-hmac-salt]");
-        await PostSignedAsync("/api/agent/patient-details", new { rxNumberHash, details, commandId }, ct);
+        // Explicit lower-camel projection keeps the Windows serializer byte contract aligned with
+        // the route's strict Zod schema. The typed PatientDetailsPayload remains the allow-list;
+        // no opaque object and no RxNumber can be smuggled into this body.
+        var callback = new
+        {
+            schemaVersion = 1,
+            commandId = command.CommandId,
+            candidateId = command.CandidateId,
+            rxHash = command.RxHash,
+            evidenceId = command.EvidenceId,
+            pharmacyId = command.PharmacyId,
+            details = new
+            {
+                firstName = details.FirstName,
+                lastInitial = details.LastInitial,
+                phone = details.Phone,
+                address1 = details.Address1,
+                address2 = details.Address2,
+                city = details.City,
+                state = details.State,
+                zip = details.Zip,
+            },
+        };
+
+        var response = await PostSignedVerifiedCoreAsync(
+            "/api/agent/patient-details",
+            callback,
+            _callbackResponsePublicKeyDer,
+            allowTypedPatientDetails: true,
+            ct).ConfigureAwait(false);
+        if (response is null) return null;
+        return TryParsePatientDetailsReceipt(response.Value, command, out var receipt)
+            ? receipt
+            : null;
+    }
+
+    internal static bool TryParsePatientDetailsReceipt(
+        JsonElement response,
+        ApprovedPatientFetchCommand command,
+        out PatientDetailsCallbackReceipt? receipt,
+        DateTimeOffset? nowUtc = null)
+    {
+        receipt = null;
+        if (response.ValueKind != JsonValueKind.Object ||
+            !HasExactProperties(response, "success", "data") ||
+            !response.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.True ||
+            !response.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object ||
+            !HasExactProperties(
+                data,
+                "schemaVersion", "commandId", "candidateId", "pharmacyId", "stagingId",
+                "transitionId", "status", "reviewState", "expiresAt", "idempotent"))
+            return false;
+
+        if (!data.TryGetProperty("schemaVersion", out var schema) ||
+            schema.ValueKind != JsonValueKind.Number || !schema.TryGetInt32(out var schemaVersion) || schemaVersion != 1 ||
+            !TryReadString(data, "commandId", out var commandId) ||
+            !TryReadString(data, "candidateId", out var candidateId) ||
+            !TryReadString(data, "pharmacyId", out var pharmacyId) ||
+            !TryReadString(data, "stagingId", out var stagingId) ||
+            !TryReadString(data, "transitionId", out var transitionId) ||
+            !TryReadString(data, "status", out var status) ||
+            !TryReadString(data, "reviewState", out var reviewState) ||
+            !TryReadString(data, "expiresAt", out var expiresAtRaw) ||
+            !data.TryGetProperty("idempotent", out var idempotentElement) ||
+            idempotentElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            return false;
+
+        if (!string.Equals(commandId, command.CommandId, StringComparison.Ordinal) ||
+            !string.Equals(candidateId, command.CandidateId, StringComparison.Ordinal) ||
+            !string.Equals(pharmacyId, command.PharmacyId, StringComparison.Ordinal) ||
+            !IsCanonicalUuid(stagingId) || !IsCanonicalUuid(transitionId) ||
+            !string.Equals(status, "patient_details_received", StringComparison.Ordinal) ||
+            reviewState is not ("ready_for_review" or "needs_review") ||
+            !DateTimeOffset.TryParse(expiresAtRaw, out var expiresAt))
+            return false;
+
+        var now = nowUtc ?? DateTimeOffset.UtcNow;
+        if (expiresAt <= now - TimeSpan.FromSeconds(30) ||
+            expiresAt > now + TimeSpan.FromMinutes(31))
+            return false;
+
+        receipt = new PatientDetailsCallbackReceipt(
+            commandId,
+            candidateId,
+            pharmacyId,
+            stagingId,
+            transitionId,
+            status,
+            reviewState,
+            expiresAt,
+            idempotentElement.GetBoolean());
+        return true;
+    }
+
+    internal async Task<DeliveryWritebackCallbackReceipt?> SendDeliveryWritebackAsync(
+        AgentDeliveryWritebackCommand command,
+        DeliveryWritebackResultCode resultCode,
+        CancellationToken ct)
+    {
+        var callback = new
+        {
+            schemaVersion = command.SchemaVersion,
+            writebackId = command.WritebackId,
+            commandId = command.CommandId,
+            candidateId = command.CandidateId,
+            rxHash = command.RxHash,
+            evidenceId = command.EvidenceId,
+            pharmacyId = command.PharmacyId,
+            orderId = command.OrderId,
+            inboxItemId = command.InboxItemId,
+            pmsReferenceId = command.PmsReferenceId,
+            proofRecordId = command.ProofRecordId,
+            proofDigest = command.ProofDigest,
+            transition = command.Transition,
+            transitionAt = command.TransitionAt,
+            resultCode = resultCode.ToWireValue(),
+        };
+        var response = await SendSignedVerifiedEnvelopeCoreAsync(
+            HttpMethod.Patch,
+            "/api/agent/delivery-writeback",
+            callback,
+            _callbackResponsePublicKeyDer,
+            RemoteCommandTrust.CommandV1KeyId,
+            allowTypedPatientDetails: false,
+            ct).ConfigureAwait(false);
+        if (response is null) return null;
+        return TryParseDeliveryWritebackReceipt(
+            response.Body,
+            command,
+            resultCode,
+            out var receipt,
+            new DeliveryWritebackSignedProof(
+                response.KeyId,
+                response.SignatureBase64,
+                response.CanonicalBodySha256,
+                response.CanonicalBodyJson))
+            ? receipt
+            : null;
+    }
+
+    internal static bool TryParseDeliveryWritebackReceipt(
+        JsonElement response,
+        AgentDeliveryWritebackCommand command,
+        DeliveryWritebackResultCode expectedResult,
+        out DeliveryWritebackCallbackReceipt? receipt,
+        DeliveryWritebackSignedProof? proof = null)
+    {
+        receipt = null;
+        if (response.ValueKind != JsonValueKind.Object ||
+            !HasExactProperties(response, "success", "data") ||
+            !response.TryGetProperty("success", out var success) ||
+            success.ValueKind != JsonValueKind.True ||
+            !response.TryGetProperty("data", out var data) ||
+            data.ValueKind != JsonValueKind.Object ||
+            !HasExactProperties(
+                data,
+                "schemaVersion", "writebackId", "commandId", "pharmacyId", "orderId",
+                "candidateId", "pmsReferenceId", "proofRecordId", "proofDigest",
+                "transition", "status", "resultCode", "completedAt", "idempotent") ||
+            !data.TryGetProperty("schemaVersion", out var schema) ||
+            schema.ValueKind != JsonValueKind.Number || !schema.TryGetInt32(out var version) || version != 2 ||
+            !TryReadString(data, "writebackId", out var writebackId) ||
+            !TryReadString(data, "commandId", out var commandId) ||
+            !TryReadString(data, "pharmacyId", out var pharmacyId) ||
+            !TryReadString(data, "orderId", out var orderId) ||
+            !TryReadString(data, "candidateId", out var candidateId) ||
+            !TryReadString(data, "pmsReferenceId", out var pmsReferenceId) ||
+            !TryReadNullableString(data, "proofRecordId", out var proofRecordId) ||
+            !TryReadNullableString(data, "proofDigest", out var proofDigest) ||
+            !TryReadString(data, "transition", out var transition) ||
+            !TryReadString(data, "status", out var status) ||
+            !TryReadString(data, "resultCode", out var resultCodeRaw) ||
+            !TryReadString(data, "completedAt", out var completedAtRaw) ||
+            !data.TryGetProperty("idempotent", out var idempotent) ||
+            idempotent.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
+            !TryParseWritebackResult(resultCodeRaw, out var resultCode) ||
+            !OffsetTimestamp.IsMatch(completedAtRaw) ||
+            !DateTimeOffset.TryParse(
+                completedAtRaw,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var completedAt))
+            return false;
+
+        var expectedStatus = expectedResult switch
+        {
+            DeliveryWritebackResultCode.Success or DeliveryWritebackResultCode.AlreadyAtTarget => "succeeded",
+            _ => "needs_attention",
+        };
+        if (!IsCanonicalUuid(writebackId) || !IsCanonicalUuid(commandId) ||
+            !IsCanonicalUuid(pharmacyId) || !IsCanonicalUuid(orderId) ||
+            !IsCanonicalUuid(candidateId) ||
+            writebackId != command.WritebackId || commandId != command.CommandId ||
+            pharmacyId != command.PharmacyId || orderId != command.OrderId ||
+            candidateId != command.CandidateId ||
+            pmsReferenceId != command.PmsReferenceId ||
+            proofRecordId != command.ProofRecordId || proofDigest != command.ProofDigest ||
+            transition != command.Transition ||
+            resultCode != expectedResult || status != expectedStatus)
+            return false;
+
+        receipt = new DeliveryWritebackCallbackReceipt(
+            writebackId,
+            commandId,
+            pharmacyId,
+            orderId,
+            candidateId,
+            pmsReferenceId,
+            proofRecordId,
+            proofDigest,
+            transition,
+            status,
+            resultCode,
+            completedAt,
+            idempotent.GetBoolean(),
+            proof ?? new DeliveryWritebackSignedProof("", "", "", ""));
         return true;
     }
 
@@ -112,54 +405,152 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     {
         var body = JsonSerializer.Serialize(payload);
         OutboundPhiGuard.AssertAllowed(path, body, _options);
-        var timestamp = DateTimeOffset.UtcNow.ToString("o");
-        var signature = _signer.Sign(timestamp, body);
-
         using var request = new HttpRequestMessage(HttpMethod.Post, path);
         request.Content = new StringContent(body, Encoding.UTF8, "application/json");
-        request.Headers.Add("x-agent-api-key", _options.ApiKey);
-        request.Headers.Add("x-agent-timestamp", timestamp);
-        request.Headers.Add("x-agent-signature", signature);
+        _signer.ApplyHeaders(request, body);
 
-        using var response = await _http.SendAsync(request, ct);
+        using var response = await _http.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            ct).ConfigureAwait(false);
         await EnsureCloudSuccessAsync(response, path, ct).ConfigureAwait(false);
 
-        var responseBody = await response.Content.ReadAsStringAsync(ct);
-        if (string.IsNullOrWhiteSpace(responseBody))
-            return null;
-
-        return JsonSerializer.Deserialize<JsonElement>(responseBody);
+        var responseBytes = await ReadResponseBytesBoundedAsync(
+            response, MaxSignedResponseBytes, ct).ConfigureAwait(false);
+        if (responseBytes is null) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<JsonElement>(responseBytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(responseBytes);
+        }
     }
 
     public async Task<JsonElement?> PostSignedVerifiedAsync(string path, object payload, string publicKeyDer, CancellationToken ct)
     {
+        return await PostSignedVerifiedCoreAsync(
+            path,
+            payload,
+            publicKeyDer,
+            allowTypedPatientDetails: false,
+            ct).ConfigureAwait(false);
+    }
+
+    private async Task<JsonElement?> PostSignedVerifiedCoreAsync(
+        string path,
+        object payload,
+        string publicKeyDer,
+        bool allowTypedPatientDetails,
+        CancellationToken ct) =>
+        await SendSignedVerifiedCoreAsync(
+            HttpMethod.Post,
+            path,
+            payload,
+            publicKeyDer,
+            allowTypedPatientDetails,
+            ct).ConfigureAwait(false);
+
+    private async Task<JsonElement?> SendSignedVerifiedCoreAsync(
+        HttpMethod method,
+        string path,
+        object payload,
+        string publicKeyDer,
+        bool allowTypedPatientDetails,
+        CancellationToken ct) =>
+        (await SendSignedVerifiedEnvelopeCoreAsync(
+            method,
+            path,
+            payload,
+            publicKeyDer,
+            RemoteCommandTrust.CommandV1KeyId,
+            allowTypedPatientDetails,
+            ct).ConfigureAwait(false))?.Body;
+
+    private async Task<VerifiedResponse?> SendSignedVerifiedEnvelopeCoreAsync(
+        HttpMethod method,
+        string path,
+        object payload,
+        string publicKeyDer,
+        string keyId,
+        bool allowTypedPatientDetails,
+        CancellationToken ct)
+    {
         var body = JsonSerializer.Serialize(payload);
-        OutboundPhiGuard.AssertAllowed(path, body, _options);
-        var timestamp = DateTimeOffset.UtcNow.ToString("o");
-        var signature = _signer.Sign(timestamp, body);
-
-        using var request = new HttpRequestMessage(HttpMethod.Post, path);
+        if (!allowTypedPatientDetails)
+            OutboundPhiGuard.AssertAllowed(path, body, _options);
+        using var request = new HttpRequestMessage(method, path);
         request.Content = new StringContent(body, Encoding.UTF8, "application/json");
-        request.Headers.Add("x-agent-api-key", _options.ApiKey);
-        request.Headers.Add("x-agent-timestamp", timestamp);
-        request.Headers.Add("x-agent-signature", signature);
+        _signer.ApplyHeaders(request, body);
 
-        using var response = await _http.SendAsync(request, ct);
+        using var response = await _http.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            ct).ConfigureAwait(false);
         await EnsureCloudSuccessAsync(response, path, ct).ConfigureAwait(false);
 
-        var responseBody = await response.Content.ReadAsStringAsync(ct);
-        if (string.IsNullOrWhiteSpace(responseBody))
-            return null;
+        var responseBytes = await ReadResponseBytesBoundedAsync(
+            response, MaxSignedResponseBytes, ct).ConfigureAwait(false);
+        if (responseBytes is null) return null;
 
-        // H-11: Reject seed responses with missing or invalid ECDSA signature.
-        if (!response.Headers.TryGetValues("X-Response-Signature", out var sigValues)
-            || !VerifyEcdsaSignature(responseBody, sigValues.FirstOrDefault() ?? "", publicKeyDer))
+        try
         {
-            Serilog.Log.Warning("Seed response ECDSA signature missing or invalid — rejecting (H-11)");
+            // Reject response bodies that are not signed by the command control plane.
+            if (!response.Headers.TryGetValues("X-Response-Signature", out var sigValues) ||
+                sigValues.ToArray() is not [var responseSignature] ||
+                !VerifyEcdsaSignature(responseBytes, responseSignature, publicKeyDer))
+            {
+                Serilog.Log.Warning(
+                    "Cloud response ECDSA signature missing or invalid for {Path} — rejecting",
+                    path);
+                return null;
+            }
+
+            using var document = JsonDocument.Parse(
+                responseBytes,
+                new JsonDocumentOptions { MaxDepth = 16, CommentHandling = JsonCommentHandling.Disallow });
+            var responseDigest = SHA256.HashData(responseBytes);
+            try
+            {
+                return new VerifiedResponse(
+                    document.RootElement.Clone(),
+                    keyId,
+                    responseSignature,
+                    Convert.ToHexString(responseDigest).ToLowerInvariant(),
+                    Encoding.UTF8.GetString(responseBytes));
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(responseDigest);
+            }
+        }
+        catch (JsonException)
+        {
             return null;
         }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(responseBytes);
+        }
+    }
 
-        return JsonSerializer.Deserialize<JsonElement>(responseBody);
+    private static bool TryParseWritebackResult(
+        string value,
+        out DeliveryWritebackResultCode result)
+    {
+        result = value switch
+        {
+            "success" => DeliveryWritebackResultCode.Success,
+            "already_at_target" => DeliveryWritebackResultCode.AlreadyAtTarget,
+            "post_verify_mismatch" => DeliveryWritebackResultCode.PostVerifyMismatch,
+            "status_conflict" => DeliveryWritebackResultCode.StatusConflict,
+            "retry_exhausted" => DeliveryWritebackResultCode.RetryExhausted,
+            "manual_review" => DeliveryWritebackResultCode.ManualReview,
+            _ => default,
+        };
+        return value is "success" or "already_at_target" or "post_verify_mismatch" or
+            "status_conflict" or "retry_exhausted" or "manual_review";
     }
 
     private static async Task EnsureCloudSuccessAsync(
@@ -170,17 +561,66 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
         if (response.IsSuccessStatusCode)
             return;
 
-        var body = response.Content == null
-            ? null
-            : await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var body = await ReadErrorResponseBodyBoundedAsync(response, ct)
+            .ConfigureAwait(false);
         var safeReason = CloudErrorSanitizer.FromBody(body);
-        throw new HttpRequestException(
+        throw CloudErrorResponse.Create(
             $"Cloud request {path} failed with {(int)response.StatusCode} ({response.ReasonPhrase}); reason={safeReason}",
-            null,
-            response.StatusCode);
+            response.StatusCode,
+            body);
     }
 
-    private static bool VerifyEcdsaSignature(string body, string signatureBase64, string publicKeyDer)
+    private static async Task<string?> ReadErrorResponseBodyBoundedAsync(
+        HttpResponseMessage response,
+        CancellationToken ct)
+    {
+        var bytes = await ReadResponseBytesBoundedAsync(
+            response, MaxErrorResponseBytes, ct).ConfigureAwait(false);
+        if (bytes is null) return null;
+        try
+        {
+            return Encoding.UTF8.GetString(bytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
+    private static async Task<byte[]?> ReadResponseBytesBoundedAsync(
+        HttpResponseMessage response,
+        int maximumBytes,
+        CancellationToken ct)
+    {
+        var content = response.Content;
+        if (content is null ||
+            content.Headers.ContentLength > maximumBytes)
+            return null;
+        await using var stream = await content.ReadAsStreamAsync(ct)
+            .ConfigureAwait(false);
+        var buffer = new byte[maximumBytes + 1];
+        var count = 0;
+        while (count < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(count), ct)
+                .ConfigureAwait(false);
+            if (read == 0) break;
+            count += read;
+        }
+        if (count is 0 || count > maximumBytes)
+        {
+            CryptographicOperations.ZeroMemory(buffer);
+            return null;
+        }
+        var exact = buffer.AsSpan(0, count).ToArray();
+        CryptographicOperations.ZeroMemory(buffer);
+        return exact;
+    }
+
+    private static bool VerifyEcdsaSignature(
+        ReadOnlySpan<byte> body,
+        string signatureBase64,
+        string publicKeyDer)
     {
         if (string.IsNullOrEmpty(signatureBase64)) return false;
         try
@@ -188,7 +628,19 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
             using var ecdsa = ECDsa.Create();
             ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(publicKeyDer), out _);
             var sigBytes = Convert.FromBase64String(signatureBase64);
-            return ecdsa.VerifyData(Encoding.UTF8.GetBytes(body), sigBytes, HashAlgorithmName.SHA256);
+            try
+            {
+                if (sigBytes.Length != 64) return false;
+                return ecdsa.VerifyData(
+                    body,
+                    sigBytes,
+                    HashAlgorithmName.SHA256,
+                    DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(sigBytes);
+            }
         }
         catch { return false; }
     }
@@ -198,6 +650,16 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     /// with status=executed or failed, plus optional result/error.
     /// </summary>
     public async Task AckCommandAsync(string commandId, bool success, object? result, string? error, CancellationToken ct)
+    {
+        _ = await TryAckCommandAsync(commandId, success, result, error, ct).ConfigureAwait(false);
+    }
+
+    internal async Task<bool> TryAckCommandAsync(
+        string commandId,
+        bool success,
+        object? result,
+        string? error,
+        CancellationToken ct)
     {
         try
         {
@@ -210,24 +672,80 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
                     error,
                 },
                 ct);
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (HttpRequestException ex)
+            when (ex.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            // The strict ACK route uses conflict only after the command is
+            // already terminal. Retrying cannot change that state, so a
+            // durable outbox may safely converge without reopening execution.
+            Serilog.Log.Information("core.command_ack_terminal_conflict");
+            return true;
         }
         catch (Exception ex)
         {
             // Best-effort ack — don't crash the agent if cloud is unreachable.
-            Serilog.Log.Warning(ex, "AckCommand failed for {CommandId}", commandId);
+            Serilog.Log.Warning(
+                "core.command_ack_failed exception_type={ExceptionType}",
+                ex.GetType().Name);
+            return false;
         }
     }
 
-    public record AuditArchiveAck(string ArchiveId, string ArchiveDigest, string Timestamp);
+    private static bool HasExactProperties(JsonElement element, params string[] expected)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!names.Add(property.Name)) return false;
+        }
+        return names.SetEquals(expected);
+    }
 
-    public async Task<AuditArchiveAck?> UploadAuditArchiveAsync(string archiveJson, string digest, CancellationToken ct)
+    private static bool TryReadString(JsonElement element, string propertyName, out string value)
+    {
+        value = "";
+        if (!element.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind != JsonValueKind.String)
+            return false;
+        value = property.GetString() ?? "";
+        return value.Length > 0 && value.Length <= 200 && !value.Any(char.IsControl);
+    }
+
+    private static bool TryReadNullableString(
+        JsonElement element,
+        string propertyName,
+        out string? value)
+    {
+        value = null;
+        if (!element.TryGetProperty(propertyName, out var property)) return false;
+        if (property.ValueKind == JsonValueKind.Null) return true;
+        if (property.ValueKind != JsonValueKind.String) return false;
+        value = property.GetString();
+        return value is { Length: > 0 and <= 200 } && !value.Any(char.IsControl);
+    }
+
+    private static bool IsCanonicalUuid(string value) =>
+        value.Length == 36 && Guid.TryParseExact(value, "D", out var parsed) &&
+        string.Equals(parsed.ToString("D"), value, StringComparison.Ordinal);
+
+    public async Task<SelfUninstallArchiveReceipt?> UploadAuditArchiveAsync(
+        string archiveJson,
+        string digest,
+        CancellationToken ct)
     {
         var response = await PostSignedAsync("/api/agent/audit-archive",
             new { archive = archiveJson, archiveDigest = digest }, ct);
         if (response == null) return null;
         try
         {
-            return JsonSerializer.Deserialize<AuditArchiveAck>(response.Value.GetRawText(),
+            return JsonSerializer.Deserialize<SelfUninstallArchiveReceipt>(
+                response.Value.GetRawText(),
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         }
         catch { return null; }
@@ -249,274 +767,4 @@ public sealed class SuavoCloudClient : IPostSigner, IDisposable
     }
 
     public void Dispose() => _http.Dispose();
-}
-
-internal static class OutboundPhiGuard
-{
-    private static readonly HashSet<string> BlockedFieldNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "rxnumber",
-        "rx_number",
-        "patientfirstname",
-        "patientlastname",
-        "patientlastinitial",
-        "patientname",
-        "patientphone",
-        "deliveryaddress1",
-        "deliveryaddress2",
-        "deliverycity",
-        "deliverystate",
-        "deliveryzip",
-        "firstname",
-        "lastname",
-        "lastinitial",
-        "phone",
-        "address1",
-        "address2",
-        "streetaddress",
-        "dob",
-        "dateofbirth",
-        "ssn",
-        "mrn",
-        "insuranceid",
-        "memberid",
-        "policy",
-        "rxdeliveryqueue",
-    };
-
-    public static void AssertAllowed(string path, string body, AgentOptions options)
-    {
-        if (IsExplicitPhiPath(path, options))
-            return;
-
-        using var doc = JsonDocument.Parse(body);
-        var offendingField = FindPhiField(doc.RootElement, options.StrictOutboundTokenAllowlist);
-        if (offendingField != null)
-        {
-            // PHI-safe diagnostic: name the FIELD that tripped the guard (never the
-            // value). Without this, a blocked heartbeat is undebuggable — which is
-            // exactly how a false-positive on legitimate telemetry can silently take
-            // an agent offline. The field name flows into logs so the offending
-            // payload field can be pinpointed and cleaned up.
-            throw new InvalidOperationException(
-                $"PHI-classified payload blocked before outbound cloud POST to {path} (field: {offendingField}).");
-        }
-    }
-
-    private static bool IsExplicitPhiPath(string path, AgentOptions options)
-    {
-        if (string.Equals(path, "/api/agent/patient-details", StringComparison.Ordinal))
-            return true;
-
-        return string.Equals(path, "/api/agent/sync", StringComparison.Ordinal) &&
-               options.EnableLegacyPhiDeliveryQueueSync;
-    }
-
-    /// <summary>
-    /// Returns the normalized NAME of the first field whose name or value classifies
-    /// as PHI, or null if the payload is clean. Returns the field name only — never
-    /// the value — so it is safe to surface in exceptions and logs.
-    /// </summary>
-    private static string? FindPhiField(JsonElement element, bool strict, string? propertyName = null)
-    {
-        switch (element.ValueKind)
-        {
-            case JsonValueKind.Object:
-                foreach (var property in element.EnumerateObject())
-                {
-                    var normalized = NormalizeFieldName(property.Name);
-                    if (BlockedFieldNames.Contains(normalized))
-                        return normalized;
-                    var nested = FindPhiField(property.Value, strict, normalized);
-                    if (nested != null)
-                        return nested;
-                }
-
-                return null;
-
-            case JsonValueKind.Array:
-                foreach (var item in element.EnumerateArray())
-                {
-                    var nested = FindPhiField(item, strict, propertyName);
-                    if (nested != null)
-                        return nested;
-                }
-
-                return null;
-
-            case JsonValueKind.String:
-                var value = element.GetString();
-                if (string.IsNullOrWhiteSpace(value))
-                    return null;
-
-                switch (ClassifyOutboundString(propertyName, value))
-                {
-                    case OutboundDecision.OperationalSafe:
-                        return null;
-
-                    // Geographic field (Safe-Harbor identifier) — allowed today, STRICT blocks it,
-                    // SHADOW logs the would-block. Field name only; geo values match no enforced
-                    // denylist rule so a value scan wouldn't help.
-                    case OutboundDecision.GeographicExempt:
-                        if (strict)
-                            return propertyName ?? "(root)";
-                        Serilog.Log.Warning(
-                            "OutboundPhiGuard shadow: geographic field {Field} would be BLOCKED under "
-                            + "StrictOutboundTokenAllowlist. No value logged — review before enabling strict.",
-                            propertyName ?? "(root)");
-                        return null;
-
-                    // Charset-clean but NOT a non-PHI token shape (a packed identifier like
-                    // "DOE-JOHN-1990", a bare DOB "1990-01-15", an SSN "123-45-6789", a 10-digit
-                    // phone). ALWAYS run the enforced ContainsPhi value scan — the previous code
-                    // let these bypass it and leak PHI under a benign field name (HIPAA). The strict
-                    // token allow-list still applies ON TOP for non-PHI unrecognized tokens.
-                    case OutboundDecision.UnrecognizedToken:
-                        if (PhiScrubber.ContainsPhi(value))
-                            return propertyName ?? "(root)";
-                        if (strict)
-                            return propertyName ?? "(root)";
-                        Serilog.Log.Warning(
-                            "OutboundPhiGuard shadow: field {Field} would be BLOCKED under "
-                            + "StrictOutboundTokenAllowlist (not on the operational token allow-list). "
-                            + "No value logged — review before enabling strict mode.",
-                            propertyName ?? "(root)");
-                        return null;
-
-                    case OutboundDecision.NeedsDenylistScan:
-                    default:
-                        // Some telemetry ships pre-validated, pre-serialized JSON as a string
-                        // value (intelligenceContext, efficiencyReport, fleetSignals). Parse and
-                        // recurse so each leaf gets per-field treatment: embedded timestamps are
-                        // exempted; embedded PHI is still caught and named by its nested field.
-                        if (TryParseNestedJson(value, out var parsed))
-                            return FindPhiField(parsed, strict, propertyName);
-
-                        // EnforcedDenylist — EXACTLY today's Core PHI patterns, incl. the broad
-                        // DatePattern (blueprint fix #3). A match blocks the outbound POST.
-                        if (PhiScrubber.ContainsPhi(value))
-                            return propertyName ?? "(root)";
-
-                        // ShadowDenylist (blueprint fix #5) — the Diagnostics-origin staged rules
-                        // (NDC / narrow DOB / Windows path / PioneerRx / checksum-DEA / member-id)
-                        // are NOT enforced yet. Log the would-block so false-positives are measured
-                        // on a real pilot before promotion. Field name + rule name only — never the
-                        // value (parallels the charset-path shadow log above).
-                        var shadowRule = PhiScrubber.ShadowDenylistMatch(value);
-                        if (shadowRule is not null)
-                        {
-                            Serilog.Log.Warning(
-                                "OutboundPhiGuard shadow-denylist: field {Field} would be BLOCKED by "
-                                + "staged rule {Rule} (not yet enforced). No value logged — review "
-                                + "before promotion.",
-                                propertyName ?? "(root)", shadowRule);
-                        }
-                        return null;
-                }
-
-            default:
-                return null;
-        }
-    }
-
-    private static bool TryParseNestedJson(string value, out JsonElement element)
-    {
-        element = default;
-        var trimmed = value.AsSpan().TrimStart();
-        if (trimmed.Length == 0 || (trimmed[0] != '{' && trimmed[0] != '['))
-            return false;
-        try
-        {
-            using var doc = JsonDocument.Parse(value);
-            element = doc.RootElement.Clone();
-            return true;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
-
-    // ISO-8601 datetimes (incl. UTC "+00:00"/"Z" offsets) are operational metadata,
-    // not PHI. Requires the "T" + time, so a bare date like a "1990-01-15" DOB is NOT
-    // matched and stays subject to the PHI scan.
-    private static readonly Regex IsoTimestamp = new(
-        @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    private enum OutboundDecision
-    {
-        /// <summary>Operational by field name or a recognized machine token shape — never PHI.</summary>
-        OperationalSafe,
-        /// <summary>Geographic field (city/state/zip5) — a HIPAA Safe-Harbor identifier.</summary>
-        GeographicExempt,
-        /// <summary>Passes the legacy &lt;=96-char charset but matches no known token — the closed hole.</summary>
-        UnrecognizedToken,
-        /// <summary>Free-form text — scan with the deny-list (and recurse into nested JSON).</summary>
-        NeedsDenylistScan,
-    }
-
-    // Known OPERATIONAL token shapes (positive allow-list). Deliberately tight: bare single
-    // words are NOT allowed by value (a surname would hide there) — legitimate enum values
-    // arrive under operational field names (status/outcome/severity/classification/mode…) and
-    // are exempted by NAME instead. Tune this via the shadow would-block logs before enabling
-    // StrictOutboundTokenAllowlist.
-    // NON-PHI token shapes ONLY — these skip the value scan because no PHI identifier can hide in
-    // them. The hyphenated-NDC (\d{1,5}-\d{1,4}-\d{1,2}) and long-numeric (\d{6,}) shapes were
-    // REMOVED: NDC collides with a bare DOB (1990-01-15 is 4-2-2) and long-numeric collides with
-    // MRN / SSN-without-dashes / 10-digit phone. Anything charset-clean that isn't one of these
-    // now falls to the enforced ContainsPhi value scan (see the UnrecognizedToken case).
-    private static readonly Regex KnownOperationalToken = new(
-        @"^(?:" +
-        @"[0-9a-fA-F]{16,128}" +                                                 // hex hash / digest
-        @"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" + // uuid
-        @"|v?\d+\.\d+(?:\.\d+)?(?:[-.][0-9A-Za-z]+)*" +                          // semver / version
-        @"|[a-z][a-z0-9]*(?:_[a-z0-9]+)+" +                                      // snake_case enum (sql_first, rx_delivery_queue)
-        @")$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    private static OutboundDecision ClassifyOutboundString(string? propertyName, string value)
-    {
-        // Hard-safe operational field NAMES (hash/digest/timestamps/machine ids/enums).
-        if (propertyName is not null &&
-            (propertyName.EndsWith("hash", StringComparison.OrdinalIgnoreCase) ||
-             propertyName.EndsWith("sha256", StringComparison.OrdinalIgnoreCase) ||
-             propertyName.Contains("digest", StringComparison.OrdinalIgnoreCase) ||
-             propertyName.Contains("timestamp", StringComparison.OrdinalIgnoreCase) ||
-             propertyName.Contains("capturedat", StringComparison.OrdinalIgnoreCase) ||
-             propertyName.Contains("syncedat", StringComparison.OrdinalIgnoreCase) ||
-             propertyName is "ndc" or "evidenceid" or "scanwindowid" or "sessionid" or "schemaversion" or "schemasignature" or
-                 "pms" or "pmsversion" or "status" or "outcome" or "severity" or "source" or "sourcedetail" or
-                 "classification" or "priority" or "temperaturerequirement"))
-        {
-            return OutboundDecision.OperationalSafe;
-        }
-
-        // Geographic field names — exempt today, but Safe-Harbor identifiers. Separated so
-        // strict mode can block them (city + state + zip5 is a re-identification vector at a
-        // small pharmacy) while shadow mode logs + allows.
-        if (propertyName is "city" or "state" or "zip5")
-            return OutboundDecision.GeographicExempt;
-
-        // ISO-8601 datetimes (incl. "Z"/"+00:00" offsets) are operational metadata. Requires the
-        // "T" + time, so a bare date like a "1990-01-15" DOB is NOT matched and stays scanned.
-        if (IsoTimestamp.IsMatch(value))
-            return OutboundDecision.OperationalSafe;
-
-        // Strings with spaces/punctuation outside the safe charset are free-form → deny-list scan
-        // (today's behavior, preserved for both modes).
-        var charsetOk = value.Length <= 96 &&
-                        value.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '-' or '.' or ':');
-        if (!charsetOk)
-            return OutboundDecision.NeedsDenylistScan;
-
-        // Charset-clean: SAFE only if it matches a known operational token shape. Anything else
-        // (the old escape hatch — a packed identifier like "DOE-JOHN-1990") is unrecognized.
-        return KnownOperationalToken.IsMatch(value)
-            ? OutboundDecision.OperationalSafe
-            : OutboundDecision.UnrecognizedToken;
-    }
-
-    private static string NormalizeFieldName(string name) =>
-        new(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 }

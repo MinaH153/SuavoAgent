@@ -47,7 +47,7 @@ public sealed class NavigateEndToEndTests
             {
                 ["automationId"] = "saveBtn",
                 ["controlType"] = "Button",
-                ["process_name"] = "notepad",
+                ["process_name"] = "calc.exe",
             });
             return Task.FromResult(new ReasonResult(click, UsedCloud: false));
         }
@@ -133,7 +133,7 @@ public sealed class NavigateEndToEndTests
                     new RuleActionSpec
                     {
                         Type = RuleActionType.Click,
-                        Parameters = new Dictionary<string, string> { ["label"] = "saveBtn", ["process_name"] = "notepad" },
+                        Parameters = new Dictionary<string, string> { ["label"] = "saveBtn", ["process_name"] = "calc.exe" },
                     },
                 },
             },

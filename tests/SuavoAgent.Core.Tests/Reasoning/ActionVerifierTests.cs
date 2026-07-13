@@ -27,7 +27,7 @@ public class ActionVerifierTests
             Request(allowed: new[] { RuleActionType.Log }, visible: new[] { "X" }));
 
         Assert.Equal(VerificationOutcome.Rejected, result.Outcome);
-        Assert.Contains(result.FailedChecks, c => c.Contains("not allowed"));
+        Assert.Contains("action_not_allowed", result.FailedChecks);
     }
 
     [Fact]
@@ -52,7 +52,7 @@ public class ActionVerifierTests
             Request(allowed: new[] { RuleActionType.Click }, visible: new[] { "Save" }));
 
         Assert.Equal(VerificationOutcome.OperatorApprovalRequired, result.Outcome);
-        Assert.Contains("AutoExecuteTier2Destructive", result.Reason);
+        Assert.Equal("model_destructive_action_requires_approval", result.Reason);
     }
 
     [Fact]
@@ -87,7 +87,7 @@ public class ActionVerifierTests
             Request(allowed: new[] { RuleActionType.Click }, visible: new[] { "Save" }));
 
         Assert.Equal(VerificationOutcome.OperatorApprovalRequired, result.Outcome);
-        Assert.Contains("Agent.AutoExecution.Enabled=false", result.Reason);
+        Assert.Equal("auto_execution_disabled", result.Reason);
     }
 
     // --- Destructive target-required (Codex C-3) ----------------------------
@@ -102,8 +102,7 @@ public class ActionVerifierTests
             Request(visible: new[] { "Anything" }));
 
         Assert.Equal(VerificationOutcome.Rejected, result.Outcome);
-        Assert.Contains(result.FailedChecks,
-            c => c.Contains("Click") && c.Contains("name"));
+        Assert.Contains("click_target_missing", result.FailedChecks);
     }
 
     [Fact]
@@ -161,7 +160,10 @@ public class ActionVerifierTests
             Request(visible: new[] { "OtherButton" }));
 
         Assert.Equal(VerificationOutcome.Rejected, result.Outcome);
-        Assert.Contains(result.FailedChecks, c => c.Contains("GhostButton"));
+        Assert.Contains("target_not_visible", result.FailedChecks);
+        Assert.DoesNotContain("GhostButton", result.Reason);
+        Assert.All(result.FailedChecks,
+            check => Assert.DoesNotContain("GhostButton", check));
     }
 
     [Fact]
@@ -226,6 +228,21 @@ public class ActionVerifierTests
         Assert.Equal(VerificationOutcome.Approved, result.Outcome);
     }
 
+    [Fact]
+    public void Verify_UnexpectedParameter_Rejected()
+    {
+        var result = _permissive.Verify(
+            Proposal(
+                RuleActionType.PressKey,
+                0.99,
+                ("key", "Enter"),
+                ("process_name", "attacker-controlled.exe")),
+            Request());
+
+        Assert.Equal(VerificationOutcome.Rejected, result.Outcome);
+        Assert.Contains("unexpected_parameter", result.FailedChecks);
+    }
+
     // --- Helpers -------------------------------------------------------------
 
     private static InferenceProposal Proposal(
@@ -240,6 +257,7 @@ public class ActionVerifierTests
             },
             Confidence = confidence,
             ModelId = "test",
+            RationaleCode = InferenceRationaleCode.NoSafeAction,
         };
 
     private static InferenceRequest Request(

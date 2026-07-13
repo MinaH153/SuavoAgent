@@ -27,6 +27,8 @@ public sealed class PressKeysVerb : IVerb
         {
             new VerbParameterSpec("chords", typeof(System.Collections.IList), Required: true,
                 ValidationHint: "non-empty list of chord strings (e.g. ['Ctrl+S', 'Enter'])"),
+            new VerbParameterSpec("process_name", typeof(string), Required: true,
+                ValidationHint: "must identify the allowlisted sandbox app receiving the chords"),
             new VerbParameterSpec("inter_chord_delay_ms", typeof(int), Required: false,
                 ValidationHint: "0..1000"),
         }),
@@ -63,6 +65,18 @@ public sealed class PressKeysVerb : IVerb
         {
             return Task.FromResult(VerbPreconditionResult.Fail("chords_invalid", "chords must be non-empty strings"));
         }
+        if (!ctx.Parameters.TryGetValue("process_name", out var pn) ||
+            pn is not string processName || string.IsNullOrWhiteSpace(processName))
+        {
+            return Task.FromResult(VerbPreconditionResult.Fail(
+                "process_name_non_empty", "process_name must be a non-empty string"));
+        }
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(processName))
+        {
+            return Task.FromResult(VerbPreconditionResult.Fail(
+                "process_not_allowlisted",
+                $"process_name '{processName}' is not in the actuation allowlist"));
+        }
         if (ctx.Services.GetService<IActuationGateway>() is null)
         {
             return Task.FromResult(VerbPreconditionResult.Fail("gateway_missing", "IActuationGateway not registered"));
@@ -78,9 +92,10 @@ public sealed class PressKeysVerb : IVerb
         var gateway = ctx.Services.GetRequiredService<IActuationGateway>();
         var enumerable = (System.Collections.IEnumerable)ctx.Parameters["chords"]!;
         var chords = enumerable.Cast<object?>().Select(o => (string)o!).ToList();
+        var processName = (string)ctx.Parameters["process_name"]!;
         var interDelay = ctx.Parameters.TryGetValue("inter_chord_delay_ms", out var d) && d is int di ? di : 80;
 
-        var req = new PressKeysRequest(chords, interDelay, ctx.DryRun);
+        var req = new PressKeysRequest(chords, interDelay, ctx.DryRun, processName);
         var result = await gateway.PressKeysAsync(req, ct).ConfigureAwait(false);
         if (!result.Ok)
         {

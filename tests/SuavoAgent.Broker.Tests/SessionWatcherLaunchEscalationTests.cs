@@ -1,5 +1,7 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Broker;
+using SuavoAgent.Contracts.Maintenance;
 using Xunit;
 
 namespace SuavoAgent.Broker.Tests;
@@ -7,27 +9,48 @@ namespace SuavoAgent.Broker.Tests;
 // B5: when the privileged interactive-session launch (CreateProcessAsUser) keeps returning null —
 // the Broker lacks SeTcbPrivilege (mis-registered as NetworkService) — the old code logged CRITICAL
 // and returned, but CheckActiveSessions re-runs every 5s, so it retried FOREVER, spammed CRITICAL,
-// and never triggered repair. These guard the launch-failure counter + the one-shot bootstrap-repair
+// and never triggered repair. These guard the launch-failure counter + the one-shot native-maintenance
 // escalation that replaces the silent infinite retry. (A Helper crash, not a launch failure, never
 // moves this counter — so "never launched" is distinguished from "crashed".)
 public class SessionWatcherLaunchEscalationTests
 {
     private sealed class FakeWatchdogProbe : IWatchdogServiceProbe
     {
-        public int InvokeCount;
-        public string? LastBootstrapPath;
-        public bool ReturnValue = true;
+        public int StartCount;
+        public MaintenanceReason? LastReason;
+        public bool StartAccepted = true;
+        public string MaintenanceExecutablePath { get; } =
+            Path.Combine("test-install", MaintenanceContract.ExecutableName);
         public bool IsWatchdogServiceInstalled() => true;
-        public bool InvokeBootstrapRepair(string bootstrapPath, TimeSpan timeout)
+        public bool TryStartMaintenanceRepair(MaintenanceReason reason)
         {
-            InvokeCount++;
-            LastBootstrapPath = bootstrapPath;
-            return ReturnValue;
+            StartCount++;
+            LastReason = reason;
+            return StartAccepted;
         }
     }
 
-    private static SessionWatcher Create(IWatchdogServiceProbe probe, Func<string, bool>? fileExists = null) =>
-        new(NullLogger<SessionWatcher>.Instance, probe, fileExists ?? (_ => true));
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public List<string> Messages { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Messages.Add(formatter(state, exception));
+    }
+
+    private static SessionWatcher Create(
+        IWatchdogServiceProbe probe,
+        Func<string, bool>? fileExists = null,
+        ILogger<SessionWatcher>? logger = null) =>
+        new(logger ?? NullLogger<SessionWatcher>.Instance, probe, fileExists ?? (_ => true));
 
     [Theory]
     [InlineData(1, false, false)]
@@ -73,24 +96,30 @@ public class SessionWatcherLaunchEscalationTests
     }
 
     [Fact]
-    public void TryInvokeBootstrapRepair_InvokesProbe_WhenBootstrapPresent()
+    public void TryStartMaintenanceRepair_ReportsLaunchAcceptance_WhenMaintenanceHostPresent()
     {
-        var probe = new FakeWatchdogProbe { ReturnValue = true };
-        var w = Create(probe, fileExists: _ => true);
+        var probe = new FakeWatchdogProbe { StartAccepted = true };
+        var logger = new RecordingLogger<SessionWatcher>();
+        var w = Create(probe, fileExists: _ => true, logger: logger);
 
-        Assert.True(w.TryInvokeBootstrapRepair());
-        Assert.Equal(1, probe.InvokeCount);
-        Assert.NotNull(probe.LastBootstrapPath);
-        Assert.EndsWith("bootstrap.ps1", probe.LastBootstrapPath);
+        Assert.True(w.TryStartMaintenanceRepair());
+        Assert.Equal(1, probe.StartCount);
+        Assert.Equal(MaintenanceReason.HelperLaunchFailed, probe.LastReason);
+        Assert.Contains(
+            logger.Messages,
+            message => message.Contains("repair launch accepted", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            logger.Messages,
+            message => message.Contains("completed", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
-    public void TryInvokeBootstrapRepair_SkipsProbe_WhenBootstrapMissing()
+    public void TryStartMaintenanceRepair_SkipsProbe_WhenMaintenanceHostMissing()
     {
         var probe = new FakeWatchdogProbe();
         var w = Create(probe, fileExists: _ => false); // dev box / broken install
 
-        Assert.False(w.TryInvokeBootstrapRepair());
-        Assert.Equal(0, probe.InvokeCount); // never invoke repair without a bootstrap script
+        Assert.False(w.TryStartMaintenanceRepair());
+        Assert.Equal(0, probe.StartCount); // never start repair without the signed native host
     }
 }

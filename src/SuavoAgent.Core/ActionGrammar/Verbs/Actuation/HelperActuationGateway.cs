@@ -119,7 +119,7 @@ public sealed class HelperActuationGateway : IActuationGateway
             {
                 return ActuationResult.Reject(
                     resp.Error?.Code ?? "ipc_error",
-                    resp.Error?.Message ?? "Helper returned non-200",
+                    "Helper rejected the actuation request",
                     dryRun: true);
             }
             if (resp.Data is null) return ActuationResult.Reject("ipc_empty_payload", "Helper returned empty payload", dryRun: true);
@@ -129,8 +129,17 @@ public sealed class HelperActuationGateway : IActuationGateway
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "HelperActuationGateway: exception for {Command}", command);
-            return ActuationResult.Reject("ipc_exception", ex.Message, dryRun: true);
+            // IPC exception messages can include mutable pipe, executable, or
+            // desktop context. Keep both logs and audit-facing rejection text
+            // structural and PHI-free.
+            _logger.LogWarning(
+                "HelperActuationGateway: channel exception for {Command} ({ErrorType})",
+                command,
+                ex.GetType().Name);
+            return ActuationResult.Reject(
+                "ipc_exception",
+                "Helper actuation channel failed",
+                dryRun: true);
         }
         finally
         {

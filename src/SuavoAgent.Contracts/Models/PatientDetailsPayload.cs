@@ -4,7 +4,7 @@ namespace SuavoAgent.Contracts.Models;
 
 /// <summary>
 /// HIPAA "minimum necessary" payload for /api/agent/patient-details cloud
-/// upload. Codex 2026-04-26 audit caught the prior shape — SendPatientDetailsAsync
+/// upload. Codex 2026-04-26 audit caught the prior shape — the old patient-details sender
 /// took an opaque <c>object details</c> and the only caller passed an
 /// <see cref="RxPatientDetails"/> that included <c>RxNumber</c> as a cleartext
 /// field even though the hashed version was already the routing key.
