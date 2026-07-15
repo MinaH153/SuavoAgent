@@ -536,6 +536,9 @@ try
     // resolve time. The IPricingJobExecutor interface is bound below based on
     // AgentOptions.PricingExecutor — SqlFirst (default) or UiaFirst (Nadim-style UIA-only
     // pharmacies). Both implementations are fail-closed by design.
+    // Shared live "current step" surface — executors write it, HeartbeatWorker
+    // ships it as currentStep so the cockpit can show a sub-step under the working run.
+    builder.Services.AddSingleton<SuavoAgent.Core.State.AgentActivity>();
     builder.Services.AddSingleton<SqlFirstPricingJobExecutor>();
     builder.Services.AddSingleton<UiaFirstPricingJobExecutor>();
     builder.Services.AddSingleton<IPricingJobExecutor>(sp =>

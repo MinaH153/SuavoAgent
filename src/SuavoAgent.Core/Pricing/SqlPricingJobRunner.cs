@@ -33,6 +33,9 @@ public sealed class SqlPricingJobRunner
     // — the most honest baseline, no PMS/Vision needed) + the plausibility-guard caps. Null = no
     // savings enrichment (today's cheapest-cost-only run).
     private readonly PricingSavingsOptions? _savings;
+    // Live sub-step surface for the cockpit (operational labels + counts only, no PHI). Optional —
+    // null in tests / callers that don't wire it.
+    private readonly AgentActivity? _activity;
 
     private static readonly TimeSpan InterLookupDelay = TimeSpan.FromMilliseconds(20);
 
@@ -43,7 +46,8 @@ public sealed class SqlPricingJobRunner
         ISupplierPriceLookup lookup,
         ILogger<SqlPricingJobRunner> logger,
         IPharmacyBaselineVolumeProvider? baselineVolume = null,
-        PricingSavingsOptions? savings = null)
+        PricingSavingsOptions? savings = null,
+        AgentActivity? activity = null)
     {
         _reader = reader;
         _writer = writer;
@@ -52,10 +56,14 @@ public sealed class SqlPricingJobRunner
         _logger = logger;
         _baselineVolume = baselineVolume;
         _savings = savings;
+        _activity = activity;
     }
 
     public async Task<PricingJobProgress> RunAsync(PricingJobSpec spec, CancellationToken ct)
     {
+        // Live sub-step for the cockpit (the caller clears it in a finally). Labels
+        // are operational only — never PHI.
+        _activity?.Set("Reading your price list");
         var readResult = _reader.Read(
             spec.ExcelPath, spec.NdcColumn, _savings?.BaselineColumnHint, _savings?.QuantityColumnHint);
         if (!readResult.Success)
@@ -163,11 +171,13 @@ public sealed class SqlPricingJobRunner
             else failed_++;
 
             _db.UpsertPricingJob(spec, PricingJobStatus.Running, totalItems, completed, failed_);
+            _activity?.Set("Sourcing costs", completed + failed_, totalItems);
 
             if (InterLookupDelay > TimeSpan.Zero)
                 await Task.Delay(InterLookupDelay, ct);
         }
 
+        _activity?.Set("Saving results", totalItems, totalItems);
         var allResults = _db.GetPricingResults(spec.JobId);
         var write = _writer.Write(spec.ExcelPath, allResults, spec.SupplierColumn, spec.CostColumn);
 

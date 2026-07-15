@@ -64,6 +64,7 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SqlFirstPricingJobExecutor> _logger;
     private readonly AgentOptions _options;
+    private readonly AgentActivity? _activity;
 
     public SqlFirstPricingJobExecutor(
         ExcelPricingReader reader,
@@ -71,7 +72,8 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
         AgentStateDb db,
         IPricingLookupFactory lookupFactory,
         ILoggerFactory loggerFactory,
-        IOptions<AgentOptions> options)
+        IOptions<AgentOptions> options,
+        AgentActivity? activity = null)
     {
         _reader = reader;
         _writer = writer;
@@ -80,6 +82,7 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SqlFirstPricingJobExecutor>();
         _options = options.Value;
+        _activity = activity;
     }
 
     public async Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
@@ -128,15 +131,25 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
                     _options.PricingMaxPlausibleUnitCost,
                     _options.PricingMaxPlausibleQuantity,
                     _options.PricingSuspiciousSavingsFraction)
-                : null);
+                : null,
+            _activity);
 
-        var progress = await runner.RunAsync(spec, ct);
-        var ok = progress.Status == PricingJobStatus.Completed;
-        return new PricingJobExecutionResult(
-            progress,
-            lookupResult.Mode,
-            ok,
-            ok ? null : "pricing job failed - see agent logs");
+        try
+        {
+            var progress = await runner.RunAsync(spec, ct);
+            var ok = progress.Status == PricingJobStatus.Completed;
+            return new PricingJobExecutionResult(
+                progress,
+                lookupResult.Mode,
+                ok,
+                ok ? null : "pricing job failed - see agent logs");
+        }
+        finally
+        {
+            // Always retire the live sub-step when the job ends (success, failure,
+            // or cancel) so the cockpit doesn't show a stale step.
+            _activity?.Clear();
+        }
     }
 
     private static PricingJobExecutionResult Failed(
