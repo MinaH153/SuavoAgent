@@ -281,6 +281,101 @@ public class ExcelPricingReaderTests : IDisposable
     }
 
     [Fact]
+    public void Read_RepeatedPreambleAndPrintedFooterAreNotInvalidRows()
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var sheet = workbook.AddWorksheet("Sheet1");
+            sheet.Cell(1, 1).Value = "Top 500 Most Dispensed Rx Items";
+            sheet.Cell(5, 1).Value = "Dispensed Item Brand/Generic: Generic";
+            sheet.Cell(6, 17).Value = "Acquisition\nCost";
+            sheet.Cell(8, 1).Value = "#";
+            sheet.Cell(8, 3).Value = "Drug";
+            sheet.Cell(8, 4).Value = "Strength";
+            sheet.Cell(8, 6).Value = "NDC";
+            sheet.Cell(8, 7).Value = "Total Dispensed";
+            sheet.Cell(8, 19).Value = "Price";
+            AddReportRow(sheet, 9, "1", "Drug A", "10 mg", "60505082901", "1523");
+
+            // Exact printed page furniture from the top of the report.
+            sheet.Cell(10, 1).Value = "Top 500 Most Dispensed Rx Items";
+            sheet.Cell(11, 1).Value = "Dispensed Item Brand/Generic: Generic";
+            sheet.Cell(12, 17).Value = "Acquisition\nCost";
+            sheet.Cell(13, 1).Value = "#";
+            sheet.Cell(13, 3).Value = "Drug";
+            sheet.Cell(13, 4).Value = "Strength";
+            sheet.Cell(13, 6).Value = "NDC";
+            sheet.Cell(13, 7).Value = "Total Dispensed";
+            sheet.Cell(13, 19).Value = "Price";
+            AddReportRow(sheet, 14, "2", "Drug B", "20 mg", "59651000205", "1405");
+            sheet.Cell(15, 1).Value = new DateTime(2026, 7, 15, 1, 30, 0);
+            sheet.Cell(15, 19).Value = "Page 1 of 2";
+            AddReportRow(sheet, 16, "3", "Drug C", "40 mg", "60505258008", "1300");
+            sheet.Cell(17, 1).Value = "7/15/2026 1:31 AM";
+            sheet.Cell(17, 19).Value = "Page 2 of 2";
+            workbook.SaveAs(path);
+        }
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(new[] { 9, 14, 16 }, result.Rows.Select(row => row.RowIndex));
+        Assert.Empty(result.Invalid);
+    }
+
+    [Theory]
+    [InlineData("Page 2 of 1", false)]
+    [InlineData("Page 0 of 1", false)]
+    [InlineData("Page 1 of 2", true)]
+    public void Read_PrintedFooterIsSkippedOnlyForTheExactBoundedShape(
+        string pageLabel,
+        bool expectedSkipped)
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var sheet = workbook.AddWorksheet("Sheet1");
+            sheet.Cell(1, 1).Value = "#";
+            sheet.Cell(1, 2).Value = "Drug";
+            sheet.Cell(1, 3).Value = "NDC";
+            sheet.Cell(2, 1).Value = new DateTime(2026, 7, 15);
+            sheet.Cell(2, 3).Value = pageLabel;
+            workbook.SaveAs(path);
+        }
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        if (expectedSkipped)
+            Assert.Empty(result.Invalid);
+        else
+            Assert.NotEmpty(Assert.Single(result.Invalid).Reason);
+    }
+
+    [Fact]
+    public void Read_PrintedFooterWithAnotherPopulatedCellRequiresReview()
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var sheet = workbook.AddWorksheet("Sheet1");
+            sheet.Cell(1, 1).Value = "#";
+            sheet.Cell(1, 2).Value = "Drug";
+            sheet.Cell(1, 3).Value = "NDC";
+            sheet.Cell(2, 1).Value = new DateTime(2026, 7, 15);
+            sheet.Cell(2, 2).Value = "Operator-visible row";
+            sheet.Cell(2, 3).Value = "Page 1 of 2";
+            workbook.SaveAs(path);
+        }
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        Assert.NotEmpty(Assert.Single(result.Invalid).Reason);
+    }
+
+    [Fact]
     public void Read_AmbiguousCostHintCannotMatchAggregateAcquisitionCost()
     {
         var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
@@ -314,6 +409,22 @@ public class ExcelPricingReaderTests : IDisposable
         }
         wb.SaveAs(path);
         return path;
+    }
+
+    private static void AddReportRow(
+        IXLWorksheet sheet,
+        int row,
+        string rank,
+        string drug,
+        string strength,
+        string ndc,
+        string totalDispensed)
+    {
+        sheet.Cell(row, 1).Value = rank;
+        sheet.Cell(row, 3).Value = drug;
+        sheet.Cell(row, 4).Value = strength;
+        sheet.Cell(row, 6).Value = ndc;
+        sheet.Cell(row, 7).Value = totalDispensed;
     }
 
     public void Dispose()

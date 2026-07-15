@@ -101,12 +101,15 @@ public sealed partial class IpcCommandServer : IDisposable
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
 
+    internal Task Completion => _listenTask ?? Task.CompletedTask;
+
     private readonly bool _relaxClientPathValidation;
 
     // ------------------------------------------------------------------
-    // Dispatch wedge watchdog. This server is a SINGLE pipe instance with ONE sequential
-    // connection handler, and several dispatches run synchronous UIA/COM work (pricing lookup,
-    // actuation) that can hang FOREVER against a hung PMS or a torn-down session. A wedged
+    // Dispatch wedge watchdog. This server keeps one active pipe plus one pending listener but
+    // deliberately has ONE sequential connection handler. Several dispatches run synchronous
+    // UIA/COM work (pricing lookup, actuation) that can hang FOREVER against a hung PMS or a
+    // torn-down session. A wedged
     // dispatch therefore strands the entire command pipe permanently while the process looks
     // alive — the exact "agent says healthy but the cursor never moves" failure. The watchdog
     // bounds every dispatch: past the ceiling we log FATAL and self-terminate, and the Broker's
@@ -177,23 +180,41 @@ public sealed partial class IpcCommandServer : IDisposable
     {
         while (!ct.IsCancellationRequested)
         {
-            NamedPipeServerStream? pipe = null;
+            NamedPipeServerStream? pending = null;
             try
             {
-                pipe = CreateSecurePipe(_pipeName);
+                pending = CreateSecurePipe(_pipeName);
+                Task pendingConnection = WaitForConnectionAsync(pending, ct);
 
-                _logger.Debug("IpcCommandServer: waiting for Core on pipe {Name}", _pipeName);
-                await pipe.WaitForConnectionAsync(ct);
+                while (!ct.IsCancellationRequested)
+                {
+                    await pendingConnection.ConfigureAwait(false);
 
-                // Client verification happens INSIDE HandleConnection, after the first frame is read
-                // and before that frame is dispatched. VerifyClientIsCore's primary identity proof
-                // (token-SID via ImpersonateNamedPipeClient) only works once the server has read a
-                // message from the pipe — verifying here (pre-read) would make the SID path silently
-                // fall through to the image-path branch (which fails for the de-privileged Helper →
-                // the command-pipe flap). Reading one bounded frame from an as-yet-unverified peer is
-                // safe: the pipe ACL already restricts connectors, and NO command is dispatched until
-                // verification passes.
-                await HandleConnection(pipe, ct);
+                    // Promote the connected listener, then establish and begin accepting on its
+                    // successor BEFORE handling any command. A second Core connection can now wait
+                    // on a real server instance instead of the retiring listener's OS backlog. We
+                    // still dispatch only one connection at a time, preserving UIA/COM serialization.
+                    var active = pending ?? throw new InvalidOperationException(
+                        "Command pipe listener promotion invariant failed.");
+                    pending = null;
+                    try
+                    {
+                        pending = CreateSecurePipe(_pipeName);
+                        pendingConnection = WaitForConnectionAsync(pending, ct);
+
+                        // Client verification happens INSIDE HandleConnection, after the first frame
+                        // is read and before that frame is dispatched. VerifyClientIsCore's primary
+                        // identity proof (token-SID via ImpersonateNamedPipeClient) only works once
+                        // the server has read a message from the pipe. Reading one bounded frame from
+                        // an as-yet-unverified peer is safe: the ACL already restricts connectors, and
+                        // NO command is dispatched until verification passes.
+                        await HandleConnection(active, ct).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        active.Dispose();
+                    }
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -208,9 +229,17 @@ public sealed partial class IpcCommandServer : IDisposable
             }
             finally
             {
-                pipe?.Dispose();
+                pending?.Dispose();
             }
         }
+    }
+
+    private async Task WaitForConnectionAsync(
+        NamedPipeServerStream pipe,
+        CancellationToken ct)
+    {
+        _logger.Debug("IpcCommandServer: waiting for Core on pipe {Name}", _pipeName);
+        await pipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
     }
 
     private async Task HandleConnection(NamedPipeServerStream pipe, CancellationToken ct)

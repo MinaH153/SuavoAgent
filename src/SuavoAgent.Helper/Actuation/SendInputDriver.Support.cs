@@ -243,6 +243,7 @@ public sealed partial class SendInputDriver
     private const uint MOUSEEVENTF_MOVE = 0x0001;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
     private const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -356,26 +357,7 @@ public sealed partial class SendInputDriver
 
     private static void MoveAndClick(int x, int y)
     {
-        // Use absolute virtual-screen coordinates so the click lands on the
-        // exact requested point regardless of DPI / multimon configuration.
-        const int SM_XVIRTUALSCREEN = 76;
-        const int SM_YVIRTUALSCREEN = 77;
-        const int SM_CXVIRTUALSCREEN = 78;
-        const int SM_CYVIRTUALSCREEN = 79;
-
-        var vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        var vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        var vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        var vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-        var dx = (int)(((double)(x - vx) / Math.Max(1, vw)) * 65535);
-        var dy = (int)(((double)(y - vy) / Math.Max(1, vh)) * 65535);
-
-        var move = new INPUT
-        {
-            Type = INPUT_MOUSE,
-            U = new InputUnion { Mouse = new MOUSEINPUT { Dx = dx, Dy = dy, Flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE } },
-        };
+        var move = BuildAbsoluteMouseMove(x, y);
         var down = new INPUT
         {
             Type = INPUT_MOUSE,
@@ -389,5 +371,46 @@ public sealed partial class SendInputDriver
 
         var inputs = new[] { move, down, up };
         SendInputOrThrow("move_and_click", inputs);
+    }
+
+    private static INPUT BuildAbsoluteMouseMove(int x, int y)
+    {
+        // Use absolute virtual-screen coordinates so the click lands on the
+        // exact requested point regardless of DPI / multimon configuration.
+        const int SM_XVIRTUALSCREEN = 76;
+        const int SM_YVIRTUALSCREEN = 77;
+        const int SM_CXVIRTUALSCREEN = 78;
+        const int SM_CYVIRTUALSCREEN = 79;
+
+        var vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        var vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        var vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        var vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        var dx = NormalizeAbsoluteCoordinate(x, vx, vw);
+        var dy = NormalizeAbsoluteCoordinate(y, vy, vh);
+
+        return new INPUT
+        {
+            Type = INPUT_MOUSE,
+            U = new InputUnion
+            {
+                Mouse = new MOUSEINPUT
+                {
+                    Dx = dx,
+                    Dy = dy,
+                    Flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE,
+                },
+            },
+        };
+    }
+
+    internal static int NormalizeAbsoluteCoordinate(int coordinate, int origin, int length)
+    {
+        if (length <= 1) return 0;
+        var boundedOffset = Math.Clamp((long)coordinate - origin, 0L, length - 1L);
+        return (int)Math.Round(
+            boundedOffset * 65535d / (length - 1d),
+            MidpointRounding.AwayFromZero);
     }
 }

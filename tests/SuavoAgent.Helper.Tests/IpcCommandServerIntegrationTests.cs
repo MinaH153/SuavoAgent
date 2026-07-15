@@ -242,6 +242,11 @@ public sealed class IpcCommandServerIntegrationTests
                 "No bounded test dispatch may wedge."));
         server.Start(shutdown.Token);
 
+        using var secondClient = new IpcPipeClient(
+            pipeName,
+            logger,
+            requestTimeout: TimeSpan.FromSeconds(5));
+
         using (var firstClient = new IpcPipeClient(
                    pipeName,
                    logger,
@@ -309,20 +314,17 @@ public sealed class IpcCommandServerIntegrationTests
                 data: null,
                 shutdown.Token);
             Assert.Equal("capture_error", failedCapture.Error?.Code);
+
+            // The successor listener must already be accepting while the first connection
+            // is active. Otherwise this connect can land in the retiring OS listener backlog
+            // and receive EOF when firstClient is disposed.
+            Assert.True(await secondClient.ConnectAsync(
+                TimeSpan.FromSeconds(3),
+                shutdown.Token));
         }
 
         // A new authenticated connection must reset the previous connection's
         // generation proof before accepting any machine-vision request.
-        using var secondClient = new IpcPipeClient(
-            pipeName,
-            logger,
-            // Full-solution CI runs every test assembly in parallel. Keep this
-            // reconnect assertion bounded without turning host scheduling
-            // pressure into a false IPC failure.
-            requestTimeout: TimeSpan.FromSeconds(5));
-        Assert.True(await ConnectEventuallyAsync(
-            secondClient,
-            shutdown.Token));
         var afterReconnect = await SendAsync(
             secondClient,
             IpcCommands.CaptureScreen,
@@ -331,6 +333,49 @@ public sealed class IpcCommandServerIntegrationTests
         Assert.Equal("vision_generation_unconfirmed", afterReconnect.Error?.Code);
 
         shutdown.Cancel();
+    }
+
+    [Fact]
+    public async Task ShutdownCancelsActiveAndPendingListenersWithoutStranding()
+    {
+        using var logger = new LoggerConfiguration().CreateLogger();
+        using var engine = new PioneerRxUiaEngine(logger);
+        var pricing = new PricingWorkflow(
+            engine,
+            new ActuationGate(new ActuationConfig
+            {
+                Enabled = false,
+                DryRun = true,
+            }, logger),
+            logger);
+        var visionGate = new VisionGenerationGate(new VisionConfigurationLoadResult(
+            IsValid: true,
+            IsMissing: true,
+            Code: "vision_registry_state_missing",
+            EffectiveOptions: VisionOptionsSnapshot.DisabledDefault()));
+        var pipeName = $"sa_cmd_{Guid.NewGuid():N}";
+        using var shutdown = new CancellationTokenSource();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var server = new IpcCommandServer(
+            pipeName,
+            pricing,
+            logger,
+            visionGate,
+            onWedgedDispatch: () => throw new Xunit.Sdk.XunitException(
+                "No bounded test dispatch may wedge."));
+        server.Start(shutdown.Token);
+
+        using var activeClient = new IpcPipeClient(pipeName, logger);
+        using var pendingClient = new IpcPipeClient(pipeName, logger);
+        Assert.True(await activeClient.ConnectAsync(
+            TimeSpan.FromSeconds(3), timeout.Token));
+        Assert.True(await pendingClient.ConnectAsync(
+            TimeSpan.FromSeconds(3), timeout.Token));
+
+        shutdown.Cancel();
+        await server.Completion.WaitAsync(TimeSpan.FromSeconds(3), timeout.Token);
+
+        Assert.True(server.Completion.IsCompletedSuccessfully);
     }
 
     [Fact]
@@ -444,21 +489,6 @@ public sealed class IpcCommandServerIntegrationTests
             new IpcRequest(Guid.NewGuid().ToString("N"), command, 1, data),
             cancellationToken);
         return Assert.IsType<IpcResponse>(response);
-    }
-
-    private static async Task<bool> ConnectEventuallyAsync(
-        IpcPipeClient client,
-        CancellationToken cancellationToken)
-    {
-        for (var attempt = 0; attempt < 20; attempt++)
-        {
-            if (await client.ConnectAsync(
-                    TimeSpan.FromMilliseconds(250),
-                    cancellationToken))
-                return true;
-            await Task.Delay(25, cancellationToken);
-        }
-        return false;
     }
 
     private sealed class MutableCapture : IScreenCapture

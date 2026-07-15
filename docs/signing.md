@@ -48,7 +48,7 @@ same reputation model (no instant trust) and switching would discard the
 reputation this cert is building. Reconsider only at a natural renewal.
 
 **Free shot:** file a WDSI software-developer submission for the signed
-`SuavoAgent-Setup-vX.Y.Z-win-x64.exe` bundle at
+`SuavoAgent-Setup.exe` bundle at
 <https://www.microsoft.com/en-us/wdsi/filesubmission> (low effort, uncertain
 payoff; re-submit per new version/hash).
 
@@ -179,7 +179,7 @@ gh release delete v3.13.99-esigner-smoke --yes
 
 ### 5. Verify SmartScreen on a fresh Windows machine
 
-Download `SuavoAgent-Setup-vX.Y.Z-win-x64.exe` from the authenticated pharmacy
+Download `SuavoAgent-Setup.exe` from the authenticated pharmacy
 dashboard on a Windows machine that has never seen the agent. Check
 **Properties → Digital Signatures**, then open it. The signature must be valid
 and the UAC prompt must read `Verified publisher: MKM Technologies LLC`, not

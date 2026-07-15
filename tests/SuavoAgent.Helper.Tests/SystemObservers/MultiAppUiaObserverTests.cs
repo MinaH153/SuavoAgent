@@ -72,6 +72,62 @@ public sealed class MultiAppUiaObserverTests
     }
 
     [Fact]
+    public async Task FailureCountPublishesOnlyAfterObserverStatusIsBuffered()
+    {
+        IReadOnlyList<BehavioralEvent>? captured = null;
+        using var buffer = new BehavioralEventBuffer(
+            capacity: 10,
+            batchSize: 10,
+            flushAction: events =>
+            {
+                captured = events;
+                return Task.CompletedTask;
+            });
+        using var logger = new LoggerConfiguration().CreateLogger();
+        var observer = new MultiAppUiaObserver(
+            buffer,
+            new StubSnapshotProvider(new WindowStructureSnapshot(
+                false, null, 0, false, "unused")),
+            logger);
+        var stateGate = Assert.IsType<object>(typeof(MultiAppUiaObserver)
+            .GetField("_stateLock", System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(observer));
+        using var callerStarted = new ManualResetEventSlim();
+        Task? reportTask = null;
+
+        Monitor.Enter(stateGate);
+        try
+        {
+            reportTask = Task.Run(() =>
+            {
+                callerStarted.Set();
+                observer.OnAppFocused("", 42);
+            });
+            Assert.True(callerStarted.Wait(TimeSpan.FromSeconds(1)));
+
+            // While the state transaction is blocked, no completion counter may become visible.
+            // The old ordering incremented first, then waited here before enqueueing its event.
+            Assert.False(SpinWait.SpinUntil(
+                () => observer.FailureCount != 0,
+                TimeSpan.FromMilliseconds(250)));
+            Assert.False(reportTask.IsCompleted);
+        }
+        finally
+        {
+            Monitor.Exit(stateGate);
+        }
+
+        await reportTask!.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, observer.FailureCount);
+        await buffer.FlushAsync();
+
+        var behavioralEvent = Assert.Single(captured!);
+        Assert.Equal(BehavioralEventType.ObserverStatus, behavioralEvent.Type);
+        Assert.Equal("invalid_window", behavioralEvent.ElementId);
+    }
+
+    [Fact]
     public async Task TimedOutCapture_CanRecoverOnNextFocusForSameWindow()
     {
         var captured = new ConcurrentQueue<BehavioralEvent>();

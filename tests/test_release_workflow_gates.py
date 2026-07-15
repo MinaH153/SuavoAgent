@@ -109,7 +109,12 @@ class ReleaseWorkflowGateTests(unittest.TestCase):
                 self.assertIn("Start-Process msiexec.exe", smoke)
                 self.assertIn("Get-AuthenticodeSignature", smoke)
                 self.assertIn("release/SuavoAgent-*-win-x64.msi", publish)
-                self.assertIn("release/SuavoAgent-Setup-*-win-x64.exe", publish)
+                self.assertIn("release/SuavoAgent-Setup.exe", publish)
+                self.assertIn('ARTIFACT="SuavoAgent-Setup.exe"', publish)
+                self.assertNotRegex(
+                    document,
+                    r"SuavoAgent-Setup-(?:\$\{\{|\$env:|\$\{VERSION\})",
+                )
                 self.assertNotIn("release/suavoagent-*-win-x64.zip", publish)
 
     def test_release_and_hotfix_resolve_rollback_from_signed_prior_receipt(self):

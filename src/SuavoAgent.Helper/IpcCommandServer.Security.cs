@@ -18,6 +18,11 @@ namespace SuavoAgent.Helper;
 
 public sealed partial class IpcCommandServer
 {
+    // One active connection plus one already-listening successor. Keeping the
+    // successor open prevents a client from connecting to the retiring OS pipe
+    // listener and then receiving EOF before a replacement instance exists.
+    private const int CommandPipeServerInstances = 2;
+
     private static IpcResponse Ok(string id, string command, System.Text.Json.JsonElement? data) =>
         new(id, IpcStatus.Ok, command, data, null);
 
@@ -48,13 +53,13 @@ public sealed partial class IpcCommandServer
             }
 
             return NamedPipeServerStreamAcl.Create(
-                pipeName, PipeDirection.InOut, 1,
+                pipeName, PipeDirection.InOut, CommandPipeServerInstances,
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
                 0, 0, security);
         }
 
         return new NamedPipeServerStream(
-            pipeName, PipeDirection.InOut, 1,
+            pipeName, PipeDirection.InOut, CommandPipeServerInstances,
             PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
     }
 

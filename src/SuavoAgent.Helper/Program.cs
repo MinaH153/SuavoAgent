@@ -127,7 +127,6 @@ try
     var visionRuntime = SuavoAgent.Helper.Vision.VisionBootstrap.BuildRuntime(
         Log.Logger, visionConfiguration);
     var visionPricingReader = visionRuntime.PricingReader;
-    var pricingWorkflow = new PricingWorkflow(pioneer, actuationGate, Log.Logger, visionPricingReader);
     var visionController = visionRuntime.CaptureController;
 
     // Intent cursor — visual-only pointer overlay. It runs in Helper because
@@ -235,6 +234,13 @@ try
                 actuationConfig.HoneytokenAttributorMode);
         }
     }
+
+    var pricingWorkflow = new PricingWorkflow(
+        pioneer,
+        actuationGate,
+        Log.Logger,
+        visionPricingReader,
+        sendInputDriver);
 
     // Codex-pet-style pharmacist panda: a native, PHI-free ambient surface
     // backed only by real Helper signals. It starts Offline until Core and the

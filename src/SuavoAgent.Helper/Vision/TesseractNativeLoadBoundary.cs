@@ -13,6 +13,7 @@ namespace SuavoAgent.Helper.Vision;
 
 internal interface ITesseractNativeLoadBoundary
 {
+    bool TryVerifyCohort(TesseractOptions options, ILogger logger);
     bool TryPrepare(TesseractOptions options, ILogger logger);
     bool TryRunEngineConstructor(
         TesseractOptions options,
@@ -109,6 +110,31 @@ internal sealed class TesseractNativeLoadBoundary : ITesseractNativeLoadBoundary
         _platform = platform;
         _verifyInstalled = verifyInstalled;
         _verifyLoadedModules = verifyLoadedModules;
+    }
+
+    public bool TryVerifyCohort(TesseractOptions options, ILogger logger)
+    {
+        if (!_platform.IsWindows) return false;
+
+        lock (_gate)
+        {
+            try
+            {
+                // Managed-only preflight. This deliberately performs no
+                // fallback probes, native loads, wrapper pinning, or module
+                // enumeration, so deterministic rejection never competes
+                // with the unmanaged watchdog budget.
+                return _verifyInstalled(options);
+            }
+            catch (Exception exception) when (exception is not
+                OutOfMemoryException and not StackOverflowException)
+            {
+                logger.Warning(
+                    "Tesseract native cohort verification rejected configuration ({Type})",
+                    exception.GetType().Name);
+                return false;
+            }
+        }
     }
 
     public bool TryPrepare(TesseractOptions options, ILogger logger)

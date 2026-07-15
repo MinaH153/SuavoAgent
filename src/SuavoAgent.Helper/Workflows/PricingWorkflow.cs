@@ -33,6 +33,7 @@ public sealed partial class PricingWorkflow
     // UIA-only, exactly today's behavior. When present, the vision read drives and the UIA read
     // verifies the exact cost (VisionExactReconciler) so a misread never writes wrong pricing.
     private readonly VisionPricingGridReader? _visionReader;
+    private readonly SendInputDriver? _pointerDriver;
     private readonly object _screenContractLock = new();
     private string? _screenContractJobId;
     private string? _screenContractPmsFingerprint;
@@ -62,12 +63,14 @@ public sealed partial class PricingWorkflow
         PioneerRxUiaEngine engine,
         ActuationGate actuationGate,
         ILogger logger,
-        VisionPricingGridReader? visionReader = null)
+        VisionPricingGridReader? visionReader = null,
+        SendInputDriver? pointerDriver = null)
     {
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
         _actuationGate = actuationGate ?? throw new ArgumentNullException(nameof(actuationGate));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _visionReader = visionReader;
+        _pointerDriver = pointerDriver;
     }
 
     /// <summary>
@@ -110,6 +113,12 @@ public sealed partial class PricingWorkflow
             var mainWindow = _engine.MainWindow;
             if (mainWindow == null)
                 return Done(Fail(request, "PioneerRx main window not available"));
+
+            // The cockpit is often foreground when the pharmacist starts a run. Bring the locally
+            // approved PMS forward before any pointer or keyboard action. Each visible movement
+            // below re-verifies that the same approved process still owns the foreground.
+            BringPmsToForeground(mainWindow);
+            Thread.Sleep(200);
 
             using var automation = new UIA2Automation();
             var cf = automation.ConditionFactory;
@@ -165,6 +174,7 @@ public sealed partial class PricingWorkflow
                 // Step 5: Read the supplier grid. VISION-PRIMARY (SEE "the one on top" via OCR) +
                 // EXACT-VERIFY (UIA cell value) so an OCR misread never writes a wrong cost. When
                 // vision is off this collapses to exactly today's UIA-only read.
+                NarrateVisibleRead("Cost Per Unit");
                 var uiaCheapest = ReadCheapestSupplier(editWindow, cf, out var gridFailure);
 
                 if (_visionReader is { IsAvailable: true })
@@ -420,6 +430,7 @@ public sealed partial class PricingWorkflow
             _logger.Debug("OpenRxItemDialog: structural menu target found={Found}", itemMenu != null);
             if (itemMenu == null) return false;
             LogIfLearned(SelectorStepId.OpenItemMenu, itemRes);
+            PrepareVisibleAction(itemMenu, "Opening", "Item menu");
 
             // Open the "Item" submenu, then find "Rx Item" inside it. Rather than assume which pattern
             // this toolkit's menu honors, try each opener and keep whichever actually makes "Rx Item"
@@ -452,6 +463,7 @@ public sealed partial class PricingWorkflow
 
             // "Rx Item" is a LEAF that opens the Edit Rx Item window — Invoke() fires it; expanding it
             // would be a no-op, so don't prefer Expand here. The caller's WaitForWindow confirms it opened.
+            PrepareVisibleAction(rxItemEntry, "Opening", "Rx Item");
             OpenMenuElement(rxItemEntry, expandToOpenSubmenu: false);
             Thread.Sleep(300);
             return true;
@@ -573,6 +585,7 @@ public sealed partial class PricingWorkflow
             // Capture the resolved box so VerifyLoadedNdc can exclude this exact
             // element by identity (RuntimeId) — robust even when HelpText is absent.
             resolvedSearchBox = searchBox;
+            PrepareVisibleAction(searchBox, "Searching", "Cost Per Unit");
 
             for (int attempt = 1; attempt <= MaxTypeAttempts; attempt++)
             {

@@ -150,13 +150,19 @@ public sealed class MultiAppUiaObserver
 
     private void ReportFailure(string code)
     {
-        Interlocked.Increment(ref _failureCount);
         lock (_stateLock)
         {
-            if (string.Equals(_lastFailureCode, code, StringComparison.Ordinal)) return;
-            _lastFailureCode = code;
-            _currentStatus = code;
-            _buffer.Enqueue(BehavioralEvent.ObserverStatus("multi_app_uia", code));
+            if (!string.Equals(_lastFailureCode, code, StringComparison.Ordinal))
+            {
+                _lastFailureCode = code;
+                _currentStatus = code;
+                _buffer.Enqueue(BehavioralEvent.ObserverStatus("multi_app_uia", code));
+            }
+
+            // Publish the count only after the status transition and its diagnostic event are
+            // complete. Readers use this count as the completion signal; incrementing first let
+            // them flush an empty buffer while this worker was still waiting on _stateLock.
+            Interlocked.Increment(ref _failureCount);
         }
     }
 }

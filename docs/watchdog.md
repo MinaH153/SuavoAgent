@@ -88,7 +88,7 @@ repair executable by path, or edit the registry.
 
 ## Installation and updates
 
-- The signed WiX Burn `SuavoAgent-Setup-…-win-x64.exe` bundle is the only
+- The signed WiX Burn `SuavoAgent-Setup.exe` bundle is the only
   customer installer. Its embedded `SuavoSetup.exe` is an internal signed
   maintenance payload, not a customer entry point.
 - Setup stages and verifies the native maintenance host before registering

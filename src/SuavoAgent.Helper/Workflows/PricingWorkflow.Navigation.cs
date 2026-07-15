@@ -27,6 +27,7 @@ public sealed partial class PricingWorkflow
                 if (pricingTab != null)
                 {
                     LogIfLearned(SelectorStepId.PricingTab, resolution);
+                    PrepareVisibleAction(pricingTab, "Opening", "Pricing");
                     ExecuteLiveMutation(() => pricingTab.AsTabItem()?.Select());
                     Thread.Sleep(500);
                     return true;
@@ -50,6 +51,7 @@ public sealed partial class PricingWorkflow
     {
         try
         {
+            PrepareVisibleAction(editWindow, "Finishing", "pricing report");
             ExecuteLiveMutation(editWindow.Focus);
             ExecuteLiveMutation(() => Keyboard.Press(
                 FlaUI.Core.WindowsAPI.VirtualKeyShort.ESCAPE));

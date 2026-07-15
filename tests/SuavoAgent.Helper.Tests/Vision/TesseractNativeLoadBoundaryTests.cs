@@ -17,6 +17,25 @@ public sealed class TesseractNativeLoadBoundaryTests : IDisposable
         "suavo-tesseract-load-test-" + Guid.NewGuid().ToString("N"));
 
     [Fact]
+    public void TryVerifyCohort_RehashesWithoutNativeOrFallbackOperations()
+    {
+        var fixture = CreateFixture();
+        var sequence = new List<string>();
+        fixture.Platform.OnOperation = operation => sequence.Add(operation);
+        var boundary = fixture.CreateBoundary(options =>
+        {
+            sequence.Add("verify-manifest");
+            return options == fixture.Options;
+        });
+
+        Assert.True(boundary.TryVerifyCohort(fixture.Options, Log));
+
+        Assert.Equal(["verify-manifest"], sequence);
+        Assert.Empty(fixture.Platform.LoadCalls);
+        Assert.Equal(0, fixture.Platform.WrapperSearchPathSetCount);
+    }
+
+    [Fact]
     public void TryPrepare_VerifiesManifestBeforeAnyNativeOrFallbackOperation()
     {
         var fixture = CreateFixture();
@@ -458,6 +477,8 @@ public sealed class TesseractNativeLoadBoundaryTests : IDisposable
 
     private sealed class RejectingNativeBoundary : ITesseractNativeLoadBoundary
     {
+        public bool TryVerifyCohort(TesseractOptions options, ILogger logger) => false;
+
         public bool TryPrepare(TesseractOptions options, ILogger logger) => false;
 
         public bool TryRunEngineConstructor(

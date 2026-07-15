@@ -64,7 +64,7 @@ signed artifact. Record screen evidence and non-PHI receipts for every step.
 
 - [ ] Download began from the authenticated Suavo dashboard.
 - [ ] Windows showed the expected verified publisher before elevation.
-- [ ] The signed `SuavoAgent-Setup-vX.Y.Z-win-x64.exe` bundle installed the MSI
+- [ ] The signed `SuavoAgent-Setup.exe` bundle installed the MSI
       and completed its graphical pairing flow with no terminal.
 - [ ] An older supported installation was discovered and handled without manual
       folder or service deletion.

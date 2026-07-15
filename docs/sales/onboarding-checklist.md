@@ -10,7 +10,7 @@
 - [ ] Verify state compliance requirements (docs/compliance/state-compliance-matrix.md)
 - [ ] Confirm the pharmacy and authorized installer entitlement appear in the Suavo dashboard
 - [ ] Confirm the installing owner/PIC can complete MFA and approve device pairing
-- [ ] Download a fresh signed `SuavoAgent-Setup-…-win-x64.exe` only from that authenticated dashboard
+- [ ] Download a fresh signed `SuavoAgent-Setup.exe` only from that authenticated dashboard
 
 ## During Visit
 

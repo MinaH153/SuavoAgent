@@ -558,7 +558,7 @@ jobs:
           $candidates = @(Get-ChildItem installer/SuavoAgent.Bundle/bin -Recurse -Filter SuavoAgent-Setup.exe -File)
           if ($candidates.Count -ne 1) { throw "Expected one Burn output, found $($candidates.Count)." }
           New-Item -ItemType Directory -Path bundle -Force | Out-Null
-          Copy-Item $candidates[0].FullName "bundle/SuavoAgent-Setup-$env:VERSION-win-x64.exe"
+          Copy-Item $candidates[0].FullName "bundle/SuavoAgent-Setup.exe"
 
       - name: Upload unsigned bundle for protected signing
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -593,7 +593,7 @@ jobs:
           password: ${{ secrets.ES_PASSWORD }}
           credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/bundle/SuavoAgent-Setup-${{ needs.build.outputs.version }}-win-x64.exe
+          file_path: ${{ github.workspace }}/bundle/SuavoAgent-Setup.exe
           output_path: ${{ github.workspace }}/bundle/signed
 
       - name: Upload signed customer bundle
@@ -764,7 +764,7 @@ jobs:
         run: |
           set -euo pipefail
           cd release
-          ARTIFACT="SuavoAgent-Setup-${VERSION}-win-x64.exe"
+          ARTIFACT="SuavoAgent-Setup.exe"
           ARTIFACT_SHA=$(sha256sum "$ARTIFACT" | awk '{print $1}')
           RELEASE_TAGS_JSON="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft,isPrerelease)"
           ROLLBACK_TAG="$(printf '%s' "$RELEASE_TAGS_JSON" | python3 ../scripts/select-release-rollback-tag.py "$VERSION")"
@@ -874,7 +874,7 @@ jobs:
         run: |
           set -euo pipefail
           cd release
-          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe SuavoSetup.exe "SuavoAgent-${VERSION}-win-x64.msi" "SuavoAgent-Setup-${VERSION}-win-x64.exe" suavoagent.spdx.json field-release-receipt.json "update-manifest-${VERSION}.txt" "update-manifest-${VERSION}.sig" > checksums.sha256
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe SuavoSetup.exe "SuavoAgent-${VERSION}-win-x64.msi" SuavoAgent-Setup.exe suavoagent.spdx.json field-release-receipt.json "update-manifest-${VERSION}.txt" "update-manifest-${VERSION}.sig" > checksums.sha256
           bash ../scripts/aws-kms-sign-ecdsa-p256.sh checksums.sha256 checksums.sha256.sig der
           cat checksums.sha256
 
@@ -903,13 +903,13 @@ jobs:
             **Source commit:** ${{ github.sha }}
             **Checksums:** ECDSA P-256 signed
             **Authenticode:** Signed (SSL.com eSigner Cloud EV)
-            **Installer URL:** https://github.com/${{ github.repository }}/releases/download/${{ needs.build.outputs.version }}/SuavoAgent-Setup-${{ needs.build.outputs.version }}-win-x64.exe
+            **Installer URL:** https://github.com/${{ github.repository }}/releases/download/${{ needs.build.outputs.version }}/SuavoAgent-Setup.exe
 
             ### How to update existing agents
             Push the update command from the fleet dashboard. Agents auto-update on next heartbeat (30s).
 
             ### Fresh install
-            Download `SuavoAgent-Setup-${{ needs.build.outputs.version }}-win-x64.exe`, verify the publisher is **MKM Technologies LLC**, open it, then follow the native pairing flow. No terminal or script is required.
+            Download `SuavoAgent-Setup.exe`, verify the publisher is **MKM Technologies LLC**, open it, then follow the native pairing flow. No terminal or script is required.
           files: |
             release/SuavoAgent.Core.exe
             release/SuavoAgent.Broker.exe
@@ -917,7 +917,7 @@ jobs:
             release/SuavoAgent.Watchdog.exe
             release/SuavoSetup.exe
             release/SuavoAgent-*-win-x64.msi
-            release/SuavoAgent-Setup-*-win-x64.exe
+            release/SuavoAgent-Setup.exe
             release/field-release-receipt.json
             release/checksums.sha256
             release/checksums.sha256.sig

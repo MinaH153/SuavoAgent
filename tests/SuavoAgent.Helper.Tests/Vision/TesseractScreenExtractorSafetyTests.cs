@@ -51,7 +51,7 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
     [Fact]
     public async Task WarmUp_CohortRejectionIsVisibleAndNeverConstructsEngine()
     {
-        var boundary = new FakeBoundary { PrepareResult = false };
+        var boundary = new FakeBoundary { CohortVerificationResult = false };
         var tracker = RuntimeTracker();
         var engineCalls = 0;
         await using var extractor = CreateExtractor(
@@ -67,7 +67,8 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
         var ready = await extractor.WarmUpAsync(CancellationToken.None, () => { });
 
         Assert.False(ready);
-        Assert.Equal(1, boundary.PrepareCalls);
+        Assert.Equal(1, boundary.CohortVerificationCalls);
+        Assert.Equal(0, boundary.PrepareCalls);
         Assert.Equal(0, boundary.ConstructorCalls);
         Assert.Equal(0, engineCalls);
         Assert.False(extractor.IsReady);
@@ -97,7 +98,8 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
         var ready = await extractor.WarmUpAsync(CancellationToken.None, () => { });
 
         Assert.False(ready);
-        Assert.Equal(1, boundary.PrepareCalls);
+        Assert.Equal(1, boundary.CohortVerificationCalls);
+        Assert.Equal(0, boundary.PrepareCalls);
         Assert.Equal(0, boundary.ConstructorCalls);
         Assert.Equal(0, engineCalls);
         Assert.Equal(VisionRuntimeCodes.OcrMemoryPressure, extractor.LastFailureCode);
@@ -115,6 +117,8 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
         var ready = await extractor.WarmUpAsync(CancellationToken.None, () => { });
 
         Assert.False(ready);
+        Assert.Equal(1, boundary.CohortVerificationCalls);
+        Assert.Equal(0, boundary.PrepareCalls);
         Assert.Equal(0, boundary.ConstructorCalls);
         Assert.Equal(
             VisionRuntimeCodes.OcrCohortVerificationFailed,
@@ -131,10 +135,16 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
             boundary,
             _ => null!);
 
-        var ready = await extractor.WarmUpAsync(CancellationToken.None, () => { });
+        var failStops = 0;
+        var ready = await extractor.WarmUpAsync(
+            CancellationToken.None,
+            () => failStops++);
 
         Assert.False(ready);
+        Assert.Equal(1, boundary.CohortVerificationCalls);
+        Assert.Equal(0, boundary.PrepareCalls);
         Assert.Equal(0, boundary.ConstructorCalls);
+        Assert.Equal(0, failStops);
         Assert.Equal(
             VisionRuntimeCodes.OcrCohortVerificationFailed,
             extractor.LastFailureCode);
@@ -154,6 +164,52 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
         var ready = await extractor.WarmUpAsync(CancellationToken.None, () => { });
 
         Assert.False(ready);
+        Assert.Equal(1, boundary.CohortVerificationCalls);
+        Assert.Equal(0, boundary.PrepareCalls);
+        Assert.Equal(0, boundary.ConstructorCalls);
+        Assert.Equal(
+            VisionRuntimeCodes.OcrCohortVerificationFailed,
+            extractor.LastFailureCode);
+    }
+
+    [Fact]
+    public async Task WarmUp_UnapprovedLanguageRejectsBeforeNativeBoundary()
+    {
+        var boundary = new FakeBoundary();
+        var tessdata = Path.Combine(_root, "tessdata-fra");
+        Directory.CreateDirectory(tessdata);
+        File.WriteAllBytes(Path.Combine(tessdata, "fra.traineddata"), [1]);
+        await using var extractor = CreateExtractor(
+            OptionsFor(tessdata, language: "fra"),
+            boundary,
+            _ => null!);
+
+        var ready = await extractor.WarmUpAsync(CancellationToken.None, () => { });
+
+        Assert.False(ready);
+        Assert.Equal(1, boundary.CohortVerificationCalls);
+        Assert.Equal(0, boundary.PrepareCalls);
+        Assert.Equal(0, boundary.ConstructorCalls);
+        Assert.Equal(
+            VisionRuntimeCodes.OcrCohortVerificationFailed,
+            extractor.LastFailureCode);
+    }
+
+    [Fact]
+    public async Task WarmUp_NativePreparationRejectionPreservesCohortFailureCode()
+    {
+        var boundary = new FakeBoundary { PrepareResult = false };
+        var tessdata = CreateTessdata();
+        await using var extractor = CreateExtractor(
+            OptionsFor(tessdata),
+            boundary,
+            _ => null!);
+
+        var ready = await extractor.WarmUpAsync(CancellationToken.None, () => { });
+
+        Assert.False(ready);
+        Assert.Equal(1, boundary.CohortVerificationCalls);
+        Assert.Equal(1, boundary.PrepareCalls);
         Assert.Equal(0, boundary.ConstructorCalls);
         Assert.Equal(
             VisionRuntimeCodes.OcrCohortVerificationFailed,
@@ -220,6 +276,7 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
 
         Assert.Equal(0, boundary.PrepareCalls);
         Assert.Equal(0, boundary.ConstructorCalls);
+        Assert.Equal(0, boundary.CohortVerificationCalls);
     }
 
     public void Dispose()
@@ -245,7 +302,8 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
 
     private static AgentOptions OptionsFor(
         string? tessdataPath,
-        long memoryHeadroomBytes = 0) => new()
+        long memoryHeadroomBytes = 0,
+        string language = "eng") => new()
         {
             Vision = new VisionOptions
             {
@@ -253,7 +311,7 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
                 Tesseract = new TesseractOptions
                 {
                     Enabled = true,
-                    Language = "eng",
+                    Language = language,
                     TessdataPath = tessdataPath,
                     MemoryHeadroomBytes = memoryHeadroomBytes,
                     IdleUnloadSeconds = 0,
@@ -290,11 +348,19 @@ public sealed class TesseractScreenExtractorSafetyTests : IDisposable
 
     private sealed class FakeBoundary : ITesseractNativeLoadBoundary
     {
+        public bool CohortVerificationResult { get; init; } = true;
         public bool PrepareResult { get; init; } = true;
         public bool ConstructorResult { get; init; } = true;
         public bool InvokeConstructor { get; init; }
+        public int CohortVerificationCalls { get; private set; }
         public int PrepareCalls { get; private set; }
         public int ConstructorCalls { get; private set; }
+
+        public bool TryVerifyCohort(TesseractOptions options, ILogger logger)
+        {
+            CohortVerificationCalls++;
+            return CohortVerificationResult;
+        }
 
         public bool TryPrepare(TesseractOptions options, ILogger logger)
         {

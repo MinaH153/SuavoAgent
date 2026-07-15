@@ -219,11 +219,19 @@ internal sealed class TesseractScreenExtractor : IPricingScreenExtractor, IAsync
         CancellationToken ct,
         Action failStop)
     {
+        // Cohort/config/tessdata/language rejection is deterministic managed
+        // work. Run it synchronously under the extractor lock, outside the
+        // native watchdog, so thread scheduling or a busy test host cannot
+        // turn a missing directory into a false native timeout.
+        ct.ThrowIfCancellationRequested();
+        if (!PassesDeterministicPreflightLocked()) return false;
+        ct.ThrowIfCancellationRequested();
+
         var timeoutSec = Math.Clamp(_options.ExtractionTimeoutSeconds, 1, 120);
         try
         {
             return await NativeOcrWatchdog.RunAsync(
-                EnsureLoadedLocked,
+                EnsureNativeLoadedLocked,
                 TimeSpan.FromSeconds(timeoutSec),
                 ct,
                 failStop).ConfigureAwait(false);
@@ -264,15 +272,13 @@ internal sealed class TesseractScreenExtractor : IPricingScreenExtractor, IAsync
     }
 
     /// <summary>
-    /// Loads TesseractEngine under the lock. Returns false on any setup
-    /// error — missing paths, missing traineddata, native-lib load failure.
+    /// Performs managed-only, deterministic validation under the extractor
+    /// lock. Native preparation and engine construction are intentionally not
+    /// allowed through this boundary.
     /// </summary>
-    private bool EnsureLoadedLocked()
+    private bool PassesDeterministicPreflightLocked()
     {
-        // Re-hash the complete compiled-policy inventory immediately before
-        // every native OCR call. A valid config or an earlier startup check
-        // cannot bless files, fallback roots, or process modules that changed.
-        if (!_nativeLoadBoundary.TryPrepare(_options, _logger))
+        if (!_nativeLoadBoundary.TryVerifyCohort(_options, _logger))
         {
             _logger.Warning(
                 "TesseractScreenExtractor: exact native cohort verification failed");
@@ -280,15 +286,13 @@ internal sealed class TesseractScreenExtractor : IPricingScreenExtractor, IAsync
             return false;
         }
 
-        if (_engine != null) return true;
-
         // Trip A 2026-04-25 Vision-On safety: refuse to load the engine if
         // Helper is already in resource pressure. Tesseract adds ~50-100 MB;
         // loading on top of an already-stressed Helper is exactly how the
         // first install at Nadim's hung the OS. Pairs with ResourceBudgetGuard
         // (500 MB soft warn / 800 MB hard kill) so OCR can't push Helper
         // into the danger zone.
-        if (_options.MemoryHeadroomBytes > 0)
+        if (_engine is null && _options.MemoryHeadroomBytes > 0)
         {
             using var proc = System.Diagnostics.Process.GetCurrentProcess();
             var rss = proc.WorkingSet64;
@@ -317,6 +321,14 @@ internal sealed class TesseractScreenExtractor : IPricingScreenExtractor, IAsync
             return false;
         }
 
+        if (!string.Equals(_options.Language, "eng", StringComparison.Ordinal))
+        {
+            _logger.Warning(
+                "TesseractScreenExtractor: configured OCR language is not release-approved");
+            RecordFailure(VisionRuntimeCodes.OcrCohortVerificationFailed);
+            return false;
+        }
+
         var trainedData = Path.Combine(
             _options.TessdataPath, $"{_options.Language}.traineddata");
         if (!File.Exists(trainedData))
@@ -327,6 +339,29 @@ internal sealed class TesseractScreenExtractor : IPricingScreenExtractor, IAsync
             RecordFailure(VisionRuntimeCodes.OcrCohortVerificationFailed);
             return false;
         }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Re-proves and initializes the native OCR boundary under the fail-stop
+    /// watchdog. Deterministic validation has already completed on the caller.
+    /// </summary>
+    private bool EnsureNativeLoadedLocked()
+    {
+        // Preserve the exact inventory re-hash immediately before every
+        // native OCR call. TryPrepare also proves the pinned wrapper/module
+        // state; TryRunEngineConstructor repeats the proof while holding its
+        // exclusive gate across first-time engine construction.
+        if (!_nativeLoadBoundary.TryPrepare(_options, _logger))
+        {
+            _logger.Warning(
+                "TesseractScreenExtractor: exact native cohort preparation failed");
+            RecordFailure(VisionRuntimeCodes.OcrCohortVerificationFailed);
+            return false;
+        }
+
+        if (_engine != null) return true;
 
         try
         {

@@ -79,13 +79,11 @@ public sealed class NativeReleaseBoundaryTests
         Assert.DoesNotContain("RegisterUninstallEntry", orchestrator);
         Assert.DoesNotContain("RegisterServices", orchestrator);
         var installedStart = coordinator[
-            coordinator.IndexOf("internal bool StartInstalledCohort", StringComparison.Ordinal)..
-            coordinator.IndexOf("internal bool RestartPromotedCohort", StringComparison.Ordinal)];
+            coordinator.IndexOf("internal bool StartInstalledCohort", StringComparison.Ordinal)..coordinator.IndexOf("internal bool RestartPromotedCohort", StringComparison.Ordinal)];
         var installedRestart = coordinator[
             coordinator.IndexOf(
                 "internal bool RestartPromotedInstalledCohort",
-                StringComparison.Ordinal)..
-            coordinator.IndexOf(
+                StringComparison.Ordinal)..coordinator.IndexOf(
                 "private static bool HasFreshActiveHeartbeat",
                 StringComparison.Ordinal)];
         Assert.DoesNotContain("_services.EnsureConfigured", installedStart);
@@ -317,9 +315,9 @@ public sealed class NativeReleaseBoundaryTests
         Assert.Contains("field-release-receipt.json", hotfix);
         Assert.Contains("\"rollbackArtifact\"", hotfix);
         Assert.Contains("track2QueenValidation", hotfix);
-        Assert.Contains("SuavoSetup.exe \"SuavoAgent-${VERSION}-win-x64.msi\" \"SuavoAgent-Setup-${VERSION}-win-x64.exe\" suavoagent.spdx.json field-release-receipt.json", hotfix);
+        Assert.Contains("SuavoSetup.exe \"SuavoAgent-${VERSION}-win-x64.msi\" SuavoAgent-Setup.exe suavoagent.spdx.json field-release-receipt.json", hotfix);
         Assert.Contains("release/SuavoAgent-*-win-x64.msi", hotfix);
-        Assert.Contains("release/SuavoAgent-Setup-*-win-x64.exe", hotfix);
+        Assert.Contains("release/SuavoAgent-Setup.exe", hotfix);
         Assert.Contains("release/field-release-receipt.json", hotfix);
         Assert.Contains("**Authenticode:** Signed (SSL.com eSigner Cloud EV).", hotfix);
         Assert.Contains("OTA_FULL_COHORT_MANIFEST: ${{ vars.OTA_FULL_COHORT_MANIFEST }}", hotfix);
@@ -336,7 +334,7 @@ public sealed class NativeReleaseBoundaryTests
                      ReadRepoFile(".github/workflows/hotfix.yml"),
                  })
         {
-            Assert.Contains("ARTIFACT=\"SuavoAgent-Setup-${VERSION}-win-x64.exe\"", workflow);
+            Assert.Contains("ARTIFACT=\"SuavoAgent-Setup.exe\"", workflow);
             Assert.Contains("\"artifact\": os.environ[\"ARTIFACT\"]", workflow);
             Assert.Contains("\"sourceCommit\": os.environ[\"GITHUB_SHA\"]", workflow);
             Assert.DoesNotContain("ROLLBACK_ARTIFACT=\"SuavoAgent-Setup-${ROLLBACK_TAG}-win-x64.exe\"", workflow);
@@ -380,7 +378,7 @@ public sealed class NativeReleaseBoundaryTests
             Assert.Contains("Get-AuthenticodeSignature", workflow);
             Assert.Contains("Start-Process msiexec.exe", workflow);
             Assert.Contains("release/SuavoAgent-*-win-x64.msi", workflow);
-            Assert.Contains("release/SuavoAgent-Setup-*-win-x64.exe", workflow);
+            Assert.Contains("release/SuavoAgent-Setup.exe", workflow);
             Assert.DoesNotContain("release/suavoagent-*-win-x64.zip", workflow);
         }
     }

@@ -1,5 +1,7 @@
 using ClosedXML.Excel;
 using SuavoAgent.Contracts.Pricing;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace SuavoAgent.Core.Pricing;
 
@@ -66,6 +68,14 @@ public sealed class ExcelPricingReader
             var invalid = new List<InvalidNdcRow>();
             for (int r = headerRow + 1; r <= lastRow; r++)
             {
+                // Printed PioneerRx workbooks repeat the report preamble and footer on every
+                // physical page. They are presentation furniture, not failed drug rows. Admit
+                // only exact copies of a row above the detected header, or the narrow two-cell
+                // printed-footer contract; any extra populated report cell still requires review.
+                if (IsExactPreambleCopy(ws, headerRow, r, lastCol) ||
+                    IsPrintedPageFooter(ws, r, lastCol))
+                    continue;
+
                 var raw = ws.Cell(r, ndcCol).GetString()?.Trim();
                 if (string.IsNullOrEmpty(raw))
                 {
@@ -233,15 +243,104 @@ public sealed class ExcelPricingReader
         int headerRow,
         int candidateRow,
         int lastCol)
+        => IsExactRowCopy(ws, headerRow, candidateRow, lastCol);
+
+    private static bool IsExactPreambleCopy(
+        IXLWorksheet ws,
+        int headerRow,
+        int candidateRow,
+        int lastCol)
+    {
+        for (var preambleRow = 1; preambleRow < headerRow; preambleRow++)
+        {
+            if (!HasAnyCellValue(ws, preambleRow, lastCol)) continue;
+            if (IsExactRowCopy(ws, preambleRow, candidateRow, lastCol))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool IsExactRowCopy(
+        IXLWorksheet ws,
+        int expectedRow,
+        int candidateRow,
+        int lastCol)
     {
         for (var column = 1; column <= lastCol; column++)
         {
-            var expected = NormalizeHeader(ws.Cell(headerRow, column).GetString() ?? "");
+            var expected = NormalizeHeader(ws.Cell(expectedRow, column).GetString() ?? "");
             var actual = NormalizeHeader(ws.Cell(candidateRow, column).GetString() ?? "");
             if (!actual.Equals(expected, StringComparison.OrdinalIgnoreCase))
                 return false;
         }
         return true;
+    }
+
+    private static bool HasAnyCellValue(IXLWorksheet ws, int row, int lastCol)
+    {
+        for (var column = 1; column <= lastCol; column++)
+        {
+            if (!string.IsNullOrWhiteSpace(ws.Cell(row, column).GetString()))
+                return true;
+        }
+        return false;
+    }
+
+    private const int MaximumPrintedPageNumber = 9999;
+    private static readonly Regex PrintedPagePattern = new(
+        @"^Page\s+(?<current>[1-9]\d{0,3})\s+of\s+(?<total>[1-9]\d{0,3})$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly string[] PrintedTimestampFormats =
+    {
+        "M/d/yyyy",
+        "M/d/yy",
+        "M/d/yyyy h:mm tt",
+        "M/d/yy h:mm tt",
+        "M/d/yyyy h:mm:ss tt",
+        "M/d/yy h:mm:ss tt",
+    };
+
+    private static bool IsPrintedPageFooter(
+        IXLWorksheet ws,
+        int candidateRow,
+        int lastCol)
+    {
+        var populated = new List<IXLCell>(capacity: 3);
+        for (var column = 1; column <= lastCol; column++)
+        {
+            var cell = ws.Cell(candidateRow, column);
+            if (string.IsNullOrWhiteSpace(cell.GetString())) continue;
+            populated.Add(cell);
+            if (populated.Count > 2) return false;
+        }
+
+        if (populated.Count != 2) return false;
+        return (IsPrintedTimestamp(populated[0]) && IsPrintedPageCount(populated[1])) ||
+               (IsPrintedTimestamp(populated[1]) && IsPrintedPageCount(populated[0]));
+    }
+
+    private static bool IsPrintedTimestamp(IXLCell cell)
+    {
+        if (cell.DataType == XLDataType.DateTime && cell.TryGetValue(out DateTime _))
+            return true;
+        return DateTime.TryParseExact(
+            NormalizeHeader(cell.GetString() ?? ""),
+            PrintedTimestampFormats,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AllowWhiteSpaces,
+            out _);
+    }
+
+    private static bool IsPrintedPageCount(IXLCell cell)
+    {
+        var match = PrintedPagePattern.Match(NormalizeHeader(cell.GetString() ?? ""));
+        if (!match.Success ||
+            !int.TryParse(match.Groups["current"].Value, NumberStyles.None,
+                CultureInfo.InvariantCulture, out var current) ||
+            !int.TryParse(match.Groups["total"].Value, NumberStyles.None,
+                CultureInfo.InvariantCulture, out var total))
+            return false;
+        return current <= total && total <= MaximumPrintedPageNumber;
     }
 
     private static bool HasMeaningfulReportData(

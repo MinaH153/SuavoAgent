@@ -89,7 +89,7 @@ class RollbackEvidenceResolverTests(unittest.TestCase):
 
     def test_accepts_future_native_burn_bundle_from_its_signed_receipt(self):
         tag = "v3.93.0"
-        artifact = f"SuavoAgent-Setup-{tag}-win-x64.exe"
+        artifact = "SuavoAgent-Setup.exe"
         checksums, receipt, artifact_sha256 = self.write_evidence(tag, artifact)
 
         result = self.run_resolver(tag, checksums, receipt)
@@ -137,6 +137,16 @@ class RollbackEvidenceResolverTests(unittest.TestCase):
         lines = checksums.read_text(encoding="utf-8").splitlines()
         lines[-1] = f"{receipt_sha256}  field-release-receipt.json"
         checksums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        result = self.run_resolver(tag, checksums, receipt)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("artifact name is outside the approved transition", result.stderr)
+
+    def test_rejects_versioned_native_bundle_name_after_canonical_transition(self):
+        tag = "v3.93.0"
+        artifact = f"SuavoAgent-Setup-{tag}-win-x64.exe"
+        checksums, receipt, _ = self.write_evidence(tag, artifact)
 
         result = self.run_resolver(tag, checksums, receipt)
 

@@ -21,7 +21,7 @@ SuavoAgent configuration by hand.
   steps before observation is enabled.
 - Download the installer only from the authenticated Suavo dashboard. Do not use
   an attachment, raw repository link, shared drive, or third-party mirror.
-- The file name begins `SuavoAgent-Setup-` and ends `-win-x64.exe`. In the
+- The file name is exactly `SuavoAgent-Setup.exe`. In the
   Windows security prompt, the verified publisher must be **MKM Technologies
   LLC**. Cancel if the publisher is missing, unknown, or different.
 
@@ -31,7 +31,7 @@ a missing or invalid publisher signature.
 
 ## Install and pair
 
-1. Open the downloaded `SuavoAgent-Setup-…-win-x64.exe` and approve the Windows
+1. Open the downloaded `SuavoAgent-Setup.exe` and approve the Windows
    administrator prompt.
 2. Follow the setup wizard. Do not choose an undocumented or console mode.
 3. Confirm the pharmacy or fleet shown in the pairing screen.

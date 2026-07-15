@@ -265,6 +265,66 @@ public sealed class SendInputDriverBoundaryMatrixTests
             char.IsAsciiDigit(character) || character is >= 'a' and <= 'f'));
     }
 
+    [Fact]
+    public void MovePointerTo_ClosedGate_RejectsBeforeWindowsInput()
+    {
+        var result = Build(enabled: false, dryRun: false).MovePointerTo(
+            100,
+            100,
+            expectedPid: 42,
+            expectedProcess: "PioneerRx",
+            SendInputDriver.TargetTrustKind.PioneerRx);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ActuationRejectionCodes.GateDisabled, result.RejectionCode);
+    }
+
+    [Fact]
+    public void MovePointerTo_DryRunGate_RejectsLiveClaimWithoutWindowsInput()
+    {
+        var result = Build(enabled: true, dryRun: true).MovePointerTo(
+            100,
+            100,
+            expectedPid: 42,
+            expectedProcess: "PioneerRx",
+            SendInputDriver.TargetTrustKind.PioneerRx);
+
+        Assert.False(result.Ok);
+        Assert.True(result.DryRun);
+        Assert.Equal(ActuationRejectionCodes.GateDryRun, result.RejectionCode);
+    }
+
+    [Fact]
+    public void MovePointerTo_MissingTrustedTarget_RejectsBeforeWindowsInput()
+    {
+        var result = Build(enabled: true, dryRun: false).MovePointerTo(
+            100,
+            100,
+            expectedPid: 0,
+            expectedProcess: "",
+            SendInputDriver.TargetTrustKind.Unspecified);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ActuationRejectionCodes.MalformedRequest, result.RejectionCode);
+    }
+
+    [Theory]
+    [InlineData(-1920, -1920, 3840, 0)]
+    [InlineData(1919, -1920, 3840, 65535)]
+    [InlineData(-3000, -1920, 3840, 0)]
+    [InlineData(3000, -1920, 3840, 65535)]
+    [InlineData(100, 100, 1, 0)]
+    public void NormalizeAbsoluteCoordinate_MapsAndClampsVirtualDesktop(
+        int coordinate,
+        int origin,
+        int length,
+        int expected)
+    {
+        Assert.Equal(
+            expected,
+            SendInputDriver.NormalizeAbsoluteCoordinate(coordinate, origin, length));
+    }
+
     private static SendInputDriver Build(bool enabled, bool dryRun)
     {
         var logger = new LoggerConfiguration().CreateLogger();

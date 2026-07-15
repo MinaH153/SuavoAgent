@@ -67,7 +67,7 @@ def allowed_artifacts(tag: str) -> set[str]:
         fail("rollback tag must be an exact stable vMAJOR.MINOR.PATCH")
     return {
         f"suavoagent-{tag}-win-x64.zip",
-        f"SuavoAgent-Setup-{tag}-win-x64.exe",
+        "SuavoAgent-Setup.exe",
     }
 
 
