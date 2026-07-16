@@ -20,12 +20,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  trusted-main-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Require workflow_dispatch from the exact protected main tip
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+
   release-signing-preflight:
+    needs: trusted-main-source
     runs-on: ubuntu-latest
     environment: suavoagent-production-signing
     outputs:
       authenticode_signer_sha256: ${{ steps.signing-preflight.outputs.authenticode_signer_sha256 }}
+      vc_redist_x64_url: ${{ steps.signing-preflight.outputs.vc_redist_x64_url }}
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+
       - name: Require eSigner cloud-signing configuration
         id: signing-preflight
         env:
@@ -39,6 +62,7 @@ jobs:
           OTA_KMS_PUBLIC_KEY_DER_BASE64: ${{ vars.OTA_KMS_PUBLIC_KEY_DER_BASE64 }}
           AWS_SIGNING_ROLE_ARN: ${{ vars.AWS_SIGNING_ROLE_ARN }}
           AWS_SIGNING_REGION: ${{ vars.AWS_SIGNING_REGION }}
+          OTA_FULL_COHORT_MANIFEST: ${{ vars.OTA_FULL_COHORT_MANIFEST }}
           WIX_OSMF_EULA_ACCEPTED: ${{ vars.WIX_OSMF_EULA_ACCEPTED }}
           VC_REDIST_X64_URL: ${{ vars.VC_REDIST_X64_URL }}
         run: |
@@ -51,8 +75,13 @@ jobs:
             echo "::error::WIX_OSMF_EULA_ACCEPTED must be set to true by the legal owner before building the customer MSI."
             exit 1
           fi
+          python3 scripts/v1_bridge_cli.py assert-normal-release \
+            --full-cohort-manifest "$OTA_FULL_COHORT_MANIFEST" \
+            --evidence security/ota-v1-bridge-convergence-evidence.json \
+            --claim security/ota-v1-bridge-convergence-claim.json \
+            --signature security/ota-v1-bridge-convergence-claim.sig
           missing=()
-          for var in ES_USERNAME ES_PASSWORD ES_CREDENTIAL_ID ES_TOTP_SECRET AUTHENTICODE_SIGNER_SHA256 OTA_KMS_KEY_ID OTA_KMS_PUBLIC_KEY_DER_BASE64 AWS_SIGNING_ROLE_ARN AWS_SIGNING_REGION VC_REDIST_X64_URL; do
+          for var in ES_USERNAME ES_PASSWORD ES_CREDENTIAL_ID ES_TOTP_SECRET AUTHENTICODE_SIGNER_SHA256 OTA_KMS_KEY_ID OTA_KMS_PUBLIC_KEY_DER_BASE64 AWS_SIGNING_ROLE_ARN AWS_SIGNING_REGION OTA_FULL_COHORT_MANIFEST VC_REDIST_X64_URL; do
             if [[ -z "${!var}" ]]; then
               missing+=("$var")
             fi
@@ -65,11 +94,26 @@ jobs:
             echo "::error::AUTHENTICODE_SIGNER_SHA256 must contain 1-16 exact SHA-256 certificate digests."
             exit 1
           fi
-          if [[ ! "$VC_REDIST_X64_URL" =~ ^https:// ]]; then
+          if [[ ! "$VC_REDIST_X64_URL" =~ ^https://[^[:space:]]+$ ]]; then
             echo "::error::VC_REDIST_X64_URL must be an HTTPS location for the reviewed 14.44.35211.0 x64 prerequisite."
             exit 1
           fi
-          echo "authenticode_signer_sha256=$AUTHENTICODE_SIGNER_SHA256" >> "$GITHUB_OUTPUT"
+          if [[ "$AWS_SIGNING_ROLE_ARN" != "arn:aws:iam::855763870758:role/github-actions/SuavoAgentProductionOtaSigningV2" ]]; then
+            echo "::error::AWS_SIGNING_ROLE_ARN is not the exact reviewed v2 signing role."
+            exit 1
+          fi
+          if [[ "$AWS_SIGNING_REGION" != "us-east-1" ]]; then
+            echo "::error::AWS_SIGNING_REGION must be exactly us-east-1."
+            exit 1
+          fi
+          if [[ "$OTA_KMS_KEY_ID" != "arn:aws:kms:us-east-1:855763870758:key/44bd84dc-8f6d-4692-b8ba-40a026db0331" ]]; then
+            echo "::error::OTA_KMS_KEY_ID is not the exact reviewed v2 signing key."
+            exit 1
+          fi
+          python3 scripts/ota_update_trust_roots.py validate --require-key-id ota-update-v2
+          python3 scripts/ota_update_trust_roots.py assert-signing-public-key "$OTA_KMS_PUBLIC_KEY_DER_BASE64"
+          printf 'authenticode_signer_sha256=%s\nvc_redist_x64_url=%s\n' \
+            "$AUTHENTICODE_SIGNER_SHA256" "$VC_REDIST_X64_URL" >> "$GITHUB_OUTPUT"
 
   production-shell-boundary:
     runs-on: ubuntu-latest
@@ -155,11 +199,12 @@ jobs:
       - name: Validate version format
         id: version
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ ! "$INPUT_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid version format: $INPUT_VERSION"
+          if [[ ! "$INPUT_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Hotfix version must be canonical vMAJOR.MINOR.PATCH with no leading zeros."
             exit 1
           fi
           VERSION_NUMERIC="${INPUT_VERSION#v}"
@@ -172,6 +217,18 @@ jobs:
             echo "Hotfix signing must run from the reviewed main branch."
             exit 1
           fi
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > release-history.json
+          python3 scripts/v1_bridge_run_metadata.py assert-version-newest \
+            --releases release-history.json --version "$INPUT_VERSION"
+          python3 scripts/v1_bridge_run_metadata.py assert-release-absent \
+            --releases release-history.json --version "$INPUT_VERSION"
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$INPUT_VERSION" >/dev/null 2>&1
+          tag_status=$?
+          set -e
+          [[ $tag_status -eq 2 ]] || { echo "::error::Hotfix tag exists or absence could not be proven."; exit 1; }
           echo "VERSION_NUMERIC=$VERSION_NUMERIC" >> "$GITHUB_OUTPUT"
 
       - name: Build + Test
@@ -183,11 +240,12 @@ jobs:
           for proj in Core Broker Helper Watchdog Setup; do
             dotnet restore "src/SuavoAgent.$proj" -r win-x64 --locked-mode -p:ContinuousIntegrationBuild=true
           done
-          python3 scripts/verify-release-trust-inputs.py
+          python3 scripts/verify-release-trust-inputs.py --trust-phase normal-v2
           python3 scripts/generate-release-legal-bundle.py --check --require-release-eligible
           python3 scripts/verify-external-release-assets.py
           python3 -m unittest \
             tests/test_aggregate_coverage.py \
+            tests/test_installer_rehearsal_script.py \
             tests/test_resolve_release_rollback_evidence.py \
             tests/test_release_workflow_gates.py \
             -v
@@ -255,6 +313,7 @@ jobs:
         run: |
           python3 -m unittest \
             tests/test_aggregate_coverage.py \
+            tests/test_installer_rehearsal_script.py \
             tests/test_resolve_release_rollback_evidence.py \
             tests/test_release_workflow_gates.py \
             -v
@@ -291,60 +350,30 @@ jobs:
       - name: Prepare signed output directory
         run: mkdir -p "${{ github.workspace }}/release/signed"
 
-      - name: Sign SuavoAgent.Core.exe
-        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
+      - name: Set up verified eSigner Java runtime
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
         with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/release/SuavoAgent.Core.exe
-          output_path: ${{ github.workspace }}/release/signed
+          distribution: temurin
+          java-version: '11.0.31+11'
+          verify-signature: true
 
-      - name: Sign SuavoAgent.Broker.exe
-        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
-        with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/release/SuavoAgent.Broker.exe
-          output_path: ${{ github.workspace }}/release/signed
-
-      - name: Sign SuavoAgent.Helper.exe
-        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
-        with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/release/SuavoAgent.Helper.exe
-          output_path: ${{ github.workspace }}/release/signed
-
-      - name: Sign SuavoAgent.Watchdog.exe
-        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
-        with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/release/SuavoAgent.Watchdog.exe
-          output_path: ${{ github.workspace }}/release/signed
-
-      - name: Sign SuavoSetup.exe
-        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
-        with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/release/SuavoSetup.exe
-          output_path: ${{ github.workspace }}/release/signed
+      - name: Sign exact executable cohort with verified CodeSignTool
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          scripts/esigner-codesign-hardened.sh release/signed \
+            release/SuavoAgent.Core.exe release/SuavoAgent.Broker.exe \
+            release/SuavoAgent.Helper.exe release/SuavoAgent.Watchdog.exe \
+            release/SuavoSetup.exe
 
       - name: Preserve reviewed legal and provenance bundle
         run: |
@@ -360,7 +389,7 @@ jobs:
       - name: Upload signed binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: suavoagent-hotfix-final-${{ inputs.version }}
+          name: suavoagent-final-${{ inputs.version }}
           path: release/signed/
           retention-days: 7
 
@@ -382,7 +411,7 @@ jobs:
       - name: Download exact signed cohort
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: suavoagent-hotfix-final-${{ inputs.version }}
+          name: suavoagent-final-${{ inputs.version }}
           path: release
 
       - name: Assemble immutable MSI payload layout
@@ -463,21 +492,33 @@ jobs:
       - name: Prepare signed MSI directory
         run: mkdir -p "${{ github.workspace }}/msi/signed"
 
-      - name: Sign MSI with protected publisher identity
-        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
+      - name: Set up verified eSigner Java runtime
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
         with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/msi/SuavoAgent-${{ inputs.version }}-win-x64.msi
-          output_path: ${{ github.workspace }}/msi/signed
+          distribution: temurin
+          java-version: '11.0.31+11'
+          verify-signature: true
+
+      - name: Sign MSI with verified CodeSignTool
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          scripts/esigner-codesign-hardened.sh msi/signed \
+            "msi/SuavoAgent-${{ inputs.version }}-win-x64.msi"
 
       - name: Upload signed customer MSI
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: suavoagent-hotfix-msi-${{ inputs.version }}
+          name: suavoagent-msi-${{ inputs.version }}
           path: msi/signed/*.msi
           retention-days: 7
 
@@ -499,23 +540,25 @@ jobs:
       - name: Download signed MSI
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: suavoagent-hotfix-msi-${{ inputs.version }}
+          name: suavoagent-msi-${{ inputs.version }}
           path: signed-msi
 
       - name: Download exact signed cohort
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: suavoagent-hotfix-final-${{ inputs.version }}
+          name: suavoagent-final-${{ inputs.version }}
           path: release
 
       - name: Stage signed MSI and reviewed prerequisite
         shell: pwsh
         env:
-          VC_REDIST_X64_URL: ${{ vars.VC_REDIST_X64_URL }}
+          VC_REDIST_X64_URL: ${{ needs.release-signing-preflight.outputs.vc_redist_x64_url }}
         run: |
           $ErrorActionPreference = 'Stop'
           $msi = @(Get-ChildItem signed-msi -Filter *.msi -File)
           if ($msi.Count -ne 1) { throw "Expected one signed MSI, found $($msi.Count)." }
+          & .\scripts\Test-InstallerAuthenticode.ps1 -Path $msi[0].FullName `
+            -AllowedSignerSha256 '${{ needs.release-signing-preflight.outputs.authenticode_signer_sha256 }}'
           $signature = Get-AuthenticodeSignature -LiteralPath $msi[0].FullName
           if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw "Embedded MSI signature is not valid." }
           $allowed = '${{ needs.release-signing-preflight.outputs.authenticode_signer_sha256 }}'.Split(',') | ForEach-Object { $_.ToUpperInvariant() }
@@ -577,21 +620,32 @@ jobs:
       - name: Prepare signed bundle directory
         run: mkdir -p "${{ github.workspace }}/bundle/signed"
 
-      - name: Sign customer bundle with protected publisher identity
-        uses: sslcom/actions-codesigner@642626595b6190e5ed570ed56eec3ac511a51de8
+      - name: Set up verified eSigner Java runtime
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
         with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/bundle/SuavoAgent-Setup.exe
-          output_path: ${{ github.workspace }}/bundle/signed
+          distribution: temurin
+          java-version: '11.0.31+11'
+          verify-signature: true
+
+      - name: Sign customer bundle with verified CodeSignTool
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          scripts/esigner-codesign-hardened.sh bundle/signed bundle/SuavoAgent-Setup.exe
 
       - name: Upload signed customer bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: suavoagent-hotfix-bundle-${{ inputs.version }}
+          name: suavoagent-bundle-${{ inputs.version }}
           path: bundle/signed/*.exe
           retention-days: 7
 
@@ -613,19 +667,19 @@ jobs:
       - name: Download final binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: suavoagent-hotfix-final-${{ inputs.version }}
+          name: suavoagent-final-${{ inputs.version }}
           path: release
 
       - name: Download signed customer MSI
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: suavoagent-hotfix-msi-${{ inputs.version }}
+          name: suavoagent-msi-${{ inputs.version }}
           path: installer-smoke
 
       - name: Download signed customer bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: suavoagent-hotfix-bundle-${{ inputs.version }}
+          name: suavoagent-bundle-${{ inputs.version }}
           path: bundle-smoke
 
       - name: Build hotfix release zip
@@ -652,41 +706,46 @@ jobs:
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $expanded -MaintenancePath (Join-Path $expanded 'SuavoSetup.exe') -AllowedSignerSha256 '${{ needs.release-signing-preflight.outputs.authenticode_signer_sha256 }}' -RequireAuthenticodeSignature -Json
           & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File $expanded -DisableRemediation
 
-      - name: Verify, install, and uninstall the signed MSI
+      - name: Rehearse signed MSI install, repair, and uninstall
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $msi = @(Get-ChildItem installer-smoke -Filter *.msi -File)
           if ($msi.Count -ne 1) { throw "Expected one signed MSI, found $($msi.Count)." }
-          $signature = Get-AuthenticodeSignature -LiteralPath $msi[0].FullName
-          if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw "Customer MSI Authenticode validation failed: $($signature.Status)" }
-          $allowed = '${{ needs.release-signing-preflight.outputs.authenticode_signer_sha256 }}'.Split(',') | ForEach-Object { $_.ToUpperInvariant() }
-          $actual = $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant()
-          if ($actual -notin $allowed) { throw "Customer MSI signer is outside the approved publisher set." }
-          $installed = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', "`"$($msi[0].FullName)`"", '/qn', '/norestart')
-          if ($installed.ExitCode -notin @(0, 3010)) { throw "MSI install failed with $($installed.ExitCode)." }
-          foreach ($service in @('SuavoAgent.Core', 'SuavoAgent.Broker', 'SuavoAgent.Watchdog')) {
-            if ($null -eq (Get-Service -Name $service -ErrorAction SilentlyContinue)) { throw "MSI did not register $service." }
-          }
-          $removed = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/x', "`"$($msi[0].FullName)`"", '/qn', '/norestart')
-          if ($removed.ExitCode -notin @(0, 3010)) { throw "MSI uninstall failed with $($removed.ExitCode)." }
-          foreach ($service in @('SuavoAgent.Core', 'SuavoAgent.Broker', 'SuavoAgent.Watchdog')) {
-            if ($null -ne (Get-Service -Name $service -ErrorAction SilentlyContinue)) { throw "MSI uninstall left $service registered." }
-          }
+          & .\scripts\Invoke-SuavoAgentInstallerRehearsal.ps1 `
+            -InstallerKind Msi `
+            -InstallerPath $msi[0].FullName `
+            -MsiPath $msi[0].FullName `
+            -ExpectedReleaseTag '${{ inputs.version }}' `
+            -AllowedSignerSha256 '${{ needs.release-signing-preflight.outputs.authenticode_signer_sha256 }}' `
+            -EvidenceDirectory 'installer-rehearsal-evidence/msi'
           & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File $msi[0].FullName -DisableRemediation
 
-      - name: Verify the signed customer bundle
+      - name: Rehearse signed customer bundle install, repair, and uninstall
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $msi = @(Get-ChildItem installer-smoke -Filter *.msi -File)
+          if ($msi.Count -ne 1) { throw "Expected one signed MSI, found $($msi.Count)." }
           $bundle = @(Get-ChildItem bundle-smoke -Filter *.exe -File)
           if ($bundle.Count -ne 1) { throw "Expected one signed bundle, found $($bundle.Count)." }
-          $signature = Get-AuthenticodeSignature -LiteralPath $bundle[0].FullName
-          if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw "Customer bundle Authenticode validation failed: $($signature.Status)" }
-          $allowed = '${{ needs.release-signing-preflight.outputs.authenticode_signer_sha256 }}'.Split(',') | ForEach-Object { $_.ToUpperInvariant() }
-          $actual = $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant()
-          if ($actual -notin $allowed) { throw "Customer bundle signer is outside the approved publisher set." }
+          & .\scripts\Invoke-SuavoAgentInstallerRehearsal.ps1 `
+            -InstallerKind Bundle `
+            -InstallerPath $bundle[0].FullName `
+            -MsiPath $msi[0].FullName `
+            -ExpectedReleaseTag '${{ inputs.version }}' `
+            -AllowedSignerSha256 '${{ needs.release-signing-preflight.outputs.authenticode_signer_sha256 }}' `
+            -EvidenceDirectory 'installer-rehearsal-evidence/bundle'
           & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File $bundle[0].FullName -DisableRemediation
+
+      - name: Upload installer rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hotfix-installer-rehearsal-${{ inputs.version }}
+          path: installer-rehearsal-evidence/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload smoked hotfix release zip
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -696,6 +755,7 @@ jobs:
           retention-days: 7
 
   # --- Tag + checksums + manifest + release -------------------------------
+
   release:
     needs: [build, sign_windows, sign_msi, sign_bundle, windows-release-smoke]
     if: |
@@ -705,209 +765,11 @@ jobs:
       needs.sign_msi.result == 'success' &&
       needs.sign_bundle.result == 'success' &&
       needs.windows-release-smoke.result == 'success'
-    runs-on: ubuntu-latest
-    environment: suavoagent-production-signing
+    uses: ./.github/workflows/production-release-signing.yml
+    with:
+      version: ${{ inputs.version }}
     permissions:
+      actions: read
+      attestations: write
       contents: write
       id-token: write
-      attestations: write
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: ${{ github.sha }}
-
-      - name: Assume OTA signing role using GitHub OIDC
-        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
-        with:
-          role-to-assume: ${{ vars.AWS_SIGNING_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_SIGNING_REGION }}
-
-      - name: Download final binaries
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: suavoagent-hotfix-final-${{ inputs.version }}
-          path: release
-
-      - name: Download signed customer MSI
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: suavoagent-hotfix-msi-${{ inputs.version }}
-          path: release
-
-      - name: Download signed customer bundle
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: suavoagent-hotfix-bundle-${{ inputs.version }}
-          path: release
-
-      - name: Generate field release receipt
-        env:
-          VERSION: ${{ inputs.version }}
-          VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
-          GH_TOKEN: ${{ github.token }}
-          OTA_KMS_KEY_ID: ${{ vars.OTA_KMS_KEY_ID }}
-          OTA_KMS_PUBLIC_KEY_DER_BASE64: ${{ vars.OTA_KMS_PUBLIC_KEY_DER_BASE64 }}
-        run: |
-          set -euo pipefail
-          cd release
-          ARTIFACT="SuavoAgent-Setup.exe"
-          ARTIFACT_SHA=$(sha256sum "$ARTIFACT" | awk '{print $1}')
-          RELEASE_TAGS_JSON="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft,isPrerelease)"
-          ROLLBACK_TAG="$(printf '%s' "$RELEASE_TAGS_JSON" | python3 ../scripts/select-release-rollback-tag.py "$VERSION")"
-          if [[ -z "$ROLLBACK_TAG" ]]; then
-            echo "::error::No signed stable release strictly lower than $VERSION exists for rollback."
-            exit 1
-          fi
-          ROLLBACK_TMP="$(mktemp -d)"
-          trap 'rm -rf "$ROLLBACK_TMP"' EXIT
-          gh release download "$ROLLBACK_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern checksums.sha256 \
-            --pattern checksums.sha256.sig \
-            --pattern field-release-receipt.json \
-            --dir "$ROLLBACK_TMP"
-          printf '%s' "$OTA_KMS_PUBLIC_KEY_DER_BASE64" | base64 --decode > "$ROLLBACK_TMP/public.der"
-          openssl pkey -pubin -inform DER -in "$ROLLBACK_TMP/public.der" -out "$ROLLBACK_TMP/public.pem"
-          if ! openssl dgst -sha256 -verify "$ROLLBACK_TMP/public.pem" -signature "$ROLLBACK_TMP/checksums.sha256.sig" "$ROLLBACK_TMP/checksums.sha256"; then
-            echo "::error::Previous release $ROLLBACK_TAG checksum signature is invalid."
-            exit 1
-          fi
-          mapfile -t ROLLBACK_EVIDENCE < <(python3 ../scripts/resolve-release-rollback-evidence.py \
-            --tag "$ROLLBACK_TAG" \
-            --checksums "$ROLLBACK_TMP/checksums.sha256" \
-            --receipt "$ROLLBACK_TMP/field-release-receipt.json")
-          if [[ ${#ROLLBACK_EVIDENCE[@]} -ne 2 ]]; then
-            echo "::error::Previous release $ROLLBACK_TAG did not resolve one exact rollback artifact."
-            exit 1
-          fi
-          ROLLBACK_ARTIFACT="${ROLLBACK_EVIDENCE[0]}"
-          ROLLBACK_SHA="${ROLLBACK_EVIDENCE[1]}"
-          gh release download "$ROLLBACK_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern "$ROLLBACK_ARTIFACT" \
-            --dir "$ROLLBACK_TMP"
-          ROLLBACK_ACTUAL_SHA="$(sha256sum "$ROLLBACK_TMP/$ROLLBACK_ARTIFACT" | awk '{print $1}')"
-          if [[ "$ROLLBACK_ACTUAL_SHA" != "$ROLLBACK_SHA" ]]; then
-            echo "::error::Previous release $ROLLBACK_TAG artifact bytes do not match its signed receipt."
-            exit 1
-          fi
-          export ARTIFACT ARTIFACT_SHA ROLLBACK_TAG ROLLBACK_ARTIFACT ROLLBACK_SHA
-          python3 - <<'PY'
-          import json
-          import os
-
-          version = os.environ["VERSION"]
-          rollback_tag = os.environ["ROLLBACK_TAG"]
-          receipt = {
-              "releaseTag": version,
-              "version": os.environ["VERSION_NUMERIC"],
-              "sourceCommit": os.environ["GITHUB_SHA"],
-              "artifact": os.environ["ARTIFACT"],
-              "artifactSha256": os.environ["ARTIFACT_SHA"],
-              "authenticode": "required-valid",
-              "checksumSignature": "checksums.sha256.sig",
-              "manifestSignature": f"update-manifest-{version}.sig",
-              "track2QueenValidation": "do-not-run-against-older-tags",
-              "rollbackArtifact": {
-                  "releaseTag": rollback_tag,
-                  "artifact": os.environ["ROLLBACK_ARTIFACT"],
-                  "artifactSha256": os.environ["ROLLBACK_SHA"],
-                  "releaseUrl": (
-                      "https://github.com/"
-                      f"{os.environ['GITHUB_REPOSITORY']}/releases/download/{rollback_tag}/"
-                      f"{os.environ['ROLLBACK_ARTIFACT']}"
-                  ),
-              },
-          }
-          with open("field-release-receipt.json", "w", encoding="utf-8") as fh:
-              json.dump(receipt, fh, indent=2, sort_keys=True)
-              fh.write("\n")
-          PY
-
-      - name: Generate + sign OTA update manifest
-        env:
-          VERSION: ${{ inputs.version }}
-          VERSION_NUMERIC: ${{ needs.build.outputs.version_numeric }}
-          OTA_KMS_KEY_ID: ${{ vars.OTA_KMS_KEY_ID }}
-          OTA_KMS_PUBLIC_KEY_DER_BASE64: ${{ vars.OTA_KMS_PUBLIC_KEY_DER_BASE64 }}
-          OTA_FULL_COHORT_MANIFEST: ${{ vars.OTA_FULL_COHORT_MANIFEST }}
-        run: |
-          set -euo pipefail
-          cd release
-          CORE_SHA=$(sha256sum SuavoAgent.Core.exe | awk '{print $1}')
-          BROKER_SHA=$(sha256sum SuavoAgent.Broker.exe | awk '{print $1}')
-          HELPER_SHA=$(sha256sum SuavoAgent.Helper.exe | awk '{print $1}')
-          WATCHDOG_SHA=$(sha256sum SuavoAgent.Watchdog.exe | awk '{print $1}')
-          MAINTENANCE_SHA=$(sha256sum SuavoSetup.exe | awk '{print $1}')
-          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}"
-          MANIFEST="$(bash ../scripts/compose-ota-manifest.sh \
-            "$BASE_URL" "$CORE_SHA" "$BROKER_SHA" "$HELPER_SHA" \
-            "$VERSION_NUMERIC" "$WATCHDOG_SHA" "$MAINTENANCE_SHA")"
-          printf '%s' "$MANIFEST" > "update-manifest-${VERSION}.txt"
-          bash ../scripts/aws-kms-sign-ecdsa-p256.sh \
-            "update-manifest-${VERSION}.txt" "update-manifest-${VERSION}.sig" p1363-hex
-          test "$(wc -c < update-manifest-${VERSION}.sig)" -eq 128
-          echo "Manifest fields: $(awk -F'|' '{print NF}' <<<"$MANIFEST")"
-
-      - name: Generate + sign final release checksums
-        env:
-          VERSION: ${{ inputs.version }}
-          OTA_KMS_KEY_ID: ${{ vars.OTA_KMS_KEY_ID }}
-          OTA_KMS_PUBLIC_KEY_DER_BASE64: ${{ vars.OTA_KMS_PUBLIC_KEY_DER_BASE64 }}
-        run: |
-          set -euo pipefail
-          cd release
-          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe SuavoAgent.Watchdog.exe SuavoSetup.exe "SuavoAgent-${VERSION}-win-x64.msi" SuavoAgent-Setup.exe suavoagent.spdx.json field-release-receipt.json "update-manifest-${VERSION}.txt" "update-manifest-${VERSION}.sig" > checksums.sha256
-          bash ../scripts/aws-kms-sign-ecdsa-p256.sh checksums.sha256 checksums.sha256.sig der
-          cat checksums.sha256
-
-      - name: Attest signed binaries, customer MSI, legal bundle, and SBOM
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
-        with:
-          subject-path: |
-            release/*.exe
-            release/*.msi
-            release/legal/*
-            release/legal/license-texts/*
-            release/legal/evidence/*
-            release/suavoagent.spdx.json
-
-      - name: Create tag
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          git tag "$INPUT_VERSION"
-          git push origin "$INPUT_VERSION"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ inputs.version }}
-          name: "${{ inputs.version }} — Hotfix"
-          body: |
-            ## Hotfix: ${{ inputs.description }}
-
-            Emergency release from hotfix pipeline.
-            **Tests:** All passing before release.
-            **Windows smoke:** Signed MSI passed Authenticode, install, service-registration, uninstall, and no-PHI checks on windows-latest.
-            **Source commit:** ${{ github.sha }}
-            **Checksums:** ECDSA P-256 signed.
-            **Authenticode:** Signed (SSL.com eSigner Cloud EV).
-            **Installer:** Download `SuavoAgent-Setup.exe`; no terminal or script is required.
-          files: |
-            release/SuavoAgent.Core.exe
-            release/SuavoAgent.Broker.exe
-            release/SuavoAgent.Helper.exe
-            release/SuavoAgent.Watchdog.exe
-            release/SuavoSetup.exe
-            release/SuavoAgent-*-win-x64.msi
-            release/SuavoAgent-Setup.exe
-            release/field-release-receipt.json
-            release/checksums.sha256
-            release/checksums.sha256.sig
-            release/update-manifest-v*.txt
-            release/update-manifest-v*.sig
-            release/suavoagent.spdx.json
-            release/legal/THIRD-PARTY-NOTICES.txt
-            release/legal/THIRD-PARTY-PROVENANCE.json
-            release/legal/external-assets.json
-            release/legal/license-texts/*
-            release/legal/evidence/*

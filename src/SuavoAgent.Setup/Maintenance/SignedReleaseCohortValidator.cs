@@ -7,9 +7,24 @@ using SuavoAgent.Diagnostics.Maintenance;
 
 namespace SuavoAgent.Setup.Maintenance;
 
-internal sealed record SignedReleaseCohortValidation(bool IsValid, string Code)
+internal sealed record SignedReleaseCohortEvidence(
+    string ReleaseTag,
+    string SourceCommit,
+    string OtaSigningKeyId,
+    string MsiArtifactSha256,
+    string ReleaseReceiptSha256,
+    string ChecksumsSha256,
+    string ChecksumsSignatureSha256,
+    string MaintenanceHostSha256,
+    IReadOnlyDictionary<string, string> InstalledCohort);
+
+internal sealed record SignedReleaseCohortValidation(
+    bool IsValid,
+    string Code,
+    SignedReleaseCohortEvidence? Evidence = null)
 {
-    public static SignedReleaseCohortValidation Valid() => new(true, "valid");
+    public static SignedReleaseCohortValidation Valid(
+        SignedReleaseCohortEvidence evidence) => new(true, "valid", evidence);
     public static SignedReleaseCohortValidation Reject(string code) => new(false, code);
 }
 
@@ -36,18 +51,49 @@ internal static partial class SignedReleaseCohortValidator
         string expectedReleaseTag) =>
         Validate(
             stagingDirectory,
+            stagingDirectory,
             expectedReleaseTag,
-            BinaryDownloader.VerifyChecksumSignature,
-            AuthenticodePublisherVerifier.Verify);
+            BinaryDownloader.VerifyChecksumSignatureForKeyId,
+            AuthenticodePublisherVerifier.Verify,
+            VerifyManifestSignatureForKeyId);
+
+    internal static SignedReleaseCohortValidation Validate(
+        string stagingDirectory,
+        string receiptDirectory,
+        string expectedReleaseTag) =>
+        Validate(
+            stagingDirectory,
+            receiptDirectory,
+            expectedReleaseTag,
+            BinaryDownloader.VerifyChecksumSignatureForKeyId,
+            AuthenticodePublisherVerifier.Verify,
+            VerifyManifestSignatureForKeyId);
 
     internal static SignedReleaseCohortValidation Validate(
         string stagingDirectory,
         string expectedReleaseTag,
-        Func<byte[], byte[], bool> verifySignature,
-        Func<string, AuthenticodePublisherTrust> verifyAuthenticode)
+        Func<string, byte[], byte[], bool> verifySignature,
+        Func<string, AuthenticodePublisherTrust> verifyAuthenticode,
+        Func<string, string, string, bool>? verifyManifestSignature = null) =>
+        Validate(
+            stagingDirectory,
+            stagingDirectory,
+            expectedReleaseTag,
+            verifySignature,
+            verifyAuthenticode,
+            verifyManifestSignature ?? VerifyManifestSignatureForKeyId);
+
+    internal static SignedReleaseCohortValidation Validate(
+        string stagingDirectory,
+        string receiptDirectory,
+        string expectedReleaseTag,
+        Func<string, byte[], byte[], bool> verifySignature,
+        Func<string, AuthenticodePublisherTrust> verifyAuthenticode,
+        Func<string, string, string, bool> verifyManifestSignature)
     {
         ArgumentNullException.ThrowIfNull(verifySignature);
         ArgumentNullException.ThrowIfNull(verifyAuthenticode);
+        ArgumentNullException.ThrowIfNull(verifyManifestSignature);
         try
         {
             if (string.IsNullOrWhiteSpace(stagingDirectory) ||
@@ -60,53 +106,121 @@ internal static partial class SignedReleaseCohortValidator
             if (ContainsReparsePoint(stagingDirectory))
                 return SignedReleaseCohortValidation.Reject(
                     "cohort_contains_reparse_point");
+            if (string.IsNullOrWhiteSpace(receiptDirectory) ||
+                !Path.IsPathFullyQualified(receiptDirectory) ||
+                !Directory.Exists(receiptDirectory) ||
+                IsReparsePoint(receiptDirectory) ||
+                (!string.Equals(
+                     Path.GetFullPath(stagingDirectory),
+                     Path.GetFullPath(receiptDirectory),
+                     OperatingSystem.IsWindows()
+                         ? StringComparison.OrdinalIgnoreCase
+                         : StringComparison.Ordinal) &&
+                 ContainsReparsePoint(receiptDirectory)))
+                return SignedReleaseCohortValidation.Reject(
+                    "receipt_directory_invalid");
             if (!BinaryDownloader.IsValidReleaseTag(expectedReleaseTag))
                 return SignedReleaseCohortValidation.Reject("release_tag_invalid");
 
             var checksumsPath = Path.Combine(
-                stagingDirectory,
+                receiptDirectory,
                 MaintenanceContract.ReleaseChecksumsFileName);
             var signaturePath = Path.Combine(
-                stagingDirectory,
+                receiptDirectory,
                 MaintenanceContract.ReleaseChecksumsSignatureFileName);
             if (!File.Exists(checksumsPath) || !File.Exists(signaturePath))
                 return SignedReleaseCohortValidation.Reject("release_receipt_missing");
             if (IsReparsePoint(checksumsPath) || IsReparsePoint(signaturePath))
                 return SignedReleaseCohortValidation.Reject("release_receipt_reparse_point");
 
+            var fieldReceiptPath = Path.Combine(
+                receiptDirectory,
+                MaintenanceContract.FieldReleaseReceiptFileName);
+            if (!File.Exists(fieldReceiptPath))
+                return SignedReleaseCohortValidation.Reject("field_release_receipt_missing");
+            if (IsReparsePoint(fieldReceiptPath))
+                return SignedReleaseCohortValidation.Reject("field_release_receipt_hash_mismatch");
+
             var checksumsBytes = ReadBounded(checksumsPath, MaxChecksumsBytes);
             var signatureBytes = ReadBounded(signaturePath, MaxSignatureBytes);
-            if (!verifySignature(checksumsBytes, signatureBytes))
-                return SignedReleaseCohortValidation.Reject("release_signature_invalid");
-
+            var fieldReceiptBytes = ReadBounded(fieldReceiptPath, MaxFieldReceiptBytes);
             var receipt = ParseChecksums(checksumsBytes);
             if (!receipt.IsValid)
                 return SignedReleaseCohortValidation.Reject(receipt.Code);
-
-            var fieldReceiptPath = Path.Combine(
-                stagingDirectory,
-                MaintenanceContract.FieldReleaseReceiptFileName);
             if (!receipt.Hashes!.TryGetValue(
                     MaintenanceContract.FieldReleaseReceiptFileName,
-                    out var expectedReceiptHash) ||
-                !File.Exists(fieldReceiptPath))
+                    out var expectedReceiptHash))
                 return SignedReleaseCohortValidation.Reject("field_release_receipt_missing");
-            if (IsReparsePoint(fieldReceiptPath) ||
-                !HashMatches(fieldReceiptPath, expectedReceiptHash))
+            if (!HashMatches(fieldReceiptPath, expectedReceiptHash))
                 return SignedReleaseCohortValidation.Reject("field_release_receipt_hash_mismatch");
             if (!receipt.Hashes.TryGetValue(
                     MaintenanceContract.SignedSetupArtifactName,
                     out var expectedSetupHash))
                 return SignedReleaseCohortValidation.Reject(
                     "release_entry_missing:" + MaintenanceContract.SignedSetupArtifactName);
+            if (!receipt.Hashes.TryGetValue(
+                    MaintenanceContract.CanonicalInstallerArtifactName,
+                    out var expectedBurnInstallerHash))
+                return SignedReleaseCohortValidation.Reject(
+                    "release_entry_missing:" + MaintenanceContract.CanonicalInstallerArtifactName);
+            var msiArtifactName = Release1ConvergenceContract.ReleaseMsiArtifactName(
+                expectedReleaseTag);
+            if (!receipt.Hashes.TryGetValue(msiArtifactName, out var expectedMsiHash))
+                return SignedReleaseCohortValidation.Reject(
+                    "release_entry_missing:" + msiArtifactName);
             var fieldReceipt = ValidateFieldReleaseReceipt(
-                ReadBounded(fieldReceiptPath, MaxFieldReceiptBytes),
+                fieldReceiptBytes,
                 expectedReleaseTag,
-                expectedSetupHash);
+                expectedBurnInstallerHash,
+                out var fieldBinding);
             if (!fieldReceipt.IsValid) return fieldReceipt;
-            if (!receipt.Hashes.ContainsKey($"update-manifest-{expectedReleaseTag}.txt") ||
-                !receipt.Hashes.ContainsKey($"update-manifest-{expectedReleaseTag}.sig"))
+            if (!verifySignature(fieldBinding!.OtaSigningKeyId, checksumsBytes, signatureBytes))
+                return SignedReleaseCohortValidation.Reject("release_signature_invalid");
+            var manifestName = $"update-manifest-{expectedReleaseTag}.txt";
+            var manifestSignatureName = $"update-manifest-{expectedReleaseTag}.sig";
+            if (!receipt.Hashes.ContainsKey(manifestName) ||
+                !receipt.Hashes.ContainsKey(manifestSignatureName))
                 return SignedReleaseCohortValidation.Reject("release_manifest_receipt_missing");
+            var manifestPath = Path.Combine(receiptDirectory, manifestName);
+            var manifestSignaturePath = Path.Combine(
+                receiptDirectory,
+                manifestSignatureName);
+            if (!File.Exists(manifestPath) || !File.Exists(manifestSignaturePath) ||
+                IsReparsePoint(manifestPath) || IsReparsePoint(manifestSignaturePath) ||
+                !HashMatches(manifestPath, receipt.Hashes[manifestName]) ||
+                !HashMatches(
+                    manifestSignaturePath,
+                    receipt.Hashes[manifestSignatureName]))
+                return SignedReleaseCohortValidation.Reject(
+                    "release_manifest_artifact_invalid");
+            var manifestBytes = ReadBounded(manifestPath, MaxFieldReceiptBytes * 2);
+            var manifestSignatureBytes = ReadBounded(
+                manifestSignaturePath,
+                MaxSignatureBytes);
+            var manifestCanonical = new ASCIIEncoding().GetString(manifestBytes);
+            var manifestSignature = new ASCIIEncoding().GetString(
+                manifestSignatureBytes);
+            if (!TryReleaseVersion(
+                    expectedReleaseTag,
+                    out _,
+                    out var numericVersion) ||
+                !string.Equals(
+                    manifestCanonical,
+                    ExpectedManifestCanonical(
+                        expectedReleaseTag,
+                        numericVersion,
+                        receipt.Hashes),
+                    StringComparison.Ordinal) ||
+                manifestSignature.Length != 128 ||
+                manifestSignature.Any(character =>
+                    character is not (>= '0' and <= '9') and
+                    not (>= 'a' and <= 'f')) ||
+                !verifyManifestSignature(
+                    fieldBinding.OtaSigningKeyId,
+                    manifestCanonical,
+                    manifestSignature))
+                return SignedReleaseCohortValidation.Reject(
+                    "release_manifest_signature_invalid");
 
             foreach (var installedName in BinaryDownloader.InstalledCohort)
             {
@@ -147,7 +261,32 @@ internal static partial class SignedReleaseCohortValidator
                 return SignedReleaseCohortValidation.Reject("cohort_executable_set_not_exact");
             }
 
-            return SignedReleaseCohortValidation.Valid();
+            return SignedReleaseCohortValidation.Valid(new(
+                fieldBinding.ReleaseTag,
+                fieldBinding.SourceCommit,
+                fieldBinding.OtaSigningKeyId,
+                Convert.ToHexString(expectedMsiHash).ToLowerInvariant(),
+                Sha256(fieldReceiptBytes),
+                Sha256(checksumsBytes),
+                Sha256(signatureBytes),
+                Convert.ToHexString(expectedSetupHash).ToLowerInvariant(),
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["SuavoAgent.Core.exe"] = HexHash(
+                        receipt.Hashes,
+                        "SuavoAgent.Core.exe"),
+                    ["SuavoAgent.Broker.exe"] = HexHash(
+                        receipt.Hashes,
+                        "SuavoAgent.Broker.exe"),
+                    ["SuavoAgent.Helper.exe"] = HexHash(
+                        receipt.Hashes,
+                        "SuavoAgent.Helper.exe"),
+                    ["SuavoAgent.Watchdog.exe"] = HexHash(
+                        receipt.Hashes,
+                        "SuavoAgent.Watchdog.exe"),
+                    [MaintenanceContract.SignedSetupArtifactName] =
+                        Convert.ToHexString(expectedSetupHash).ToLowerInvariant(),
+                }));
         }
         catch (Exception ex) when (ex is
             IOException or
@@ -165,8 +304,10 @@ internal static partial class SignedReleaseCohortValidator
     private static SignedReleaseCohortValidation ValidateFieldReleaseReceipt(
         byte[] bytes,
         string expectedReleaseTag,
-        byte[] expectedSetupHash)
+        byte[] expectedInstallerHash,
+        out FieldReleaseBinding? binding)
     {
+        binding = null;
         using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions
         {
             AllowTrailingCommas = false,
@@ -178,7 +319,8 @@ internal static partial class SignedReleaseCohortValidator
         {
             "releaseTag", "version", "sourceCommit", "artifact",
             "artifactSha256", "authenticode", "checksumSignature",
-            "manifestSignature", "track2QueenValidation", "rollbackArtifact",
+            "manifestSignature", "otaSigningKeyId", "track2QueenValidation",
+            "rollbackArtifact",
         };
         if (root.ValueKind != JsonValueKind.Object ||
             root.EnumerateObject().Count() != exact.Length ||
@@ -194,6 +336,7 @@ internal static partial class SignedReleaseCohortValidator
         var sourceCommit = Read(root, "sourceCommit");
         var artifact = Read(root, "artifact");
         var artifactSha = Read(root, "artifactSha256");
+        var otaSigningKeyId = Read(root, "otaSigningKeyId");
         if (!TryReleaseVersion(
                 expectedReleaseTag,
                 out var currentVersion,
@@ -204,15 +347,16 @@ internal static partial class SignedReleaseCohortValidator
             sourceCommit is null || sourceCommit.Length != 40 || !sourceCommit.All(IsLowerHex) ||
             !string.Equals(
                 artifact,
-                MaintenanceContract.SignedSetupArtifactName,
+                MaintenanceContract.CanonicalInstallerArtifactName,
                 StringComparison.Ordinal) ||
             !IsSha256(artifactSha) ||
             !CryptographicOperations.FixedTimeEquals(
                 Convert.FromHexString(artifactSha!),
-                expectedSetupHash) ||
+                expectedInstallerHash) ||
             Read(root, "authenticode") != "required-valid" ||
             Read(root, "checksumSignature") != MaintenanceContract.ReleaseChecksumsSignatureFileName ||
             Read(root, "manifestSignature") != $"update-manifest-{expectedReleaseTag}.sig" ||
+            otaSigningKeyId is not (OtaUpdateTrust.LegacyV1KeyId or OtaUpdateTrust.CurrentV2KeyId) ||
             Read(root, "track2QueenValidation") != "do-not-run-against-older-tags")
             return SignedReleaseCohortValidation.Reject("field_release_receipt_binding_invalid");
 
@@ -224,17 +368,30 @@ internal static partial class SignedReleaseCohortValidator
             return SignedReleaseCohortValidation.Reject("field_release_rollback_invalid");
         var rollbackTag = Read(rollback, "releaseTag");
         var rollbackArtifact = Read(rollback, "artifact");
-        var expectedRollbackArtifact = MaintenanceContract.SignedSetupArtifactName;
+        var expectedLegacyRollbackArtifact = $"suavoagent-{rollbackTag}-win-x64.zip";
+        var approvedRollbackArtifact =
+            string.Equals(
+                rollbackArtifact,
+                MaintenanceContract.SignedSetupArtifactName,
+                StringComparison.Ordinal) ||
+            string.Equals(
+                rollbackArtifact,
+                expectedLegacyRollbackArtifact,
+                StringComparison.Ordinal);
         var expectedRollbackUrl =
-            $"https://github.com/{BinaryDownloader.RepoOwner}/{BinaryDownloader.RepoName}/releases/download/{rollbackTag}/{expectedRollbackArtifact}";
+            $"https://github.com/{BinaryDownloader.RepoOwner}/{BinaryDownloader.RepoName}/releases/download/{rollbackTag}/{rollbackArtifact}";
         if (!TryStableVersion(rollbackTag, out var rollbackVersion) ||
             rollbackVersion >= currentVersion ||
-            !string.Equals(rollbackArtifact, expectedRollbackArtifact, StringComparison.Ordinal) ||
+            !approvedRollbackArtifact ||
             !IsSha256(Read(rollback, "artifactSha256")) ||
             !string.Equals(Read(rollback, "releaseUrl"), expectedRollbackUrl, StringComparison.Ordinal))
             return SignedReleaseCohortValidation.Reject("field_release_rollback_invalid");
 
-        return SignedReleaseCohortValidation.Valid();
+        binding = new(
+            releaseTag!,
+            sourceCommit!,
+            otaSigningKeyId!);
+        return new SignedReleaseCohortValidation(true, "valid");
     }
 
     private static bool TryStableVersion(string? tag, out Version version)
@@ -271,6 +428,57 @@ internal static partial class SignedReleaseCohortValidator
 
     private static bool IsLowerHex(char value) =>
         value is >= '0' and <= '9' or >= 'a' and <= 'f';
+
+    private static string Sha256(byte[] value) =>
+        Convert.ToHexString(SHA256.HashData(value)).ToLowerInvariant();
+
+    private static string HexHash(
+        IReadOnlyDictionary<string, byte[]> hashes,
+        string name)
+    {
+        if (!hashes.TryGetValue(name, out var value))
+            throw new InvalidDataException("Signed release cohort hash is missing.");
+        return Convert.ToHexString(value).ToLowerInvariant();
+    }
+
+    private static string ExpectedManifestCanonical(
+        string releaseTag,
+        string numericVersion,
+        IReadOnlyDictionary<string, byte[]> hashes)
+    {
+        var baseUrl =
+            $"https://github.com/{BinaryDownloader.RepoOwner}/{BinaryDownloader.RepoName}/releases/download/{releaseTag}";
+        return string.Join('|',
+            $"{baseUrl}/SuavoAgent.Core.exe",
+            HexHash(hashes, "SuavoAgent.Core.exe"),
+            $"{baseUrl}/SuavoAgent.Broker.exe",
+            HexHash(hashes, "SuavoAgent.Broker.exe"),
+            $"{baseUrl}/SuavoAgent.Helper.exe",
+            HexHash(hashes, "SuavoAgent.Helper.exe"),
+            numericVersion,
+            "net8.0",
+            "win-x64",
+            $"{baseUrl}/SuavoAgent.Watchdog.exe",
+            HexHash(hashes, "SuavoAgent.Watchdog.exe"));
+    }
+
+    private static bool VerifyManifestSignatureForKeyId(
+        string keyId,
+        string canonical,
+        string signature)
+    {
+        if (!OtaUpdateTrust.ProductionTrustedPublicKeys.TryGetValue(
+                keyId,
+                out var publicKey))
+            return false;
+        return OtaUpdateTrust.VerifyP1363Hex(
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [keyId] = publicKey,
+            },
+            canonical,
+            signature);
+    }
 
     private static ParsedChecksums ParseChecksums(byte[] bytes)
     {
@@ -346,4 +554,9 @@ internal static partial class SignedReleaseCohortValidator
             new(true, "valid", hashes);
         public static ParsedChecksums Reject(string code) => new(false, code, null);
     }
+
+    private sealed record FieldReleaseBinding(
+        string ReleaseTag,
+        string SourceCommit,
+        string OtaSigningKeyId);
 }

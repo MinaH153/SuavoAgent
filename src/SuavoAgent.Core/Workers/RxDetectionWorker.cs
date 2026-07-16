@@ -13,6 +13,7 @@ using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Contracts.Models;
 using SuavoAgent.Contracts.Adapters;
+using SuavoAgent.Contracts.Security;
 using SuavoAgent.Core.Adapters;
 
 namespace SuavoAgent.Core.Workers;
@@ -34,6 +35,7 @@ public sealed partial class RxDetectionWorker : ResilientHostedService
     private readonly AdapterConfig _adapterConfig;
     private readonly IRxCorrelationStore? _rxCorrelationStore;
     private readonly IActivePmsAdapterRegistry? _learnedAdapterRegistry;
+    private readonly ObservationActivationAuthority? _observationAuthority;
     private PioneerRxSqlEngine? _sqlEngine;
     private PioneerRxCanarySource? _canarySource;
     private PioneerRxWritebackEngine? _writebackEngine;
@@ -104,6 +106,9 @@ public sealed partial class RxDetectionWorker : ResilientHostedService
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
         _rxCorrelationStore = serviceProvider.GetService<IRxCorrelationStore>();
         _learnedAdapterRegistry = serviceProvider.GetService<IActivePmsAdapterRegistry>();
+        _observationAuthority = serviceProvider.GetService<ObservationActivationAuthority>();
+        if (_observationAuthority is not null)
+            _observationAuthority.AuthorityLost += OnObservationAuthorityLost;
         _adapterConfig = serviceProvider.GetService<IAdapterRegistry>()?.Default ?? PioneerRxAdapterConfig.Create();
         _canaryEnabled = !_options.LearningMode;
     }
@@ -128,8 +133,6 @@ public sealed partial class RxDetectionWorker : ResilientHostedService
 
         _stateDb.PurgeExpiredDeadLetters();
 
-        await TryConnectSqlAsync(stoppingToken);
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -146,7 +149,11 @@ public sealed partial class RxDetectionWorker : ResilientHostedService
                 _sqlConnected = false;
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(DetectionIntervalSeconds), stoppingToken);
+            var delay = _observationAuthority is not null &&
+                        !_observationAuthority.ObservationEnabled
+                ? TimeSpan.FromSeconds(1)
+                : TimeSpan.FromSeconds(DetectionIntervalSeconds);
+            await Task.Delay(delay, stoppingToken);
         }
 
         _sqlEngine?.Dispose();
@@ -155,6 +162,14 @@ public sealed partial class RxDetectionWorker : ResilientHostedService
 
     internal async Task RunCycleAsync(CancellationToken ct)
     {
+        using var activation = _observationAuthority?.TryAcquireExecutionLease(ct);
+        if (_observationAuthority is not null && activation is null)
+        {
+            SuspendObservation();
+            return;
+        }
+        if (activation is not null) ct = activation.Token;
+
         if (!_sqlConnected)
         {
             await TryConnectSqlAsync(ct);

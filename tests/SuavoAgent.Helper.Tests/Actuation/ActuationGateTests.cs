@@ -74,6 +74,41 @@ public sealed class ActuationGateTests
     }
 
     [Fact]
+    public void WorkstationInputOutsideApprovedPioneerRx_CausesNoObservationState()
+    {
+        var gate = Build(enabled: true);
+        var presenceCallbacks = 0;
+        using var observer = new UserInputObserver(
+            gate,
+            new LoggerConfiguration().CreateLogger(),
+            TimeSpan.Zero,
+            () => presenceCallbacks++,
+            isApprovedPioneerRxForeground: () => false);
+
+        var accepted = observer.TryNotifyUserInputForTest("keyboard");
+
+        Assert.False(accepted);
+        Assert.Null(gate.Snapshot().PausedUntilUtc);
+        Assert.Equal(0, presenceCallbacks);
+    }
+
+    [Fact]
+    public void InputInExactApprovedPioneerRx_TriggersSafetyPause()
+    {
+        var gate = Build(enabled: true);
+        using var observer = new UserInputObserver(
+            gate,
+            new LoggerConfiguration().CreateLogger(),
+            TimeSpan.Zero,
+            isApprovedPioneerRxForeground: () => true);
+
+        var accepted = observer.TryNotifyUserInputForTest("mouse");
+
+        Assert.True(accepted);
+        Assert.NotNull(gate.Snapshot().PausedUntilUtc);
+    }
+
+    [Fact]
     public void ClearPause_AllowsActuation_IfStillEnabled()
     {
         var gate = Build(enabled: true);

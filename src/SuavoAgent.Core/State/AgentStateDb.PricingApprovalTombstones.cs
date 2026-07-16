@@ -37,12 +37,20 @@ public sealed partial class AgentStateDb
         using var command = transaction.Connection!.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT revocation_id, approval_id, proposal_id, proposal_digest,
-                   pharmacy_id, agent_id, machine_fingerprint, policy_digest,
-                   reason_code, revoked_at_utc, key_id, signature
-              FROM pricing_approval_pregrant_revocations
-             WHERE approval_id = @approval OR proposal_id = @proposal
-             ORDER BY revoked_at_utc ASC, revocation_id ASC
+            SELECT revocation.revocation_id, revocation.approval_id,
+                   revocation.proposal_id, revocation.proposal_digest,
+                   revocation.pharmacy_id, revocation.agent_id,
+                   revocation.machine_fingerprint, revocation.policy_digest,
+                   revocation.reason_code, revocation.revoked_at_utc,
+                   revocation.key_id, revocation.signature,
+                   proposal.cost_basis
+              FROM pricing_approval_pregrant_revocations revocation
+              JOIN pricing_approval_proposals proposal
+                ON proposal.proposal_id = revocation.proposal_id
+             WHERE revocation.approval_id = @approval
+                OR revocation.proposal_id = @proposal
+             ORDER BY revocation.revoked_at_utc ASC,
+                      revocation.revocation_id ASC
              LIMIT 1
             """;
         command.Parameters.AddWithValue("@approval", approvalId);
@@ -54,6 +62,7 @@ public sealed partial class AgentStateDb
     private static bool PricingRevocationMatchesProposal(
         PricingApprovalRevocation revocation,
         PricingApprovalProposal proposal) =>
+        revocation.SchemaVersion == proposal.SchemaVersion &&
         revocation.ProposalId == proposal.ProposalId &&
         FixedApprovalHexEquals(
             revocation.ProposalDigest,

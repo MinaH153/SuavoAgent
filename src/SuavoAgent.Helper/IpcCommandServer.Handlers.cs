@@ -25,10 +25,20 @@ public sealed partial class IpcCommandServer
             IpcCommands.VisionStateHandshake => Task.FromResult(
                 HandleVisionStateHandshake(request)),
             IpcCommands.PricingLookup => HandlePricingLookupAsync(request, ct),
+            IpcCommands.PioneerRxTop500Export => HandlePioneerRxTop500ExportAsync(request, ct),
+            IpcCommands.PioneerRxTop500ReadArtifact => HandlePioneerRxTop500ReadArtifactAsync(request, ct),
+            IpcCommands.PioneerRxPricedWorkbookBegin =>
+                HandlePioneerRxPricedWorkbookBeginAsync(request, ct),
+            IpcCommands.PioneerRxPricedWorkbookChunk =>
+                HandlePioneerRxPricedWorkbookChunkAsync(request, ct),
+            IpcCommands.PioneerRxPricedWorkbookCommit =>
+                HandlePioneerRxPricedWorkbookCommitAsync(request, ct),
             IpcCommands.PricingObservationContext => Task.FromResult(
                 HandlePricingObservationContext(request)),
             IpcCommands.CaptureScreen => HandleCaptureScreenAsync(request, ct),
-            IpcCommands.FindFile => HandleFindFileAsync(request, ct),
+            IpcCommands.FindFile when _allowNonPioneerRxCapabilities =>
+                HandleFindFileAsync(request, ct),
+            IpcCommands.FindFile => Task.FromResult(ScopeDenied(request)),
             IpcCommands.IntentCursor => HandleIntentCursorAsync(request, ct),
             "presence.set_visible" => Task.FromResult(HandlePresenceSetVisible(request)),
             IpcCommands.Ping => Task.FromResult(Ok(request.Id, request.Command,
@@ -42,7 +52,18 @@ public sealed partial class IpcCommandServer
                 or ActuationIpcCommands.ReloadAllowlist
                 or ActuationIpcCommands.AssertElement
                 or ActuationIpcCommands.DiscoverElements
+                when _allowNonPioneerRxCapabilities
                 => HandleActuationAsync(request, ct),
+            ActuationIpcCommands.GetState
+                or ActuationIpcCommands.ClickByLabel
+                or ActuationIpcCommands.ClickBySignature
+                or ActuationIpcCommands.TypeText
+                or ActuationIpcCommands.PressKeys
+                or ActuationIpcCommands.LaunchSandboxApp
+                or ActuationIpcCommands.ReloadAllowlist
+                or ActuationIpcCommands.AssertElement
+                or ActuationIpcCommands.DiscoverElements
+                => Task.FromResult(ScopeDenied(request)),
             PioneerRxActuationIpcCommands.Click
                 or PioneerRxActuationIpcCommands.TypeText
                 or PioneerRxActuationIpcCommands.Query
@@ -51,6 +72,13 @@ public sealed partial class IpcCommandServer
             _ => Task.FromResult(Error(request.Id, request.Command, "unknown_command", $"Unknown command: {request.Command}"))
         };
     }
+
+    private static IpcResponse ScopeDenied(IpcRequest request) => Error(
+        request.Id,
+        request.Command,
+        "observation_policy_scope_denied",
+        "This capability is outside the activated PioneerRx-only policy.",
+        IpcStatus.Forbidden);
 
     internal HelperPingInfo BuildPingInfo()
     {
@@ -268,6 +296,7 @@ public sealed partial class IpcCommandServer
         }
         if (string.Equals(targetProcess, "sandbox", StringComparison.OrdinalIgnoreCase))
         {
+            if (!_allowNonPioneerRxCapabilities) return ScopeDenied(request);
             return await HandleSandboxCaptureAsync(request, ct);
         }
 

@@ -1,3 +1,5 @@
+using SuavoAgent.Setup.Maintenance;
+
 namespace SuavoAgent.Setup.InstallerSupport;
 
 internal readonly record struct InstallerServiceConfiguration(
@@ -12,10 +14,24 @@ internal interface IInstallerServiceConfigurationSession : IDisposable
 
 internal interface IInstallerServiceHardeningJournal
 {
-    void Save(IReadOnlyDictionary<string, InstallerServiceConfiguration> snapshots);
-    IReadOnlyDictionary<string, InstallerServiceConfiguration>? Load();
-    void Delete();
+    void SavePending(
+        string invocationId,
+        IReadOnlyDictionary<string, InstallerServiceConfiguration> snapshots);
+    InstallerServiceHardeningJournalState? Load();
+    void MarkCommitted(string invocationId);
+    void Delete(string invocationId, InstallerTransactionJournalPhase phase);
 }
+
+internal enum InstallerTransactionJournalPhase
+{
+    Pending,
+    Committed,
+}
+
+internal sealed record InstallerServiceHardeningJournalState(
+    string InvocationId,
+    InstallerTransactionJournalPhase Phase,
+    IReadOnlyDictionary<string, InstallerServiceConfiguration> Snapshots);
 
 /// <summary>
 /// Applies the two service settings that Windows Installer's service-config
@@ -40,17 +56,47 @@ internal sealed class MsiServiceHardeningTransaction
 
     private readonly IInstallerServiceConfigurationSession _session;
     private readonly IInstallerServiceHardeningJournal _journal;
+    private readonly IMsiInstallerTransactionActivation _activation;
 
     internal MsiServiceHardeningTransaction(
         IInstallerServiceConfigurationSession session,
-        IInstallerServiceHardeningJournal journal)
+        IInstallerServiceHardeningJournal journal,
+        IMsiInstallerTransactionActivation activation)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _journal = journal ?? throw new ArgumentNullException(nameof(journal));
+        _activation = activation ?? throw new ArgumentNullException(nameof(activation));
     }
 
-    internal MsiServiceHardeningExitCode Execute()
+    internal MsiServiceHardeningExitCode Execute(string invocationId)
     {
+        if (!MsiInstallerInvocation.IsValidInvocationId(invocationId))
+            return MsiServiceHardeningExitCode.JournalFailed;
+        try { _activation.RequireCurrent(invocationId); }
+        catch { return MsiServiceHardeningExitCode.JournalFailed; }
+
+        try
+        {
+            var existing = _journal.Load();
+            if (existing?.Phase == InstallerTransactionJournalPhase.Committed)
+            {
+                // A prior successful invocation may have crashed after sealing
+                // but before its ignore-only deletion. It is cleanup-only.
+                _journal.Delete(
+                    existing.InvocationId,
+                    InstallerTransactionJournalPhase.Committed);
+            }
+            else if (existing is not null)
+            {
+                // Never infer whether a prior pending invocation mutated SCM.
+                return MsiServiceHardeningExitCode.JournalFailed;
+            }
+        }
+        catch (Exception)
+        {
+            return MsiServiceHardeningExitCode.JournalFailed;
+        }
+
         IReadOnlyDictionary<string, InstallerServiceConfiguration> snapshots;
         try
         {
@@ -64,18 +110,6 @@ internal sealed class MsiServiceHardeningTransaction
             return MsiServiceHardeningExitCode.SnapshotFailed;
         }
 
-        try
-        {
-            // Never overwrite or silently commit a prior interrupted
-            // transaction, including the already-target idempotent path.
-            if (_journal.Load() is not null)
-                return MsiServiceHardeningExitCode.JournalFailed;
-        }
-        catch (Exception)
-        {
-            return MsiServiceHardeningExitCode.JournalFailed;
-        }
-
         var pending = ServiceNames
             .Where(serviceName => snapshots[serviceName] != Target)
             .ToArray();
@@ -87,7 +121,7 @@ internal sealed class MsiServiceHardeningTransaction
             // The deferred process exits before MSI knows whether a later action
             // will fail. Persist the exact pre-change state before the first SCM
             // mutation so the paired rollback action can restore it.
-            _journal.Save(snapshots);
+            _journal.SavePending(invocationId, snapshots);
         }
         catch (Exception)
         {
@@ -116,7 +150,9 @@ internal sealed class MsiServiceHardeningTransaction
                 return MsiServiceHardeningExitCode.RollbackFailed;
             try
             {
-                _journal.Delete();
+                _journal.Delete(
+                    invocationId,
+                    InstallerTransactionJournalPhase.Pending);
                 return MsiServiceHardeningExitCode.ApplyFailedRolledBack;
             }
             catch (Exception)
@@ -127,12 +163,18 @@ internal sealed class MsiServiceHardeningTransaction
         }
     }
 
-    internal MsiServiceHardeningExitCode ExecutePersistedRollback()
+    internal MsiServiceHardeningExitCode ExecutePersistedRollback(
+        string invocationId)
     {
-        IReadOnlyDictionary<string, InstallerServiceConfiguration>? snapshots;
+        if (!MsiInstallerInvocation.IsValidInvocationId(invocationId))
+            return MsiServiceHardeningExitCode.RollbackFailed;
+        try { _activation.RequireCurrent(invocationId); }
+        catch { return MsiServiceHardeningExitCode.RollbackFailed; }
+
+        InstallerServiceHardeningJournalState? journal;
         try
         {
-            snapshots = _journal.Load();
+            journal = _journal.Load();
         }
         catch (Exception)
         {
@@ -141,15 +183,24 @@ internal sealed class MsiServiceHardeningTransaction
 
         // The rollback action is queued before the forward action. A missing
         // journal therefore means the forward action never mutated the SCM.
-        if (snapshots is null)
+        if (journal is null)
             return MsiServiceHardeningExitCode.Success;
 
-        if (!RollBack(ServiceNames, snapshots))
+        if (journal.Phase != InstallerTransactionJournalPhase.Pending ||
+            !string.Equals(
+                journal.InvocationId,
+                invocationId,
+                StringComparison.Ordinal))
+            return MsiServiceHardeningExitCode.RollbackFailed;
+
+        if (!RollBack(ServiceNames, journal.Snapshots))
             return MsiServiceHardeningExitCode.RollbackFailed;
 
         try
         {
-            _journal.Delete();
+            _journal.Delete(
+                invocationId,
+                InstallerTransactionJournalPhase.Pending);
             return MsiServiceHardeningExitCode.Success;
         }
         catch (Exception)
@@ -199,12 +250,14 @@ internal enum MsiServiceHardeningExitCode
 
 internal static class MsiServiceHardeningRunner
 {
+    internal const string ArmSwitch = "--msi-arm-installer-transaction";
     internal const string ApplySwitch = "--msi-apply-service-hardening";
     internal const string RollbackSwitch = "--msi-rollback-service-hardening";
     internal const string CommitSwitch = "--msi-commit-service-hardening";
 
     internal static readonly IReadOnlyList<string> Switches =
     [
+        ArmSwitch,
         ApplySwitch,
         RollbackSwitch,
         CommitSwitch,
@@ -218,17 +271,32 @@ internal static class MsiServiceHardeningRunner
             arguments,
             OperatingSystem.IsWindows(),
             static () => new Win32InstallerServiceConfigurationSession(),
-            static () => FileInstallerServiceHardeningJournal.CreateForInstalledHost());
+            static installDirectory =>
+                FileInstallerServiceHardeningJournal.CreateForInstallDirectory(
+                    installDirectory),
+            static installDirectory =>
+                FileMsiInstallerTransactionActivation.CreateForInstallDirectory(
+                    installDirectory),
+            static () => Release1MsiInstallMarkerTransaction.AcquireProofLock(
+                Release1MsiInstallMarkerStore.DefaultProofDirectory()),
+            static () =>
+                Release1MsiInstallMarkerTransaction
+                    .RequireSettledForArmOrFinalization(
+                        Release1MsiInstallMarkerStore.DefaultProofDirectory()));
 
     internal static int Run(
         IReadOnlyList<string>? arguments,
         bool isWindows,
         Func<IInstallerServiceConfigurationSession> createSession,
-        Func<IInstallerServiceHardeningJournal> createJournal)
+        Func<string, IInstallerServiceHardeningJournal> createJournal,
+        Func<string, IMsiInstallerTransactionActivation> createActivation,
+        Func<IDisposable> acquireTransactionGate,
+        Action requireMarkerTransactionSettled)
     {
         if (arguments is null ||
-            arguments.Count != 1 ||
-            !IsKnownSwitch(arguments[0]))
+            arguments.Count != 2 ||
+            !IsKnownSwitch(arguments[0]) ||
+            !MsiInstallerInvocation.TryParse(arguments[1], out var invocation))
         {
             return (int)MsiServiceHardeningExitCode.InvalidArguments;
         }
@@ -238,22 +306,63 @@ internal static class MsiServiceHardeningRunner
 
         ArgumentNullException.ThrowIfNull(createSession);
         ArgumentNullException.ThrowIfNull(createJournal);
+        ArgumentNullException.ThrowIfNull(createActivation);
+        ArgumentNullException.ThrowIfNull(acquireTransactionGate);
+        ArgumentNullException.ThrowIfNull(requireMarkerTransactionSettled);
         var requestedSwitch = arguments[0];
         try
         {
-            var journal = createJournal();
+            var activation = createActivation(invocation.InstallDirectory);
+            var journal = createJournal(invocation.InstallDirectory);
+            if (string.Equals(requestedSwitch, ArmSwitch, StringComparison.OrdinalIgnoreCase))
+            {
+                using var transactionGate = acquireTransactionGate();
+                activation.RequireAbsent();
+                SettleServiceJournalForArm(journal);
+                requireMarkerTransactionSettled();
+                activation.Arm(invocation.InvocationId);
+                return (int)MsiServiceHardeningExitCode.Success;
+            }
+
             if (string.Equals(requestedSwitch, CommitSwitch, StringComparison.OrdinalIgnoreCase))
             {
                 // Commit cleanup does not need SCM authority and therefore does
                 // not open service handles unnecessarily.
-                return (int)Commit(journal);
+                var commitResult = CommitJournal(
+                    journal,
+                    activation,
+                    invocation.InvocationId);
+                if (commitResult != MsiServiceHardeningExitCode.Success)
+                    return (int)commitResult;
+                return (int)FinalizeTransaction(
+                    activation,
+                    invocation.InvocationId,
+                    acquireTransactionGate,
+                    requireMarkerTransactionSettled,
+                    MsiServiceHardeningExitCode.CommitFailed);
             }
 
             using var session = createSession();
-            var transaction = new MsiServiceHardeningTransaction(session, journal);
-            return string.Equals(requestedSwitch, ApplySwitch, StringComparison.OrdinalIgnoreCase)
-                ? (int)transaction.Execute()
-                : (int)transaction.ExecutePersistedRollback();
+            var transaction = new MsiServiceHardeningTransaction(
+                session,
+                journal,
+                activation);
+            if (string.Equals(
+                    requestedSwitch,
+                    ApplySwitch,
+                    StringComparison.OrdinalIgnoreCase))
+                return (int)transaction.Execute(invocation.InvocationId);
+
+            var rollbackResult = transaction.ExecutePersistedRollback(
+                invocation.InvocationId);
+            if (rollbackResult != MsiServiceHardeningExitCode.Success)
+                return (int)rollbackResult;
+            return (int)FinalizeTransaction(
+                activation,
+                invocation.InvocationId,
+                acquireTransactionGate,
+                requireMarkerTransactionSettled,
+                MsiServiceHardeningExitCode.RollbackFailed);
         }
         catch (Exception)
         {
@@ -263,7 +372,9 @@ internal static class MsiServiceHardeningRunner
                 ? (int)MsiServiceHardeningExitCode.RollbackFailed
                 : string.Equals(requestedSwitch, CommitSwitch, StringComparison.OrdinalIgnoreCase)
                     ? (int)MsiServiceHardeningExitCode.CommitFailed
-                    : (int)MsiServiceHardeningExitCode.SnapshotFailed;
+                    : string.Equals(requestedSwitch, ArmSwitch, StringComparison.OrdinalIgnoreCase)
+                        ? (int)MsiServiceHardeningExitCode.JournalFailed
+                        : (int)MsiServiceHardeningExitCode.SnapshotFailed;
         }
     }
 
@@ -273,19 +384,88 @@ internal static class MsiServiceHardeningRunner
             argument,
             StringComparison.OrdinalIgnoreCase));
 
-    private static MsiServiceHardeningExitCode Commit(
+    private static void SettleServiceJournalForArm(
         IInstallerServiceHardeningJournal journal)
+    {
+        var state = journal.Load();
+        if (state is null)
+            return;
+        if (state.Phase != InstallerTransactionJournalPhase.Committed)
+            throw new InvalidDataException(
+                "A pending service-hardening transaction blocks this invocation.");
+        journal.Delete(
+            state.InvocationId,
+            InstallerTransactionJournalPhase.Committed);
+    }
+
+    private static MsiServiceHardeningExitCode CommitJournal(
+        IInstallerServiceHardeningJournal journal,
+        IMsiInstallerTransactionActivation activation,
+        string invocationId)
     {
         // Commit has no service session, but reusing the transaction's cleanup
         // behavior would otherwise require opening SCM with elevated rights.
         try
         {
-            journal.Delete();
-            return MsiServiceHardeningExitCode.Success;
+            activation.RequireCurrent(invocationId);
+            var state = journal.Load();
+            if (state is not null &&
+                (!string.Equals(
+                     state.InvocationId,
+                     invocationId,
+                     StringComparison.Ordinal) ||
+                 state.Phase is not (
+                     InstallerTransactionJournalPhase.Pending or
+                     InstallerTransactionJournalPhase.Committed)))
+                return MsiServiceHardeningExitCode.CommitFailed;
+
+            var succeeded = true;
+            if (state?.Phase == InstallerTransactionJournalPhase.Pending)
+            {
+                try { journal.MarkCommitted(invocationId); }
+                catch { succeeded = false; }
+            }
+            if (succeeded && state is not null)
+            {
+                try
+                {
+                    journal.Delete(
+                        invocationId,
+                        InstallerTransactionJournalPhase.Committed);
+                }
+                catch { succeeded = false; }
+            }
+
+            return succeeded
+                ? MsiServiceHardeningExitCode.Success
+                : MsiServiceHardeningExitCode.CommitFailed;
         }
         catch (Exception)
         {
             return MsiServiceHardeningExitCode.CommitFailed;
+        }
+    }
+
+    private static MsiServiceHardeningExitCode FinalizeTransaction(
+        IMsiInstallerTransactionActivation activation,
+        string invocationId,
+        Func<IDisposable> acquireTransactionGate,
+        Action requireMarkerTransactionSettled,
+        MsiServiceHardeningExitCode failureCode)
+    {
+        try
+        {
+            using var transactionGate = acquireTransactionGate();
+            activation.RequireCurrent(invocationId);
+            requireMarkerTransactionSettled();
+            activation.Disarm(invocationId);
+            return MsiServiceHardeningExitCode.Success;
+        }
+        catch
+        {
+            // A token is intentionally stranded whenever either journal is
+            // pending or cleanup fails. The next invocation must refuse it.
+            return failureCode;
         }
     }
 }

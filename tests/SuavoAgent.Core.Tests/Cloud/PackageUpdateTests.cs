@@ -74,6 +74,29 @@ public class PackageUpdateTests
     }
 
     [Fact]
+    public void ManifestSignatureVerification_RotationPairAcceptsV2()
+    {
+        var (v1, v1Public) = GenerateTestKeyPair();
+        var (v2, v2Public) = GenerateTestKeyPair();
+        using (v1)
+        using (v2)
+        {
+            var canonical = MakeManifest().ToCanonical();
+            var signature = Convert.ToHexString(v2.SignData(
+                Encoding.UTF8.GetBytes(canonical),
+                HashAlgorithmName.SHA256,
+                DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
+            var roots = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [SuavoAgent.Contracts.Maintenance.OtaUpdateTrust.LegacyV1KeyId] = v1Public,
+                [SuavoAgent.Contracts.Maintenance.OtaUpdateTrust.CurrentV2KeyId] = v2Public,
+            };
+
+            Assert.True(SelfUpdater.VerifyManifestSignature(canonical, signature, roots, _logger));
+        }
+    }
+
+    [Fact]
     public void ManifestSignatureVerification_NullSignature_Rejects()
     {
         var manifest = MakeManifest();

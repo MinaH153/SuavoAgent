@@ -1,0 +1,395 @@
+name: OTA v1 bridge - finalize
+run-name: Finalize v1 bridge stage ${{ inputs.stage_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage_run_id:
+        description: Successful OTA v1 bridge stage run ID
+        required: true
+        type: string
+      authorization_run_id:
+        description: Successful protected-main v2 handoff authorization run ID
+        required: true
+        type: string
+      response_b64:
+        description: Exact public Base64 response from sign-ota-v1-bridge-local.sh
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: suavoagent-production-release
+  cancel-in-progress: false
+
+jobs:
+  verify-stage-response:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.metadata.outputs.source_sha }}
+      run_attempt: ${{ steps.metadata.outputs.run_attempt }}
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+      descriptor_name: ${{ steps.metadata.outputs.descriptor_name }}
+      version: ${{ steps.finalize.outputs.version }}
+      request_sha256: ${{ steps.finalize.outputs.request_sha256 }}
+      authenticode_signer_sha256: ${{ steps.finalize.outputs.authenticode_signer_sha256 }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Prove finalizer itself is exact current main
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "MinaH153/SuavoAgent" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]
+      - name: Validate exact successful stage and authorization runs
+        id: metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGE_RUN_ID: ${{ inputs.stage_run_id }}
+          AUTHORIZATION_RUN_ID: ${{ inputs.authorization_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$STAGE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$AUTHORIZATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          STAGE_WORKFLOW_ID="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/v1-bridge-stage.yml" --jq '.id | select(type == "number" and . > 0)')"
+          AUTHORIZATION_WORKFLOW_ID="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/v1-bridge-authorize.yml" --jq '.id | select(type == "number" and . > 0)')"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN_ID" > stage-run.json
+          SOURCE_SHA="$(jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))' stage-run.json)"
+          RUN_ATTEMPT="$(jq -er '.run_attempt | select(type == "number" and . > 0)' stage-run.json)"
+          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]
+          python3 scripts/v1_bridge_run_metadata.py validate-stage-metadata \
+            --metadata stage-run.json --expected-sha "$SOURCE_SHA" \
+            --expected-run-id "$STAGE_RUN_ID" --expected-run-attempt "$RUN_ATTEMPT" \
+            --expected-workflow-id "$STAGE_WORKFLOW_ID"
+          ARTIFACT_NAME="suavoagent-v1-bridge-request-$STAGE_RUN_ID-$RUN_ATTEMPT"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN_ID/artifacts?per_page=100" > stage-artifacts.json
+          python3 scripts/v1_bridge_run_metadata.py validate-request-artifact \
+            --artifacts stage-artifacts.json --expected-artifact "$ARTIFACT_NAME" \
+            --expected-run-id "$STAGE_RUN_ID" --expected-sha "$SOURCE_SHA"
+          REQUEST_ARTIFACT_ID="$(jq -er --arg name "$ARTIFACT_NAME" \
+            '[.[] | .artifacts[] | select(.name == $name)] | select(length == 1 and .[0].expired == false) | .[0].id' stage-artifacts.json)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$AUTHORIZATION_RUN_ID" > authorization-run.json
+          AUTHORIZATION_ATTEMPT="$(jq -er '.run_attempt | select(type == "number" and . > 0)' authorization-run.json)"
+          python3 scripts/v1_bridge_run_metadata.py validate-authorization-metadata \
+            --metadata authorization-run.json --expected-sha "$SOURCE_SHA" \
+            --expected-run-id "$AUTHORIZATION_RUN_ID" --expected-run-attempt "$AUTHORIZATION_ATTEMPT" \
+            --expected-stage-run-id "$STAGE_RUN_ID" --expected-workflow-id "$AUTHORIZATION_WORKFLOW_ID"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$AUTHORIZATION_RUN_ID/attempts/$AUTHORIZATION_ATTEMPT" \
+            > authorization-attempt.json
+          python3 scripts/v1_bridge_run_metadata.py validate-authorization-metadata \
+            --metadata authorization-attempt.json --expected-sha "$SOURCE_SHA" \
+            --expected-run-id "$AUTHORIZATION_RUN_ID" --expected-run-attempt "$AUTHORIZATION_ATTEMPT" \
+            --expected-stage-run-id "$STAGE_RUN_ID" --expected-workflow-id "$AUTHORIZATION_WORKFLOW_ID"
+          DESCRIPTOR_NAME="suavoagent-v1-bridge-descriptor-$STAGE_RUN_ID-$RUN_ATTEMPT-authorization-$AUTHORIZATION_RUN_ID-$AUTHORIZATION_ATTEMPT"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$AUTHORIZATION_RUN_ID/artifacts?per_page=100" > authorization-artifacts.json
+          python3 scripts/v1_bridge_run_metadata.py validate-descriptor-artifact \
+            --artifacts authorization-artifacts.json --expected-descriptor "$DESCRIPTOR_NAME" \
+            --expected-run-id "$AUTHORIZATION_RUN_ID" --expected-sha "$SOURCE_SHA"
+          DESCRIPTOR_ARTIFACT_ID="$(jq -er --arg name "$DESCRIPTOR_NAME" \
+            '[.[] | .artifacts[] | select(.name == $name)] | select(length == 1 and .[0].expired == false) | .[0].id' authorization-artifacts.json)"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/v1-bridge-finalize.yml/runs?event=workflow_dispatch&status=success&per_page=100" > finalization-runs.json
+          python3 scripts/v1_bridge_run_metadata.py assert-not-replayed \
+            --runs finalization-runs.json --stage-run-id "$STAGE_RUN_ID" \
+            --current-run-id "$GITHUB_RUN_ID"
+          printf 'source_sha=%s\nrun_attempt=%s\nartifact_name=%s\ndescriptor_name=%s\nrequest_artifact_id=%s\ndescriptor_artifact_id=%s\nauthorization_attempt=%s\n' \
+            "$SOURCE_SHA" "$RUN_ATTEMPT" "$ARTIFACT_NAME" "$DESCRIPTOR_NAME" \
+            "$REQUEST_ARTIFACT_ID" "$DESCRIPTOR_ARTIFACT_ID" "$AUTHORIZATION_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Download exact v2-authenticated descriptor artifact by ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ steps.metadata.outputs.descriptor_artifact_id }}
+          path: descriptor
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.authorization_run_id }}
+      - name: Download only the exact immutable stage request artifact by ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ steps.metadata.outputs.request_artifact_id }}
+          path: bridge
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.stage_run_id }}
+      - name: Prove v2 descriptor binds the REST artifact and exact request cohort
+        run: |
+          python3 scripts/v1_bridge_run_metadata.py validate-descriptor \
+            --descriptor descriptor/bridge-handoff-descriptor.json \
+            --signature descriptor/bridge-handoff-descriptor.sig \
+            --request bridge/bridge-signing-request.json --release-dir bridge/release \
+            --artifacts stage-artifacts.json \
+            --expected-sha "${{ steps.metadata.outputs.source_sha }}" \
+            --expected-run-id "${{ inputs.stage_run_id }}" \
+            --expected-run-attempt "${{ steps.metadata.outputs.run_attempt }}" \
+            --expected-artifact "${{ steps.metadata.outputs.artifact_name }}" \
+            --expected-authorization-run-id "${{ inputs.authorization_run_id }}" \
+            --expected-authorization-run-attempt "${{ steps.metadata.outputs.authorization_attempt }}"
+      - name: Verify request binding and both signatures specifically with v1
+        id: finalize
+        env:
+          RESPONSE_B64: ${{ inputs.response_b64 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$RESPONSE_B64" > response.b64
+          python3 scripts/v1_bridge_cli.py finalize \
+            --request bridge/bridge-signing-request.json --release-dir bridge/release \
+            --response-b64-file response.b64 --response-json bridge/bridge-signing-response.json \
+            --expected-repository "$GITHUB_REPOSITORY" \
+            --expected-sha "${{ steps.metadata.outputs.source_sha }}" \
+            --expected-run-id "${{ inputs.stage_run_id }}" \
+            --expected-run-attempt "${{ steps.metadata.outputs.run_attempt }}" \
+            --expected-artifact "${{ steps.metadata.outputs.artifact_name }}" >> "$GITHUB_OUTPUT"
+      - name: Prove requested tag and release remain absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.finalize.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > published-releases.json
+          python3 scripts/v1_bridge_run_metadata.py assert-version-newest \
+            --releases published-releases.json --version "$VERSION"
+          python3 scripts/v1_bridge_run_metadata.py assert-release-absent \
+            --releases published-releases.json --version "$VERSION"
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1
+          tag_status=$?
+          release_error="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" 2>&1 >/dev/null)"
+          release_status=$?
+          set -e
+          [[ $tag_status -eq 2 ]] || { echo "::error::Bridge tag exists or absence could not be proven."; exit 1; }
+          [[ $release_status -ne 0 && "$release_error" == *"HTTP 404"* ]] || { echo "::error::Bridge release exists or absence could not be proven."; exit 1; }
+      - name: Upload finalized exact-byte cohort
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-finalized-${{ inputs.stage_run_id }}-${{ steps.metadata.outputs.run_attempt }}
+          path: bridge/
+          retention-days: 7
+          if-no-files-found: error
+
+  windows-resmoke:
+    runs-on: windows-latest
+    needs: verify-stage-response
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.verify-stage-response.outputs.source_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-finalized-${{ inputs.stage_run_id }}-${{ needs.verify-stage-response.outputs.run_attempt }}
+          path: bridge
+      - name: Re-probe exact signed cohort and scan with Defender
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ needs.verify-stage-response.outputs.authenticode_signer_sha256 }}' -notmatch '^[a-f0-9]{64}(,[a-f0-9]{64}){0,15}$') { throw 'Invalid signer allowlist.' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 `
+            -Mode ReleaseArtifact -ReleaseDir bridge/release -MaintenancePath bridge/release/SuavoSetup.exe `
+            -AllowedSignerSha256 '${{ needs.verify-stage-response.outputs.authenticode_signer_sha256 }}' -RequireAuthenticodeSignature -Json
+          & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File bridge/release -DisableRemediation
+      - name: Re-verify, install, and uninstall exact MSI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = @(Get-ChildItem bridge/release -Filter *.msi -File)
+          if ($msi.Count -ne 1) { throw "Expected one MSI, found $($msi.Count)." }
+          & .\scripts\Test-InstallerAuthenticode.ps1 -Path $msi[0].FullName `
+            -AllowedSignerSha256 '${{ needs.verify-stage-response.outputs.authenticode_signer_sha256 }}'
+          $allowed = '${{ needs.verify-stage-response.outputs.authenticode_signer_sha256 }}'.Split(',') | ForEach-Object { $_.ToUpperInvariant() }
+          $signature = Get-AuthenticodeSignature -LiteralPath $msi[0].FullName
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw 'MSI Authenticode is invalid.' }
+          $actual = $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant()
+          if ($actual -notin $allowed) { throw 'MSI publisher is not approved.' }
+          $install = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i',"`"$($msi[0].FullName)`"",'/qn','/norestart')
+          if ($install.ExitCode -notin @(0,3010)) { throw "MSI install failed: $($install.ExitCode)" }
+          foreach ($service in @('SuavoAgent.Core','SuavoAgent.Broker','SuavoAgent.Watchdog')) { if ($null -eq (Get-Service $service -ErrorAction SilentlyContinue)) { throw "Missing service $service" } }
+          $remove = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/x',"`"$($msi[0].FullName)`"",'/qn','/norestart')
+          if ($remove.ExitCode -notin @(0,3010)) { throw "MSI uninstall failed: $($remove.ExitCode)" }
+          foreach ($service in @('SuavoAgent.Core','SuavoAgent.Broker','SuavoAgent.Watchdog')) { if ($null -ne (Get-Service $service -ErrorAction SilentlyContinue)) { throw "Service remained: $service" } }
+          & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File $msi[0].FullName -DisableRemediation
+      - name: Re-verify and scan exact Burn bundle
+        shell: pwsh
+        run: |
+          $bundle = @(Get-ChildItem bridge/release -Filter SuavoAgent-Setup.exe -File)
+          if ($bundle.Count -ne 1) { throw "Expected one bundle, found $($bundle.Count)." }
+          & .\scripts\Test-InstallerAuthenticode.ps1 -Path $bundle[0].FullName `
+            -AllowedSignerSha256 '${{ needs.verify-stage-response.outputs.authenticode_signer_sha256 }}'
+          $allowed = '${{ needs.verify-stage-response.outputs.authenticode_signer_sha256 }}'.Split(',') | ForEach-Object { $_.ToUpperInvariant() }
+          $signature = Get-AuthenticodeSignature -LiteralPath $bundle[0].FullName
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw 'Bundle Authenticode is invalid.' }
+          $actual = $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant()
+          if ($actual -notin $allowed) { throw 'Bundle publisher is not approved.' }
+          $install = Start-Process $bundle[0].FullName -Wait -PassThru -ArgumentList @('/install','/quiet','/norestart')
+          if ($install.ExitCode -notin @(0,1641,3010)) { throw "Bundle install failed: $($install.ExitCode)" }
+          foreach ($service in @('SuavoAgent.Core','SuavoAgent.Broker','SuavoAgent.Watchdog')) { if ($null -eq (Get-Service $service -ErrorAction SilentlyContinue)) { throw "Bundle missing service $service" } }
+          $remove = Start-Process $bundle[0].FullName -Wait -PassThru -ArgumentList @('/uninstall','/quiet','/norestart')
+          if ($remove.ExitCode -notin @(0,1641,3010)) { throw "Bundle uninstall failed: $($remove.ExitCode)" }
+          foreach ($service in @('SuavoAgent.Core','SuavoAgent.Broker','SuavoAgent.Watchdog')) { if ($null -ne (Get-Service $service -ErrorAction SilentlyContinue)) { throw "Bundle left service $service" } }
+          & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File $bundle[0].FullName -DisableRemediation
+
+  attest-and-release:
+    runs-on: ubuntu-latest
+    environment: suavoagent-v1-bridge-finalization
+    needs: [verify-stage-response, windows-resmoke]
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.verify-stage-response.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-finalized-${{ inputs.stage_run_id }}-${{ needs.verify-stage-response.outputs.run_attempt }}
+          path: bridge
+      - name: Revalidate exact final bytes, replay history, and tag absence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify-stage-response.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/v1_bridge_cli.py validate-final --stage-dir bridge \
+            --expected-repository "$GITHUB_REPOSITORY" \
+            --expected-sha "${{ needs.verify-stage-response.outputs.source_sha }}" \
+            --expected-run-id "${{ inputs.stage_run_id }}" \
+            --expected-run-attempt "${{ needs.verify-stage-response.outputs.run_attempt }}" \
+            --expected-artifact "${{ needs.verify-stage-response.outputs.artifact_name }}"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/v1-bridge-finalize.yml/runs?event=workflow_dispatch&status=success&per_page=100" > finalization-runs.json
+          python3 scripts/v1_bridge_run_metadata.py assert-not-replayed \
+            --runs finalization-runs.json --stage-run-id "${{ inputs.stage_run_id }}" \
+            --current-run-id "$GITHUB_RUN_ID"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > all-releases.json
+          python3 scripts/v1_bridge_run_metadata.py assert-release-absent \
+            --releases all-releases.json --version "$VERSION"
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1
+          tag_status=$?
+          release_error="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" 2>&1 >/dev/null)"
+          release_status=$?
+          set -e
+          [[ $tag_status -eq 2 ]] || { echo "::error::Bridge tag exists or absence could not be proven."; exit 1; }
+          [[ $release_status -ne 0 && "$release_error" == *"HTTP 404"* ]] || { echo "::error::Bridge release exists or absence could not be proven."; exit 1; }
+      - name: Attest exact finalized Release 1 cohort
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: bridge/release/**
+      - name: Create exact-SHA bridge tag and release only after protected approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify-stage-response.outputs.version }}
+          SOURCE_SHA: ${{ needs.verify-stage-response.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          validate_release_tag_ruleset() {
+            local stem="$1"
+            local list_path="${stem}-ruleset-list.json"
+            local details_path="${stem}-rulesets.json"
+            local ndjson_path="${stem}-rulesets.ndjson"
+            gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/rulesets?per_page=100" > "$list_path"
+            mapfile -t ruleset_ids < <(
+              jq -r '[.[][] | .id | select(type == "number" and . > 0)] | unique[]' \
+                "$list_path"
+            )
+            : > "$ndjson_path"
+            for ruleset_id in "${ruleset_ids[@]}"; do
+              gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+                "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id" >> "$ndjson_path"
+              printf '\n' >> "$ndjson_path"
+            done
+            jq -s '.' "$ndjson_path" > "$details_path"
+            python3 scripts/validate-release-tag-ruleset.py \
+              --input "$details_path" --repository "$GITHUB_REPOSITORY"
+          }
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > published-releases.json
+          python3 scripts/v1_bridge_run_metadata.py assert-version-newest \
+            --releases published-releases.json --version "$VERSION"
+          python3 scripts/v1_bridge_run_metadata.py assert-release-absent \
+            --releases published-releases.json --version "$VERSION"
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1
+          tag_status=$?
+          set -e
+          [[ $tag_status -eq 2 ]] || { echo "::error::Bridge tag appeared before publication."; exit 1; }
+          validate_release_tag_ruleset before-draft
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            > immutable-releases-before-draft.json
+          [[ "$(jq -r .enabled immutable-releases-before-draft.json)" == "true" ]]
+          mapfile -t files < <(python3 scripts/v1_bridge_run_metadata.py publication-paths \
+            --release-dir bridge/release --version "$VERSION")
+          [[ ${#files[@]} -gt 12 ]]
+          printf '%s\n' \
+            "SuavoAgent $VERSION Release 1 trust bridge." \
+            "Source: $SOURCE_SHA" \
+            "Stage run: ${{ inputs.stage_run_id }} attempt ${{ needs.verify-stage-response.outputs.run_attempt }}" \
+            "Request digest: ${{ needs.verify-stage-response.outputs.request_sha256 }}" \
+            "OTA manifest and deterministic checksums are signed specifically by ota-update-v1." \
+            "MANDATORY: install this Release 1 with the graphical Burn bundle or MSI on every registered host." \
+            "An 11-field OTA success does not replace the legacy maintenance host and is not trust convergence." \
+            "Record machine-by-machine signed PHI-negative convergence evidence before activating ota-update-v2." > release-notes.txt
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_SHA" ]]
+          gh release create "$VERSION" "${files[@]}" --repo "$GITHUB_REPOSITORY" --draft \
+            --target "$SOURCE_SHA" --title "$VERSION - OTA trust bridge" \
+            --notes-file release-notes.txt
+          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,isDraft,tagName,targetCommitish > draft-release.json
+          [[ "$(jq -r .isDraft draft-release.json)" == "true" ]]
+          [[ "$(jq -r .tagName draft-release.json)" == "$VERSION" ]]
+          [[ "$(jq -r .targetCommitish draft-release.json)" == "$SOURCE_SHA" ]]
+          RELEASE_ID="$(jq -r .databaseId draft-release.json)"
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq .object.sha)" == "$SOURCE_SHA" ]]
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" > draft-assets.json
+          python3 scripts/v1_bridge_run_metadata.py validate-release-assets \
+            --assets draft-assets.json --release-dir bridge/release --version "$VERSION"
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq .object.sha)" == "$SOURCE_SHA" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_SHA" ]]
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" > immutable-releases.json
+          [[ "$(jq -r .enabled immutable-releases.json)" == "true" ]]
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > prepublish-release.json
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+            > prepublish-assets.json
+          python3 scripts/v1_bridge_run_metadata.py validate-publication-state \
+            --release prepublish-release.json --assets prepublish-assets.json \
+            --release-dir bridge/release --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --expected-release-id "$RELEASE_ID" --expected-draft true \
+            --expected-immutable false
+          validate_release_tag_ruleset before-publish
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" --method PATCH \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -f make_latest=true > publish-response.json
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > published-release.json
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+            > published-assets.json
+          python3 scripts/v1_bridge_run_metadata.py validate-publication-state \
+            --release published-release.json --assets published-assets.json \
+            --reference-assets prepublish-assets.json --release-dir bridge/release \
+            --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --expected-release-id "$RELEASE_ID" --expected-draft false \
+            --expected-immutable true
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq .object.sha)" == "$SOURCE_SHA" ]]
+          [[ "$(gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" --jq .id)" == "$RELEASE_ID" ]]

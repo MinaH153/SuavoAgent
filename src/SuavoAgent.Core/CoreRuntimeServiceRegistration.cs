@@ -6,6 +6,7 @@ using Serilog;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Health;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.Pricing;
@@ -33,10 +34,37 @@ internal static class CoreRuntimeServiceRegistration
         builder.Services.AddSingleton<IIntentCursorClient, IntentCursorClient>();
         builder.Services.AddSingleton<ExcelPricingReader>();
         builder.Services.AddSingleton<ExcelPricingWriter>();
+        builder.Services.AddSingleton<ExcelTop500Writer>();
+        builder.Services.AddSingleton<PioneerRxTop500ProgressRelay>();
+        // v2 retains the previously approved SQL-generated worklist semantics.
+        builder.Services.AddSingleton<ITopDispensedWorklistBuilder,
+            TopDispensedWorklistBuilder>();
+        // v3 alone drives the fixed PioneerRx report/export workflow.
+        builder.Services.AddSingleton<ITopDispensedWorklistProgressBuilder,
+            PioneerRxExportTopDispensedWorklistBuilder>();
+        builder.Services.AddSingleton<IPricedWorkbookPublisher,
+            PioneerRxPricedWorkbookPublisher>();
         builder.Services.AddSingleton<IPricingLookupFactory, PioneerRxSqlPricingLookupFactory>();
         builder.Services.TryAddSingleton<SuavoAgent.Core.Autonomy.IPioneerRxAutonomyIdentityProvider>(sp =>
             new SuavoAgent.Core.Autonomy.PioneerRxAutonomyIdentityProvider(
                 sp.GetRequiredService<IOptions<AgentOptions>>().Value));
+        builder.Services.TryAddSingleton<ActuationReadinessTracker>();
+        builder.Services.AddSingleton<PricingUiaActivityGate>();
+        builder.Services.AddSingleton(sp =>
+            new PackageCostApprovalBootstrapper(
+                sp.GetRequiredService<IOptions<AgentOptions>>(),
+                sp.GetRequiredService<AgentStateDb>(),
+                sp.GetRequiredService<IIpcCommandClient>(),
+                sp.GetRequiredService<PricingUiaActivityGate>(),
+                sp.GetRequiredService<ActuationReadinessTracker>(),
+                sp.GetRequiredService<SuavoAgent.Core.Autonomy.IPioneerRxAutonomyIdentityProvider>(),
+                sp.GetRequiredService<ILogger<PackageCostApprovalBootstrapper>>()));
+        builder.Services.AddHostedService(sp =>
+            new SuavoAgent.Core.Workers.PackageCostApprovalBootstrapWorker(
+                sp.GetRequiredService<PackageCostApprovalBootstrapper>(),
+                sp.GetRequiredService<ILogger<
+                    SuavoAgent.Core.Workers.PackageCostApprovalBootstrapWorker>>(),
+                sp.GetService<SuavoAgent.Core.Workers.WorkerHealthRegistry>()));
 
         // Register both pricing executors as concrete singletons so either can be selected at
         // resolve time. The IPricingJobExecutor interface is bound below based on
@@ -52,7 +80,8 @@ internal static class CoreRuntimeServiceRegistration
                 sp.GetRequiredService<ILogger<UiaFirstPricingJobExecutor>>(),
                 sp.GetRequiredService<IOptions<AgentOptions>>(),
                 sp.GetRequiredService<SuavoAgent.Core.Autonomy.IPioneerRxAutonomyIdentityProvider>(),
-                SuavoAgent.Contracts.Maintenance.RemoteCommandTrust.CreateProductionKeyRegistry()));
+                SuavoAgent.Contracts.Maintenance.RemoteCommandTrust.CreateProductionKeyRegistry(),
+                sp.GetRequiredService<PricingUiaActivityGate>()));
         builder.Services.AddSingleton<IPricingJobExecutor>(sp =>
         {
             var opts = sp.GetRequiredService<IOptions<AgentOptions>>().Value;
@@ -492,6 +521,13 @@ internal static class CoreRuntimeServiceRegistration
                             eventRateLimiter);
                         return Task.FromResult(response);
                     }
+
+                    case SuavoAgent.Contracts.Ipc.IpcCommands.PricingJobProgress:
+                        return SuavoAgent.Core.Pricing.PioneerRxTop500ProgressIpcProcessor
+                            .ProcessAsync(
+                                msg,
+                                sp.GetRequiredService<
+                                    SuavoAgent.Core.Pricing.PioneerRxTop500ProgressRelay>());
 
                     default:
                         return Task.FromResult(new SuavoAgent.Contracts.Ipc.IpcResponse(

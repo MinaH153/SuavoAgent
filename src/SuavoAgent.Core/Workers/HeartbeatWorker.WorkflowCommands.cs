@@ -374,6 +374,17 @@ public sealed partial class HeartbeatWorker
 
         if (!string.Equals(activeRunId, requestedRunId, StringComparison.Ordinal))
         {
+            _stateDb.AppendChainedAuditEntry(new AuditEntry(
+                TaskId: requestedRunId,
+                EventType: "workflow_run_abort_noop",
+                FromState: "requested",
+                ToState: "no_matching_run",
+                Trigger: "signed_command",
+                CommandId: cmd.Nonce,
+                RequesterId: "operator",
+                Actor: "operator",
+                SourceComponent: "heartbeat_worker",
+                CaptureReason: requestedReason));
             _logger.LogInformation(
                 "abort_workflow received for run {Requested}, but active run is {Active} (no-op ack)",
                 requestedRunId,

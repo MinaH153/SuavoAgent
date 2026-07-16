@@ -45,10 +45,9 @@ public sealed record MaintenanceHostTrustResult(
 /// </summary>
 public static partial class MaintenanceHostTrustVerifier
 {
-    // ECDSA P-256 SubjectPublicKeyInfo DER, Base64. This is the production update
-    // signing key also used by release checksums and package OTA manifests.
-    public const string ProductionUpdatePublicKeyDer =
-        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA==";
+    // Compatibility alias for callers that intentionally exercise a single root.
+    public static string ProductionUpdatePublicKeyDer =>
+        OtaUpdateTrust.ProductionTrustedPublicKeys[OtaUpdateTrust.LegacyV1KeyId];
 
     private const int MaxChecksumsBytes = 1024 * 1024;
     private const int MaxOtaManifestBytes = 64 * 1024;
@@ -65,7 +64,7 @@ public static partial class MaintenanceHostTrustVerifier
     public static MaintenanceHostTrustResult Verify(string maintenanceExecutablePath) =>
         Verify(
             maintenanceExecutablePath,
-            ProductionUpdatePublicKeyDer,
+            OtaUpdateTrust.ProductionTrustedPublicKeys,
             AuthenticodePublisherVerifier.Verify);
 
     /// <summary>
@@ -83,6 +82,18 @@ public static partial class MaintenanceHostTrustVerifier
     internal static MaintenanceHostTrustResult Verify(
         string maintenanceExecutablePath,
         string publicKeyDerBase64,
+        Func<string, AuthenticodePublisherTrust> verifyAuthenticode)
+        => Verify(
+            maintenanceExecutablePath,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [OtaUpdateTrust.LegacyV1KeyId] = publicKeyDerBase64,
+            },
+            verifyAuthenticode);
+
+    internal static MaintenanceHostTrustResult Verify(
+        string maintenanceExecutablePath,
+        IReadOnlyDictionary<string, string> updatePublicKeys,
         Func<string, AuthenticodePublisherTrust> verifyAuthenticode)
     {
         ArgumentNullException.ThrowIfNull(verifyAuthenticode);
@@ -108,16 +119,15 @@ public static partial class MaintenanceHostTrustVerifier
                 return MaintenanceHostTrustResult.Rejected(
                     "maintenance_" + publisher.Code);
 
-            using var key = ImportP256PublicKey(publicKeyDerBase64);
             var hostHash = ComputeSha256(maintenanceExecutablePath);
 
             var release = VerifyReceiptSafely(
-                () => VerifyReleaseReceipt(installDir, hostHash, key),
+                () => VerifyReleaseReceipt(installDir, hostHash, updatePublicKeys),
                 "release");
             if (release.IsTrusted) return release;
 
             var ota = VerifyReceiptSafely(
-                () => VerifyOtaReceipt(installDir, hostHash, key),
+                () => VerifyOtaReceipt(installDir, hostHash, updatePublicKeys),
                 "ota");
             if (ota.IsTrusted) return ota;
 
@@ -163,7 +173,7 @@ public static partial class MaintenanceHostTrustVerifier
     private static MaintenanceHostTrustResult VerifyReleaseReceipt(
         string installDir,
         byte[] hostHash,
-        ECDsa key)
+        IReadOnlyDictionary<string, string> updatePublicKeys)
     {
         var checksumsPath = Path.Combine(installDir, MaintenanceContract.ReleaseChecksumsFileName);
         var signaturePath = Path.Combine(installDir, MaintenanceContract.ReleaseChecksumsSignatureFileName);
@@ -176,12 +186,7 @@ public static partial class MaintenanceHostTrustVerifier
 
         var checksums = ReadBounded(checksumsPath, MaxChecksumsBytes);
         var signature = ReadBounded(signaturePath, MaxSignatureBytes);
-        if (signature.Length == 0 ||
-            !key.VerifyData(
-                checksums,
-                signature,
-                HashAlgorithmName.SHA256,
-                DSASignatureFormat.Rfc3279DerSequence))
+        if (!OtaUpdateTrust.VerifyDer(updatePublicKeys, checksums, signature))
         {
             return MaintenanceHostTrustResult.Rejected("release_signature_invalid");
         }
@@ -224,7 +229,7 @@ public static partial class MaintenanceHostTrustVerifier
     private static MaintenanceHostTrustResult VerifyOtaReceipt(
         string installDir,
         byte[] hostHash,
-        ECDsa key)
+        IReadOnlyDictionary<string, string> updatePublicKeys)
     {
         var manifestPath = Path.Combine(installDir, MaintenanceContract.CurrentOtaManifestFileName);
         var signaturePath = Path.Combine(installDir, MaintenanceContract.CurrentOtaManifestSignatureFileName);
@@ -269,12 +274,10 @@ public static partial class MaintenanceHostTrustVerifier
             .Trim();
         if (signatureText.Length != 128 || !signatureText.All(Uri.IsHexDigit))
             return MaintenanceHostTrustResult.Rejected("ota_signature_malformed");
-        var signature = Convert.FromHexString(signatureText);
-        if (!key.VerifyData(
-                manifestBytes,
-                signature,
-                HashAlgorithmName.SHA256,
-                DSASignatureFormat.IeeeP1363FixedFieldConcatenation))
+        if (!OtaUpdateTrust.VerifyP1363Hex(
+                updatePublicKeys,
+                canonical,
+                signatureText))
         {
             return MaintenanceHostTrustResult.Rejected("ota_signature_invalid");
         }
@@ -286,24 +289,6 @@ public static partial class MaintenanceHostTrustVerifier
         return MaintenanceHostTrustResult.Trusted(
             MaintenanceTrustSource.SignedOtaManifest,
             hostHash);
-    }
-
-    private static ECDsa ImportP256PublicKey(string publicKeyDerBase64)
-    {
-        var keyBytes = Convert.FromBase64String(publicKeyDerBase64);
-        var key = ECDsa.Create();
-        try
-        {
-            key.ImportSubjectPublicKeyInfo(keyBytes, out var bytesRead);
-            if (bytesRead != keyBytes.Length || key.KeySize != 256)
-                throw new CryptographicException("Update signing key is not an exact P-256 SPKI value.");
-            return key;
-        }
-        catch
-        {
-            key.Dispose();
-            throw;
-        }
     }
 
     private static byte[] ReadBounded(string path, int maxBytes)

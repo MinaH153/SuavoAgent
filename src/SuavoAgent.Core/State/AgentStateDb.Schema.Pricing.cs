@@ -23,6 +23,7 @@ public sealed partial class AgentStateDb
                 ndc_column TEXT NOT NULL DEFAULT 'NDC',
                 supplier_column TEXT NOT NULL DEFAULT 'Best Supplier',
                 cost_column TEXT NOT NULL DEFAULT 'Best Cost Per Unit',
+                cost_basis TEXT NOT NULL DEFAULT 'cost_per_unit',
                 status TEXT NOT NULL DEFAULT 'pending',
                 total_items INTEGER NOT NULL DEFAULT 0,
                 completed_items INTEGER NOT NULL DEFAULT 0,
@@ -40,6 +41,8 @@ public sealed partial class AgentStateDb
                 found INTEGER NOT NULL DEFAULT 0,
                 supplier_name TEXT,
                 cost_per_unit REAL,
+                package_cost REAL,
+                cost_basis TEXT NOT NULL DEFAULT 'cost_per_unit',
                 baseline_cost_per_unit REAL,
                 quantity REAL,
                 error_message TEXT,
@@ -55,6 +58,9 @@ public sealed partial class AgentStateDb
         // the cloud can compute (baseline - sourced) * quantity. Nullable — cost-only runs unaffected.
         TryAlter("ALTER TABLE pricing_results ADD COLUMN baseline_cost_per_unit REAL");
         TryAlter("ALTER TABLE pricing_results ADD COLUMN quantity REAL");
+        TryAlter("ALTER TABLE pricing_results ADD COLUMN package_cost REAL");
+        TryAlter("ALTER TABLE pricing_results ADD COLUMN cost_basis TEXT NOT NULL DEFAULT 'cost_per_unit'");
+        TryAlter("ALTER TABLE pricing_jobs ADD COLUMN cost_basis TEXT NOT NULL DEFAULT 'cost_per_unit'");
 
         // Immutable admission identity for crash-resumable pricing jobs. A
         // job_id can resume only against the same source bytes and the same

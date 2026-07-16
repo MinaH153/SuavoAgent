@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "signingKeyId": "ota-update-v1",
+  "roots": [
+    {
+      "keyId": "ota-update-v1",
+      "publicKeyDerBase64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA=="
+    },
+    {
+      "keyId": "ota-update-v2",
+      "publicKeyDerBase64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE6e3fGMiq2kDSym5ZRjKfVvuaFnhtkBygJuqPenafFBBK9oKNk+aMEHa2bM9SNBHXcmsyqOPznkjpNCNhvbpcRg=="
+    }
+  ]
+}

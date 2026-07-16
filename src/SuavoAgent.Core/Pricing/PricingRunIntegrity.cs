@@ -73,6 +73,18 @@ internal static class PricingRunIntegrity
         string jobId,
         NdcRow expected,
         SupplierPriceResult actual,
+        out string code) => TryValidateLookupResult(
+            jobId,
+            expected,
+            actual,
+            PricingApprovalContract.CostPerUnitBasis,
+            out code);
+
+    internal static bool TryValidateLookupResult(
+        string jobId,
+        NdcRow expected,
+        SupplierPriceResult actual,
+        string costBasis,
         out string code)
     {
         if (!string.Equals(actual.JobId, jobId, StringComparison.Ordinal) ||
@@ -82,7 +94,7 @@ internal static class PricingRunIntegrity
             code = "pricing_result_identity_mismatch";
             return false;
         }
-        if (!HasValidOutcomeShape(actual))
+        if (!HasValidOutcomeShape(actual, costBasis))
         {
             code = "pricing_result_outcome_invalid";
             return false;
@@ -95,6 +107,18 @@ internal static class PricingRunIntegrity
         string jobId,
         PricingInputManifest manifest,
         IReadOnlyList<SupplierPriceResult> results,
+        out string code) => TryValidatePersistedResults(
+            jobId,
+            manifest,
+            results,
+            PricingApprovalContract.CostPerUnitBasis,
+            out code);
+
+    internal static bool TryValidatePersistedResults(
+        string jobId,
+        PricingInputManifest manifest,
+        IReadOnlyList<SupplierPriceResult> results,
+        string costBasis,
         out string code)
     {
         var seen = new HashSet<int>();
@@ -110,7 +134,7 @@ internal static class PricingRunIntegrity
 
             if (expected.IsInvalid)
             {
-                if (!IsExactInvalidRow(result))
+                if (!IsExactInvalidRow(result, costBasis))
                 {
                     code = "pricing_persisted_invalid_row_shape_invalid";
                     return false;
@@ -118,7 +142,7 @@ internal static class PricingRunIntegrity
             }
             else if (!string.Equals(
                          result.Ndc, expected.CanonicalNdc, StringComparison.Ordinal) ||
-                     !HasValidOutcomeShape(result))
+                     !HasValidOutcomeShape(result, costBasis))
             {
                 code = "pricing_persisted_result_outcome_invalid";
                 return false;
@@ -135,6 +159,23 @@ internal static class PricingRunIntegrity
         WriteResult write,
         int completed,
         int failed)
+        => IsTerminallyComplete(
+            jobId,
+            manifest,
+            results,
+            write,
+            completed,
+            failed,
+            PricingApprovalContract.CostPerUnitBasis);
+
+    internal static bool IsTerminallyComplete(
+        string jobId,
+        PricingInputManifest manifest,
+        IReadOnlyList<SupplierPriceResult> results,
+        WriteResult write,
+        int completed,
+        int failed,
+        string costBasis)
     {
         return manifest.Count > 0 &&
                results.Count == manifest.Count &&
@@ -144,11 +185,34 @@ internal static class PricingRunIntegrity
                write.OkRows == manifest.Count &&
                write.FailRows == 0 &&
                manifest.Rows.Values.All(row => !row.IsInvalid) &&
-               TryValidatePersistedResults(jobId, manifest, results, out _) &&
+               TryValidatePersistedResults(
+                   jobId, manifest, results, costBasis, out _) &&
                results.All(result => result.Found);
     }
 
-    private static bool HasValidOutcomeShape(SupplierPriceResult result)
+    internal static bool IsTerminallyReviewComplete(
+        string jobId,
+        PricingInputManifest manifest,
+        IReadOnlyList<SupplierPriceResult> results,
+        WriteResult write,
+        int completed,
+        int failed,
+        string costBasis)
+    {
+        return costBasis == PricingApprovalContract.PackageCostBasis &&
+               manifest.Count > 0 &&
+               results.Count == manifest.Count &&
+               completed + failed == manifest.Count &&
+               write.Success &&
+               write.OkRows == completed &&
+               write.FailRows == failed &&
+               TryValidatePersistedResults(
+                   jobId, manifest, results, costBasis, out _);
+    }
+
+    private static bool HasValidOutcomeShape(
+        SupplierPriceResult result,
+        string costBasis)
     {
         var observationTotal =
             (long)result.OmittedSelectorObservations +
@@ -157,29 +221,44 @@ internal static class PricingRunIntegrity
             observationTotal > PricingSelectorObservationPolicy.MaximumTotalObservations)
             return false;
 
+        if (!string.Equals(result.CostBasis, costBasis, StringComparison.Ordinal))
+            return false;
+
         if (result.Found)
             return !string.IsNullOrWhiteSpace(result.SupplierName) &&
-                   IsExactUnitCost(result.CostPerUnit) &&
                    string.IsNullOrWhiteSpace(result.ErrorMessage) &&
-                   IsOptionalExactUnitCost(result.BaselineCostPerUnit) &&
-                   IsOptionalExactQuantity(result.Quantity) &&
-                   SavingsTupleFitsPersistence(result);
+                   (costBasis == PricingApprovalContract.CostPerUnitBasis
+                       ? IsExactUnitCost(result.CostPerUnit) &&
+                         result.PackageCost is null &&
+                         IsOptionalExactUnitCost(result.BaselineCostPerUnit) &&
+                         IsOptionalExactQuantity(result.Quantity) &&
+                         SavingsTupleFitsPersistence(result)
+                       : costBasis == PricingApprovalContract.PackageCostBasis &&
+                         result.CostPerUnit is null &&
+                         IsExactUnitCost(result.PackageCost) &&
+                         result.BaselineCostPerUnit is null &&
+                         result.Quantity is null);
 
         return string.IsNullOrWhiteSpace(result.SupplierName) &&
                result.CostPerUnit is null &&
+               result.PackageCost is null &&
                !string.IsNullOrWhiteSpace(result.ErrorMessage) &&
                result.BaselineCostPerUnit is null &&
                result.Quantity is null;
     }
 
-    private static bool IsExactInvalidRow(SupplierPriceResult result) =>
+    private static bool IsExactInvalidRow(
+        SupplierPriceResult result,
+        string costBasis) =>
         !result.Found &&
+        result.CostBasis == costBasis &&
         string.Equals(
             result.Ndc,
             PricingResultContentPolicy.InvalidNdcStorageValue,
             StringComparison.Ordinal) &&
         string.IsNullOrWhiteSpace(result.SupplierName) &&
         result.CostPerUnit is null &&
+        result.PackageCost is null &&
         result.ErrorMessage == PricingResultContentPolicy.InvalidNdcReasonCode &&
         result.BaselineCostPerUnit is null &&
         result.Quantity is null;

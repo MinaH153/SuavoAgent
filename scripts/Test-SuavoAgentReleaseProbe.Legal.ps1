@@ -36,11 +36,45 @@ function Test-ReleaseLegalBundle {
     try {
         $document = Get-Content -LiteralPath $sbom -Raw | ConvertFrom-Json
         $root = (Resolve-Path -LiteralPath $Directory).Path.TrimEnd([char[]]"\/")
+        $rootPackages = @($document.packages | Where-Object {
+            [string]$_.SPDXID -ceq 'SPDXRef-Package-SuavoAgent'
+        })
+        $declaredExclusions = @()
+        if ($rootPackages.Count -eq 1) {
+            $declaredExclusions = @(
+                $rootPackages[0].packageVerificationCode.packageVerificationCodeExcludedFiles |
+                    ForEach-Object { [string]$_ }
+            )
+        }
+        $declaredSet = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::Ordinal)
+        $exclusionsUnique = $true
+        foreach ($name in $declaredExclusions) {
+            if (-not $declaredSet.Add($name)) { $exclusionsUnique = $false }
+        }
+        $preFinalExclusionsOk =
+            $declaredExclusions.Count -eq 1 -and
+            $declaredSet.Contains('./suavoagent.spdx.json')
+        $manifestSignatures = @(
+            Get-ChildItem -LiteralPath $Directory -File | Where-Object {
+                $_.Name -cmatch '^update-manifest-v[0-9]+\.[0-9]+\.[0-9]+\.sig$'
+            }
+        )
+        $finalExclusionsOk =
+            $manifestSignatures.Count -eq 1 -and
+            $declaredExclusions.Count -eq 4 -and
+            $declaredSet.Contains('./suavoagent.spdx.json') -and
+            $declaredSet.Contains('./checksums.sha256') -and
+            $declaredSet.Contains('./checksums.sha256.sig') -and
+            $declaredSet.Contains('./' + $manifestSignatures[0].Name) -and
+            (Test-Path -LiteralPath (Join-Path $Directory 'checksums.sha256') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $Directory 'checksums.sha256.sig') -PathType Leaf)
         $actualFiles = @{}
         foreach ($file in @(Get-ChildItem -LiteralPath $Directory -Recurse -File)) {
-            if ($file.FullName -eq (Resolve-Path -LiteralPath $sbom).Path) { continue }
             $relative = $file.FullName.Substring($root.Length).TrimStart([char[]]"\/").Replace('\', '/')
-            $actualFiles['./' + $relative] = $file.FullName
+            $documentName = './' + $relative
+            if ($declaredSet.Contains($documentName)) { continue }
+            $actualFiles[$documentName] = $file.FullName
         }
         $documentFiles = @($document.files)
         $seen = [System.Collections.Generic.HashSet[string]]::new(
@@ -48,6 +82,9 @@ function Test-ReleaseLegalBundle {
         $sbomOk =
             [string]$document.spdxVersion -eq 'SPDX-2.3' -and
             [string]$document.SPDXID -eq 'SPDXRef-DOCUMENT' -and
+            $rootPackages.Count -eq 1 -and
+            $exclusionsUnique -and
+            ($preFinalExclusionsOk -or $finalExclusionsOk) -and
             $documentFiles.Count -eq $actualFiles.Count
         foreach ($entry in $documentFiles) {
             $name = [string]$entry.fileName

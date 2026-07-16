@@ -53,7 +53,8 @@ public sealed partial class AgentStateDb
 
             var observedAt = now;
             var unsigned = new PricingApprovalProposal(
-                PricingApprovalContract.SchemaVersion,
+                PricingApprovalContract.SchemaVersionForCostBasis(
+                    observation.CostBasis),
                 Guid.NewGuid().ToString("D"),
                 new string('0', 64),
                 pharmacyId,

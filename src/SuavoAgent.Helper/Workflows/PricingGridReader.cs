@@ -24,6 +24,19 @@ public static class PricingGridReader
     /// </summary>
     public readonly record struct SupplierRow(string Supplier, decimal CostPerUnit, string Status);
 
+    /// <summary>
+    /// One package-cost row from the exact PioneerRx Supplier Catalog columns.
+    /// This is intentionally a separate type so a package amount can never be
+    /// passed to the cost-per-unit selector by accident.
+    /// </summary>
+    public readonly record struct PackageSupplierRow(
+        string Supplier,
+        decimal PackageCost,
+        string Status,
+        bool Linked,
+        string InventoryGroup,
+        bool Discontinued);
+
     public static bool TryParseCost(string? text, out decimal cost)
     {
         cost = 0m;
@@ -63,6 +76,28 @@ public static class PricingGridReader
             || value.Equals("Active", StringComparison.OrdinalIgnoreCase);
     }
 
+    public static bool TryParseLinked(string? text, out bool linked)
+    {
+        linked = false;
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var value = text.Trim();
+        if (value.Equals("True", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("Yes", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("Linked", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("Checked", StringComparison.OrdinalIgnoreCase) ||
+            value == "1")
+        {
+            linked = true;
+            return true;
+        }
+        if (value.Equals("False", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("No", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("Unchecked", StringComparison.OrdinalIgnoreCase) ||
+            value == "0")
+            return true;
+        return false;
+    }
+
     /// <summary>True if the text marks a PioneerRx "(Do Not Use)" item.</summary>
     public static bool LooksLikeDoNotUse(string? text) =>
         !string.IsNullOrEmpty(text)
@@ -92,5 +127,31 @@ public static class PricingGridReader
         }
 
         return bestSupplier == null ? null : (bestSupplier, bestCostPerUnit);
+    }
+
+    /// <summary>
+    /// Cheapest exact package Cost among rows explicitly linked to an Rx item,
+    /// in an eligible status, and not marked discontinued.
+    /// </summary>
+    public static (string supplier, decimal packageCost)? SelectCheapestPackage(
+        IEnumerable<PackageSupplierRow> rows)
+    {
+        string? bestSupplier = null;
+        decimal bestPackageCost = decimal.MaxValue;
+        foreach (var row in rows)
+        {
+            if (!row.Linked || row.Discontinued ||
+                !row.InventoryGroup.Trim().Equals("Rx", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(row.Supplier) ||
+                row.PackageCost <= 0 ||
+                !IsUsableStatus(row.Status))
+                continue;
+            if (row.PackageCost < bestPackageCost)
+            {
+                bestPackageCost = row.PackageCost;
+                bestSupplier = row.Supplier.Trim();
+            }
+        }
+        return bestSupplier is null ? null : (bestSupplier, bestPackageCost);
     }
 }

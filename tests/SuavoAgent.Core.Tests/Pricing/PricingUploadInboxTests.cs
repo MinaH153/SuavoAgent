@@ -256,6 +256,7 @@ public sealed class PricingUploadInboxTests : IDisposable
         grantDigest = new string('a', 64),
         status = PricingJobStatus.Completed,
         mode = "sql",
+        costBasis = PricingApprovalContract.CostPerUnitBasis,
         totalItems = 0,
         completedItems = 0,
         failedItems = 0,

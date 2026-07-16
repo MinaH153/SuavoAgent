@@ -402,12 +402,151 @@ public sealed class PricingCommandRecoveryCoordinatorTests
         }
     }
 
+    [Fact]
+    public async Task Restart_package_cost_refuses_completion_when_publication_fails()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(), $"suavo_package_publish_recovery_{Guid.NewGuid():N}.db");
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        const string keyId = "pricing-package-publication-test";
+        var trustedKeys = TrustedKeys(key, keyId);
+        var scopeDigest = new string('7', 64);
+        var command = SignedPricingCommand(key, keyId);
+        var spec = NewPackageSpec();
+        try
+        {
+            spec = SeedAbandonedIntent(
+                path,
+                trustedKeys,
+                command,
+                spec,
+                scopeDigest,
+                DateTimeOffset.Parse(command.Timestamp).AddDays(1)).Spec;
+            using var restarted = new AgentStateDb(path);
+            string? deliveredError = null;
+            var outbox = new PricingTerminalAckOutbox(
+                restarted,
+                (_, _, _, error, _) =>
+                {
+                    deliveredError = error;
+                    return Task.FromResult(true);
+                },
+                NullLogger<PricingTerminalAckOutbox>.Instance,
+                trustedKeys);
+            var executor = new RecoverableSuccessExecutor(spec, @"C:\\Priced.xlsx");
+            var publisher = new RecordingPricedWorkbookPublisher(
+                published: false,
+                throwAfterFirstPublication: false);
+            var coordinator = new PricingCommandRecoveryCoordinator(
+                restarted,
+                executor,
+                uploader: null,
+                outbox,
+                () => scopeDigest,
+                NullLogger<PricingCommandRecoveryCoordinator>.Instance,
+                trustedKeys,
+                pricedWorkbookPublisher: publisher);
+
+            await coordinator.RecoverAsync(CancellationToken.None);
+
+            Assert.Equal(1, executor.RunCalls);
+            Assert.Equal(1, publisher.Calls);
+            Assert.Equal("pricing_output_publication_failed", deliveredError);
+            Assert.Equal(
+                "pricing_output_publication_failed",
+                restarted.GetPricingTerminalAck(CommandId)!.Ack.ErrorCode);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task Restart_package_cost_retries_idempotent_publication_after_crash()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(), $"suavo_package_publish_retry_{Guid.NewGuid():N}.db");
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        const string keyId = "pricing-package-publication-retry-test";
+        var trustedKeys = TrustedKeys(key, keyId);
+        var scopeDigest = new string('7', 64);
+        var command = SignedPricingCommand(key, keyId);
+        var spec = NewPackageSpec();
+        try
+        {
+            spec = SeedAbandonedIntent(
+                path,
+                trustedKeys,
+                command,
+                spec,
+                scopeDigest,
+                DateTimeOffset.Parse(command.Timestamp).AddDays(1)).Spec;
+            using var restarted = new AgentStateDb(path);
+            string? deliveredError = null;
+            var outbox = new PricingTerminalAckOutbox(
+                restarted,
+                (_, _, _, error, _) =>
+                {
+                    deliveredError = error;
+                    return Task.FromResult(true);
+                },
+                NullLogger<PricingTerminalAckOutbox>.Instance,
+                trustedKeys);
+            var executor = new RecoverableSuccessExecutor(spec, @"C:\\Priced.xlsx");
+            var publisher = new RecordingPricedWorkbookPublisher(
+                published: true,
+                throwAfterFirstPublication: true);
+            var coordinator = new PricingCommandRecoveryCoordinator(
+                restarted,
+                executor,
+                uploader: null,
+                outbox,
+                () => scopeDigest,
+                NullLogger<PricingCommandRecoveryCoordinator>.Instance,
+                trustedKeys,
+                pricedWorkbookPublisher: publisher);
+
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                () => coordinator.RecoverAsync(CancellationToken.None));
+            Assert.Null(restarted.GetPricingTerminalAck(CommandId));
+
+            await coordinator.RecoverAsync(CancellationToken.None);
+
+            Assert.Equal(2, executor.RunCalls);
+            Assert.Equal(2, publisher.Calls);
+            Assert.All(publisher.CommandIds, value => Assert.Equal(CommandId, value));
+            Assert.Equal("pricing_execution_exception", deliveredError);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
     private static PricingJobSpec NewSpec() => new(
         Guid.NewGuid().ToString("N"),
         @"C:\Pricing.xlsx",
         "NDC",
         "Supplier",
         "Cost Per Unit");
+
+    private static PricingJobSpec NewPackageSpec() => new(
+        Guid.NewGuid().ToString("N"),
+        @"C:\Pricing.xlsx",
+        PricingJobDefaults.NdcColumn,
+        PricingJobDefaults.PackageSupplierColumn,
+        PricingJobDefaults.PackageCostColumn,
+        CostBasis: PricingApprovalContract.PackageCostBasis);
+
+    private static IReadOnlyDictionary<string, string> TrustedKeys(
+        ECDsa key,
+        string keyId) => new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [keyId] = Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),
+        [PricingTestAuthority.KeyId] =
+            PricingTestAuthority.TrustedPublicKeys[PricingTestAuthority.KeyId],
+    };
 
     private static (PricingJobSpec Spec, PricingApprovalGrant? Grant)
         SeedAbandonedIntent(
@@ -425,7 +564,14 @@ public sealed class PricingCommandRecoveryCoordinatorTests
             (_, _, _, _, _) => Task.FromResult(false),
             NullLogger<PricingTerminalAckOutbox>.Instance,
             trustedKeys);
-        var contract = PricingTestAuthority.Contract(modality: "sql");
+        var packageCost = string.Equals(
+            spec.CostBasis,
+            PricingApprovalContract.PackageCostBasis,
+            StringComparison.Ordinal);
+        var executionMode = packageCost ? "uia" : "sql";
+        var contract = PricingTestAuthority.Contract(
+            modality: executionMode,
+            costBasis: spec.CostBasis);
         var observedAt = DateTimeOffset.Parse(command.Timestamp);
         PricingApprovalGrant? grant = null;
         PricingCostBasisAuthority? authority = null;
@@ -475,7 +621,7 @@ public sealed class PricingCommandRecoveryCoordinatorTests
             spec,
             CommandId,
             sourceUploadId: null,
-            sourceMode: "sql");
+            sourceMode: executionMode);
         if (bindAuthority)
         {
             Assert.True(first.TryBindPricingInputIdentity(
@@ -490,7 +636,7 @@ public sealed class PricingCommandRecoveryCoordinatorTests
         first.UpsertPricingJob(spec, PricingJobStatus.Running, 1, 0, 0);
         Assert.True(first.MarkPricingCommandIntentAdmitted(
             CommandId,
-            "sql",
+            executionMode,
             "supervised",
             scopeDigest,
             trustedIdentity: true));
@@ -568,6 +714,66 @@ public sealed class PricingCommandRecoveryCoordinatorTests
 
         public PricingJobSpec? GetRecoverableSpecForCommand(
             string commandId) => commandId == CommandId ? spec : null;
+    }
+
+    private sealed class RecoverableSuccessExecutor(
+        PricingJobSpec spec,
+        string deliverablePath) :
+        IPricingJobExecutor,
+        IRecoverablePricingJobExecutor
+    {
+        internal int RunCalls { get; private set; }
+
+        public Task<PricingJobExecutionResult> RunAsync(
+            PricingJobSpec requested,
+            CancellationToken ct)
+        {
+            RunCalls++;
+            Assert.Equal(spec, requested);
+            return Task.FromResult(new PricingJobExecutionResult(
+                new PricingJobProgress(
+                    spec.JobId,
+                    500,
+                    500,
+                    0,
+                    PricingJobStatus.Completed),
+                "uia",
+                true,
+                null,
+                deliverablePath));
+        }
+
+        public PricingJobSpec? GetRecoverableSpec(
+            PricingJobSpec proposed,
+            string? commandId) => spec;
+
+        public PricingJobSpec? GetRecoverableSpecForCommand(
+            string commandId) => commandId == CommandId ? spec : null;
+    }
+
+    private sealed class RecordingPricedWorkbookPublisher(
+        bool published,
+        bool throwAfterFirstPublication) : IPricedWorkbookPublisher
+    {
+        internal int Calls { get; private set; }
+        internal List<string> CommandIds { get; } = [];
+
+        public Task<PricedWorkbookPublicationResult> PublishAsync(
+            string commandId,
+            string localWorkbookPath,
+            CancellationToken ct)
+        {
+            Calls++;
+            CommandIds.Add(commandId);
+            if (throwAfterFirstPublication && Calls == 1)
+                throw new OperationCanceledException(
+                    "Simulated crash after durable local publication.");
+            return Task.FromResult(new PricedWorkbookPublicationResult(
+                published,
+                published
+                    ? PioneerRxPricedWorkbookPublicationCodes.Published
+                    : PioneerRxPricedWorkbookPublicationCodes.PublicationFailed));
+        }
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

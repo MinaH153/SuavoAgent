@@ -86,13 +86,15 @@ public class ServiceInstallerTests
     // grants BUILTIN\Users (*S-1-5-32-545 — robust vs INTERACTIVE for a UAC-filtered
     // token; the proven principal): traverse on the root (dir-only,
     // NO inherited file reads — state.db is plaintext PHI, state.key machine-DPAPI),
-    // Modify on logs\helper + diagnostics\helper, per-file read on the remaining helper configs.
+    // Modify on logs\helper + diagnostics\helper, inherited read-only access to the
+    // PHI-free signed observation authority directory, and per-file read on the
+    // remaining helper configs.
     [Fact]
     public void Helper_carveout_grants_minimum_and_never_root_file_reads()
     {
         var grants = ServiceInstaller.BuildInteractiveAclSpecs(@"C:\ProgramData\SuavoAgent");
 
-        Assert.Equal(9, grants.Count);
+        Assert.Equal(10, grants.Count);
 
         var root = grants[0];
         Assert.Equal(@"C:\ProgramData\SuavoAgent", root.Target);
@@ -130,6 +132,12 @@ public class ServiceInstallerTests
         Assert.Contains(grants, g =>
             g.Target.EndsWith("honeytokens") &&
             g.UsersRights == FileSystemRights.Modify &&
+            g.UsersInheritance == inherited &&
+            g.EnsureDirectory &&
+            g.ApplyRecursively);
+        Assert.Contains(grants, g =>
+            g.Target.EndsWith(ObservationActivationAuthority.StateDirectoryName) &&
+            g.UsersRights == FileSystemRights.ReadAndExecute &&
             g.UsersInheritance == inherited &&
             g.EnsureDirectory &&
             g.ApplyRecursively);

@@ -75,6 +75,7 @@ public class SignedCommandVerifier
         ["chat"] = SignedCommandAuthorityClass.ReadOnly,
 
         ["update"] = SignedCommandAuthorityClass.DurableOutbox,
+        [Release1ConvergenceCommand.Name] = SignedCommandAuthorityClass.DurableOutbox,
         ["approve_pom"] = SignedCommandAuthorityClass.DurableOutbox,
         ["install_pioneerrx_process_approval"] = SignedCommandAuthorityClass.DurableOutbox,
         ["set_vision_config"] = SignedCommandAuthorityClass.DurableOutbox,
@@ -91,6 +92,9 @@ public class SignedCommandVerifier
 
     public static bool IsExplicitlyClassified(string command) =>
         KnownCommandAuthority.ContainsKey(command);
+
+    internal static IReadOnlyCollection<string> ExplicitCommands =>
+        KnownCommandAuthority.Keys.ToArray();
 
     public static bool RequiresLiveExpiry(string command) =>
         ClassifyCommand(command) == SignedCommandAuthorityClass.LiveMutator;

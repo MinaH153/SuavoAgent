@@ -109,6 +109,37 @@ public sealed class ObservationSpool : IBehavioralEventSpool
             new WindowsObservationSpoolAccessControl());
     }
 
+    /// <summary>
+    /// Permanently removes a channel excluded by the currently disclosed
+    /// observation policy. It never opens, decrypts, rebinds, or uploads the
+    /// historical envelopes.
+    /// </summary>
+    public static void RetireProductionChannel(string channel)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        if (!BehavioralEventChannels.IsKnown(channel))
+            throw new ArgumentException("Unknown observation channel.", nameof(channel));
+        var root = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SuavoAgent",
+            "observations");
+        if (!Directory.Exists(root)) return;
+        WindowsObservationSpoolAccessControl.ValidateLocalNonReparsePathForRetirement(root);
+        var spoolPath = Path.Combine(root, channel + ".spool");
+        var candidates = new List<string> { spoolPath, spoolPath + ".lock" };
+        candidates.AddRange(Directory.EnumerateFiles(
+            root,
+            $".{channel}.spool.*.tmp",
+            SearchOption.TopDirectoryOnly));
+        foreach (var candidate in candidates)
+        {
+            if (!File.Exists(candidate)) continue;
+            if (File.GetAttributes(candidate).HasFlag(FileAttributes.ReparsePoint))
+                throw new BehavioralEventPersistenceException("observation_spool_reparse_rejected");
+            File.Delete(candidate);
+        }
+    }
+
     public BehavioralEventBufferState? Load()
     {
         ThrowIfDisposed();
@@ -362,6 +393,9 @@ public sealed class WindowsObservationSpoolAccessControl : IObservationSpoolAcce
                 throw new BehavioralEventPersistenceException("observation_spool_reparse_rejected");
         }
     }
+
+    internal static void ValidateLocalNonReparsePathForRetirement(string path) =>
+        ValidateLocalNonReparsePath(path);
 
     private static SecurityIdentifier CurrentUserSid() =>
         WindowsIdentity.GetCurrent().User

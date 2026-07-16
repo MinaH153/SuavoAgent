@@ -89,7 +89,7 @@ public sealed partial class WatchdogWorker : BackgroundService
             options.HangBeaconDirectory ?? SuavoAgent.Diagnostics.LivenessBeaconStore.DefaultDirectory);
         _updateActivationGate = new UpdateActivationGate(
             RemoteCommandTrust.CreateProductionKeyRegistry(),
-            UpdateActivationContract.ProductionUpdatePublicKeyDer,
+            UpdateActivationContract.ProductionUpdatePublicKeys,
             logger);
         var updateRoot = options.UpdateRoot ?? UpdateActivationContract.DefaultUpdateRoot();
         _updateReplayLedger = new UpdateReplayLedger(

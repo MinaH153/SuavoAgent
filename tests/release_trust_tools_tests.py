@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import importlib.util
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from release_legal_evidence import release_eligibility_blockers
+import v1_bridge_run_metadata as RUN_METADATA
 
 SBOM_SPEC = importlib.util.spec_from_file_location(
     "generate_release_sbom", ROOT / "scripts/generate-release-sbom.py"
@@ -33,6 +35,161 @@ TRUST_SPEC.loader.exec_module(TRUST_MODULE)
 
 
 class ReleaseTrustToolsTests(unittest.TestCase):
+    def test_publication_state_rechecks_numeric_release_assets_and_immutability(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release_dir = root / "release"
+            version = "v4.0.0"
+            source_sha = "a" * 40
+            relative_paths = (
+                "SuavoAgent.Core.exe", "SuavoAgent.Broker.exe",
+                "SuavoAgent.Helper.exe", "SuavoAgent.Watchdog.exe",
+                "SuavoSetup.exe", f"SuavoAgent-{version}-win-x64.msi",
+                "SuavoAgent-Setup.exe", "suavoagent.spdx.json",
+                "field-release-receipt.json", f"update-manifest-{version}.txt",
+                f"update-manifest-{version}.sig", "checksums.sha256",
+                "checksums.sha256.sig", "legal/THIRD-PARTY-NOTICES.txt",
+                "legal/THIRD-PARTY-PROVENANCE.json", "legal/external-assets.json",
+                "legal/license-texts/Apache-2.0.txt", "legal/evidence/runtime.json",
+            )
+            for relative in relative_paths:
+                path = release_dir / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((relative + "\n").encode("ascii"))
+
+            def asset_document(path: Path) -> None:
+                assets = []
+                for item in sorted(release_dir.rglob("*")):
+                    if item.is_file():
+                        raw = item.read_bytes()
+                        assets.append({
+                            "name": item.name,
+                            "state": "uploaded",
+                            "size": len(raw),
+                            "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                        })
+                path.write_text(json.dumps([assets]), encoding="utf-8")
+
+            pre_assets = root / "pre-assets.json"
+            post_assets = root / "post-assets.json"
+            asset_document(pre_assets)
+            asset_document(post_assets)
+            draft_release = root / "draft.json"
+            published_release = root / "published.json"
+            base = {
+                "id": 777,
+                "tag_name": version,
+                "target_commitish": source_sha,
+                "prerelease": False,
+            }
+            draft_release.write_text(json.dumps(base | {
+                "draft": True, "immutable": False, "published_at": None,
+            }), encoding="utf-8")
+            published_release.write_text(json.dumps(base | {
+                "draft": False, "immutable": True,
+                "published_at": "2026-07-15T12:00:00Z",
+            }), encoding="utf-8")
+
+            def arguments(
+                release: Path, assets: Path, draft: str, immutable: str,
+                reference: Path | None = None,
+            ) -> argparse.Namespace:
+                return argparse.Namespace(
+                    release=release, assets=assets, reference_assets=reference,
+                    release_dir=release_dir, version=version, source_sha=source_sha,
+                    expected_release_id=777, expected_draft=draft,
+                    expected_immutable=immutable,
+                )
+
+            RUN_METADATA.validate_publication_state(
+                arguments(draft_release, pre_assets, "true", "false")
+            )
+            RUN_METADATA.validate_publication_state(
+                arguments(
+                    published_release, post_assets, "false", "true", pre_assets
+                )
+            )
+
+            published = json.loads(published_release.read_text())
+            published["immutable"] = False
+            published_release.write_text(json.dumps(published), encoding="utf-8")
+            with self.assertRaises(Exception):
+                RUN_METADATA.validate_publication_state(
+                    arguments(
+                        published_release, post_assets, "false", "true", pre_assets
+                    )
+                )
+
+            published["immutable"] = True
+            published_release.write_text(json.dumps(published), encoding="utf-8")
+            target = release_dir / "SuavoAgent.Core.exe"
+            target.write_bytes(b"changed after prepublication validation\n")
+            asset_document(post_assets)
+            with self.assertRaises(Exception):
+                RUN_METADATA.validate_publication_state(
+                    arguments(
+                        published_release, post_assets, "false", "true", pre_assets
+                    )
+                )
+
+    def test_trust_phase_keeps_bridge_source_pre_convergence_and_normal_source_complete(self) -> None:
+        self.assertEqual(
+            frozenset(), TRUST_MODULE.trust_phase_required("bridge-v1", set())
+        )
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            TRUST_MODULE.trust_phase_required("normal-v2", set())
+        self.assertEqual(
+            TRUST_MODULE.CONVERGENCE_TRACKED,
+            TRUST_MODULE.trust_phase_required(
+                "normal-v2", set(TRUST_MODULE.CONVERGENCE_TRACKED)
+            ),
+        )
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            TRUST_MODULE.trust_phase_required(
+                "bridge-v1", set(TRUST_MODULE.CONVERGENCE_TRACKED)
+            )
+        self.assertEqual(
+            TRUST_MODULE.CONVERGENCE_INPUT_TRACKED,
+            TRUST_MODULE.trust_phase_required(
+                "convergence-v1", set(TRUST_MODULE.CONVERGENCE_INPUT_TRACKED)
+            ),
+        )
+        for invalid in (
+            set(),
+            set(TRUST_MODULE.CONVERGENCE_INPUT_TRACKED)
+            | set(TRUST_MODULE.CONVERGENCE_CLAIM_TRACKED),
+        ):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                TRUST_MODULE.trust_phase_required("convergence-v1", invalid)
+
+    def test_ci_auto_phase_accepts_only_three_exact_registry_artifact_states(self) -> None:
+        inputs = set(TRUST_MODULE.CONVERGENCE_INPUT_TRACKED)
+        all_artifacts = set(TRUST_MODULE.CONVERGENCE_TRACKED)
+        self.assertEqual(
+            "bridge-v1", TRUST_MODULE.resolve_trust_phase("auto", set(), "ota-update-v1")
+        )
+        self.assertEqual(
+            "convergence-v1",
+            TRUST_MODULE.resolve_trust_phase("auto", inputs, "ota-update-v1"),
+        )
+        self.assertEqual(
+            "normal-v2",
+            TRUST_MODULE.resolve_trust_phase("auto", all_artifacts, "ota-update-v2"),
+        )
+        for tracked, key_id in (
+            (inputs, "ota-update-v2"),
+            (all_artifacts, "ota-update-v1"),
+            (set(), "ota-update-v2"),
+        ):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                TRUST_MODULE.resolve_trust_phase("auto", tracked, key_id)
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        stage = (ROOT / ".github/workflows/v1-bridge-stage.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("--trust-phase auto", ci)
+        self.assertIn("--trust-phase bridge-v1", stage)
+        self.assertIn("--trust-phase normal-v2", release)
+
     def test_notice_bundle_retains_required_full_texts_and_exact_windows_closure(self) -> None:
         subprocess.run(
             [sys.executable, "scripts/generate-release-legal-bundle.py", "--check"],
@@ -357,6 +514,74 @@ class ReleaseTrustToolsTests(unittest.TestCase):
             )
             self.assertEqual([], sbom["annotations"])
 
+    def test_final_sbom_equals_publication_inputs_except_exact_cyclic_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary) / "release"
+            release.mkdir()
+            version = "v4.0.0"
+            publication_inputs = {
+                "SuavoAgent.Core.exe",
+                f"SuavoAgent-{version}-win-x64.msi",
+                "SuavoAgent-Setup.exe",
+                f"update-manifest-{version}.txt",
+                "field-release-receipt.json",
+                "legal/THIRD-PARTY-NOTICES.txt",
+            }
+            for relative in publication_inputs:
+                path = release / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((relative + "\n").encode("ascii"))
+            output = release / "suavoagent.spdx.json"
+            output.write_text("provisional\n", encoding="ascii")
+            subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/generate-release-sbom.py",
+                    "--release-dir", str(release),
+                    "--version", version,
+                    "--source-commit", "a" * 40,
+                    "--output", str(output),
+                    "--exclude-finalization-outputs",
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            document = json.loads(output.read_text(encoding="utf-8"))
+            documented = {
+                entry["fileName"].removeprefix("./")
+                for entry in document["files"]
+            }
+            self.assertEqual(publication_inputs, documented)
+            exclusions = frozenset(
+                {"suavoagent.spdx.json"}
+                | set(SBOM_MODULE.finalization_output_names(version))
+            )
+            root_package = next(
+                package for package in document["packages"]
+                if package["SPDXID"] == "SPDXRef-Package-SuavoAgent"
+            )
+            self.assertEqual(
+                ["./" + name for name in sorted(exclusions)],
+                root_package["packageVerificationCode"][
+                    "packageVerificationCodeExcludedFiles"
+                ],
+            )
+
+            for relative in SBOM_MODULE.finalization_output_names(version):
+                (release / relative).write_bytes((relative + "\n").encode("ascii"))
+            SBOM_MODULE.verify_exact_file_inventory(document, release, exclusions)
+
+            private = release / "appsettings.json"
+            private.write_text("must-not-publish\n", encoding="ascii")
+            with self.assertRaisesRegex(SystemExit, "does not equal"):
+                SBOM_MODULE.verify_exact_file_inventory(document, release, exclusions)
+            private.unlink()
+
+            installer = release / f"SuavoAgent-{version}-win-x64.msi"
+            installer.write_bytes(b"replaced after SBOM generation\n")
+            with self.assertRaisesRegex(SystemExit, "hash does not match"):
+                SBOM_MODULE.verify_exact_file_inventory(document, release, exclusions)
+
     def test_spdx_ids_are_injective_for_paths_that_share_a_sanitized_form(self) -> None:
         self.assertNotEqual(
             SBOM_MODULE.spdx_id("File", "a_b.dll"),
@@ -364,13 +589,145 @@ class ReleaseTrustToolsTests(unittest.TestCase):
         )
 
     def test_each_release_workflow_must_retain_every_gate_independently(self) -> None:
+        reusable = (ROOT / ".github/workflows/production-release-signing.yml").read_text()
         for workflow_name in ("release.yml", "hotfix.yml"):
             workflow = (ROOT / ".github/workflows" / workflow_name).read_text()
-            TRUST_MODULE.validate_workflow_text(workflow_name, workflow)
+            TRUST_MODULE.validate_workflow_text(workflow_name, workflow, reusable)
             weakened = workflow.replace("--minimum-branch 80", "", 1)
             with contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
-                    TRUST_MODULE.validate_workflow_text(workflow_name, weakened)
+                    TRUST_MODULE.validate_workflow_text(workflow_name, weakened, reusable)
+
+    def test_publication_proves_immutable_support_before_draft_and_publish(self) -> None:
+        endpoint = '"repos/$GITHUB_REPOSITORY/immutable-releases"'
+        for workflow_name in (
+            "production-release-signing.yml",
+            "v1-bridge-finalize.yml",
+        ):
+            workflow = (ROOT / ".github/workflows" / workflow_name).read_text()
+            TRUST_MODULE.validate_immutable_publication_order(workflow_name, workflow)
+            first = workflow.index(endpoint)
+            weakened = workflow[:first] + workflow[first + len(endpoint):]
+            with self.subTest(workflow=workflow_name), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                with self.assertRaises(SystemExit):
+                    TRUST_MODULE.validate_immutable_publication_order(
+                        workflow_name, weakened
+                    )
+
+    def test_hardened_signing_and_rfc3161_gates_reject_weakened_inputs(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        TRUST_MODULE.validate_hardened_signing_workflow("release.yml", release, 3)
+        weakened = release.replace("verify-signature: true", "verify-signature: false", 1)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_hardened_signing_workflow("release.yml", weakened, 3)
+
+        signer = (ROOT / "scripts/esigner-codesign-hardened.sh").read_text()
+        installer = (ROOT / "scripts/Test-InstallerAuthenticode.ps1").read_text()
+        TRUST_MODULE.validate_hardened_signing_scripts(signer, installer)
+        without_timestamp_requirement = installer.replace("verify /pa /all /tw", "verify /pa /all", 1)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_hardened_signing_scripts(
+                    signer, without_timestamp_requirement
+                )
+
+    def test_bridge_signer_binds_each_privileged_phase_to_exact_authorizer(self) -> None:
+        workflow = (ROOT / ".github/workflows/production-signing.yml").read_text()
+        TRUST_MODULE.validate_bridge_signing_workflow(workflow)
+
+        weakened = workflow.replace(
+            TRUST_MODULE.EXPECTED_BRIDGE_AUTHORIZER_ASSERTION,
+            '[[ "$GITHUB_WORKFLOW_REF" == *"v1-bridge-authorize.yml"* ]]',
+            1,
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_bridge_signing_workflow(weakened)
+
+        weakened = workflow.replace(
+            TRUST_MODULE.EXPECTED_BRIDGE_AUTHORIZER_ASSERTION + "\n          mkdir descriptor",
+            "mkdir descriptor\n          " + TRUST_MODULE.EXPECTED_BRIDGE_AUTHORIZER_ASSERTION,
+            1,
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_bridge_signing_workflow(weakened)
+
+    def test_production_signing_policy_is_exact_and_fails_closed_on_scope_expansion(self) -> None:
+        template = json.loads(
+            (
+                ROOT
+                / "infrastructure/aws/suavoagent-production-signing-v2.template.json"
+            ).read_text()
+        )
+        TRUST_MODULE.validate_production_signing_template(template)
+
+        weakened = json.loads(json.dumps(template))
+        statements = weakened["Resources"]["GitHubProductionSigningRoleInlinePolicy"][
+            "Properties"
+        ]["PolicyDocument"]["Statement"]
+        statements[0]["Action"] = ["kms:GetPublicKey", "kms:DescribeKey"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_production_signing_template(weakened)
+
+        weakened = json.loads(json.dumps(template))
+        weakened["Resources"]["OtaSigningKey"] = {"Type": "AWS::KMS::Key"}
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_production_signing_template(weakened)
+
+        for retention_attribute in ("DeletionPolicy", "UpdateReplacePolicy"):
+            weakened = json.loads(json.dumps(template))
+            weakened["Resources"]["OtaSigningKey"].pop(retention_attribute)
+            with self.subTest(retention=retention_attribute), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                with self.assertRaises(SystemExit):
+                    TRUST_MODULE.validate_production_signing_template(weakened)
+
+        weakened = json.loads(json.dumps(template))
+        weakened["Resources"]["OtaSigningKeyAlias"]["Properties"]["TargetKeyId"] = {
+            "Ref": "ReplacementKey"
+        }
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_production_signing_template(weakened)
+
+        weakened = json.loads(json.dumps(template))
+        weakened["Parameters"] = {"OtaSigningKeyArn": {"Type": "String"}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_production_signing_template(weakened)
+
+        self.assertEqual(
+            {"Fn::GetAtt": ["OtaSigningKey", "Arn"]},
+            template["Outputs"]["OtaKmsKeyId"]["Value"],
+        )
+        self.assertIn(
+            TRUST_MODULE.EXPECTED_OTA_KMS_KEY_ARN,
+            (ROOT / ".github/workflows/production-signing.yml").read_text(),
+        )
+
+        weakened = json.loads(json.dumps(template))
+        weakened["Outputs"]["AWS_SIGNING_ROLE_ARN"] = weakened["Outputs"].pop(
+            "AwsSigningRoleArn"
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_production_signing_template(weakened)
+
+        weakened = json.loads(json.dumps(template))
+        condition = weakened["Resources"]["GitHubProductionSigningRole"][
+            "Properties"
+        ]["AssumeRolePolicyDocument"]["Statement"][0]["Condition"]["StringEquals"]
+        condition["token.actions.githubusercontent.com:sub"] = "repo:MinaH153/SuavoAgent:*"
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                TRUST_MODULE.validate_production_signing_template(weakened)
 
 
 if __name__ == "__main__":

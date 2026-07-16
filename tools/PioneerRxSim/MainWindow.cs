@@ -6,7 +6,8 @@ namespace PioneerRxSim;
 
 /// <summary>
 /// The simulated PioneerRx main window. Automation surface the workflow drives:
-///   - a menu bar (ControlType.MenuBar by default; stock Menu under --variant wpf-menu)
+///   - a menu bar for item maintenance
+///   - an Actions / Tools / Search / Reports toolbar matching the field build
 ///   - MenuItem "Item" → MenuItem "Rx Item" → opens the "Edit Rx Item" window
 /// Everything else is inert dressing so the window reads as a plausible PMS shell.
 /// </summary>
@@ -19,12 +20,16 @@ public sealed class MainWindow : Window
     internal static string? PersistedNdc;
 
     private EditRxItemWindow? _editWindow;
+    private TopDispensedReportSurface? _top500Surface;
+    private TopDispensedReportParametersWindow? _top500Parameters;
+    private TopDispensedReportViewerWindow? _top500Viewer;
+    private readonly ContentControl _bodyHost = new();
 
     public MainWindow(SimOptions options)
     {
         _options = options;
 
-        Title = "PioneerRx — Better Life Pharmacy #001  [SIMULATOR — synthetic data]";
+        Title = "PioneerRx — Synthetic Test Pharmacy #001  [SIMULATOR — synthetic data]";
         Width = 1180;
         Height = 760;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -52,10 +57,62 @@ public sealed class MainWindow : Window
         menu.Items.Add(new MenuItem { Header = "Patient" });
         menu.Items.Add(new MenuItem { Header = "Rx" });
         menu.Items.Add(itemMenu);
-        menu.Items.Add(new MenuItem { Header = "Reports" });
-        menu.Items.Add(new MenuItem { Header = "Tools" });
+        menu.Items.Add(new MenuItem { Header = "Inventory" });
         DockPanel.SetDock(menu, Dock.Top);
         root.Children.Add(menu);
+
+        // The real PioneerRx shell presents Search as a toolbar dropdown, not
+        // necessarily as a MenuBar/Menu descendant. A WPF Button + ContextMenu
+        // deliberately exposes Search as ControlType.Button and its opened
+        // Rx Binoculars entry as a popup MenuItem.
+        var toolbar = new ToolBar
+        {
+            Background = new SolidColorBrush(Color.FromRgb(0xF4, 0xF5, 0xF7)),
+        };
+        var findRx = new Button
+        {
+            Content = "Find Rx",
+            Padding = new Thickness(10, 3, 10, 3),
+        };
+        findRx.Click += (_, _) => OpenTopDispensedReport();
+        toolbar.Items.Add(findRx);
+        toolbar.Items.Add(new Button { Content = "Actions", Padding = new Thickness(10, 3, 10, 3) });
+        toolbar.Items.Add(new Button { Content = "Tools", Padding = new Thickness(10, 3, 10, 3) });
+        var searchButton = new Button
+        {
+            Content = "Search",
+            Padding = new Thickness(10, 3, 10, 3),
+        };
+        var searchPopup = new ContextMenu();
+        var rxBinoculars = new MenuItem { Header = "Rx Binoculars" };
+        rxBinoculars.Click += (_, _) => OpenTopDispensedReport();
+        searchPopup.Items.Add(rxBinoculars);
+        searchPopup.Items.Add(new MenuItem { Header = "Patient Search" });
+        searchButton.Click += (_, _) =>
+        {
+            searchPopup.PlacementTarget = searchButton;
+            searchPopup.IsOpen = true;
+        };
+        toolbar.Items.Add(searchButton);
+        var reportsButton = new Button
+        {
+            Content = "Reports",
+            Padding = new Thickness(10, 3, 10, 3),
+        };
+        var reportsPopup = new ContextMenu();
+        var topDispensed = new MenuItem { Header = "Top X Most Dispensed" };
+        topDispensed.Click += (_, _) => OpenTopDispensedParameters();
+        reportsPopup.Items.Add(new MenuItem { Header = "Drug Log" });
+        reportsPopup.Items.Add(new MenuItem { Header = "Patient Volume" });
+        reportsPopup.Items.Add(topDispensed);
+        reportsButton.Click += (_, _) =>
+        {
+            reportsPopup.PlacementTarget = reportsButton;
+            reportsPopup.IsOpen = true;
+        };
+        toolbar.Items.Add(reportsButton);
+        DockPanel.SetDock(toolbar, Dock.Top);
+        root.Children.Add(toolbar);
 
         // ── Footer: sim configuration banner (also human-verifiable on the VM) ──
         var footer = new TextBlock
@@ -72,12 +129,13 @@ public sealed class MainWindow : Window
         // ── Inert body ───────────────────────────────────────────────────────
         var body = new TextBlock
         {
-            Text = "Workflow Queue\n\n(simulated shell — drive via Item → Rx Item)",
+            Text = "Workflow Queue\n\n(simulated shell — drive via Item → Rx Item or Search → Rx Binoculars)",
             Margin = new Thickness(24),
             FontSize = 16,
             Foreground = new SolidColorBrush(Color.FromRgb(0x3A, 0x3F, 0x46)),
         };
-        root.Children.Add(body);
+        _bodyHost.Content = body;
+        root.Children.Add(_bodyHost);
 
         Content = root;
     }
@@ -94,5 +152,49 @@ public sealed class MainWindow : Window
         _editWindow = new EditRxItemWindow(_options) { Owner = this };
         _editWindow.Closed += (_, _) => _editWindow = null;
         _editWindow.Show();
+    }
+
+    private void OpenTopDispensedReport()
+    {
+        _top500Surface = new TopDispensedReportSurface();
+        _bodyHost.Content = _top500Surface;
+    }
+
+    private void OpenTopDispensedParameters()
+    {
+        if (_top500Surface is null) return;
+        if (_top500Parameters is { IsLoaded: true })
+        {
+            _top500Parameters.Activate();
+            return;
+        }
+
+        _top500Parameters = new TopDispensedReportParametersWindow(
+            _top500Surface.RecipeFiltersMatch,
+            OpenTopDispensedViewer)
+        {
+            Owner = this,
+        };
+        _top500Parameters.Closed += (_, _) => _top500Parameters = null;
+        _top500Parameters.Show();
+    }
+
+    private void OpenTopDispensedViewer()
+    {
+        if (_top500Surface is null) return;
+        if (_top500Viewer is { IsLoaded: true })
+        {
+            _top500Viewer.Activate();
+            return;
+        }
+
+        _top500Viewer = new TopDispensedReportViewerWindow(
+            _top500Surface.RecipeFiltersMatch,
+            _options.Variant)
+        {
+            Owner = this,
+        };
+        _top500Viewer.Closed += (_, _) => _top500Viewer = null;
+        _top500Viewer.Show();
     }
 }

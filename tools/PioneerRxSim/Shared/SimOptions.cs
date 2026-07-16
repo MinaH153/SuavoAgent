@@ -37,6 +37,13 @@ public enum SimVariant
     /// does FindAllChildren(DataItem) see unrealized rows (and their cells) or silently miss
     /// the true minimum?</summary>
     VirtualDepth,
+
+    /// <summary>Top-500 viewer Excel opens a same-process common Save As surface.</summary>
+    Top500SaveAs,
+
+    /// <summary>Top-500 viewer Excel opens Save As from a second process. Helper must
+    /// reject it instead of automating a foreign desktop surface.</summary>
+    Top500ForeignSaveAs,
 }
 
 public sealed record SimOptions(
@@ -109,8 +116,10 @@ public sealed record SimOptions(
         "wpf-menu" => SimVariant.WpfMenu,
         "currency-cells" => SimVariant.CurrencyCells,
         "virtual-depth" => SimVariant.VirtualDepth,
+        "top500-save-as" => SimVariant.Top500SaveAs,
+        "top500-foreign-save-as" => SimVariant.Top500ForeignSaveAs,
         _ => throw new ArgumentException(
-            $"Unknown variant '{raw}'. Valid: faithful, renamed-cost, slow-grid, glacial-grid, wpf-menu, currency-cells, virtual-depth"),
+            $"Unknown variant '{raw}'. Valid: faithful, renamed-cost, slow-grid, glacial-grid, wpf-menu, currency-cells, virtual-depth, top500-save-as, top500-foreign-save-as"),
     };
 
     public string VariantFlag => Variant switch
@@ -122,6 +131,8 @@ public sealed record SimOptions(
         SimVariant.WpfMenu => "wpf-menu",
         SimVariant.CurrencyCells => "currency-cells",
         SimVariant.VirtualDepth => "virtual-depth",
+        SimVariant.Top500SaveAs => "top500-save-as",
+        SimVariant.Top500ForeignSaveAs => "top500-foreign-save-as",
         _ => "faithful",
     };
 }

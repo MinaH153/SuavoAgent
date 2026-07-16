@@ -487,9 +487,22 @@ public sealed partial class HeartbeatWorker
         // A specific runId that doesn't match the active run is a no-op ack; no runId ⇒ abort whatever's active.
         if (!string.IsNullOrEmpty(requestedRunId) && !string.Equals(activeRunId, requestedRunId, StringComparison.Ordinal))
         {
+            AppendNavigationAbortAudit(
+                cmd,
+                requestedRunId,
+                "requested",
+                "no_matching_run",
+                requestedReason ?? "operator_abort_navigation");
             await AckAsync(true, new { aborted = false, reason = "no_active_run_with_id" }, null);
             return;
         }
+
+        AppendNavigationAbortAudit(
+            cmd,
+            activeRunId ?? cmd.Nonce,
+            "in_progress",
+            "aborting",
+            requestedReason ?? "operator_abort_navigation");
 
         try { activeCts?.Cancel(); }
         catch (Exception ex)
@@ -501,6 +514,24 @@ public sealed partial class HeartbeatWorker
 
         await AckAsync(true, new { aborted = true, run_id = activeRunId, reason = requestedReason }, null);
     }
+
+    private void AppendNavigationAbortAudit(
+        SignedCommand command,
+        string taskId,
+        string fromState,
+        string toState,
+        string reason) =>
+        _stateDb.AppendChainedAuditEntry(new AuditEntry(
+            TaskId: taskId,
+            EventType: "navigation_run_abort_requested",
+            FromState: fromState,
+            ToState: toState,
+            Trigger: "signed_command",
+            CommandId: command.Nonce,
+            RequesterId: "operator",
+            Actor: "operator",
+            SourceComponent: "heartbeat_worker",
+            CaptureReason: reason));
 
     private async Task HandleForceRestartAsync(JsonElement scEl, SignedCommand cmd, CancellationToken ct)
     {

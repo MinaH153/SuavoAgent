@@ -1,6 +1,7 @@
 using SuavoAgent.Helper.Workflows;
 using Xunit;
 using Row = SuavoAgent.Helper.Workflows.PricingGridReader.SupplierRow;
+using PackageRow = SuavoAgent.Helper.Workflows.PricingGridReader.PackageSupplierRow;
 
 namespace SuavoAgent.Helper.Tests;
 
@@ -156,5 +157,41 @@ public sealed class PricingGridReaderTests
         Assert.NotNull(result);
         Assert.Equal("McKesson", result!.Value.supplier);       // per-unit winner, not the pack-cost winner
         Assert.Equal(0.0099m, result.Value.costPerUnit);
+    }
+
+    [Fact]
+    public void Package_cost_lane_uses_exact_cost_and_keeps_per_unit_lane_unchanged()
+    {
+        var perUnit = PricingGridReader.SelectCheapest(new[]
+        {
+            new Row("Real Value Rx", 0.0316m, "Available"),
+            new Row("McKesson", 0.0099m, "Available"),
+        });
+        var package = PricingGridReader.SelectCheapestPackage(new[]
+        {
+            new PackageRow("Real Value Rx", 3.16m, "Available", true, "Rx", false),
+            new PackageRow("McKesson", 4.95m, "Available", true, "Rx", false),
+        });
+
+        Assert.Equal("McKesson", perUnit!.Value.supplier);
+        Assert.Equal(0.0099m, perUnit.Value.costPerUnit);
+        Assert.Equal("Real Value Rx", package!.Value.supplier);
+        Assert.Equal(3.16m, package.Value.packageCost);
+    }
+
+    [Fact]
+    public void Package_cost_lane_rejects_unlinked_non_rx_and_discontinued_rows()
+    {
+        var result = PricingGridReader.SelectCheapestPackage(new[]
+        {
+            new PackageRow("Unlinked", 1.00m, "Available", false, "Rx", false),
+            new PackageRow("Front Shop", 1.10m, "Available", true, "OTC", false),
+            new PackageRow("Discontinued", 1.20m, "Available", true, "Rx", true),
+            new PackageRow("Unavailable", 1.30m, "Unavailable", true, "Rx", false),
+            new PackageRow("Eligible", 2.60m, "Active", true, "Rx", false),
+        });
+
+        Assert.Equal("Eligible", result!.Value.supplier);
+        Assert.Equal(2.60m, result.Value.packageCost);
     }
 }

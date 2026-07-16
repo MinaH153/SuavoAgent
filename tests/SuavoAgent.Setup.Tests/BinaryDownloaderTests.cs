@@ -65,6 +65,37 @@ public sealed class BinaryDownloaderTests
     }
 
     [Fact]
+    public void Rotation_registry_accepts_checksum_signed_by_v2()
+    {
+        using var v1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var v2 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var checksums = System.Text.Encoding.UTF8.GetBytes("abc  SuavoAgent.Core.exe\n");
+        var signature = v2.SignData(
+            checksums,
+            HashAlgorithmName.SHA256,
+            DSASignatureFormat.Rfc3279DerSequence);
+        var roots = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [SuavoAgent.Contracts.Maintenance.OtaUpdateTrust.LegacyV1KeyId] =
+                Convert.ToBase64String(v1.ExportSubjectPublicKeyInfo()),
+            [SuavoAgent.Contracts.Maintenance.OtaUpdateTrust.CurrentV2KeyId] =
+                Convert.ToBase64String(v2.ExportSubjectPublicKeyInfo()),
+        };
+
+        Assert.True(BinaryDownloader.VerifyChecksumSignature(checksums, signature, roots));
+        Assert.True(BinaryDownloader.VerifyChecksumSignatureForKeyId(
+            SuavoAgent.Contracts.Maintenance.OtaUpdateTrust.CurrentV2KeyId,
+            checksums,
+            signature,
+            roots));
+        Assert.False(BinaryDownloader.VerifyChecksumSignatureForKeyId(
+            SuavoAgent.Contracts.Maintenance.OtaUpdateTrust.LegacyV1KeyId,
+            checksums,
+            signature,
+            roots));
+    }
+
+    [Fact]
     public async Task Metadata_header_over_cap_is_rejected_before_body_read()
     {
         var content = new TrackingContent([1]);

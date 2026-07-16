@@ -1,6 +1,7 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using SuavoAgent.Adapters.PioneerRx;
 using SuavoAgent.Adapters.PioneerRx.Pricing;
 using SuavoAgent.Contracts.Ipc;
@@ -19,11 +20,20 @@ public sealed record PricingJobExecutionResult(
     PricingJobProgress Progress,
     string Mode,
     bool Ok,
-    string? Error);
+    string? Error,
+    [property: JsonIgnore] string? DeliverablePath = null);
 
 public interface IPricingJobExecutor
 {
     Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct);
+}
+
+public interface IProgressReportingPricingJobExecutor : IPricingJobExecutor
+{
+    Task<PricingJobExecutionResult> RunAsync(
+        PricingJobSpec spec,
+        Func<PricingJobLocalProgress, CancellationToken, ValueTask> reportProgress,
+        CancellationToken ct);
 }
 
 public interface IRecoverablePricingJobExecutor
@@ -126,6 +136,11 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor, IRecoverab
 
     public async Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
     {
+        if (spec.CostBasis != PricingApprovalContract.CostPerUnitBasis)
+        {
+            _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+            return Failed(spec, "sql pricing requires cost_per_unit");
+        }
         PricingLookupFactoryResult lookupResult;
         try
         {
@@ -199,7 +214,8 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor, IRecoverab
             DateTimeOffset.UtcNow,
             commandId,
             proposed.ExcelPath,
-            _trustedApprovalKeys);
+            _trustedApprovalKeys,
+            PricingApprovalContract.CostPerUnitBasis);
 
     public PricingJobSpec? GetRecoverableSpecForCommand(string commandId) =>
         _db.GetRecoverablePricingJob(
@@ -209,7 +225,8 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor, IRecoverab
             _options.MachineFingerprint ?? "",
             DateTimeOffset.UtcNow,
             commandId,
-            trustedApprovalKeys: _trustedApprovalKeys);
+            trustedApprovalKeys: _trustedApprovalKeys,
+            expectedCostBasis: PricingApprovalContract.CostPerUnitBasis);
 
     private static PricingJobExecutionResult Failed(
         PricingJobSpec spec,
@@ -433,7 +450,9 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
 /// <see cref="AgentOptions.PricingThrottleMs"/>; recommended 1500 ms for UIA to stay below
 /// any anti-automation heuristic the vendor may apply.
 /// </summary>
-public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor, IRecoverablePricingJobExecutor
+public sealed partial class UiaFirstPricingJobExecutor :
+    IProgressReportingPricingJobExecutor,
+    IRecoverablePricingJobExecutor
 {
     private readonly PricingJobRunner _runner;
     private readonly IIpcCommandClient _commandClient;
@@ -443,6 +462,7 @@ public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor, IRecoverab
     private readonly AgentOptions _options;
     private readonly IReadOnlyDictionary<string, string> _trustedApprovalKeys;
     private readonly IPioneerRxAutonomyIdentityProvider? _pmsIdentityProvider;
+    private readonly PricingUiaActivityGate? _activityGate;
 
     public UiaFirstPricingJobExecutor(
         PricingJobRunner runner,
@@ -471,7 +491,8 @@ public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor, IRecoverab
         ILogger<UiaFirstPricingJobExecutor> logger,
         IOptions<AgentOptions> options,
         IPioneerRxAutonomyIdentityProvider? pmsIdentityProvider,
-        IReadOnlyDictionary<string, string> trustedApprovalKeys)
+        IReadOnlyDictionary<string, string> trustedApprovalKeys,
+        PricingUiaActivityGate? activityGate = null)
     {
         _runner = runner;
         _commandClient = commandClient;
@@ -482,13 +503,38 @@ public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor, IRecoverab
         _pmsIdentityProvider = pmsIdentityProvider;
         _trustedApprovalKeys = trustedApprovalKeys ??
             throw new ArgumentNullException(nameof(trustedApprovalKeys));
+        _activityGate = activityGate;
     }
 
-    public async Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
+    public Task<PricingJobExecutionResult> RunAsync(
+        PricingJobSpec spec,
+        CancellationToken ct) => RunCoreAsync(spec, null, ct);
+
+    public Task<PricingJobExecutionResult> RunAsync(
+        PricingJobSpec spec,
+        Func<PricingJobLocalProgress, CancellationToken, ValueTask> reportProgress,
+        CancellationToken ct) => RunCoreAsync(
+            spec,
+            reportProgress ?? throw new ArgumentNullException(nameof(reportProgress)),
+            ct);
+
+    private async Task<PricingJobExecutionResult> RunCoreAsync(
+        PricingJobSpec spec,
+        Func<PricingJobLocalProgress, CancellationToken, ValueTask>? reportProgress,
+        CancellationToken ct)
     {
-        var modality = _options.PricingExecutor == PricingExecutorMode.VisionFirst
-            ? "vision"
-            : "uia";
+        using var activityLease = _activityGate is null
+            ? null
+            : await _activityGate.EnterExecutionAsync(ct).ConfigureAwait(false);
+        string? deliverablePath = null;
+        // Package Cost is a distinct UIA-only signed contract. A global
+        // VisionFirst preference may still enrich CPU pricing, but it can
+        // never relabel the package lane's modality or bypass exact UIA reads.
+        var modality = spec.CostBasis == PricingApprovalContract.PackageCostBasis
+            ? "uia"
+            : _options.PricingExecutor == PricingExecutorMode.VisionFirst
+                ? "vision"
+                : "uia";
 
         // Authoritative live-actuation preflight. Pricing has no simulation path:
         // dry-run therefore blocks rather than pretending the PMS was navigated.
@@ -584,7 +630,8 @@ public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor, IRecoverab
                 modality,
                 pmsFingerprint,
                 screenContext.ScreenSignatureV1,
-                activePatches);
+                activePatches,
+                spec.CostBasis);
         }
         catch (ArgumentException)
         {
@@ -633,13 +680,16 @@ public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor, IRecoverab
                 activePatches,
                 pmsFingerprint,
                 screenContext.ScreenSignatureV1,
-                ct);
+                ct,
+                reportProgress,
+                path => deliverablePath = path);
             var ok = progress.Status == PricingJobStatus.Completed;
             return new PricingJobExecutionResult(
                 progress,
                 Mode: modality,
                 Ok: ok,
-                Error: ok ? null : $"pricing job ended with status {progress.Status} - see agent logs");
+                Error: ok ? null : $"pricing job ended with status {progress.Status} - see agent logs",
+                DeliverablePath: ok ? deliverablePath : null);
         }
         catch (OperationCanceledException)
         {
@@ -661,72 +711,6 @@ public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor, IRecoverab
         }
     }
 
-    public PricingJobSpec? GetRecoverableSpec(PricingJobSpec proposed, string? commandId) =>
-        _db.GetRecoverablePricingJob(
-            _options.PricingExecutor == PricingExecutorMode.VisionFirst ? "vision" : "uia",
-            _options.PharmacyId ?? "",
-            _options.AgentId ?? "",
-            _options.MachineFingerprint ?? "",
-            DateTimeOffset.UtcNow,
-            commandId,
-            proposed.ExcelPath,
-            _trustedApprovalKeys);
-
-    public PricingJobSpec? GetRecoverableSpecForCommand(string commandId) =>
-        _db.GetRecoverablePricingJob(
-            _options.PricingExecutor == PricingExecutorMode.VisionFirst ? "vision" : "uia",
-            _options.PharmacyId ?? "",
-            _options.AgentId ?? "",
-            _options.MachineFingerprint ?? "",
-            DateTimeOffset.UtcNow,
-            commandId,
-            trustedApprovalKeys: _trustedApprovalKeys);
-
-    private async Task<PricingScreenObservationContext?> CaptureScreenContextAsync(
-        CancellationToken ct)
-    {
-        var id = Guid.NewGuid().ToString("N");
-        IpcResponse? response;
-        try
-        {
-            response = await _commandClient.SendAsync(
-                new IpcRequest(
-                    id,
-                    IpcCommands.PricingObservationContext,
-                    1,
-                    Data: null),
-                TimeSpan.FromSeconds(10),
-                ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogSafeWarning(ex);
-            return null;
-        }
-
-        if (response is null || response.Id != id ||
-            response.Command != IpcCommands.PricingObservationContext ||
-            response.Status != IpcStatus.Ok || response.Error is not null ||
-            response.Data is null)
-            return null;
-        try
-        {
-            var parsed = response.Data.Value.Deserialize<PricingScreenObservationContext>();
-            return parsed is { ProcessId: > 0, ScreenSignatureV1.Length: 64 } &&
-                   parsed.ScreenSignatureV1.All(ch =>
-                       ch is >= '0' and <= '9' or >= 'a' and <= 'f')
-                ? parsed
-                : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
 }
 
 internal static class PricingActuationPreflight

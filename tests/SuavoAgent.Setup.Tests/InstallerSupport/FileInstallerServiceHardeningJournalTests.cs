@@ -8,6 +8,7 @@ namespace SuavoAgent.Setup.Tests.InstallerSupport;
 
 public sealed class FileInstallerServiceHardeningJournalTests : IDisposable
 {
+    private static readonly string InvocationId = new('a', 64);
     private readonly string _root = Path.Combine(
         Path.GetTempPath(),
         "suavo-msi-hardening-journal-tests",
@@ -29,12 +30,14 @@ public sealed class FileInstallerServiceHardeningJournalTests : IDisposable
             });
         var snapshots = Snapshots();
 
-        journal.Save(snapshots);
+        journal.SavePending(InvocationId, snapshots);
         var loaded = journal.Load();
 
         Assert.True(secured);
         Assert.NotNull(loaded);
-        Assert.Equal(snapshots, loaded);
+        Assert.Equal(InvocationId, loaded?.InvocationId);
+        Assert.Equal(InstallerTransactionJournalPhase.Pending, loaded?.Phase);
+        Assert.Equal(snapshots, loaded?.Snapshots);
         Assert.InRange(new FileInfo(path).Length, 1, FileInstallerServiceHardeningJournal.MaximumBytes);
         Assert.False(File.Exists(path + ".tmp"));
     }
@@ -45,10 +48,10 @@ public sealed class FileInstallerServiceHardeningJournalTests : IDisposable
         Directory.CreateDirectory(_root);
         var path = Path.Combine(_root, "rollback.json");
         var journal = new FileInstallerServiceHardeningJournal(path, static _ => { });
-        journal.Save(Snapshots());
+        journal.SavePending(InvocationId, Snapshots());
         var original = File.ReadAllBytes(path);
 
-        Assert.Throws<IOException>(() => journal.Save(Snapshots()));
+        Assert.Throws<IOException>(() => journal.SavePending(InvocationId, Snapshots()));
         Assert.Equal(original, File.ReadAllBytes(path));
     }
 
@@ -61,7 +64,8 @@ public sealed class FileInstallerServiceHardeningJournalTests : IDisposable
             path,
             static _ => throw new InvalidDataException("Injected reparse rejection."));
 
-        Assert.Throws<InvalidDataException>(() => journal.Save(Snapshots()));
+        Assert.Throws<InvalidDataException>(() =>
+            journal.SavePending(InvocationId, Snapshots()));
         Assert.False(File.Exists(path));
         Assert.False(File.Exists(path + ".tmp"));
     }
@@ -82,10 +86,36 @@ public sealed class FileInstallerServiceHardeningJournalTests : IDisposable
 
         File.WriteAllText(
             path,
-            "{\"schemaVersion\":1,\"services\":[],\"unexpected\":true}",
+            "{\"schemaVersion\":2,\"invocationId\":\"" + InvocationId +
+            "\",\"phase\":\"pending\",\"services\":[],\"unexpected\":true}",
             new UTF8Encoding(false));
         Assert.ThrowsAny<Exception>(() => journal.Load());
         Assert.True(File.Exists(path));
+    }
+
+    [Fact]
+    public void Commit_phase_is_durable_and_delete_requires_exact_identity_and_phase()
+    {
+        Directory.CreateDirectory(_root);
+        var path = Path.Combine(_root, "rollback.json");
+        var journal = new FileInstallerServiceHardeningJournal(path, static _ => { });
+        journal.SavePending(InvocationId, Snapshots());
+
+        journal.MarkCommitted(InvocationId);
+
+        Assert.Equal(
+            InstallerTransactionJournalPhase.Committed,
+            journal.Load()?.Phase);
+        Assert.Throws<InvalidDataException>(() => journal.Delete(
+            new string('b', 64),
+            InstallerTransactionJournalPhase.Committed));
+        Assert.Throws<InvalidDataException>(() => journal.Delete(
+            InvocationId,
+            InstallerTransactionJournalPhase.Pending));
+        Assert.True(File.Exists(path));
+
+        journal.Delete(InvocationId, InstallerTransactionJournalPhase.Committed);
+        Assert.False(File.Exists(path));
     }
 
     [Fact]

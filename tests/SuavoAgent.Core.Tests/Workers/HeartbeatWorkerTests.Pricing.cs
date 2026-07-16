@@ -27,6 +27,37 @@ namespace SuavoAgent.Core.Tests.Workers;
 
 public partial class HeartbeatWorkerTests
 {
+    [Fact]
+    public async Task GeneratedPricingV2_BuildsLocalWorklist_ThenUsesSignedExecutor()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.xlsx");
+        await File.WriteAllTextAsync(path, "local aggregate worklist");
+        try
+        {
+            const string commandId = "30000000-0000-4000-8000-000000000099";
+            _worklistBuilder.Result = TopDispensedWorklistBuildResult.Success(
+                path,
+                37);
+            var response = BuildAuthorizedGeneratedPricingResponseJson(
+                _db,
+                commandId);
+
+            await InvokeProcessAsync(response);
+            await _pricingJobExecutor.Started.Task.WaitAsync(
+                TimeSpan.FromSeconds(5));
+
+            Assert.Equal(commandId, Assert.Single(_worklistBuilder.CommandIds));
+            var spec = Assert.Single(_pricingJobExecutor.Specs);
+            Assert.Equal(path, spec.ExcelPath);
+            Assert.NotNull(spec.ApprovalId);
+            Assert.NotNull(spec.GrantDigest);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
     // ── Command Dispatch: run_pricing_job ──
 
     [Theory]
@@ -84,6 +115,7 @@ public partial class HeartbeatWorkerTests
             .AddSingleton(db)
             .AddSingleton<IPricingJobExecutor>(executor)
             .AddSingleton(new AutopilotRunCoordinator())
+            .AddSingleton(_observationAuthority)
             .AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance)
             .AddSingleton(typeof(ILogger<>), typeof(NullLogger<>))
             .BuildServiceProvider();
@@ -148,6 +180,7 @@ public partial class HeartbeatWorkerTests
             .AddSingleton<IPricingJobExecutor>(executor)
             .AddSingleton(new AutopilotRunCoordinator())
             .AddSingleton(outbox)
+            .AddSingleton(_observationAuthority)
             .AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance)
             .AddSingleton(typeof(ILogger<>), typeof(NullLogger<>))
             .BuildServiceProvider();
@@ -714,6 +747,27 @@ public partial class HeartbeatWorkerTests
         payload["approvalId"] = authority.ApprovalId;
         payload["grantDigest"] = authority.ApprovalDigest;
         return BuildResponseJson("run_pricing_job", payload);
+    }
+
+    private JsonElement BuildAuthorizedGeneratedPricingResponseJson(
+        AgentStateDb db,
+        string commandId)
+    {
+        var authority = PricingTestAuthority.InstallAuthority(
+            db,
+            PricingTestAuthority.Contract(),
+            pharmacyId: TestPharmacyId,
+            agentId: TestAgentId,
+            machineFingerprint: TestFingerprint);
+        return BuildResponseJson(
+            "find_and_run_pricing_job",
+            new JsonObject
+            {
+                ["pack"] = "pharmacy_rx_generate_v2",
+                ["commandId"] = commandId,
+                ["approvalId"] = authority.ApprovalId,
+                ["grantDigest"] = authority.ApprovalDigest,
+            });
     }
 
 }

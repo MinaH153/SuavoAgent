@@ -42,6 +42,8 @@ internal static class PricingResultContentPolicy
     internal static SupplierPriceResult NormalizeForPersistence(
         SupplierPriceResult result)
     {
+        if (!PricingApprovalContract.IsSupportedCostBasis(result.CostBasis))
+            throw new InvalidOperationException("pricing_result_cost_basis_invalid");
         var selectorObservationTotal =
             (long)result.OmittedSelectorObservations +
             (result.Observations?.Count ?? 0);
@@ -66,16 +68,36 @@ internal static class PricingResultContentPolicy
                 Observations: null,
                 BaselineCostPerUnit: null,
                 Quantity: null,
-                OmittedSelectorObservations: (int)selectorObservationTotal);
+                OmittedSelectorObservations: (int)selectorObservationTotal,
+                PackageCost: null,
+                CostBasis: result.CostBasis);
         }
 
         var sourced = QuantizeUnitCost(result.CostPerUnit);
+        var package = QuantizeUnitCost(result.PackageCost);
         var baseline = QuantizeUnitCost(result.BaselineCostPerUnit);
         var quantity = QuantizeQuantity(result.Quantity);
-        var capacityReviewRequired =
-            result.CostPerUnit is not null && sourced is null ||
-            result.BaselineCostPerUnit is not null && baseline is null ||
-            result.Quantity is not null && quantity is null;
+        var packageBasis = result.CostBasis == PricingApprovalContract.PackageCostBasis;
+        var capacityReviewRequired = packageBasis
+            ? result.PackageCost is not null && package is null ||
+              result.CostPerUnit is not null ||
+              result.BaselineCostPerUnit is not null ||
+              result.Quantity is not null
+            : result.CostPerUnit is not null && sourced is null ||
+              result.PackageCost is not null ||
+              result.BaselineCostPerUnit is not null && baseline is null ||
+              result.Quantity is not null && quantity is null;
+
+        if (packageBasis)
+        {
+            sourced = null;
+            baseline = null;
+            quantity = null;
+        }
+        else
+        {
+            package = null;
+        }
 
         if (!capacityReviewRequired &&
             baseline is not null && sourced is not null && quantity is not null &&
@@ -107,6 +129,7 @@ internal static class PricingResultContentPolicy
         {
             Ndc = canonical,
             CostPerUnit = sourced,
+            PackageCost = package,
             BaselineCostPerUnit = baseline,
             Quantity = quantity,
             ErrorMessage = capacityReviewRequired
@@ -129,7 +152,10 @@ internal static class PricingResultContentPolicy
         return rounded <= MaximumQuantity ? rounded : null;
     }
 
-    internal static SupplierPriceResult InvalidNdcRow(string jobId, int rowIndex) =>
+    internal static SupplierPriceResult InvalidNdcRow(
+        string jobId,
+        int rowIndex,
+        string costBasis = PricingApprovalContract.CostPerUnitBasis) =>
         NormalizeForPersistence(new SupplierPriceResult(
             jobId,
             rowIndex,
@@ -137,7 +163,8 @@ internal static class PricingResultContentPolicy
             Found: false,
             SupplierName: null,
             CostPerUnit: null,
-            ErrorMessage: InvalidNdcReasonCode));
+            ErrorMessage: InvalidNdcReasonCode,
+            CostBasis: costBasis));
 
     internal static string? CanonicalNdcOrNull(string? value)
     {

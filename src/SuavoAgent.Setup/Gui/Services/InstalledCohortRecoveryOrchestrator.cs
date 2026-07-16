@@ -45,12 +45,26 @@ internal static class InstalledCohortRecoveryOrchestrator
                         DefaultInstallDirectory,
                         DefaultDataDirectory,
                         TimeSpan.FromSeconds(90)),
-                CompleteAuthority: () =>
-                    InitialCredentialPersister.CompleteRecoveredPendingAuthority(
-                        DefaultDataDirectory),
+                CompleteAuthority: CompleteRecoveredAuthority,
                 AbortAuthority: () =>
                     InitialCredentialPersister.ReconcilePendingAuthorityWithoutTransaction(
                         DefaultDataDirectory)));
         return transaction.Recover();
+    }
+
+    private static bool CompleteRecoveredAuthority()
+    {
+        var identity = Release1InstalledReceiptIdentityReader.TryRead(
+            DefaultInstallDirectory);
+        if (identity is null) return false;
+        var receipt = Release1InstallReceiptWriter.CreateProduction().Write(
+            DefaultInstallDirectory,
+            DefaultDataDirectory,
+            identity.ReleaseTag,
+            identity.MachineFingerprint,
+            identity.MaintenanceKeyId);
+        return receipt.Succeeded &&
+               InitialCredentialPersister.CompleteRecoveredPendingAuthority(
+                   DefaultDataDirectory);
     }
 }

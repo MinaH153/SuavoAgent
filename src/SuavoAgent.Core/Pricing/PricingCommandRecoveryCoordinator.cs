@@ -21,6 +21,7 @@ internal sealed class PricingCommandRecoveryCoordinator
     private readonly ILogger<PricingCommandRecoveryCoordinator> _logger;
     private readonly IReadOnlyDictionary<string, string> _trustedCommandKeys;
     private readonly TimeProvider _timeProvider;
+    private readonly IPricedWorkbookPublisher? _pricedWorkbookPublisher;
 
     internal PricingCommandRecoveryCoordinator(
         AgentStateDb db,
@@ -30,7 +31,8 @@ internal sealed class PricingCommandRecoveryCoordinator
         Func<string?> currentScopeDigest,
         ILogger<PricingCommandRecoveryCoordinator> logger,
         IReadOnlyDictionary<string, string>? trustedCommandKeys = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IPricedWorkbookPublisher? pricedWorkbookPublisher = null)
     {
         _db = db;
         _executor = executor;
@@ -41,6 +43,7 @@ internal sealed class PricingCommandRecoveryCoordinator
         _trustedCommandKeys = trustedCommandKeys ??
             RemoteCommandTrust.CreateProductionKeyRegistry();
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _pricedWorkbookPublisher = pricedWorkbookPublisher;
     }
 
     internal async Task RecoverAsync(CancellationToken ct)
@@ -183,9 +186,44 @@ internal sealed class PricingCommandRecoveryCoordinator
                             execution.Progress.TotalItems,
                             execution.Progress.CompletedItems,
                             execution.Progress.FailedItems,
-                            "pricing_job_failed"),
+                            "pricing_job_failed",
+                            spec.CostBasis),
                         ct).ConfigureAwait(false);
                     continue;
+                }
+
+                if (string.Equals(
+                        spec.CostBasis,
+                        PricingApprovalContract.PackageCostBasis,
+                        StringComparison.Ordinal))
+                {
+                    if (_pricedWorkbookPublisher is null ||
+                        string.IsNullOrWhiteSpace(execution.DeliverablePath))
+                    {
+                        await TerminalizeEarlyAsync(
+                                intent.CommandId,
+                                "pricing_output_publication_failed",
+                                ct)
+                            .ConfigureAwait(false);
+                        continue;
+                    }
+                    var publication = await _pricedWorkbookPublisher.PublishAsync(
+                            intent.CommandId,
+                            execution.DeliverablePath,
+                            ct)
+                        .ConfigureAwait(false);
+                    if (!publication.Published)
+                    {
+                        _logger.LogWarning(
+                            "core.pricing.recovery_output_publication_failed code={Code}",
+                            publication.Code);
+                        await TerminalizeEarlyAsync(
+                                intent.CommandId,
+                                "pricing_output_publication_failed",
+                                ct)
+                            .ConfigureAwait(false);
+                        continue;
+                    }
                 }
 
                 if (_uploader is null)
@@ -232,7 +270,8 @@ internal sealed class PricingCommandRecoveryCoordinator
                 var terminal = PricingTerminalAckPolicy.FromResultSync(
                     receipt,
                     spec.JobId,
-                    execution);
+                    execution,
+                    spec.CostBasis);
                 if (terminal is not null)
                 {
                     await _terminalOutbox.StageAndTryDeliverAsync(

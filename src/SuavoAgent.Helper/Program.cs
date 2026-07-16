@@ -12,6 +12,7 @@ using SuavoAgent.Helper.SystemObservers;
 using SuavoAgent.Helper.SystemObservers.BrowserConnector;
 using SuavoAgent.Helper.Workflows;
 using SuavoAgent.Contracts.Models;
+using SuavoAgent.Contracts.Security;
 
 // Diagnostic Mesh: Wire.AttachUnhandledHooks MUST be the literal first
 // executable statement (spec §7 PR 4 wire-ordering invariant; verified
@@ -34,18 +35,42 @@ Wire.AttachUnhandledHooks(WireComponent.Helper, new WireOptions
     EnableSentry = true,
 });
 
+if (!ObservationActivationProcessGuard.TryStartProduction(
+        out var activationProcessGuard,
+        out _)
+    || activationProcessGuard is null)
+{
+    Environment.ExitCode = ObservationActivationProcessGuard.AuthorityRequiredExitCode;
+    return;
+}
+await using var activationGuard = activationProcessGuard;
+
+// Never replay envelopes collected under the retired workstation-wide scope.
+ObservationSpool.RetireProductionChannel(BehavioralEventChannels.System);
+
 if (BrowserNativeMessagingEntryPoint.IsCandidate(args))
 {
+    if (!ObservationActivationPolicy.AllowsBrowserObservation)
+    {
+        Environment.ExitCode = ObservationActivationProcessGuard.ScopeDeniedExitCode;
+        return;
+    }
     Environment.ExitCode = await BrowserNativeMessagingEntryPoint.RunAsync(
         args,
         Console.OpenStandardInput(),
         Console.OpenStandardOutput(),
-        CancellationToken.None);
+        activationGuard.AuthorityLostToken);
     return;
 }
 
-if (UiaSnapshotWorkerMode.TryRun(args, Console.Out, out var uiaWorkerExitCode))
+if (UiaSnapshotWorkerMode.IsCandidate(args))
 {
+    if (!ObservationActivationPolicy.AllowsMultiApplicationObservation)
+    {
+        Environment.ExitCode = ObservationActivationProcessGuard.ScopeDeniedExitCode;
+        return;
+    }
+    _ = UiaSnapshotWorkerMode.TryRun(args, Console.Out, out var uiaWorkerExitCode);
     Environment.ExitCode = uiaWorkerExitCode;
     return;
 }
@@ -68,7 +93,8 @@ try
 {
     Log.Information("SuavoAgent.Helper starting");
 
-    var cts = new CancellationTokenSource();
+    using var cts = CancellationTokenSource.CreateLinkedTokenSource(
+        activationGuard.AuthorityLostToken);
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
     // H-10: resolve pipe name from --pipe arg (written by Core, passed by Broker).
@@ -111,7 +137,6 @@ try
     // including the legacy PricingWorkflow UIA path. Construct it before any
     // workflow so pricing cannot accidentally create an ungated side channel.
     var actuationConfig = ActuationBootstrap.LoadConfig(Log.Logger);
-    SuavoAgent.Contracts.Ipc.ActuationAllowlistedSandboxApps.LoadAndExtendFromConfig();
     var actuationGate = new ActuationGate(actuationConfig, Log.Logger);
     // Load the strict registry document once. Pricing and observation consume
     // this exact immutable snapshot; malformed state escapes this scope and
@@ -134,15 +159,6 @@ try
     // and carries no text labels or screen content across IPC.
     var intentCursor = SuavoAgent.Helper.IntentCursor.IntentCursorBootstrap.Build(Log.Logger);
 
-    // File discovery — runs in Helper (interactive user session) because
-    // Core runs as LocalSystem and doesn't see the user's Desktop/
-    // Documents. Heuristic-only ranker in v3.13; LLM tier plugs in later.
-    var fileLocator = new SuavoAgent.Core.Discovery.FileLocatorService(
-        enumerator: new SuavoAgent.Core.Discovery.DefaultFileEnumerator(),
-        scorer: new SuavoAgent.Core.Discovery.FilenameHeuristicScorer(),
-        sampler: new SuavoAgent.Core.Discovery.TabularShapeSampler(),
-        ranker: new SuavoAgent.Core.Discovery.HeuristicOnlyRanker());
-
     // Actuation runtime — Phase 5.2 sandbox actuation chain. Disabled +
     // dry-run by default; flipped per-pharmacy via appsettings or operator
     // override. Owns the WH_KEYBOARD_LL/WH_MOUSE_LL hooks and the
@@ -152,7 +168,6 @@ try
     SuavoAgent.Helper.Presence.PresencePreferenceStore? presenceStore = null;
     SuavoAgent.Helper.Presence.PresenceController? presenceController = null;
     UiaLabelResolver? uiaResolver = null;
-    ActuationCommandHandler? actuationHandler = null;
     PioneerRxCommandHandler? pioneerRxHandler = null;
     ActuationRuntime? actuationRuntime = null;
     HoneytokenWatcher? honeytokenWatcher = null;
@@ -188,7 +203,6 @@ try
             presenceController,
             pioneerRxProcessTrust,
             uiaResolver.ReadFocusedElementValue);
-        actuationHandler = new ActuationCommandHandler(actuationGate, sendInputDriver, uiaResolver, actuationConfig, Log.Logger, presence: presenceController);
         pioneerRxHandler = new PioneerRxCommandHandler(
             actuationGate,
             sendInputDriver,
@@ -197,8 +211,14 @@ try
             pioneerRxConfig,
             pioneerRxProcessTrust,
             Log.Logger);
-        var observer = new UserInputObserver(actuationGate, Log.Logger,
-            onUserInput: () => presenceController?.OnHumanInput()); // takeover → Observing
+        var observer = new UserInputObserver(
+            actuationGate,
+            Log.Logger,
+            onUserInput: () => presenceController?.OnHumanInput(), // takeover → Observing
+            isApprovedPioneerRxForeground: () =>
+                SuavoAgent.Helper.SystemObservers.ForegroundGuard.IsPidForeground(
+                    pioneer.ProcessId)
+                && pioneer.VerifyAttachedProcessIdentity().Trusted);
         var hotkey = new HotkeyKillSwitch(actuationGate, Log.Logger, requireRegistration: actuationConfig.RequireKillSwitchHotkey);
         actuationRuntime = new ActuationRuntime(actuationGate, observer, hotkey, Log.Logger);
         actuationRuntime.Start();
@@ -241,6 +261,15 @@ try
         Log.Logger,
         visionPricingReader,
         sendInputDriver);
+    var top500ProgressSink = new CoreTop500ProgressSink(ipcClient, Log.Logger);
+    var top500ExportWorkflow = new PioneerRxTop500ExportWorkflow(
+        pioneer,
+        actuationGate,
+        Log.Logger,
+        sendInputDriver,
+        progressSink: top500ProgressSink);
+    using var pricedWorkbookStore = new PioneerRxPricedWorkbookStore(
+        PioneerRxTop500ArtifactStore.ResolveDefaultDocumentsDirectory());
 
     // Codex-pet-style pharmacist panda: a native, PHI-free ambient surface
     // backed only by real Helper signals. It starts Offline until Core and the
@@ -266,16 +295,20 @@ try
     // capture_screen's HIPAA gate stays accurate as PMS detaches/re-attaches.
     using var cmdServer = new IpcCommandServer(
         cmdPipeName, pricingWorkflow, Log.Logger, visionGenerationGate,
-        visionController, fileLocator,
+        visionController, locator: null,
         isPmsForeground: () => SuavoAgent.Helper.SystemObservers.ForegroundGuard
             .IsPidForeground(pioneer.ProcessId),
         intentCursor: intentCursor,
-        actuation: actuationHandler,
+        actuation: null,
         pioneerRx: pioneerRxHandler,
-        sandboxDriver: sendInputDriver, // source of the launch-established sandbox HWND for window-scoped capture
+        sandboxDriver: null,
         relaxClientPathValidation: actuationConfig.RelaxIpcClientPathValidation,
         presenceStore: presenceStore,
-        visionRuntimeStatus: visionRuntime.RuntimeStatus); // authenticated ping → Core/dashboard
+        visionRuntimeStatus: visionRuntime.RuntimeStatus,
+        allowNonPioneerRxCapabilities:
+            ObservationActivationPolicy.AllowsMultiApplicationObservation,
+        top500Export: top500ExportWorkflow,
+        pricedWorkbookStore: pricedWorkbookStore); // authenticated ping → Core/dashboard
     cmdServer.Start(cts.Token);
 
     const int maxAttachRetries = 30; // 30 × 10s = 5 minutes of retrying
@@ -284,7 +317,6 @@ try
 
     // Durable buffers outlive PMS hook detach/reattach for crash-safe replay.
     BehavioralEventBuffer? eventBuffer = null;
-    BehavioralEventBuffer? systemBuffer = null;
     UiaTreeObserver? treeObserver = null;
     UiaInteractionObserver? interactionObserver = null;
     KeyboardCategoryHook? keyboardHook = null;
@@ -293,7 +325,6 @@ try
     Thread? keyboardPumpThread = null;
     bool behavioralObserversStarted = false;
     string pmsObservationKey = "";
-    string systemObservationKey = "";
 
     async Task<ObservationKeyLease> FetchObservationLeaseAsync(string? currentLeaseId = null)
     {
@@ -478,7 +509,6 @@ try
         behavioralObserversStarted = false;
     }
 
-    // ── System observers — always running, no PMS dependency ──
     var freshObservationLease = await FetchObservationLeaseAsync();
     try
     {
@@ -494,36 +524,15 @@ try
             spool: ObservationSpool.CreateProduction(BehavioralEventChannels.Pms),
             onPersistenceFault: observationStatusReporter.PersistenceFailed,
             onQuarantine: observationStatusReporter.Quarantined);
-        systemBuffer = new BehavioralEventBuffer(
-            capacity: 200,
-            batchSize: 20,
-            channel: BehavioralEventChannels.System,
-            flushAction: (batch, cancellationToken) => SendObservationBatchAsync(
-                IpcCommands.SystemEvents,
-                batch,
-                cancellationToken),
-            activeLease: freshObservationLease,
-            spool: ObservationSpool.CreateProduction(BehavioralEventChannels.System),
-            onPersistenceFault: observationStatusReporter.PersistenceFailed,
-            onQuarantine: observationStatusReporter.Quarantined);
-
-        // Replay old envelopes before observation; quarantine never rebinds.
+        // Replay only the approved PioneerRx stream before observation.
         using var recoveryDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
         await eventBuffer.FlushAsync(recoveryDeadline.Token);
-        await systemBuffer.FlushAsync(recoveryDeadline.Token);
         if (!string.Equals(
                 eventBuffer.ActiveLease?.LeaseId,
                 freshObservationLease.LeaseId,
                 StringComparison.Ordinal))
         {
             eventBuffer.RotateLease(freshObservationLease);
-        }
-        if (!string.Equals(
-                systemBuffer.ActiveLease?.LeaseId,
-                freshObservationLease.LeaseId,
-                StringComparison.Ordinal))
-        {
-            systemBuffer.RotateLease(freshObservationLease);
         }
     }
     catch (Exception ex) when (ex is BehavioralEventPersistenceException or OperationCanceledException)
@@ -536,10 +545,8 @@ try
     }
 
     pmsObservationKey = eventBuffer.ActiveLease!.KeyMaterial;
-    systemObservationKey = systemBuffer.ActiveLease!.KeyMaterial;
     string CurrentObservationSpoolStatus() =>
-        eventBuffer.SnapshotTelemetry().QuarantinedBatches
-        + systemBuffer.SnapshotTelemetry().QuarantinedBatches > 0
+        eventBuffer.SnapshotTelemetry().QuarantinedBatches > 0
             ? "observation_spool_quarantined"
             : "observation_spool_healthy";
     await observationStatusReporter.ReportCurrentAsync(CurrentObservationSpoolStatus(), cts.Token);
@@ -567,7 +574,6 @@ try
 
             using var drainDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             await eventBuffer.FlushAsync(drainDeadline.Token);
-            await systemBuffer.FlushAsync(drainDeadline.Token);
             Log.Information(
                 "Observation lease epoch changed; Helper restart requested after exact spool drain");
             cts.Cancel();
@@ -585,25 +591,6 @@ try
         }
     });
 
-    var adapterDir = Path.Combine(AppContext.BaseDirectory, "adapters");
-    var industryAdapter = SuavoAgent.Core.Config.IndustryAdapter.LoadForIndustry("pharmacy", adapterDir);
-    var systemObservationRuntime = new SystemObservationRuntime(
-        systemBuffer,
-        systemObservationKey,
-        industryAdapter.ClassifyDomain,
-        () => systemBuffer.ActiveLease,
-        active => pandaCompanion?.SetObservationActive(active),
-        Log.Logger,
-        cts.Token);
-    systemObservationRuntime.Start();
-    var systemObserversStopped = false;
-    async Task StopSystemObserversAsync()
-    {
-        if (systemObserversStopped) return;
-        systemObserversStopped = true;
-        await systemObservationRuntime.DisposeAsync();
-    }
-
     // Pre-flight: skip the entire attach polling loop on hosts where
     // PioneerRx isn't installed. Pre-2026-05-06 this loop spammed 30
     // "PioneerRx not found" warnings every 5 minutes on no-PMS sandboxes
@@ -615,7 +602,7 @@ try
     // bare sim box (no PioneerRx footprint) can still attach + observe for FSD eval.
     if (!PioneerRxInstallDetector.ShouldPollForPms(Log.Logger, pioneerRxProcessTrust))
     {
-        systemBuffer.Enqueue(BehavioralEvent.ObserverStatus("pioneerrx", "not_approved"));
+        eventBuffer.Enqueue(BehavioralEvent.ObserverStatus("pioneerrx", "not_approved"));
         Log.Information(
             "PioneerRx is not locally approved on this host — skipping attach polling. " +
             "Helper remains alive for IPC + actuation runtime + observers, " +
@@ -636,7 +623,6 @@ try
         {
             // Normal shutdown path.
         }
-        await StopSystemObserversAsync();
         await eventBuffer.DisposeAsync();
         actuationRuntime?.Dispose();
         honeytokenWatcher?.Dispose();
@@ -678,7 +664,7 @@ try
 
             if (attachFailures == maxAttachRetries)
             {
-                systemBuffer.Enqueue(BehavioralEvent.ObserverStatus("pioneerrx", "not_attached"));
+                eventBuffer.Enqueue(BehavioralEvent.ObserverStatus("pioneerrx", "not_attached"));
                 // Do NOT exit. The old Environment.Exit(1) respawn made the Helper suicide-loop
                 // every ~5 min on any box where the PMS is closed (nights) or absent (demo
                 // boxes) — and the command pipe died with it, so Core's ping flapped and
@@ -755,7 +741,6 @@ try
     // Cleanup observers. Each durable buffer flushes before releasing its
     // exclusive spool lock; any missing ACK remains encrypted for replay.
     StopBehavioralObservers();
-    await StopSystemObserversAsync();
     await eventBuffer!.DisposeAsync();
     actuationRuntime?.Dispose();
     honeytokenWatcher?.Dispose();

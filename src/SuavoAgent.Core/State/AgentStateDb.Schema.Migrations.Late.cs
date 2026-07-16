@@ -686,5 +686,9 @@ public sealed partial class AgentStateDb
         ApplyPricingGrantIdentityMigration();
         ApplyPricingAuthorityReplayMigration();
         ApplyPricingLegacyDeliveryQuarantineMigration();
+        ApplyObservationActivationRequestCounterMigration();
+        ApplyPricingPackageCostMigration();
+        ApplyUpdateNoopReceiptMigration();
+        ApplyRelease1ConvergenceMigration();
     }
 }

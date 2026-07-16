@@ -43,6 +43,27 @@ public sealed class SqlTopDispensedGenerator
         DateTime windowStart,
         CancellationToken ct)
     {
+        try
+        {
+            return (await GenerateVerifiedAsync(spec, topN, windowStart, ct)
+                    .ConfigureAwait(false)).Rows;
+        }
+        catch (OperationCanceledException)
+        {
+            return Array.Empty<TopDispensedRow>();
+        }
+    }
+
+    /// <summary>
+    /// Orchestration-facing variant. It preserves fixed structural failure evidence and lets
+    /// cancellation propagate so a signed command cannot be mislabeled as an empty report.
+    /// </summary>
+    public async Task<TopDispensedGenerationResult> GenerateVerifiedAsync(
+        TopDispensedSpec spec,
+        int topN,
+        DateTime windowStart,
+        CancellationToken ct)
+    {
         string? query;
         try
         {
@@ -56,14 +77,17 @@ public sealed class SqlTopDispensedGenerator
             _logger.LogWarning(
                 "SqlTopDispensedGenerator: required report filter unresolved ({ReasonCode}) — yielding no worklist",
                 ex.Message);
-            return Array.Empty<TopDispensedRow>();
+            return TopDispensedGenerationResult.Fail(ex.Message);
         }
 
         if (query is null || topN <= 0)
         {
             _logger.LogWarning(
                 "SqlTopDispensedGenerator: cannot build query (schema unresolved, no dispensed statuses, or topN<=0) — yielding no worklist");
-            return Array.Empty<TopDispensedRow>();
+            return TopDispensedGenerationResult.Fail(
+                topN <= 0
+                    ? "top_dispensed_top_n_invalid"
+                    : "top_dispensed_schema_unresolved");
         }
 
         try
@@ -87,16 +111,16 @@ public sealed class SqlTopDispensedGenerator
             }
 
             _logger.LogInformation("SqlTopDispensedGenerator: generated {Count} rows (topN={TopN})", rows.Count, topN);
-            return rows;
+            return TopDispensedGenerationResult.Success(rows);
         }
         catch (OperationCanceledException)
         {
-            return Array.Empty<TopDispensedRow>();
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogError("SqlTopDispensedGenerator failed ({ErrorType}) — yielding no worklist", ex.GetType().Name);
-            return Array.Empty<TopDispensedRow>();
+            return TopDispensedGenerationResult.Fail("top_dispensed_query_failed");
         }
     }
 
@@ -141,4 +165,16 @@ public sealed class SqlTopDispensedGenerator
                 SqlTopDispensedQueryBuilder.StatusParameterSize).Value = value;
         }
     }
+}
+
+public sealed record TopDispensedGenerationResult(
+    bool Ok,
+    IReadOnlyList<TopDispensedRow> Rows,
+    string? ErrorCode)
+{
+    public static TopDispensedGenerationResult Success(
+        IReadOnlyList<TopDispensedRow> rows) => new(true, rows, null);
+
+    public static TopDispensedGenerationResult Fail(string errorCode) =>
+        new(false, Array.Empty<TopDispensedRow>(), errorCode);
 }

@@ -44,14 +44,18 @@ internal static class PricingApprovalCommandContract
     {
         command = null;
         code = "pricing_approval_install_schema_invalid";
-        if (!ValidEnvelopeObject(data, InstallFields, out var commandId) ||
+        if (!ValidEnvelopeObject(
+                data,
+                InstallFields,
+                out var commandId,
+                out var schemaVersion) ||
             !data.TryGetProperty("grant", out var grantElement) ||
             grantElement.ValueKind != JsonValueKind.Object)
             return false;
         try
         {
             var grant = grantElement.Deserialize<PricingApprovalGrant>(StrictJson);
-            if (grant is null) return false;
+            if (grant is null || grant.SchemaVersion != schemaVersion) return false;
             command = new(commandId, grant);
             code = "valid";
             return true;
@@ -69,14 +73,19 @@ internal static class PricingApprovalCommandContract
     {
         command = null;
         code = "pricing_approval_revoke_schema_invalid";
-        if (!ValidEnvelopeObject(data, RevokeFields, out var commandId) ||
+        if (!ValidEnvelopeObject(
+                data,
+                RevokeFields,
+                out var commandId,
+                out var schemaVersion) ||
             !data.TryGetProperty("revocation", out var revocationElement) ||
             revocationElement.ValueKind != JsonValueKind.Object)
             return false;
         try
         {
             var revocation = revocationElement.Deserialize<PricingApprovalRevocation>(StrictJson);
-            if (revocation is null) return false;
+            if (revocation is null || revocation.SchemaVersion != schemaVersion)
+                return false;
             command = new(commandId, revocation);
             code = "valid";
             return true;
@@ -90,17 +99,21 @@ internal static class PricingApprovalCommandContract
     private static bool ValidEnvelopeObject(
         JsonElement data,
         IReadOnlySet<string> exactFields,
-        out string commandId)
+        out string commandId,
+        out int schemaVersion)
     {
         commandId = string.Empty;
+        schemaVersion = 0;
         if (data.ValueKind != JsonValueKind.Object ||
             !HasUniquePropertiesRecursive(data) ||
             !data.EnumerateObject().Select(item => item.Name)
                 .ToHashSet(StringComparer.Ordinal).SetEquals(exactFields) ||
             !data.TryGetProperty("schemaVersion", out var schema) ||
             schema.ValueKind != JsonValueKind.Number ||
-            !schema.TryGetInt32(out var version) ||
-            version != PricingApprovalContract.SchemaVersion ||
+            !schema.TryGetInt32(out schemaVersion) ||
+            schemaVersion is not (
+                PricingApprovalContract.SchemaVersion or
+                PricingApprovalContract.PackageSchemaVersion) ||
             !data.TryGetProperty("commandId", out var id) ||
             id.ValueKind != JsonValueKind.String)
             return false;

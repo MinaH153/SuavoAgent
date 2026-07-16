@@ -15,7 +15,7 @@ namespace SuavoAgent.Core.Pricing;
 ///   3. Persist each result to SQLite (crash-resumable)
 ///   4. Write results back to Excel when done
 /// </summary>
-public sealed class PricingJobRunner
+public sealed partial class PricingJobRunner
 {
     private readonly ExcelPricingReader _reader;
     private readonly ExcelPricingWriter _writer;
@@ -25,6 +25,7 @@ public sealed class PricingJobRunner
     private readonly TimeSpan _interLookupDelay;
     private readonly TimeProvider _clock;
     private readonly IReadOnlyDictionary<string, string> _trustedApprovalKeys;
+    private readonly Action<PricingJobLocalProgress>? _localProgressObserver;
 
     // Timeout per NDC lookup. MUST exceed the Helper PricingWorkflow's worst-case internal UIA budget
     // (its sequential step timeouts sum to ~42s: WaitForWindow 8 + SearchByNdc 8 + VerifyLoadedNdc 8 +
@@ -69,7 +70,8 @@ public sealed class PricingJobRunner
         PricingBrainEvaluator? brainEvaluator = null,
         TimeSpan? interLookupDelay = null,
         TimeProvider? clock = null,
-        IReadOnlyDictionary<string, string>? trustedApprovalKeys = null)
+        IReadOnlyDictionary<string, string>? trustedApprovalKeys = null,
+        Action<PricingJobLocalProgress>? localProgressObserver = null)
     {
         _reader = reader;
         _writer = writer;
@@ -79,6 +81,7 @@ public sealed class PricingJobRunner
         _clock = clock ?? TimeProvider.System;
         _trustedApprovalKeys = trustedApprovalKeys ??
             RemoteCommandTrust.CreateProductionKeyRegistry();
+        _localProgressObserver = localProgressObserver;
 
         // Clamp the throttle. Negative inputs collapse to zero; absurd values are capped so a typo
         // in appsettings can't silently turn a 12-minute job into a multi-hour stall.
@@ -115,8 +118,20 @@ public sealed class PricingJobRunner
         IReadOnlyList<SelectorPatch> activePatches,
         string? pmsFingerprint,
         string? screenSignature,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<PricingJobLocalProgress, CancellationToken, ValueTask>?
+            runProgressObserver = null,
+        Action<string>? deliverableObserver = null)
     {
+        if (!PricingApprovalContract.IsSupportedCostBasis(spec.CostBasis) ||
+            observationContract.CostBasis != spec.CostBasis ||
+            authority.CostBasis != spec.CostBasis)
+        {
+            _db.UpsertPricingJob(spec, PricingJobStatus.Halted, 0, 0, 0);
+            return new PricingJobProgress(
+                spec.JobId, 0, 0, 0, PricingJobStatus.Halted,
+                HaltReason: "pricing_cost_basis_contract_mismatch");
+        }
         if (!_db.TryAdmitPricingCloudAuthority(
                 _clock.GetUtcNow(),
                 out var initialAuthorityCode))
@@ -220,7 +235,11 @@ public sealed class PricingJobRunner
 
         var previousResults = _db.GetPricingResults(spec.JobId);
         if (!PricingRunIntegrity.TryValidatePersistedResults(
-                spec.JobId, manifest, previousResults, out var resumeCode))
+                spec.JobId,
+                manifest,
+                previousResults,
+                spec.CostBasis,
+                out var resumeCode))
         {
             _logger.LogWarning(
                 "core.pricing.resume_integrity_rejected code={Code}", resumeCode);
@@ -240,6 +259,13 @@ public sealed class PricingJobRunner
             totalItems,
             readResult.Invalid.Count,
             pending.Count);
+        await ReportLocalProgressAsync(
+            PricingJobLocalPhase.PricingItems,
+            completed + failed,
+            totalItems,
+            failed,
+            runProgressObserver,
+            ct).ConfigureAwait(false);
 
         // M2b: load the job's active learned selector patches once and hand them to the Helper
         // with each lookup. Empty (the case until M2c distributes one) = builtin-only behavior.
@@ -267,8 +293,15 @@ public sealed class PricingJobRunner
                 }
                 _db.SavePricingResult(
                     PricingResultContentPolicy.InvalidNdcRow(
-                        spec.JobId, i.RowIndex));
+                        spec.JobId, i.RowIndex, spec.CostBasis));
                 failed++;
+                await ReportLocalProgressAsync(
+                    PricingJobLocalPhase.PricingItems,
+                    completed + failed,
+                    totalItems,
+                    failed,
+                    runProgressObserver,
+                    ct).ConfigureAwait(false);
             }
         }
 
@@ -295,6 +328,7 @@ public sealed class PricingJobRunner
                 activePatches,
                 pmsFingerprint,
                 screenSignature,
+                spec.CostBasis,
                 ct);
 
             if (!TryAdmitJobAuthority(
@@ -346,7 +380,11 @@ public sealed class PricingJobRunner
             // ID is insufficient: the inner result must bind to this exact job,
             // row, and canonical NDC and carry a coherent success/failure shape.
             if (!PricingRunIntegrity.TryValidateLookupResult(
-                    spec.JobId, row, result, out var resultIntegrityCode))
+                    spec.JobId,
+                    row,
+                    result,
+                    spec.CostBasis,
+                    out var resultIntegrityCode))
             {
                 halted = true;
                 haltReason = "pricing_result_integrity_failed";
@@ -366,6 +404,15 @@ public sealed class PricingJobRunner
                 _logger.LogCritical(
                     "core.pricing.actuation_gate_closed remaining={Remaining}",
                     totalItems - completed - failed);
+                break;
+            }
+
+            if (spec.CostBasis == PricingApprovalContract.PackageCostBasis &&
+                IsPackageCostInfrastructureFailure(result))
+            {
+                halted = true;
+                haltReason = "pricing_package_cost_surface_unavailable";
+                _logger.LogCritical("core.pricing.package_cost_surface_unavailable");
                 break;
             }
 
@@ -417,6 +464,13 @@ public sealed class PricingJobRunner
             }
 
             _db.UpsertPricingJob(spec, PricingJobStatus.Running, totalItems, completed, failed);
+            await ReportLocalProgressAsync(
+                PricingJobLocalPhase.PricingItems,
+                completed + failed,
+                totalItems,
+                failed,
+                runProgressObserver,
+                ct).ConfigureAwait(false);
 
             _logger.LogDebug("core.pricing.lookup_completed found={Found}", result.Found);
 
@@ -475,7 +529,11 @@ public sealed class PricingJobRunner
         // succeed and the final File.Move throws an IOException.
         var allResults = _db.GetPricingResults(spec.JobId);
         if (!PricingRunIntegrity.TryValidatePersistedResults(
-                spec.JobId, manifest, allResults, out var terminalIntegrityCode))
+                spec.JobId,
+                manifest,
+                allResults,
+                spec.CostBasis,
+                out var terminalIntegrityCode))
         {
             _logger.LogCritical(
                 "core.pricing.terminal_integrity_failed code={Code}",
@@ -487,6 +545,13 @@ public sealed class PricingJobRunner
                 PricingJobStatus.Failed,
                 HaltReason: "pricing_terminal_integrity_failed");
         }
+        await ReportLocalProgressAsync(
+            PricingJobLocalPhase.CreatingSpreadsheet,
+            completed + failed,
+            totalItems,
+            failed,
+            runProgressObserver,
+            ct).ConfigureAwait(false);
         var write = _writer.WriteAuthorized(
             executionPath,
             allResults,
@@ -494,7 +559,15 @@ public sealed class PricingJobRunner
             spec.SupplierColumn,
             spec.CostColumn,
             headerRow: readResult.HeaderRowIndex,
-            siblingPathAnchor: spec.ExcelPath);
+            siblingPathAnchor: spec.ExcelPath,
+            costBasis: spec.CostBasis);
+        await ReportLocalProgressAsync(
+            PricingJobLocalPhase.VerifyingResults,
+            completed + failed,
+            totalItems,
+            failed,
+            runProgressObserver,
+            ct).ConfigureAwait(false);
 
         if (write.PublicationWasDenied)
         {
@@ -519,10 +592,17 @@ public sealed class PricingJobRunner
         // A review workbook is still useful when individual lookups fail, but writing that
         // artifact does not make the pricing job successful. Only a complete, zero-failure
         // run may cross the terminal success boundary.
-        var cleanCompletion = PricingRunIntegrity.IsTerminallyComplete(
-            spec.JobId, manifest, allResults, write, completed, failed);
+        var cleanCompletion = spec.CostBasis == PricingApprovalContract.PackageCostBasis
+            ? PricingRunIntegrity.IsTerminallyReviewComplete(
+                spec.JobId, manifest, allResults, write, completed, failed,
+                spec.CostBasis)
+            : PricingRunIntegrity.IsTerminallyComplete(
+                spec.JobId, manifest, allResults, write, completed, failed,
+                spec.CostBasis);
         var finalStatus = cleanCompletion ? PricingJobStatus.Completed : PricingJobStatus.Failed;
         var terminalReason = cleanCompletion ? null : "pricing_job_failed";
+        if (cleanCompletion && write.OutputPath is not null)
+            ReportDeliverablePath(write.OutputPath, deliverableObserver);
         _db.UpsertPricingJob(spec, finalStatus, totalItems, completed, failed);
 
         _logger.LogInformation(
@@ -566,6 +646,7 @@ public sealed class PricingJobRunner
         IReadOnlyList<SelectorPatch> patches,
         string? pmsFingerprint,
         string? screenSignature,
+        string costBasis,
         CancellationToken ct)
     {
         try
@@ -581,14 +662,15 @@ public sealed class PricingJobRunner
                         row.NdcNormalized,
                         patches,
                         pmsFingerprint,
-                        screenSignature)));
+                        screenSignature,
+                        costBasis)));
 
             var response = await commandClient.SendAsync(request, LookupTimeout, ct);
 
             // No response at all = Helper hung/disconnected (infrastructure failure), NOT a price miss.
             if (response == null)
                 return new LookupOutcome(
-                    Fail(jobId, row, "No response from Helper"),
+                    Fail(jobId, row, "No response from Helper", costBasis),
                     HelperUnreachable: true,
                     IntegrityFailure: false);
 
@@ -599,26 +681,26 @@ public sealed class PricingJobRunner
             if (response.Id != request.Id ||
                 response.Command != request.Command)
                 return new LookupOutcome(
-                    Fail(jobId, row, "Helper response envelope mismatch"),
+                    Fail(jobId, row, "Helper response envelope mismatch", costBasis),
                     HelperUnreachable: false,
                     IntegrityFailure: true);
 
             if (response.Status != IpcStatus.Ok)
                 return new LookupOutcome(
-                    Fail(jobId, row, response.Error?.Message ?? $"Status {response.Status}"),
+                    Fail(jobId, row, response.Error?.Message ?? $"Status {response.Status}", costBasis),
                     HelperUnreachable: false,
                     IntegrityFailure: false);
 
             if (response.Data == null || response.Error is not null)
                 return new LookupOutcome(
-                    Fail(jobId, row, "Helper response payload invalid"),
+                    Fail(jobId, row, "Helper response payload invalid", costBasis),
                     HelperUnreachable: false,
                     IntegrityFailure: true);
 
             var parsed = JsonSerializer.Deserialize<SupplierPriceResult>(response.Data.Value);
             if (parsed is null)
                 return new LookupOutcome(
-                    Fail(jobId, row, "Helper response payload invalid"),
+                    Fail(jobId, row, "Helper response payload invalid", costBasis),
                     HelperUnreachable: false,
                     IntegrityFailure: true);
             return new LookupOutcome(
@@ -634,7 +716,7 @@ public sealed class PricingJobRunner
         {
             _logger.LogSafeWarning(ex);
             return new LookupOutcome(
-                Fail(jobId, row, "Helper response payload invalid"),
+                Fail(jobId, row, "Helper response payload invalid", costBasis),
                 HelperUnreachable: false,
                 IntegrityFailure: true);
         }
@@ -642,14 +724,43 @@ public sealed class PricingJobRunner
         {
             _logger.LogSafeWarning(ex);
             return new LookupOutcome(
-                Fail(jobId, row, $"lookup_exception:{ex.GetType().Name}"),
+                Fail(jobId, row, $"lookup_exception:{ex.GetType().Name}", costBasis),
                 HelperUnreachable: false,
                 IntegrityFailure: false);
         }
     }
 
-    private static SupplierPriceResult Fail(string jobId, NdcRow row, string error) =>
-        new(jobId, row.RowIndex, row.NdcNormalized, false, null, null, error);
+    private static SupplierPriceResult Fail(
+        string jobId,
+        NdcRow row,
+        string error,
+        string costBasis) => new(
+            jobId,
+            row.RowIndex,
+            row.NdcNormalized,
+            false,
+            null,
+            null,
+            error,
+            CostBasis: costBasis);
+
+    internal static bool IsPackageCostInfrastructureFailure(
+        SupplierPriceResult result)
+    {
+        if (result.Found || result.ErrorMessage is not { } error) return false;
+        return error is
+            "Pricing tab DataGrid not found" or
+            "Pricing grid is virtualized; refusing to rank a partial supplier set" or
+            "Pricing grid package-cost schema not recognized" or
+            "Pricing grid read error" or
+            "pricing_cost_basis_unsupported" or
+            "pricing_screen_identity_changed" or
+            "Edit Rx Item window did not appear" or
+            "Could not open Item → Rx Item menu" or
+            "Could not click Pricing tab" ||
+            error.StartsWith("Could not enter NDC", StringComparison.Ordinal) ||
+            error.StartsWith("Pricing lookup failed", StringComparison.Ordinal);
+    }
 
     // QA I2: a not-found result whose error is the Helper's "PioneerRx not attached" signal.
     internal static bool IsPmsUnavailable(SupplierPriceResult result) =>

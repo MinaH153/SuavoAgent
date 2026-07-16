@@ -46,9 +46,13 @@ public sealed partial class HeartbeatWorker : ResilientHostedService
     private readonly PricingJobCloudUploader? _pricingJobCloudUploader;
     private readonly PricingTerminalAckOutbox? _pricingTerminalAckOutbox;
     private readonly SuavoAgent.Core.Autonomy.TaskAutonomyLedger? _taskAutonomy;
-    private readonly IpcCommandClient? _ipcCommandClient;
+    private readonly IIpcCommandClient? _ipcCommandClient;
     private readonly IIntentCursorClient? _intentCursorClient;
     private readonly SuavoAgent.Core.Discovery.DiscoveryClient? _discoveryClient;
+    private readonly ITopDispensedWorklistBuilder? _topDispensedWorklistBuilder;
+    private readonly ITopDispensedWorklistProgressBuilder?
+        _topDispensedWorklistProgressBuilder;
+    private readonly IPricedWorkbookPublisher? _pricedWorkbookPublisher;
     // Wave 1B Track 1.4 — health composite. Both optional so the worker
     // still starts if Program.cs hasn't wired the health module yet (matches
     // the existing optional-deps pattern used for cloud client, pricing,
@@ -73,7 +77,10 @@ public sealed partial class HeartbeatWorker : ResilientHostedService
     private readonly SuavoAgent.Core.Vision.VisionConfigurationCoordinator? _visionConfigurationCoordinator;
     private readonly SuavoAgent.Core.Vision.VisionConfigurationStatusProvider? _visionConfigurationStatus;
     private readonly SuavoAgent.Core.Vision.VisionConfigurationCommandOutbox? _visionConfigurationOutbox;
+    private readonly Release1ConvergenceCoordinator? _release1Convergence;
     private readonly AutopilotRunCoordinator _autopilotRuns;
+    private readonly SuavoAgent.Contracts.Security.ObservationActivationAuthority?
+        _observationAuthority;
     private readonly string _autoRuleRunOwnerId = Guid.NewGuid().ToString("D");
     private readonly SemaphoreSlim _pricingJobSemaphore = new(1, 1);
     private readonly SemaphoreSlim _workflowSemaphore = new(1, 1);
@@ -670,6 +677,9 @@ public sealed partial class HeartbeatWorker : ResilientHostedService
                 await RetryPendingDeliveryWritebacksAsync(stoppingToken).ConfigureAwait(false);
                 if (_visionConfigurationOutbox is not null)
                     await _visionConfigurationOutbox.RetryPendingAsync(stoppingToken)
+                        .ConfigureAwait(false);
+                if (_release1Convergence is not null)
+                    await _release1Convergence.RetryPendingAsync(stoppingToken)
                         .ConfigureAwait(false);
 
                 _commandVerifier?.PruneNonces(TimeSpan.FromMinutes(5));

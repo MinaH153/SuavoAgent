@@ -26,6 +26,9 @@ public sealed partial class PricingJobCloudUploader
             !payload.TryGetProperty("mode", out var mode) ||
             mode.ValueKind != JsonValueKind.String ||
             !SafeSources.Contains(mode.GetString() ?? "") ||
+            !payload.TryGetProperty("costBasis", out var costBasis) ||
+            costBasis.ValueKind != JsonValueKind.String ||
+            !PricingApprovalContract.IsSupportedCostBasis(costBasis.GetString()) ||
             !payload.TryGetProperty("items", out var items) ||
             items.ValueKind != JsonValueKind.Array ||
             items.GetArrayLength() != expectedItemCount ||
@@ -47,6 +50,7 @@ public sealed partial class PricingJobCloudUploader
         var observationCount = 0;
         var rowIndexes = ImmutableHashSet<int>.Empty;
         var modeValue = mode.GetString()!;
+        var costBasisValue = costBasis.GetString()!;
         foreach (var item in items.EnumerateArray())
         {
             if (item.ValueKind != JsonValueKind.Object ||
@@ -80,7 +84,10 @@ public sealed partial class PricingJobCloudUploader
                 !item.TryGetProperty("selectorObservations", out var observations) ||
                 !IsPersistedSelectorEvidenceCloudSafe(
                     observations, ref observationCount) ||
-                !IsPersistedSavingsTupleCloudSafe(item))
+                !IsPersistedCostTupleCloudSafe(
+                    item,
+                    costBasisValue,
+                    found.ValueKind == JsonValueKind.True))
                 return false;
             rowIndexes = rowIndexes.Add(rowIndex.GetInt32());
             if (found.ValueKind == JsonValueKind.True) foundItems++;
@@ -217,7 +224,10 @@ public sealed partial class PricingJobCloudUploader
             value >= 0 && value <= maximum;
     }
 
-    private static bool IsPersistedSavingsTupleCloudSafe(JsonElement item)
+    private static bool IsPersistedCostTupleCloudSafe(
+        JsonElement item,
+        string costBasis,
+        bool found)
     {
         if (!TryGetOptionalDecimal(
                 item, "costPerUnit", PricingResultContentPolicy.MaximumUnitCost,
@@ -227,7 +237,16 @@ public sealed partial class PricingJobCloudUploader
                 PricingResultContentPolicy.MaximumUnitCost, out var baseline) ||
             !TryGetOptionalDecimal(
                 item, "quantity", PricingResultContentPolicy.MaximumQuantity,
-                out var quantity))
+                out var quantity) ||
+            !TryGetOptionalDecimal(
+                item, "packageCost", PricingResultContentPolicy.MaximumUnitCost,
+                out var package))
+            return false;
+        if (costBasis == PricingApprovalContract.PackageCostBasis)
+            return (found ? package is not null : package is null) &&
+                sourced is null && baseline is null && quantity is null;
+        if (costBasis != PricingApprovalContract.CostPerUnitBasis ||
+            package is not null)
             return false;
         if (baseline is null || sourced is null || quantity is null || baseline <= sourced)
             return true;

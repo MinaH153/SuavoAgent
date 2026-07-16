@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SuavoAgent.Core\SuavoAgent.Core.csproj" />
+    <ProjectReference Include="..\..\tools\PioneerRxSim\Shared\PioneerRxSim.Shared.csproj" />
   </ItemGroup>
 
   <ItemGroup>

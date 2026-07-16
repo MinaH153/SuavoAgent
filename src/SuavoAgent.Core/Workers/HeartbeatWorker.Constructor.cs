@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Contracts.Maintenance;
+using SuavoAgent.Contracts.Security;
 using SuavoAgent.Core.ActionGrammarV1.Workflows;
 using SuavoAgent.Core.Autonomy;
 using SuavoAgent.Core.Cloud;
@@ -45,9 +46,15 @@ public sealed partial class HeartbeatWorker
                         .NullLogger<PricingTerminalAckOutbox>.Instance);
         }
         _taskAutonomy = serviceProvider.GetService<TaskAutonomyLedger>();
-        _ipcCommandClient = serviceProvider.GetService<IpcCommandClient>();
+        _ipcCommandClient = serviceProvider.GetService<IIpcCommandClient>();
         _intentCursorClient = serviceProvider.GetService<IIntentCursorClient>();
         _discoveryClient = serviceProvider.GetService<Discovery.DiscoveryClient>();
+        _topDispensedWorklistBuilder = serviceProvider
+            .GetService<ITopDispensedWorklistBuilder>();
+        _topDispensedWorklistProgressBuilder = serviceProvider
+            .GetService<ITopDispensedWorklistProgressBuilder>();
+        _pricedWorkbookPublisher = serviceProvider
+            .GetService<IPricedWorkbookPublisher>();
         _healthSignals = serviceProvider.GetService<IHealthSignals>();
         _healthCompositeCalculator = serviceProvider.GetService<HealthCompositeCalculator>();
         _cloudAuthRecovery = serviceProvider.GetService<CloudAuthRecoveryCoordinator>();
@@ -62,6 +69,8 @@ public sealed partial class HeartbeatWorker
             .GetService<VisionConfigurationCoordinator>();
         _visionConfigurationStatus = serviceProvider
             .GetService<VisionConfigurationStatusProvider>();
+        _release1Convergence = serviceProvider
+            .GetService<Release1ConvergenceCoordinator>();
         if (_visionConfigurationCoordinator is not null &&
             _visionConfigurationStatus is not null &&
             _cloudClient is not null)
@@ -96,6 +105,7 @@ public sealed partial class HeartbeatWorker
         // pause/stop reaches every active command.
         _autopilotRuns = serviceProvider.GetService<AutopilotRunCoordinator>()
             ?? new AutopilotRunCoordinator();
+        _observationAuthority = serviceProvider.GetService<ObservationActivationAuthority>();
         var rxCorrelationStore = serviceProvider.GetService<IRxCorrelationStore>();
         if (_cloudClient is not null && rxCorrelationStore is not null)
         {
@@ -122,6 +132,19 @@ public sealed partial class HeartbeatWorker
 
         var agentId = _options.AgentId ?? "";
         var fingerprint = _options.MachineFingerprint ?? "";
+        if (_release1Convergence is null &&
+            _cloudClient is not null &&
+            serviceProvider.GetService<IDeviceAuthoritySigner>() is { } deviceSigner &&
+            !string.IsNullOrWhiteSpace(_options.DeviceAttestationKeyId) &&
+            !string.IsNullOrWhiteSpace(_options.MaintenanceAttestationKeyId))
+        {
+            _release1Convergence = new Release1ConvergenceCoordinator(
+                stateDb,
+                _options,
+                deviceSigner,
+                new SuavoRelease1ConvergenceTransport(_cloudClient),
+                logger);
+        }
         if (!string.IsNullOrEmpty(agentId))
         {
             _commandVerifier = new SignedCommandVerifier(

@@ -30,16 +30,30 @@ internal sealed record UpdateActivationGateResult(
 internal sealed class UpdateActivationGate
 {
     private readonly IReadOnlyDictionary<string, string> _commandKeys;
-    private readonly string _updatePublicKey;
+    private readonly IReadOnlyDictionary<string, string> _updatePublicKeys;
     private readonly ILogger _logger;
 
     public UpdateActivationGate(
         IReadOnlyDictionary<string, string> commandKeys,
         string updatePublicKey,
         ILogger logger)
+        : this(
+            commandKeys,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [OtaUpdateTrust.LegacyV1KeyId] = updatePublicKey,
+            },
+            logger)
+    {
+    }
+
+    public UpdateActivationGate(
+        IReadOnlyDictionary<string, string> commandKeys,
+        IReadOnlyDictionary<string, string> updatePublicKeys,
+        ILogger logger)
     {
         _commandKeys = commandKeys;
-        _updatePublicKey = updatePublicKey;
+        _updatePublicKeys = updatePublicKeys;
         _logger = logger;
     }
 
@@ -71,7 +85,7 @@ internal sealed class UpdateActivationGate
             var validation = UpdateActivationContract.Validate(
                 request!,
                 _commandKeys,
-                _updatePublicKey,
+                _updatePublicKeys,
                 now,
                 expectedAgentId,
                 expectedMachineFingerprint);

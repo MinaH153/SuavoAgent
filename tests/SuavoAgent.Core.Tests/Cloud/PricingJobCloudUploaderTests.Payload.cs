@@ -18,6 +18,38 @@ namespace SuavoAgent.Core.Tests.Cloud;
 
 public sealed partial class PricingJobCloudUploaderTests
 {
+    [Fact]
+    public void BuildPersistedPayload_ProjectsPackageCostWithoutRelabelingIt()
+    {
+        var payload = PricingJobCloudUploader.BuildPersistedPayloadEnvelope(
+            "package-cost-job",
+            null,
+            PricingJobStatus.Completed,
+            "uia",
+            1,
+            1,
+            0,
+            [new SupplierPriceResult(
+                "package-cost-job", 2, "00093505698", true,
+                "McKesson", null, null,
+                PackageCost: 2.6000m,
+                CostBasis: PricingApprovalContract.PackageCostBasis)],
+            approvalId: "11111111-1111-4111-8111-111111111111",
+            grantDigest: new string('a', 64),
+            costBasis: PricingApprovalContract.PackageCostBasis);
+
+        using var document = JsonDocument.Parse(payload.Json);
+        var root = document.RootElement;
+        var item = root.GetProperty("items")[0];
+        Assert.Equal(
+            PricingApprovalContract.PackageCostBasis,
+            root.GetProperty("costBasis").GetString());
+        Assert.Equal(2.6000m, item.GetProperty("packageCost").GetDecimal());
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("costPerUnit").ValueKind);
+        Assert.True(PricingJobCloudUploader.IsPersistedPayloadCloudSafe(
+            root, "package-cost-job", 1), payload.Json);
+    }
+
     public static IEnumerable<object[]> ApprovedSupplierCatalog() =>
         new[]
         {

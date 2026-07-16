@@ -37,19 +37,130 @@ def spdx_id(prefix: str, value: str) -> str:
     return "SPDXRef-" + prefix + "-" + value.encode("utf-8").hex()
 
 
+def finalization_output_names(version: str) -> tuple[str, ...]:
+    """Outputs that cannot be hashed by the SBOM they authenticate."""
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise SystemExit("final publication SBOM requires a canonical release version")
+    return (
+        "checksums.sha256",
+        "checksums.sha256.sig",
+        f"update-manifest-{version}.sig",
+    )
+
+
+def release_files(release: Path, excluded: frozenset[str]) -> tuple[Path, ...]:
+    files: list[Path] = []
+    for path in sorted(release.rglob("*")):
+        if path.is_symlink():
+            raise SystemExit(f"release directory contains a symlink: {path}")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(release).as_posix()
+        if relative not in excluded:
+            files.append(path)
+    return tuple(files)
+
+
+def verify_exact_file_inventory(
+    document: dict[str, object],
+    release: Path,
+    excluded: frozenset[str],
+) -> None:
+    """Fail closed unless SPDX files and hashes equal the release minus exclusions."""
+    expected = {
+        path.relative_to(release).as_posix(): path
+        for path in release_files(release, excluded)
+    }
+    entries = document.get("files")
+    if not isinstance(entries, list):
+        raise SystemExit("SBOM files inventory is malformed")
+    observed: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise SystemExit("SBOM file entry is malformed")
+        file_name = entry.get("fileName")
+        if not isinstance(file_name, str) or not file_name.startswith("./"):
+            raise SystemExit("SBOM file name is malformed")
+        relative = file_name[2:]
+        if relative in observed:
+            raise SystemExit("SBOM file inventory contains a duplicate path")
+        observed[relative] = entry
+    if set(observed) != set(expected):
+        raise SystemExit("SBOM file inventory does not equal the release cohort")
+
+    for relative, path in expected.items():
+        checksums = observed[relative].get("checksums")
+        if not isinstance(checksums, list):
+            raise SystemExit("SBOM file checksums are malformed")
+        by_algorithm: dict[str, str] = {}
+        for checksum in checksums:
+            if not isinstance(checksum, dict):
+                raise SystemExit("SBOM file checksum is malformed")
+            algorithm = checksum.get("algorithm")
+            value = checksum.get("checksumValue")
+            if (
+                algorithm not in ("SHA1", "SHA256")
+                or not isinstance(value, str)
+                or algorithm in by_algorithm
+            ):
+                raise SystemExit("SBOM file checksum set is not exact")
+            by_algorithm[algorithm] = value
+        if by_algorithm != {"SHA1": digest(path, "sha1"), "SHA256": digest(path)}:
+            raise SystemExit("SBOM file hash does not match the release cohort")
+
+    roots = [
+        package
+        for package in document.get("packages", [])
+        if isinstance(package, dict)
+        and package.get("SPDXID") == "SPDXRef-Package-SuavoAgent"
+    ]
+    if len(roots) != 1:
+        raise SystemExit("SBOM root package is missing or duplicated")
+    verification = roots[0].get("packageVerificationCode")
+    declared = (
+        verification.get("packageVerificationCodeExcludedFiles")
+        if isinstance(verification, dict)
+        else None
+    )
+    expected_exclusions = ["./" + name for name in sorted(excluded)]
+    if declared != expected_exclusions:
+        raise SystemExit("SBOM publication exclusions are not exact")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--release-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--exclude-finalization-outputs", action="store_true")
     args = parser.parse_args()
 
     release = args.release_dir.resolve()
     if not release.is_dir() or not re.fullmatch(r"[0-9A-Fa-f]{40}", args.source_commit):
         raise SystemExit("release directory or source commit is invalid")
+    if args.output.is_symlink():
+        raise SystemExit("SBOM output must not be a symlink")
+    output = args.output.resolve()
+    try:
+        output_relative = output.relative_to(release).as_posix()
+    except ValueError:
+        output_relative = ""
+    excluded = {output_relative} if output_relative else set()
+    if args.exclude_finalization_outputs:
+        if output_relative != "suavoagent.spdx.json":
+            raise SystemExit("final publication SBOM must be inside the release root")
+        finalization_outputs = finalization_output_names(args.version)
+        for relative in finalization_outputs:
+            candidate = release / relative
+            if candidate.exists() or candidate.is_symlink():
+                raise SystemExit(
+                    f"finalization output exists before the SBOM boundary: {relative}"
+                )
+        excluded.update(finalization_outputs)
+    excluded_files = frozenset(excluded)
     provenance = json.loads((ROOT / "legal/THIRD-PARTY-PROVENANCE.json").read_text())
-    files = [path for path in sorted(release.rglob("*")) if path.is_file() and path.resolve() != args.output.resolve()]
+    files = release_files(release, excluded_files)
     if not files:
         raise SystemExit("release directory is empty")
 
@@ -112,12 +223,10 @@ def main() -> int:
             "".join(sorted(file_sha1_values)).encode("ascii")
         ).hexdigest(),
     }
-    try:
-        excluded = args.output.resolve().relative_to(release).as_posix()
-    except ValueError:
-        excluded = ""
-    if excluded:
-        verification["packageVerificationCodeExcludedFiles"] = ["./" + excluded]
+    if excluded_files:
+        verification["packageVerificationCodeExcludedFiles"] = [
+            "./" + name for name in sorted(excluded_files)
+        ]
     document["packages"][0]["packageVerificationCode"] = verification
     for package in provenance["packages"]:
         identity = spdx_id("NuGet", package["name"] + "-" + package["version"])
@@ -366,6 +475,7 @@ def main() -> int:
         })
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+    verify_exact_file_inventory(document, release, excluded_files)
     return 0
 
 

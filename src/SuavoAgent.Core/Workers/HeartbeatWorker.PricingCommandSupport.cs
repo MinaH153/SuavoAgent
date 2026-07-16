@@ -98,6 +98,7 @@ public sealed partial class HeartbeatWorker
         "actuation_gate_closed" => value,
         "pioneerrx_not_attached" => value,
         "pricing_brain_operator_required" => value,
+        "pricing_package_cost_surface_unavailable" => value,
         _ => "pricing_job_failed",
     };
 

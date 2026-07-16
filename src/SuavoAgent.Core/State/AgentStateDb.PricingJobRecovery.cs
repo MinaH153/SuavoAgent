@@ -27,9 +27,13 @@ public sealed partial class AgentStateDb
         DateTimeOffset now,
         string? commandId = null,
         string? exactWorkbookPath = null,
-        IReadOnlyDictionary<string, string>? trustedApprovalKeys = null)
+        IReadOnlyDictionary<string, string>? trustedApprovalKeys = null,
+        string? expectedCostBasis = null)
     {
         if (modality is not ("sql" or "uia" or "vision"))
+            return null;
+        if (expectedCostBasis is not null &&
+            !PricingApprovalContract.IsSupportedCostBasis(expectedCostBasis))
             return null;
         trustedApprovalKeys ??= RemoteCommandTrust.CreateProductionKeyRegistry();
         now = now.ToUniversalTime();
@@ -55,7 +59,7 @@ public sealed partial class AgentStateDb
                     ON delivery.job_id = j.job_id
                  WHERE j.status IN ('running', 'halted')
                    AND identity.modality = @modality
-                   AND identity.cost_basis = @basis
+                   AND (@basis IS NULL OR identity.cost_basis = @basis)
                    AND identity.authority_pharmacy_id = @pharmacy
                    AND identity.authority_role = @role
                    AND identity.fresh_until_utc >= @now
@@ -69,7 +73,7 @@ public sealed partial class AgentStateDb
             command.Parameters.AddWithValue("@modality", modality);
             command.Parameters.AddWithValue(
                 "@basis",
-                PricingObservationPolicy.CostPerUnitBasis);
+                (object?)expectedCostBasis ?? DBNull.Value);
             command.Parameters.AddWithValue("@pharmacy", expectedPharmacyId);
             command.Parameters.AddWithValue(
                 "@role",
@@ -93,7 +97,8 @@ public sealed partial class AgentStateDb
                         reader.GetString(3),
                         reader.GetString(4),
                         reader.IsDBNull(5) ? null : reader.GetString(5),
-                        reader.IsDBNull(6) ? null : reader.GetString(6)),
+                        reader.IsDBNull(6) ? null : reader.GetString(6),
+                        reader.GetString(9)),
                     new PricingObservationContract(
                         modality,
                         reader.GetString(7),

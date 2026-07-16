@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using ClosedXML.Excel;
 using SuavoAgent.Contracts.Pricing;
 
@@ -22,7 +24,7 @@ namespace SuavoAgent.Core.Pricing;
 ///   • LOCKED_SOURCE        — Excel file held a lock; row skipped
 ///   • ERROR:{message}      — other lookup failures
 /// </summary>
-public sealed class ExcelPricingWriter
+public sealed partial class ExcelPricingWriter
 {
     private readonly ILogger<ExcelPricingWriter> _logger;
     private readonly Func<string, string> _siblingPathFactory;
@@ -55,7 +57,8 @@ public sealed class ExcelPricingWriter
         string statusColumnHeader = DefaultStatusHeader,
         WriteMode mode = WriteMode.Sibling,
         int headerRow = 1,
-        string? siblingPathAnchor = null) =>
+        string? siblingPathAnchor = null,
+        string costBasis = PricingApprovalContract.CostPerUnitBasis) =>
         WriteCore(
             sourcePath,
             results,
@@ -65,7 +68,8 @@ public sealed class ExcelPricingWriter
             statusColumnHeader,
             mode,
             headerRow,
-            siblingPathAnchor);
+            siblingPathAnchor,
+            costBasis);
 
     internal WriteResult WriteAuthorized(
         string sourcePath,
@@ -76,7 +80,8 @@ public sealed class ExcelPricingWriter
         string statusColumnHeader = DefaultStatusHeader,
         WriteMode mode = WriteMode.Sibling,
         int headerRow = 1,
-        string? siblingPathAnchor = null)
+        string? siblingPathAnchor = null,
+        string costBasis = PricingApprovalContract.CostPerUnitBasis)
     {
         ArgumentNullException.ThrowIfNull(publicationGate);
         return WriteCore(
@@ -88,7 +93,8 @@ public sealed class ExcelPricingWriter
             statusColumnHeader,
             mode,
             headerRow,
-            siblingPathAnchor);
+            siblingPathAnchor,
+            costBasis);
     }
 
     private WriteResult WriteCore(
@@ -100,7 +106,8 @@ public sealed class ExcelPricingWriter
         string statusColumnHeader,
         WriteMode mode,
         int headerRow,
-        string? siblingPathAnchor)
+        string? siblingPathAnchor,
+        string costBasis)
     {
         if (!File.Exists(sourcePath))
         {
@@ -129,6 +136,17 @@ public sealed class ExcelPricingWriter
                 "Re-run with WriteMode.Sibling or close the workbook.");
             return WriteResult.Fail("Source workbook is locked — close Excel and retry, or use Sibling mode.");
         }
+
+        if (costBasis == PricingApprovalContract.PackageCostBasis)
+            return WritePackageCostWorkbook(
+                sourcePath,
+                outputPath,
+                results,
+                publicationGate,
+                mode,
+                headerRow);
+        if (costBasis != PricingApprovalContract.CostPerUnitBasis)
+            return WriteResult.Fail("pricing_cost_basis_unsupported");
 
         try
         {
@@ -171,11 +189,13 @@ public sealed class ExcelPricingWriter
             }
 
             // Save to a same-directory CreateNew file, flush it, then publish in one filesystem
-            // operation. Sibling publication uses File.Move(overwrite:false): concurrent jobs that
-            // somehow choose the same identity cannot overwrite each other; exactly one wins.
+            // operation. Sibling publication creates a hard link at the final path: link creation
+            // is an atomic no-clobber primitive on NTFS/APFS, unlike File.Move(overwrite:false),
+            // whose Unix implementation can race between its existence check and rename.
             var tmp = CreatePublicationTempPath(outputPath);
             PricingPublicationDecision? deniedPublication = null;
             var cleanupFailed = false;
+            var publicationCompleted = false;
             try
             {
                 using (var stream = new FileStream(
@@ -195,9 +215,10 @@ public sealed class ExcelPricingWriter
                 void Publish()
                 {
                     if (mode == WriteMode.Sibling)
-                        File.Move(tmp, outputPath, overwrite: false);
+                        CreateNoClobberHardLink(outputPath, tmp);
                     else
                         File.Replace(tmp, outputPath, destinationBackupFileName: null);
+                    publicationCompleted = true;
                 }
 
                 if (publicationGate is null)
@@ -221,7 +242,10 @@ public sealed class ExcelPricingWriter
                     }
                     catch (Exception ex)
                     {
-                        cleanupFailed = true;
+                        // Once the final hard link exists, publication succeeded and is complete.
+                        // A leaked hidden temp link is operational debt, not permission to report
+                        // the artifact as unpublished and retry into a deterministic collision.
+                        cleanupFailed = !publicationCompleted;
                         _logger.LogCritical(
                             "core.excel_pricing_writer.temp_cleanup_failed exception_type={ExceptionType}",
                             ex.GetType().Name);
@@ -274,6 +298,30 @@ public sealed class ExcelPricingWriter
         var ext = Path.GetExtension(outputPath);
         return Path.Combine(dir, $".suavo-priced-{Guid.NewGuid():N}{ext}");
     }
+
+    private static void CreateNoClobberHardLink(string outputPath, string preparedPath)
+    {
+        var result = OperatingSystem.IsWindows()
+            ? CreateHardLinkWindows(outputPath, preparedPath, IntPtr.Zero) ? 0 : Marshal.GetLastPInvokeError()
+            : CreateHardLinkUnix(preparedPath, outputPath) == 0 ? 0 : Marshal.GetLastPInvokeError();
+        if (result != 0)
+            throw new IOException(
+                "Atomic pricing output publication failed.",
+                new Win32Exception(result));
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", ExactSpelling = true,
+        CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkWindows(
+        string fileName,
+        string existingFileName,
+        IntPtr securityAttributes);
+
+    [DllImport("libc", EntryPoint = "link", SetLastError = true)]
+    private static extern int CreateHardLinkUnix(
+        string existingPath,
+        string newPath);
 
     private static string ExplicitPerUnitCostHeader(string requested)
     {

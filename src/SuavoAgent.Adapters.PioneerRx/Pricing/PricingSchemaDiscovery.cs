@@ -59,6 +59,42 @@ public sealed class PricingSchemaDiscovery
         return outcome;
     }
 
+    /// <summary>
+    /// Resolves the aggregate top-dispensed source from the same bounded Inventory metadata
+    /// snapshot used by pricing discovery. No prescription or patient rows are inspected.
+    /// </summary>
+    public async Task<TopDispensedSpec?> DiscoverTopDispensedSpecAsync(
+        SqlConnection conn,
+        TopDispensedColumnOverrides overrides,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(conn);
+        ArgumentNullException.ThrowIfNull(overrides);
+        if (conn.State != System.Data.ConnectionState.Open) return null;
+
+        try
+        {
+            var columns = await FetchColumnsAsync(conn, ct).ConfigureAwait(false);
+            var pricing = PricingSchemaResolver.Resolve(columns);
+            if (!pricing.Ok || pricing.Schema?.ItemJoin is null) return null;
+            return TopDispensedSchemaResolver.Resolve(
+                pricing.Schema.ItemJoin,
+                columns,
+                overrides);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                "PricingSchemaDiscovery: top-dispensed metadata resolution failed ({Type})",
+                exception.GetType().Name);
+            return null;
+        }
+    }
+
     private static async Task<List<InventoryColumnInfo>> FetchColumnsAsync(
         SqlConnection conn, CancellationToken ct)
     {

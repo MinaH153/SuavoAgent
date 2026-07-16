@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using SuavoAgent.Contracts.Maintenance;
 using SuavoAgent.Contracts.Security;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Workers;
@@ -84,6 +85,37 @@ internal sealed record AutonomyEvidenceDeviceReceipt(
     long Counter,
     string CompletedAt);
 
+/// <summary>
+/// PHI-negative, device-bound proof that a signed OTA command was already satisfied by the
+/// currently running native cohort. The command fields are the complete signed-command canonical
+/// binding; the raw command data is deliberately excluded.
+/// </summary>
+internal sealed record ReleaseNoopDeviceReceipt(
+    int SchemaVersion,
+    string Purpose,
+    string CommandId,
+    string Command,
+    string AgentId,
+    string MachineFingerprint,
+    string CommandTimestamp,
+    string EnvelopeNonce,
+    string CommandDataHash,
+    string CommandKeyId,
+    string CommandSignature,
+    string TargetVersion,
+    string ManifestCanonical,
+    string ManifestSignature,
+    string OtaSigningKeyId,
+    string? ReleaseTag,
+    string? SourceSha,
+    string? ManifestName,
+    string? ChecksumsSha256,
+    string? ChecksumsSignatureSha256,
+    string? InventorySha256,
+    string? InstallReceiptSha256,
+    string? RestartReceiptSha256,
+    string VerifiedAtUtc);
+
 internal sealed record SignedDeviceReceipt<T>(
     T Receipt,
     string KeyId,
@@ -126,6 +158,15 @@ internal interface IDeviceAuthoritySigner : IDisposable
         SeedApplicationDeviceReceipt receipt);
     SignedDeviceReceipt<AutonomyEvidenceDeviceReceipt> Sign(
         AutonomyEvidenceDeviceReceipt receipt);
+    SignedDeviceReceipt<ReleaseNoopDeviceReceipt> Sign(
+        ReleaseNoopDeviceReceipt receipt) =>
+        throw new NotSupportedException("Release no-op receipt signing is unavailable.");
+    SignedRelease1PreliminaryConvergenceProof SignRelease1Preliminary(
+        Release1PreliminaryConvergenceProof proof) =>
+        throw new NotSupportedException("Release 1 preliminary signing is unavailable.");
+    string SignRelease1Attestation(
+        Release1DeviceConvergenceAttestation attestation) =>
+        throw new NotSupportedException("Release 1 attestation signing is unavailable.");
     SignedDeviceProvisioningProof SignProvisioningProof(
         DeviceProvisioningProofPayload proof);
     SignedDeviceProbationHealth SignProbationHealth(
@@ -178,6 +219,28 @@ internal sealed class DeviceAuthoritySigner : IDeviceAuthoritySigner
             receipt,
             "suavo.autonomy-evidence.v1\n");
 
+    public SignedDeviceReceipt<ReleaseNoopDeviceReceipt> Sign(
+        ReleaseNoopDeviceReceipt receipt) => SignCore(
+            receipt,
+            "suavo.release-noop.v1\n");
+
+    public SignedRelease1PreliminaryConvergenceProof SignRelease1Preliminary(
+        Release1PreliminaryConvergenceProof proof)
+    {
+        RequireRelease1KeyId(proof.AttestationKeyId);
+        return new(
+            proof,
+            Base64Url(_key.Sign(Release1ConvergenceContract.CanonicalBytes(proof))));
+    }
+
+    public string SignRelease1Attestation(
+        Release1DeviceConvergenceAttestation attestation)
+    {
+        RequireRelease1KeyId(attestation.AttestationKeyId);
+        return Base64Url(_key.Sign(
+            Release1ConvergenceContract.CanonicalBytes(attestation)));
+    }
+
     public SignedDeviceProvisioningProof SignProvisioningProof(
         DeviceProvisioningProofPayload proof)
     {
@@ -226,6 +289,13 @@ internal sealed class DeviceAuthoritySigner : IDeviceAuthoritySigner
     }
 
     public void Dispose() => _key.Dispose();
+
+    private void RequireRelease1KeyId(string keyId)
+    {
+        if (!string.Equals(keyId, KeyId, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "Release 1 proof key id does not match the opened device key.");
+    }
 
     private static string Base64Url(byte[] value) =>
         Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');

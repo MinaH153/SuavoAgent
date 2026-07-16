@@ -81,9 +81,9 @@ public sealed partial class AgentStateDb
         cmd.CommandText = """
             INSERT OR REPLACE INTO pricing_results
                 (job_id, row_index, ndc, found, supplier_name, cost_per_unit,
-                 baseline_cost_per_unit, quantity, error_message,
+                 package_cost, cost_basis, baseline_cost_per_unit, quantity, error_message,
                  observations_json, omitted_selector_observations)
-            VALUES (@job, @row, @ndc, @found, @supplier, @cost, @baseline,
+            VALUES (@job, @row, @ndc, @found, @supplier, @cost, @package, @basis, @baseline,
                     @quantity, @error, @observations, @omitted_observations)
             """;
         var observationsJson = result.Observations is { Count: > 0 }
@@ -95,6 +95,8 @@ public sealed partial class AgentStateDb
         cmd.Parameters.AddWithValue("@found", result.Found ? 1 : 0);
         cmd.Parameters.AddWithValue("@supplier", (object?)result.SupplierName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@cost", (object?)result.CostPerUnit ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@package", (object?)result.PackageCost ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@basis", result.CostBasis);
         cmd.Parameters.AddWithValue("@baseline", (object?)result.BaselineCostPerUnit ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@quantity", (object?)result.Quantity ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@error", (object?)result.ErrorMessage ?? DBNull.Value);
@@ -177,7 +179,7 @@ public sealed partial class AgentStateDb
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit,
-                   baseline_cost_per_unit, quantity, error_message,
+                   package_cost, cost_basis, baseline_cost_per_unit, quantity, error_message,
                    observations_json, omitted_selector_observations
               FROM pricing_results
              WHERE job_id = @job
@@ -195,13 +197,15 @@ public sealed partial class AgentStateDb
                 Found: reader.GetInt32(3) == 1,
                 SupplierName: reader.IsDBNull(4) ? null : reader.GetString(4),
                 CostPerUnit: reader.IsDBNull(5) ? null : (decimal)reader.GetDouble(5),
-                ErrorMessage: reader.IsDBNull(8) ? null : reader.GetString(8),
-                Observations: reader.IsDBNull(9)
+                ErrorMessage: reader.IsDBNull(10) ? null : reader.GetString(10),
+                Observations: reader.IsDBNull(11)
                     ? null
-                    : System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Learning.SelectorObservation>>(reader.GetString(9)),
-                BaselineCostPerUnit: reader.IsDBNull(6) ? null : (decimal)reader.GetDouble(6),
-                Quantity: reader.IsDBNull(7) ? null : (decimal)reader.GetDouble(7),
-                OmittedSelectorObservations: reader.GetInt32(10)));
+                    : System.Text.Json.JsonSerializer.Deserialize<List<SuavoAgent.Contracts.Learning.SelectorObservation>>(reader.GetString(11)),
+                BaselineCostPerUnit: reader.IsDBNull(8) ? null : (decimal)reader.GetDouble(8),
+                Quantity: reader.IsDBNull(9) ? null : (decimal)reader.GetDouble(9),
+                OmittedSelectorObservations: reader.GetInt32(12),
+                PackageCost: reader.IsDBNull(6) ? null : (decimal)reader.GetDouble(6),
+                CostBasis: reader.GetString(7)));
         }
         return results;
         }

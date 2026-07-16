@@ -31,6 +31,7 @@
     <!-- Shared/ is its own (net8.0, cross-platform) project — keep its sources out of this glob. -->
     <Compile Remove="Shared/**" />
     <ProjectReference Include="Shared/PioneerRxSim.Shared.csproj" />
+    <ProjectReference Include="../../src/SuavoAgent.Contracts/SuavoAgent.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

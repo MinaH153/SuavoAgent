@@ -30,10 +30,15 @@ public sealed record PricingCostBasisAuthority(
 public static class PricingObservationPolicy
 {
     public const int PricingApprovalSchemaVersion = PricingApprovalContract.SchemaVersion;
+    public const int PackagePricingApprovalSchemaVersion =
+        PricingApprovalContract.PackageSchemaVersion;
     public const string CostPerUnitBasis = PricingApprovalContract.CostPerUnitBasis;
+    public const string PackageCostBasis = PricingApprovalContract.PackageCostBasis;
     public const string PharmacistInChargeRole =
         PricingApprovalContract.PharmacistInChargeRole;
     public const string SnapshotContractV1 = PricingApprovalContract.SnapshotContractV1;
+    public const string PackageSnapshotContractV2 =
+        PricingApprovalContract.PackageSnapshotContractV2;
     public static readonly TimeSpan DefaultFreshnessWindow = TimeSpan.FromHours(12);
 
     public static PricingObservationContract CreateUia(string modality)
@@ -47,21 +52,60 @@ public static class PricingObservationPolicy
         string modality,
         string pmsFingerprint,
         string screenSignature,
-        IReadOnlyList<SelectorPatch> activePatches)
+        IReadOnlyList<SelectorPatch> activePatches) => CreateUia(
+            modality,
+            pmsFingerprint,
+            screenSignature,
+            activePatches,
+            CostPerUnitBasis);
+
+    internal static PricingObservationContract CreateUia(
+        string modality,
+        string pmsFingerprint,
+        string screenSignature,
+        IReadOnlyList<SelectorPatch> activePatches,
+        string costBasis)
     {
         if (modality is not ("uia" or "vision"))
             throw new ArgumentOutOfRangeException(nameof(modality));
         if (!IsLowerHex64(pmsFingerprint) || !IsLowerHex64(screenSignature))
             throw new ArgumentException("Pricing live screen identity is invalid.");
+        if (!PricingApprovalContract.IsSupportedCostBasis(costBasis))
+            throw new ArgumentException("Pricing cost basis is invalid.");
+        if (costBasis == PackageCostBasis && modality != "uia")
+            throw new ArgumentException("Package-cost pricing requires UI Automation.");
         var selectorDigest = SelectorSnapshotDigest(activePatches);
-        var schema = Digest("pioneerrx_supplier_catalog_uia_v3", modality,
-            "quick_search:help_text_or_pic_approved_selector",
-            "cost_column:exact_cost_per_unit_header_or_uia_cell",
-            pmsFingerprint,
-            screenSignature,
-            selectorDigest);
-        var status = Digest("eligible_status_v1", "Available", "Active");
-        return Create(modality, schema, status, CostPerUnitBasis);
+        var schema = costBasis == PackageCostBasis
+            ? Digest(
+                "pioneerrx_supplier_catalog_uia_v3",
+                modality,
+                "quick_search:help_text_or_pic_approved_selector",
+                "quick_search_selection:two_enter_exact_ndc_non_do_not_use",
+                "filters:include_discontinued_no_inventory_group_rx",
+                "cost_column:exact_cost_header_uia_cell",
+                pmsFingerprint,
+                screenSignature,
+                selectorDigest)
+            : Digest(
+                "pioneerrx_supplier_catalog_uia_v3",
+                modality,
+                "quick_search:help_text_or_pic_approved_selector",
+                "cost_column:exact_cost_per_unit_header_or_uia_cell",
+                pmsFingerprint,
+                screenSignature,
+                selectorDigest);
+        var status = costBasis == PackageCostBasis
+            ? Digest(
+                "eligible_status_v2",
+                "Available",
+                "Active",
+                "linked:true",
+                "inventory_group:Rx",
+                "discontinued:false",
+                "include_discontinued_filter:No",
+                "inventory_group_filter:Rx")
+            : Digest("eligible_status_v1", "Available", "Active");
+        return Create(modality, schema, status, costBasis);
     }
 
     internal static string SelectorSnapshotDigest(
@@ -246,12 +290,14 @@ public static class PricingObservationPolicy
         string statusPolicyDigest,
         string costBasis)
     {
+        var snapshotContract = PricingApprovalContract
+            .SnapshotContractForCostBasis(costBasis);
         var policyDigest = PricingApprovalContract.ComputeObservationPolicyDigest(
             modality,
             schemaDigest,
             statusPolicyDigest,
             costBasis,
-            SnapshotContractV1,
+            snapshotContract,
             (long)DefaultFreshnessWindow.TotalSeconds);
         return new PricingObservationContract(
             modality,
@@ -259,7 +305,7 @@ public static class PricingObservationPolicy
             statusPolicyDigest,
             costBasis,
             policyDigest,
-            SnapshotContractV1,
+            snapshotContract,
             DefaultFreshnessWindow);
     }
 

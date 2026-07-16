@@ -1,12 +1,14 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using PioneerRxSim;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Core.Discovery;
 using SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation;
+using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.State;
@@ -197,7 +199,16 @@ public static class Program
                     visionHandshake),
                 loggerFactory.CreateLogger<HelperActuationGateway>());
             var executor = new UiaFirstPricingJobExecutor(
-                runner, ipc, db, actuationGateway, loggerFactory.CreateLogger<UiaFirstPricingJobExecutor>());
+                runner,
+                ipc,
+                db,
+                actuationGateway,
+                loggerFactory.CreateLogger<UiaFirstPricingJobExecutor>(),
+                Options.Create(new AgentOptions
+                {
+                    PricingExecutor = PricingExecutorMode.UiaFirst,
+                    PricingThrottleMs = a.ThrottleMs,
+                }));
             log.LogInformation(
                 "Pricing executor selected: UiaFirst ({Type}); throttle={ThrottleMs}ms",
                 executor.GetType().Name, a.ThrottleMs);

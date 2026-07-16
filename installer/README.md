@@ -23,7 +23,8 @@ current runtime responsibilities require the Windows session/token privileges
 documented in the service projects. Recovery uses WiX's reviewed utility
 action. Windows Installer's native advanced service-configuration tables are
 documented as not working correctly, so narrow rollback/deferred/commit actions
-invoke the signed maintenance host with one fixed switch each around the
+invoke the current package's embedded signed maintenance host with one fixed
+switch each around the
 `InstallServices`/`StartServices` boundary. That host uses `QueryServiceConfig2` and
 `ChangeServiceConfig2` directly to apply delayed automatic start and
 unrestricted service SIDs to the exact three-service cohort. It snapshots all
@@ -38,6 +39,12 @@ Program files are read-only to standard users. Runtime state lives under
 The ProgramData directory is intentionally retained on uninstall so audit and
 diagnostic evidence is not silently destroyed. Product removal deletes the
 installed executables and known residue from Program Files.
+
+The destination is the private MSI directory property `InstallFolder`, rooted
+at `ProgramFiles64Folder\Suavo\Agent`; it is not a public command-line property.
+The historical public `INSTALLFOLDER=` override is explicitly refused before
+mutation. The embedded host independently requires the canonical local
+`C:\Program Files\Suavo\Agent` path and rejects redirection or reparse points.
 
 ## Connect the installed workstation
 
@@ -61,13 +68,30 @@ owns configuration only:
 No secret, pharmacy identifier, credential, pairing code, or PHI is carried in
 an MSI property or process argument.
 
-Successful MSI commit also invokes one fixed native cleanup mode before pairing
-is optional. It inspects only the exact historical Suavo.lnk candidates and
-stops only the exact
-...\suavo-publish\Broker\SuavoAgent.Broker.exe process. Unclassified same-name
-shortcuts/processes and the developer-publish directory are preserved. Because
-cleanup is commit-only, an MSI rollback never touches the old interactive
-launch.
+The MSI deliberately makes no LocalSystem changes to historical user shortcuts,
+developer-publish folders, legacy services, or legacy processes. Remove any
+legacy graphical installation through Windows **Installed apps** before
+starting the new lifecycle. A current-package, read-only immediate action runs
+after related-product discovery and before `InstallValidate`: it allows an
+actually installed related product or repair, but a direct fresh MSI launch
+refuses any SuavoAgent service/Broker process and known product registration,
+directory, task, or shortcut state. The Windows rehearsal independently checks
+the exact historical `suavo-publish\Broker\SuavoAgent.Broker.exe`
+process/shortcut shape. Neither boundary kills, relaunches, rewrites, or deletes
+legacy state.
+
+Every transaction action receives the same hidden identity derived from the MSI
+product code, Restart Manager session key, original database, and canonical
+install directory. The current package host arms a protected active token before
+mutation. Marker and service-hardening journals are bound to that identity and
+move durably from `pending` to `committed`; rollback requires both the current
+token and a matching pending journal. A committed tombstone is cleanup-only and
+can never restore old state. Receipt sealing and transaction arm share one
+protected proof gate, so they cannot race. Arm is create-new only and refuses
+any existing token or pending journal. The last commit/rollback finalizer
+disarms only after both journals are absent; any seal, restore, or cleanup
+failure deliberately leaves the token in place and blocks Release 1 receipt
+creation.
 
 ## Build inputs
 
@@ -134,6 +158,24 @@ dotnet test tests/SuavoAgent.Setup.Tests/SuavoAgent.Setup.Tests.csproj -c Releas
 
 MSI ICE validation and install/repair/upgrade/uninstall proof must run on a clean
 x64 Windows VM. Follow [WINDOWS-VALIDATION.md](WINDOWS-VALIDATION.md).
+
+For the repeatable signed-artifact slice, run the repository-owned rehearsal
+from an elevated PowerShell 7 session on a disposable Windows 11 x64 machine:
+
+```text
+.\scripts\Invoke-SuavoAgentInstallerRehearsal.ps1 -InstallerKind Bundle -InstallerPath C:\reviewed\SuavoAgent-Setup.exe -MsiPath C:\reviewed\SuavoAgent-v3.93.0-win-x64.msi -ExpectedReleaseTag v3.93.0 -AllowedSignerSha256 <approved-certificate-sha256> -EvidenceDirectory C:\SuavoAgent-Rehearsal
+```
+
+The rehearsal refuses any pre-existing SuavoAgent service, Program Files
+cohort, installer transaction journal, exact legacy Broker process/shortcut, or
+known legacy product registration, directory, and task. It validates both
+signed installer inputs, exact installed hashes, service accounts and hardening, the MSI-bound
+Release 1 marker, real file-loss repair, the rule that repair cannot mint
+fresh-install proof, rollback-journal cleanup, uninstall, and exact
+ProgramData-sentinel preservation. Its JSON summary is PHI-negative; MSI and
+Burn logs remain separate evidence. This is one automated slice of the larger
+matrix, not a substitute for reboot, upgrade rollback, Defender,
+accessibility, or graphical pairing proof.
 
 ## Deployment rules
 

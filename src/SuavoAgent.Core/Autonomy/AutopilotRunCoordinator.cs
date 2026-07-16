@@ -1,3 +1,5 @@
+using SuavoAgent.Contracts.Security;
+
 namespace SuavoAgent.Core.Autonomy;
 
 /// <summary>Every Core path capable of causing Helper-side mutation.</summary>
@@ -42,6 +44,11 @@ public sealed record AutopilotRunCancellationReceipt(
     int SignalledRunCount,
     int CancellationSignalFailureCount);
 
+public sealed record AutopilotAuthorityLossReceipt(
+    int SignalledRunCount,
+    int CancellationSignalFailureCount,
+    IReadOnlyList<AutopilotRunKind> SignalledKinds);
+
 /// <summary>
 /// One process-wide cancellation and admission constitution for every
 /// Autopilot execution path. The Helper remains the authoritative no-more-
@@ -53,14 +60,40 @@ public sealed class AutopilotRunCoordinator
     private readonly object _sync = new();
     private readonly Dictionary<long, ActiveRun> _active = [];
     private readonly Func<DateTimeOffset> _clock;
+    private readonly ObservationActivationIdentity? _observationIdentity;
+    private readonly string? _observationControlPath;
+    private readonly Action? _revokeObservationAuthority;
+    private readonly Func<bool>? _isObservationAuthorized;
     private long _nextLeaseId;
     private long _controlGeneration;
     private bool _paused;
     private bool _stopped;
 
     public AutopilotRunCoordinator(Func<DateTimeOffset>? clock = null)
+        : this(null, null, clock)
+    { }
+
+    public AutopilotRunCoordinator(
+        ObservationActivationIdentity? observationIdentity,
+        string? observationControlPath,
+        Func<DateTimeOffset>? clock = null,
+        Action? revokeObservationAuthority = null,
+        Func<bool>? isObservationAuthorized = null)
     {
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
+        _observationIdentity = observationIdentity;
+        _observationControlPath = observationControlPath;
+        _revokeObservationAuthority = revokeObservationAuthority;
+        _isObservationAuthorized = isObservationAuthorized;
+        if (observationIdentity is not null && !string.IsNullOrWhiteSpace(observationControlPath))
+        {
+            var persisted = ObservationControlStateStore.Load(
+                observationControlPath,
+                observationIdentity);
+            _controlGeneration = persisted.Generation;
+            _paused = persisted.Paused;
+            _stopped = persisted.Stopped;
+        }
     }
 
     public AutopilotRunLease Register(
@@ -68,6 +101,9 @@ public sealed class AutopilotRunCoordinator
         CancellationToken parentToken)
     {
         var linked = CancellationTokenSource.CreateLinkedTokenSource(parentToken);
+        var observationAuthorized = false;
+        try { observationAuthorized = _isObservationAuthorized?.Invoke() ?? true; }
+        catch { }
         long leaseId;
         string? rejectionCode;
 
@@ -78,6 +114,8 @@ public sealed class AutopilotRunCoordinator
                 ? "autopilot_stopped"
                 : _paused
                     ? "autopilot_paused"
+                    : !observationAuthorized
+                        ? ObservationActivationCodes.StateMissing
                     : null;
             if (rejectionCode is null)
                 _active.Add(leaseId, new ActiveRun(kind, linked));
@@ -123,6 +161,7 @@ public sealed class AutopilotRunCoordinator
         long generation;
         bool paused;
         bool stopped;
+        var mustRevokeObservationAuthority = false;
 
         lock (_sync)
         {
@@ -144,6 +183,7 @@ public sealed class AutopilotRunCoordinator
                     _clock());
             }
 
+            var previousGeneration = _controlGeneration;
             generation = ++_controlGeneration;
             switch (action)
             {
@@ -173,8 +213,44 @@ public sealed class AutopilotRunCoordinator
                     throw new ArgumentOutOfRangeException(nameof(action));
             }
 
+            if (_observationIdentity is not null &&
+                !string.IsNullOrWhiteSpace(_observationControlPath) &&
+                (!ObservationControlStateStore.TryTransition(
+                     _observationControlPath,
+                     _observationIdentity,
+                     previousGeneration,
+                     _paused,
+                     _stopped,
+                     _clock(),
+                     out var persistedGeneration) ||
+                 persistedGeneration != generation))
+            {
+                // Keep the in-memory generation coherent with the durable file.
+                // Resume may never succeed only in memory. Pause/Stop failure
+                // additionally trips the machine-wide emergency circuit below.
+                _controlGeneration = previousGeneration;
+                generation = previousGeneration;
+                _paused = true;
+                if (action == AutopilotControlAction.Stop) _stopped = true;
+                applied = false;
+                code = "observation_control_persistence_failed";
+                mustRevokeObservationAuthority = action is
+                    AutopilotControlAction.Pause or AutopilotControlAction.Stop;
+            }
+
             paused = _paused;
             stopped = _stopped;
+        }
+
+        if (mustRevokeObservationAuthority)
+        {
+            ObservationEmergencyStop.Latch();
+            try { _revokeObservationAuthority?.Invoke(); }
+            catch
+            {
+                // The named emergency circuit is already latched. Never turn a
+                // failed durable Pause into a successful acknowledgement.
+            }
         }
 
         var failures = 0;
@@ -195,6 +271,26 @@ public sealed class AutopilotRunCoordinator
             failures,
             runsToCancel.Select(run => run.Kind).Distinct().Order().ToArray(),
             _clock());
+    }
+
+    /// <summary>
+    /// Cancels every active run and closes admission when the signed machine
+    /// lease disappears or expires. This is deliberately in-memory only: a
+    /// control-plane lease expiry is not an operator-authored persistent Pause.
+    /// </summary>
+    public AutopilotAuthorityLossReceipt EnforceObservationAuthorityLost()
+    {
+        List<ActiveRun> runs;
+        lock (_sync)
+        {
+            runs = _active.Values.ToList();
+        }
+
+        var failures = runs.Count(run => !TryCancel(run.Cancellation));
+        return new(
+            runs.Count,
+            failures,
+            runs.Select(run => run.Kind).Distinct().Order().ToArray());
     }
 
     public AutopilotRuntimeState Snapshot()

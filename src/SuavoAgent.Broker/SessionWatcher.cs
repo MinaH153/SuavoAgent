@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Maintenance;
+using SuavoAgent.Contracts.Security;
 
 namespace SuavoAgent.Broker;
 
@@ -11,6 +12,7 @@ public sealed class SessionWatcher : BackgroundService
     private readonly ILogger<SessionWatcher> _logger;
     private readonly IWatchdogServiceProbe _watchdogProbe;
     private readonly Func<string, bool> _fileExists;
+    private readonly Func<ObservationActivationSnapshot> _refreshObservationAuthority;
     private readonly Dictionary<uint, HelperInfo> _helpers = new();
     private DateTimeOffset _lastAttestationWrite = DateTimeOffset.MinValue;
 
@@ -42,16 +44,44 @@ public sealed class SessionWatcher : BackgroundService
         string HelperSha256);
 
     public SessionWatcher(ILogger<SessionWatcher> logger)
-        : this(logger, new ScWatchdogServiceProbe(), File.Exists) { }
+        : this(
+            logger,
+            new ScWatchdogServiceProbe(),
+            File.Exists,
+            CreateProductionObservationAuthority()) { }
 
     // Test seam: inject a fake Watchdog probe + file-existence check so the launch-failure escalation
     // is unit-testable without a live Windows session or a real maintenance host.
     internal SessionWatcher(
         ILogger<SessionWatcher> logger, IWatchdogServiceProbe watchdogProbe, Func<string, bool> fileExists)
+        : this(logger, watchdogProbe, fileExists, () => new(
+            true,
+            ObservationActivationCodes.Active,
+            1,
+            "test-lease",
+            "test-nonce",
+            DateTimeOffset.MaxValue,
+            "test",
+            ObservationActivationIdentityStore.PolicyDigest))
+    { }
+
+    internal SessionWatcher(
+        ILogger<SessionWatcher> logger,
+        IWatchdogServiceProbe watchdogProbe,
+        Func<string, bool> fileExists,
+        Func<ObservationActivationSnapshot> refreshObservationAuthority)
     {
         _logger = logger;
         _watchdogProbe = watchdogProbe;
         _fileExists = fileExists;
+        _refreshObservationAuthority = refreshObservationAuthority;
+    }
+
+    private static Func<ObservationActivationSnapshot> CreateProductionObservationAuthority()
+    {
+        var authority = new ObservationActivationAuthority(
+            identity: ObservationActivationIdentityStore.LoadProduction());
+        return authority.Refresh;
     }
 
     internal int ConsecutiveLaunchFailures => _consecutiveLaunchFailures;
@@ -61,6 +91,9 @@ public sealed class SessionWatcher : BackgroundService
     /// escalate a native maintenance repair once. Pure so the threshold decision is unit-testable.</summary>
     internal static bool ShouldEscalateLaunchFailure(int consecutiveFailures, bool alreadyEscalated) =>
         !alreadyEscalated && consecutiveFailures >= MaxConsecutiveLaunchFailuresBeforeEscalation;
+
+    internal static bool IsHelperLaunchAuthorized(ObservationActivationSnapshot snapshot) =>
+        snapshot.ObservationEnabled;
 
     internal void RegisterLaunchSuccess()
     {
@@ -403,6 +436,22 @@ public sealed class SessionWatcher : BackgroundService
 
     private void CheckActiveSessions()
     {
+        ObservationActivationSnapshot activation;
+        try
+        {
+            activation = _refreshObservationAuthority();
+        }
+        catch
+        {
+            activation = ObservationActivationSnapshot.Dormant(
+                ObservationActivationCodes.StateInvalid);
+        }
+        if (!IsHelperLaunchAuthorized(activation))
+        {
+            _ = KillAllHelperProcesses("observation_authority_unavailable");
+            return;
+        }
+
         var activeSessionId = GetActiveConsoleSessionId();
         if (activeSessionId == 0xFFFFFFFF)
         {

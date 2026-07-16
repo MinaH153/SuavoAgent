@@ -10,6 +10,7 @@ public static class MaintenanceContract
     public const string ExecutableName = "SuavoAgent.Maintenance.exe";
     public const string InstallStateFileName = "install-state.json";
     public const string SignedSetupArtifactName = "SuavoSetup.exe";
+    public const string CanonicalInstallerArtifactName = "SuavoAgent-Setup.exe";
     public const string ReleaseChecksumsFileName = "checksums.sha256";
     public const string ReleaseChecksumsSignatureFileName = "checksums.sha256.sig";
     public const string FieldReleaseReceiptFileName = "field-release-receipt.json";

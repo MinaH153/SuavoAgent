@@ -11,11 +11,13 @@ output="$2"
 format="$3"
 : "${OTA_KMS_KEY_ID:?OTA_KMS_KEY_ID is required}"
 : "${OTA_KMS_PUBLIC_KEY_DER_BASE64:?OTA_KMS_PUBLIC_KEY_DER_BASE64 is required}"
-reviewed_public_key="MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA=="
-if [[ "$OTA_KMS_PUBLIC_KEY_DER_BASE64" != "$reviewed_public_key" ]]; then
-  echo "configured OTA public key does not match the runtime-pinned update root" >&2
-  exit 66
+script_dir="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+key_arguments=()
+if [[ -n "${OTA_KMS_EXPECTED_KEY_ID:-}" ]]; then
+  key_arguments=(--key-id "$OTA_KMS_EXPECTED_KEY_ID")
 fi
+python3 "$script_dir/ota_update_trust_roots.py" \
+  assert-signing-public-key "$OTA_KMS_PUBLIC_KEY_DER_BASE64" "${key_arguments[@]}"
 
 if [[ ! -f "$input" || -L "$input" || -e "$output" ]]; then
   echo "input must be a regular non-link and output must not exist" >&2
@@ -56,6 +58,6 @@ openssl dgst -sha256 -verify "$tmp/public.pem" -signature "$tmp/signature.der" "
 if [[ "$format" == "der" ]]; then
   install -m 0644 "$tmp/signature.der" "$output"
 else
-  python3 "$(dirname "$0")/ecdsa_der_to_p1363.py" "$tmp/signature.der" "$output"
+  python3 "$script_dir/ecdsa_der_to_p1363.py" "$tmp/signature.der" "$output"
   [[ "$(wc -c < "$output" | tr -d ' ')" == "128" ]]
 fi

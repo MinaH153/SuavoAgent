@@ -56,6 +56,36 @@ public sealed class UpdateActivationGateTests : IDisposable
     }
 
     [Fact]
+    public void Validate_RotationRegistryAcceptsV2SignedManifest()
+    {
+        var fixture = CreateFixture(maintenance: true);
+        using var unrelatedV1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var gate = new UpdateActivationGate(
+            new Dictionary<string, string>
+            {
+                [fixture.Request.KeyId] = fixture.CommandPublicKey,
+            },
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [OtaUpdateTrust.LegacyV1KeyId] =
+                    Convert.ToBase64String(unrelatedV1.ExportSubjectPublicKeyInfo()),
+                [OtaUpdateTrust.CurrentV2KeyId] = fixture.UpdatePublicKey,
+            },
+            NullLogger.Instance);
+
+        var result = gate.Validate(
+            fixture.RequestPath,
+            fixture.UpdateRoot,
+            fixture.Ledger,
+            fixture.Request.AgentId,
+            fixture.Request.MachineFingerprint,
+            "1.9.0",
+            Now);
+
+        Assert.True(result.IsValid, result.Code);
+    }
+
+    [Fact]
     public void Validate_ReplayedReservation_IsRejectedAcrossLedgerInstances()
     {
         var fixture = CreateFixture(maintenance: true);
@@ -268,7 +298,9 @@ public sealed class UpdateActivationGateTests : IDisposable
             ledgerPath,
             request,
             gate,
-            new UpdateReplayLedger(ledgerPath));
+            new UpdateReplayLedger(ledgerPath),
+            commandKeys[keyId],
+            Convert.ToBase64String(_updateKey.ExportSubjectPublicKeyInfo()));
     }
 
     private static void WriteRequest(string path, UpdateActivationRequest request)
@@ -298,5 +330,7 @@ public sealed class UpdateActivationGateTests : IDisposable
         string LedgerPath,
         UpdateActivationRequest Request,
         UpdateActivationGate Gate,
-        UpdateReplayLedger Ledger);
+        UpdateReplayLedger Ledger,
+        string CommandPublicKey,
+        string UpdatePublicKey);
 }

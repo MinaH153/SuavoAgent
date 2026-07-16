@@ -14,7 +14,7 @@ namespace SuavoAgent.Core.Workers;
 /// Orchestrates the 30-day learning phases. Manages observer lifecycle,
 /// phase transitions, and mode promotions. Only runs when LearningMode = true.
 /// </summary>
-public sealed class LearningWorker : BackgroundService
+public sealed partial class LearningWorker : BackgroundService
 {
     private readonly ILogger<LearningWorker> _logger;
     private readonly AgentOptions _options;
@@ -62,7 +62,7 @@ public sealed class LearningWorker : BackgroundService
         _seedClient = seedClient;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    private async Task RunAuthorizedSessionAsync(CancellationToken stoppingToken)
     {
         if (!_options.LearningMode)
         {
@@ -502,14 +502,6 @@ public sealed class LearningWorker : BackgroundService
             }
         }
 
-        // Cleanup
-        foreach (var obs in _observers)
-        {
-            await obs.StopAsync();
-            obs.Dispose();
-        }
-
-        _logger.LogInformation("LearningWorker stopped");
     }
 
     /// <summary>

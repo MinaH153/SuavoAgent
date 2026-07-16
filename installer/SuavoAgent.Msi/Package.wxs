@@ -14,6 +14,10 @@
     <SummaryInformation Description="SuavoAgent pharmacy workstation agent"
                         Manufacturer="MKM Technologies LLC" />
     <MediaTemplate EmbedCab="yes" />
+    <!-- Every privileged transaction action executes the current signed host
+         embedded in this MSI, never a missing, mutable, or older installed copy. -->
+    <Binary Id="MaintenanceTransactionHost"
+            SourceFile="$(PayloadRoot)/Setup/SuavoSetup.exe" />
     <MajorUpgrade Schedule="afterInstallExecute"
                   DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
 
@@ -21,61 +25,172 @@
     <Property Id="ARPHELPLINK" Value="https://suavollc.com" />
     <Property Id="ARPURLINFOABOUT" Value="https://suavollc.com" />
     <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="MsiHiddenProperties"
+              Value="OriginalDatabase;MsiRestartManagerSessionKey;InstallFolder;ArmExistingInstallerTransaction;ArmFreshInstallerTransaction;RollbackServiceHardening;ApplyServiceHardening;CommitServiceHardening;RollbackReleaseInstallMarker;WriteReleaseInstallMarker;CommitReleaseInstallMarker" />
     <Launch Condition="VersionNT64" Message="SuavoAgent requires 64-bit Windows." />
+    <Launch Condition="NOT INSTALLFOLDER"
+            Message="SuavoAgent uses its fixed protected Program Files location; custom install paths are not supported." />
     <Launch Condition="REMOVE~=&quot;ALL&quot; OR NOT RollbackDisabled"
             Message="SuavoAgent requires Windows Installer rollback to protect the existing service configuration." />
 
     <!-- Windows Installer's MsiServiceConfig family is documented as not
-         working correctly and WiX emits WIX1149 for it. Run the signed,
-         installed maintenance host through three fixed non-sensitive modes.
+         working correctly and WiX emits WIX1149 for it. Run the current
+         package's embedded signed maintenance host through fixed bounded modes.
          Apply durably snapshots all three services before ChangeServiceConfig2;
-         rollback restores that snapshot after any later MSI failure; commit is
-         the only successful-install path that removes the journal. -->
+         rollback restores that snapshot after any later MSI failure. The
+         non-vital cleanup action runs last; an undeleted journal blocks Release
+         1 receipt sealing instead of making cleanup failure request rollback
+         after the rollback proof may already have been deleted. -->
+    <!-- Existing installs arm before InstallFiles, excluding receipt sealing
+         before repair/major-upgrade can mutate the installed cohort. A truly
+         fresh host has no receipt-capable maintenance executable, so its
+         mutually exclusive arm runs immediately after InstallFiles. -->
+    <CustomAction Id="AssertCleanInstallHost"
+                  BinaryRef="MaintenanceTransactionHost"
+                  ExeCommand="--msi-assert-clean-install-host"
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="check"
+                  HideTarget="yes" />
+    <CustomAction Id="ArmExistingInstallerTransaction"
+                  BinaryRef="MaintenanceTransactionHost"
+                  ExeCommand="--msi-arm-installer-transaction &quot;[CustomActionData]&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check"
+                  HideTarget="yes" />
+    <CustomAction Id="ArmFreshInstallerTransaction"
+                  BinaryRef="MaintenanceTransactionHost"
+                  ExeCommand="--msi-arm-installer-transaction &quot;[CustomActionData]&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check"
+                  HideTarget="yes" />
     <CustomAction Id="RollbackServiceHardening"
-                  FileRef="MaintenanceExecutable"
-                  ExeCommand="--msi-rollback-service-hardening"
+                  BinaryRef="MaintenanceTransactionHost"
+                  ExeCommand="--msi-rollback-service-hardening &quot;[CustomActionData]&quot;"
                   Execute="rollback"
                   Impersonate="no"
                   Return="check"
                   HideTarget="yes" />
     <CustomAction Id="ApplyServiceHardening"
-                  FileRef="MaintenanceExecutable"
-                  ExeCommand="--msi-apply-service-hardening"
+                  BinaryRef="MaintenanceTransactionHost"
+                  ExeCommand="--msi-apply-service-hardening &quot;[CustomActionData]&quot;"
                   Execute="deferred"
                   Impersonate="no"
                   Return="check"
                   HideTarget="yes" />
     <CustomAction Id="CommitServiceHardening"
-                  FileRef="MaintenanceExecutable"
-                  ExeCommand="--msi-commit-service-hardening"
+                  BinaryRef="MaintenanceTransactionHost"
+                  ExeCommand="--msi-commit-service-hardening &quot;[CustomActionData]&quot;"
+                  Execute="commit"
+                  Impersonate="no"
+                  Return="ignore"
+                  HideTarget="yes" />
+    <!-- Marker rollback is queued before the commit write. The write snapshots
+         exact prior canonical bytes (or proven absence) and replaces the
+         marker under the same protected lock used by receipt consumption. -->
+    <CustomAction Id="RollbackReleaseInstallMarker"
+                  BinaryRef="MaintenanceTransactionHost"
+                  ExeCommand="--msi-rollback-release-install-marker &quot;[CustomActionData]&quot;"
+                  Execute="rollback"
+                  Impersonate="no"
+                  Return="check"
+                  HideTarget="yes" />
+    <!-- A one-use, PHI-negative marker written only after MSI commit into the
+         SYSTEM/Administrators-only proof root. Pairing later binds it to the
+         exact signed release and TPM maintenance key. -->
+    <CustomAction Id="WriteReleaseInstallMarker"
+                  BinaryRef="MaintenanceTransactionHost"
+                  ExeCommand="--msi-write-release-install-marker &quot;[CustomActionData]&quot;"
                   Execute="commit"
                   Impersonate="no"
                   Return="check"
                   HideTarget="yes" />
-    <!-- Commit-only takeover cleanup: if MSI rolls back this never runs.
-         Impersonation intentionally preserves the installing user's profile so
-         the exact former Suavo.lnk can be inspected and retired. The native
-         host preserves every unclassified same-name shortcut and never deletes
-         the developer-publish directory itself. -->
-    <CustomAction Id="RetireLegacyInteractiveLaunch"
-                  FileRef="MaintenanceExecutable"
-                  ExeCommand="--msi-retire-legacy-interactive"
+    <!-- Successful commit cleanup is deliberately non-vital: if deletion is
+         denied, the protected journal remains and receipt sealing fails closed.
+         This avoids deleting rollback state and then asking MSI to roll back. -->
+    <CustomAction Id="CommitReleaseInstallMarker"
+                  BinaryRef="MaintenanceTransactionHost"
+                  ExeCommand="--msi-commit-release-install-marker &quot;[CustomActionData]&quot;"
                   Execute="commit"
-                  Impersonate="yes"
-                  Return="check"
+                  Impersonate="no"
+                  Return="ignore"
                   HideTarget="yes" />
+    <!-- Capture one byte-identical hidden invocation identity for every member
+         before InstallValidate clears MsiRestartManagerSessionKey. The signed
+         host hashes v1|ProductCode|RM-session-key|OriginalDatabase|InstallFolder
+         and never emits either path or the session key to the MSI log. -->
+    <SetProperty Id="ArmExistingInstallerTransaction"
+                 Value="v1|[ProductCode]|[MsiRestartManagerSessionKey]|[OriginalDatabase]|[InstallFolder]"
+                 Before="InstallValidate"
+                 Sequence="execute"
+                 Condition="NOT REMOVE~=&quot;ALL&quot; AND (REINSTALL OR WIX_UPGRADE_DETECTED)" />
+    <SetProperty Id="ArmFreshInstallerTransaction"
+                 Value="v1|[ProductCode]|[MsiRestartManagerSessionKey]|[OriginalDatabase]|[InstallFolder]"
+                 Before="InstallValidate"
+                 Sequence="execute"
+                 Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+    <SetProperty Id="RollbackServiceHardening"
+                 Value="v1|[ProductCode]|[MsiRestartManagerSessionKey]|[OriginalDatabase]|[InstallFolder]"
+                 Before="InstallValidate"
+                 Sequence="execute"
+                 Condition="NOT REMOVE~=&quot;ALL&quot; AND (NOT Installed OR REINSTALL)" />
+    <SetProperty Id="ApplyServiceHardening"
+                 Value="v1|[ProductCode]|[MsiRestartManagerSessionKey]|[OriginalDatabase]|[InstallFolder]"
+                 Before="InstallValidate"
+                 Sequence="execute"
+                 Condition="NOT REMOVE~=&quot;ALL&quot; AND (NOT Installed OR REINSTALL)" />
+    <SetProperty Id="CommitServiceHardening"
+                 Value="v1|[ProductCode]|[MsiRestartManagerSessionKey]|[OriginalDatabase]|[InstallFolder]"
+                 Before="InstallValidate"
+                 Sequence="execute"
+                 Condition="NOT REMOVE~=&quot;ALL&quot; AND (NOT Installed OR REINSTALL)" />
+    <SetProperty Id="RollbackReleaseInstallMarker"
+                 Value="v1|[ProductCode]|[MsiRestartManagerSessionKey]|[OriginalDatabase]|[InstallFolder]"
+                 Before="InstallValidate"
+                 Sequence="execute"
+                 Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT Installed" />
+    <SetProperty Id="WriteReleaseInstallMarker"
+                 Value="v1|[ProductCode]|[MsiRestartManagerSessionKey]|[OriginalDatabase]|[InstallFolder]"
+                 Before="InstallValidate"
+                 Sequence="execute"
+                 Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT Installed" />
+    <SetProperty Id="CommitReleaseInstallMarker"
+                 Value="v1|[ProductCode]|[MsiRestartManagerSessionKey]|[OriginalDatabase]|[InstallFolder]"
+                 Before="InstallValidate"
+                 Sequence="execute"
+                 Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT Installed" />
     <InstallExecuteSequence>
+      <!-- Always run for a new ProductCode. The embedded read-only probe
+           recognizes an actually installed related UpgradeCode itself, so a
+           public WIX_UPGRADE_DETECTED command-line value cannot bypass it. -->
+      <Custom Action="AssertCleanInstallHost"
+              After="FindRelatedProducts"
+              Condition="NOT Installed" />
+      <Custom Action="ArmExistingInstallerTransaction"
+              Before="InstallFiles"
+              Condition="NOT REMOVE~=&quot;ALL&quot; AND (REINSTALL OR WIX_UPGRADE_DETECTED)" />
+      <Custom Action="ArmFreshInstallerTransaction"
+              After="InstallFiles"
+              Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
       <Custom Action="RollbackServiceHardening"
-              Before="ApplyServiceHardening"
-              Condition="NOT REMOVE~=&quot;ALL&quot; AND (NOT Installed OR REINSTALL)" />
-      <Custom Action="ApplyServiceHardening"
               After="InstallServices"
               Condition="NOT REMOVE~=&quot;ALL&quot; AND (NOT Installed OR REINSTALL)" />
-      <Custom Action="CommitServiceHardening"
-              After="ApplyServiceHardening"
+      <Custom Action="ApplyServiceHardening"
+              After="RollbackServiceHardening"
               Condition="NOT REMOVE~=&quot;ALL&quot; AND (NOT Installed OR REINSTALL)" />
-      <Custom Action="RetireLegacyInteractiveLaunch"
-              After="CommitServiceHardening"
+      <Custom Action="RollbackReleaseInstallMarker"
+              After="ApplyServiceHardening"
+              Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT Installed" />
+      <Custom Action="WriteReleaseInstallMarker"
+              After="RollbackReleaseInstallMarker"
+              Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT Installed" />
+      <Custom Action="CommitReleaseInstallMarker"
+              After="WriteReleaseInstallMarker"
+              Condition="NOT REMOVE~=&quot;ALL&quot; AND NOT Installed" />
+      <Custom Action="CommitServiceHardening"
+              After="CommitReleaseInstallMarker"
               Condition="NOT REMOVE~=&quot;ALL&quot; AND (NOT Installed OR REINSTALL)" />
     </InstallExecuteSequence>
 
@@ -87,10 +202,13 @@
   <Fragment>
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="SUAVOFOLDER" Name="Suavo">
-        <Directory Id="INSTALLFOLDER" Name="Agent" />
+        <!-- Mixed-case directory identifiers are private MSI properties and
+             cannot be overridden from the msiexec command line. -->
+        <Directory Id="InstallFolder" Name="Agent" />
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="INSTALLPROOFFOLDER" Name="SuavoAgent-InstallerProof" />
       <Directory Id="DATAFOLDER" Name="SuavoAgent">
         <Directory Id="LOGSFOLDER" Name="logs">
           <Directory Id="HELPERLOGFOLDER" Name="helper" />
@@ -116,13 +234,14 @@
       <ComponentRef Id="NativeMaintenanceHost" />
       <ComponentRef Id="NativeOnboardingEntry" />
       <ComponentRef Id="BootstrapConfiguration" />
+      <ComponentRef Id="InstallerProofDirectoryPermissions" />
       <ComponentRef Id="DataDirectoryPermissions" />
       <ComponentRef Id="IntegrityMetadata" />
       <ComponentRef Id="LegacyInstallCleanup" />
     </ComponentGroup>
 
     <Component Id="InstallDirectoryPermissions"
-               Directory="INSTALLFOLDER"
+               Directory="InstallFolder"
                Guid="{FE61C8E6-4F08-46E6-B962-A4BAA68AC771}">
       <CreateFolder>
         <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-3161787503-2860973704-3751597344-303720228-1013404410)(A;;0x1200a9;;;BU)" />
@@ -131,7 +250,7 @@
     </Component>
 
     <Component Id="CoreService"
-               Directory="INSTALLFOLDER"
+               Directory="InstallFolder"
                Guid="{E6B8F2A8-70D6-4D26-B62C-F9398F046824}">
       <File Id="CoreExecutable"
             Name="SuavoAgent.Core.exe"
@@ -163,7 +282,7 @@
     </Component>
 
     <Component Id="BrokerService"
-               Directory="INSTALLFOLDER"
+               Directory="InstallFolder"
                Guid="{122BBA3F-CBAA-4944-A6E3-C9943AAE2E3D}">
       <File Id="BrokerExecutable"
             Name="SuavoAgent.Broker.exe"
@@ -196,7 +315,7 @@
     </Component>
 
     <Component Id="WatchdogService"
-               Directory="INSTALLFOLDER"
+               Directory="InstallFolder"
                Guid="{0515325B-47BD-4498-BEE7-0F044BDE1FA6}">
       <File Id="WatchdogExecutable"
             Name="SuavoAgent.Watchdog.exe"
@@ -228,7 +347,7 @@
     </Component>
 
     <Component Id="InteractiveHelper"
-               Directory="INSTALLFOLDER"
+               Directory="InstallFolder"
                Guid="{5EDDEB95-F836-4B03-898D-55FD48FBB965}">
       <File Id="HelperExecutable"
             Name="SuavoAgent.Helper.exe"
@@ -240,7 +359,7 @@
     </Component>
 
     <Component Id="NativeMaintenanceHost"
-               Directory="INSTALLFOLDER"
+               Directory="InstallFolder"
                Guid="{AE344629-3D44-4FC7-AEA1-5992B55083DD}">
       <File Id="MaintenanceExecutable"
             Name="SuavoAgent.Maintenance.exe"
@@ -267,7 +386,7 @@
                 Description="Connect this workstation to the Suavo pharmacy dashboard"
                 Target="[#MaintenanceExecutable]"
                 Arguments="--connect-installed"
-                WorkingDirectory="INSTALLFOLDER" />
+                WorkingDirectory="InstallFolder" />
       <RemoveFolder Id="RemoveSuavoAgentProgramMenuFolder" On="uninstall" />
       <RegistryValue Root="HKLM"
                      Key="SOFTWARE\MKM Technologies LLC\SuavoAgent"
@@ -278,7 +397,7 @@
     </Component>
 
     <Component Id="BootstrapConfiguration"
-               Directory="INSTALLFOLDER"
+               Directory="InstallFolder"
                Guid="{4E0C19FE-45D1-46E8-8759-292C945DF03D}"
                NeverOverwrite="yes">
       <File Id="BootstrapAppSettings"
@@ -286,6 +405,15 @@
             Source="$(PayloadRoot)/Core/appsettings.json"
             KeyPath="yes"
             Vital="yes" />
+    </Component>
+
+    <Component Id="InstallerProofDirectoryPermissions"
+               Directory="INSTALLPROOFFOLDER"
+               Guid="{1713310A-A49E-4CC0-AB51-BCE20706428B}"
+               Permanent="yes">
+      <CreateFolder Directory="INSTALLPROOFFOLDER">
+        <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+      </CreateFolder>
     </Component>
 
     <Component Id="DataDirectoryPermissions"
@@ -324,7 +452,7 @@
     </Component>
 
     <Component Id="LegacyInstallCleanup"
-               Directory="INSTALLFOLDER"
+               Directory="InstallFolder"
                Guid="{8BE48270-8BE0-40B9-90A5-7F945974AD54}">
       <RegistryValue Root="HKLM"
                      Key="SOFTWARE\MKM Technologies LLC\SuavoAgent"
@@ -332,16 +460,6 @@
                      Value="wix7-msi-v1"
                      Type="string"
                      KeyPath="yes" />
-      <RemoveRegistryKey Id="RemoveLegacyArpEntry"
-                         Root="HKLM"
-                         Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SuavoAgent"
-                         Action="removeOnInstall" />
-      <RemoveFile Id="RemoveLegacyBootstrapScript" Name="bootstrap.ps1" On="both" />
-      <RemoveFile Id="RemoveLegacyInstallScript" Name="install.ps1" On="both" />
-      <RemoveFile Id="RemoveLegacyQuickInstallScript" Name="quick-install.ps1" On="both" />
-      <RemoveFile Id="RemoveLegacySetupScript" Name="setup-windows.ps1" On="both" />
-      <RemoveFile Id="RemoveLegacyCheckScript" Name="suavo-check.ps1" On="both" />
-      <RemoveFile Id="RemoveLegacySymbols" Name="SuavoAgent.*.pdb" On="install" />
     </Component>
   </Fragment>
 </Wix>

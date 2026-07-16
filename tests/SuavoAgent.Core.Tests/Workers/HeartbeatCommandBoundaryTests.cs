@@ -236,18 +236,21 @@ public partial class HeartbeatWorkerTests
         using var active = new CancellationTokenSource();
         SetPrivateField("_activeNavigationCts", active);
         SetPrivateField("_activeNavigationRunId", "run-active");
+        var before = _db.GetAuditEntryCount();
 
         await InvokePrivateHandlerAsync(
             "HandleAbortNavigationAsync",
             "abort_navigation",
             "{\"runId\":\"run-other\",\"reason\":\"operator_requested\"}");
         Assert.False(active.IsCancellationRequested);
+        Assert.Equal(before + 1, _db.GetAuditEntryCount());
 
         await InvokePrivateHandlerAsync(
             "HandleAbortNavigationAsync",
             "abort_navigation",
             "{\"runId\":\"run-active\",\"reason\":\"operator_requested\"}");
         Assert.True(active.IsCancellationRequested);
+        Assert.Equal(before + 2, _db.GetAuditEntryCount());
     }
 
     [Fact]
@@ -265,14 +268,14 @@ public partial class HeartbeatWorkerTests
             "abort_workflow",
             AbortWorkflowPayload(otherRunId));
         Assert.False(active.IsCancellationRequested);
-        Assert.Equal(before, _db.GetAuditEntryCount());
+        Assert.Equal(before + 1, _db.GetAuditEntryCount());
 
         await InvokePrivateHandlerAsync(
             "HandleAbortWorkflowAsync",
             "abort_workflow",
             AbortWorkflowPayload(activeRunId));
         Assert.True(active.IsCancellationRequested);
-        Assert.True(_db.GetAuditEntryCount() > before);
+        Assert.Equal(before + 2, _db.GetAuditEntryCount());
     }
 
     [Theory]

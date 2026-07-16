@@ -78,6 +78,7 @@ public sealed class UserInputObserver : IDisposable
     private readonly ActuationGate _gate;
     private readonly ILogger _logger;
     private readonly TimeSpan _coalesceWindow;
+    private readonly Func<bool> _isApprovedPioneerRxForeground;
     // Optional cheap callback for the presence layer (mode flip → Observing). Must do near-nothing
     // (an interlocked timestamp write) — this fires on the low-level hook path.
     private readonly Action? _onUserInput;
@@ -90,12 +91,21 @@ public sealed class UserInputObserver : IDisposable
     private IntPtr _mouseHook = IntPtr.Zero;
     private bool _disposed;
 
-    public UserInputObserver(ActuationGate gate, ILogger logger, TimeSpan? coalesceWindow = null, Action? onUserInput = null)
+    public UserInputObserver(
+        ActuationGate gate,
+        ILogger logger,
+        TimeSpan? coalesceWindow = null,
+        Action? onUserInput = null,
+        Func<bool>? isApprovedPioneerRxForeground = null)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<UserInputObserver>();
         _coalesceWindow = coalesceWindow ?? TimeSpan.FromSeconds(2);
         _onUserInput = onUserInput;
+        // This hook is process-global at the Win32 layer, but the activated
+        // pharmacy policy is not. A missing or throwing scope predicate must
+        // therefore observe nothing instead of falling back workstation-wide.
+        _isApprovedPioneerRxForeground = isApprovedPioneerRxForeground ?? (() => false);
     }
 
     /// <summary>
@@ -212,9 +222,23 @@ public sealed class UserInputObserver : IDisposable
     {
         var now = DateTimeOffset.UtcNow;
         if (now - _lastNotifyUtc < _coalesceWindow) return;
+        if (!IsApprovedPioneerRxForeground()) return;
         _lastNotifyUtc = now;
         _gate.NotifyUserInputDetected(source);
         try { _onUserInput?.Invoke(); } catch { /* presence is cosmetic — never break the safety observer */ }
+    }
+
+    internal bool TryNotifyUserInputForTest(string source)
+    {
+        var before = _lastNotifyUtc;
+        NotifyCoalesced(source);
+        return _lastNotifyUtc != before;
+    }
+
+    private bool IsApprovedPioneerRxForeground()
+    {
+        try { return _isApprovedPioneerRxForeground(); }
+        catch { return false; }
     }
 
     public void Dispose()

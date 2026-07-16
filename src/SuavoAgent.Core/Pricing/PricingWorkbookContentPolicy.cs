@@ -35,11 +35,11 @@ internal static partial class PricingWorkbookContentPolicy
     private static readonly HashSet<string> ApprovedPricingHeaders = new(
         StringComparer.OrdinalIgnoreCase)
     {
-        "#", "NDC", "NDC11", "Drug", "Drug Name", "Generic Name",
+        "#", "Rank", "NDC", "NDC11", "Drug", "Drug Name", "Generic Name",
         "Brand Name", "Strength", "Dosage Form", "Total Dispensed",
         "Quantity", "Monthly Qty", "Acquisition Cost", "Current Cost",
         "Price", "WAC", "AWP", "Package Size", "Manufacturer", "RxBIN",
-        "Supplier", "Best Supplier", "Cost", "Cost (per unit)",
+        "Supplier", "Best Supplier", "Cheapest Supplier", "Cost", "Cost (per unit)",
         "Best Cost", "Best Cost Per Unit", "Price Lookup Status",
     };
     private static readonly HashSet<string> ApprovedWorksheetNames = new(

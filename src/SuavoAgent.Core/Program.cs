@@ -318,6 +318,10 @@ try
 
     var isDeviceProbation =
         credentialBootstrap?.Source == CloudCredentialSource.PendingProvisioning;
+    var observationIdentity =
+        SuavoAgent.Contracts.Security.ObservationActivationIdentityStore.LoadProduction();
+    builder.Services.AddSingleton(new SuavoAgent.Contracts.Security.ObservationActivationAuthority(
+        identity: observationIdentity));
 
     Log.Information(
         "Writeback mode: {Mode} (SQL writes {Status}) — audit receipts always generated",
@@ -342,6 +346,12 @@ try
             var cloudClient = new SuavoCloudClient(agentOpts);
             builder.Services.AddSingleton(cloudClient);
             builder.Services.AddSingleton<IPostSigner>(cloudClient);
+            builder.Services.AddSingleton<
+                SuavoAgent.Core.Cloud.IObservationActivationRequestSigner>(sp =>
+                new SuavoAgent.Core.Cloud.ObservationActivationRequestSigner(
+                    observationIdentity,
+                    sp.GetRequiredService<AgentStateDb>()));
+            builder.Services.AddHostedService<ObservationActivationLeaseWorker>();
             builder.Services.AddHostedService<AutonomyEvidenceSyncWorker>();
             builder.Services.AddSingleton<PricingJobCloudUploader>();
             builder.Services.AddHostedService<PricingResultOutboxWorker>();
@@ -446,7 +456,19 @@ try
     builder.Services.AddSingleton<SuavoAgent.Core.Workers.WorkerHealthRegistry>();
     // One process-wide human-control constitution. Every Heartbeat actuation
     // path resolves this exact singleton so Pause/Stop reaches every run.
-    builder.Services.AddSingleton<SuavoAgent.Core.Autonomy.AutopilotRunCoordinator>();
+    builder.Services.AddSingleton(sp =>
+    {
+        var observationAuthority = sp.GetRequiredService<
+            SuavoAgent.Contracts.Security.ObservationActivationAuthority>();
+        var coordinator = new SuavoAgent.Core.Autonomy.AutopilotRunCoordinator(
+            SuavoAgent.Contracts.Security.ObservationActivationIdentityStore.LoadProduction(),
+            SuavoAgent.Contracts.Security.ObservationControlStateStore.DefaultPath(),
+            revokeObservationAuthority: () => observationAuthority.RevokeLocalAuthority(),
+            isObservationAuthorized: () => observationAuthority.Refresh().ObservationEnabled);
+        observationAuthority.AuthorityLost += _ =>
+            coordinator.EnforceObservationAuthorityLost();
+        return coordinator;
+    });
 
     builder.Services.AddHostedService<HeartbeatWorker>();
     // Liveness beacon — the Watchdog reads it to detect an alive-but-hung Core (SCM can't see deadlock).
@@ -611,7 +633,6 @@ try
     // mirrors the verdict into heartbeat `helper.actuation.*`, and — when the strand signature
     // persists — drops the HelperRestartRequest sentinel so the Broker relaunches the Helper
     // (same bounded self-heal the restart_helper command triggers manually).
-    builder.Services.AddSingleton<SuavoAgent.Core.Health.ActuationReadinessTracker>();
     builder.Services.AddSingleton(sp => new SuavoAgent.Core.Health.ActuationReadinessProbe(
         sp.GetService<IpcCommandClient>(),
         sp.GetRequiredService<SuavoAgent.Core.Health.ActuationReadinessTracker>(),

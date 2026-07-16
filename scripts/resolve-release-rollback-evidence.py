@@ -9,6 +9,14 @@ import json
 from pathlib import Path
 import re
 import sys
+from typing import Callable
+
+from ota_update_trust_roots import (
+    DEFAULT_REGISTRY,
+    TrustRegistryError,
+    load_registry_configuration,
+    verify_signature_bytes,
+)
 
 
 MAX_CHECKSUM_BYTES = 128 * 1024
@@ -18,6 +26,9 @@ STABLE_TAG_PATTERN = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 CHECKSUM_LINE_PATTERN = re.compile(
     r"(?P<sha256>[a-f0-9]{64})  (?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,255})"
 )
+V1_KEY_ID = "ota-update-v1"
+V2_KEY_ID = "ota-update-v2"
+OTA_SIGNING_KEY_IDS = frozenset({V1_KEY_ID, V2_KEY_ID})
 
 
 def fail(message: str) -> "NoReturn":
@@ -71,8 +82,56 @@ def allowed_artifacts(tag: str) -> set[str]:
     }
 
 
-def resolve(tag: str, checksums_path: Path, receipt_path: Path) -> tuple[str, str]:
+def required_ota_signing_key_id(
+    tag: str,
+    receipt: dict[str, object],
+    receipt_sha256: str,
+    expected_ota_signing_key_id: str | None,
+    bridge_release_tag: str | None,
+    bridge_source_sha: str | None,
+    bridge_receipt_sha256: str | None,
+) -> str:
+    bridge_values = (bridge_release_tag, bridge_source_sha, bridge_receipt_sha256)
+    if expected_ota_signing_key_id is not None:
+        if expected_ota_signing_key_id not in OTA_SIGNING_KEY_IDS:
+            fail("expected OTA signing key id is invalid")
+        if any(value is not None for value in bridge_values):
+            fail("explicit OTA root and claim-bound Release 1 policy are mutually exclusive")
+        return expected_ota_signing_key_id
+
+    if any(value is None for value in bridge_values):
+        fail("claim-bound Release 1 tag, source, and receipt digest are all required")
+    if STABLE_TAG_PATTERN.fullmatch(bridge_release_tag or "") is None:
+        fail("claim-bound Release 1 tag is invalid")
+    if re.fullmatch(r"[a-f0-9]{40}", bridge_source_sha or "") is None:
+        fail("claim-bound Release 1 source commit is invalid")
+    if SHA256_PATTERN.fullmatch(bridge_receipt_sha256 or "") is None:
+        fail("claim-bound Release 1 receipt digest is invalid")
+
+    is_exact_release_1 = (
+        tag == bridge_release_tag
+        and receipt.get("sourceCommit") == bridge_source_sha
+        and receipt_sha256 == bridge_receipt_sha256
+    )
+    return V1_KEY_ID if is_exact_release_1 else V2_KEY_ID
+
+
+def resolve(
+    tag: str,
+    checksums_path: Path,
+    receipt_path: Path,
+    *,
+    signature_path: Path,
+    registry_path: Path = DEFAULT_REGISTRY,
+    expected_ota_signing_key_id: str | None = None,
+    bridge_release_tag: str | None = None,
+    bridge_source_sha: str | None = None,
+    bridge_receipt_sha256: str | None = None,
+    allow_missing_legacy_ota_signing_key_id: bool = False,
+    signature_verifier: Callable[[str, bytes, bytes], bool] | None = None,
+) -> tuple[str, str]:
     checksums_data = read_bounded(checksums_path, MAX_CHECKSUM_BYTES, "rollback checksums")
+    signature_data = read_bounded(signature_path, 512, "rollback checksum signature")
     receipt_data = read_bounded(receipt_path, MAX_RECEIPT_BYTES, "rollback receipt")
     checksums = parse_checksums(checksums_data)
 
@@ -89,6 +148,56 @@ def resolve(tag: str, checksums_path: Path, receipt_path: Path) -> tuple[str, st
         fail(f"rollback receipt is not valid JSON: {error.__class__.__name__}")
     if not isinstance(receipt, dict):
         fail("rollback receipt root must be an object")
+
+    required_key_id = required_ota_signing_key_id(
+        tag,
+        receipt,
+        receipt_sha256,
+        expected_ota_signing_key_id,
+        bridge_release_tag,
+        bridge_source_sha,
+        bridge_receipt_sha256,
+    )
+    if allow_missing_legacy_ota_signing_key_id and (
+        expected_ota_signing_key_id != V1_KEY_ID
+        or any(value is not None for value in (
+            bridge_release_tag,
+            bridge_source_sha,
+            bridge_receipt_sha256,
+        ))
+    ):
+        fail("legacy missing-key allowance is restricted to explicit bridge-stage ota-update-v1")
+    declared_key_id = receipt.get("otaSigningKeyId")
+    allow_legacy_missing_v1 = (
+        declared_key_id is None
+        and allow_missing_legacy_ota_signing_key_id
+        and expected_ota_signing_key_id == V1_KEY_ID
+        and all(value is None for value in (
+            bridge_release_tag,
+            bridge_source_sha,
+            bridge_receipt_sha256,
+        ))
+    )
+    if declared_key_id is not None and declared_key_id not in OTA_SIGNING_KEY_IDS:
+        fail("rollback receipt OTA signing key id is missing or invalid")
+    if declared_key_id is not None and declared_key_id != required_key_id:
+        fail(
+            f"rollback receipt declares {declared_key_id} but policy requires {required_key_id}"
+        )
+    if declared_key_id is None and not allow_legacy_missing_v1:
+        fail("rollback receipt OTA signing key id is missing or invalid")
+    if signature_verifier is None:
+        _, roots = load_registry_configuration(registry_path)
+        verified = required_key_id in roots and verify_signature_bytes(
+            {required_key_id: roots[required_key_id]},
+            checksums_data,
+            signature_data,
+            "der",
+        )
+    else:
+        verified = signature_verifier(required_key_id, checksums_data, signature_data)
+    if not verified:
+        fail(f"rollback checksums are not signed specifically by {required_key_id}")
 
     if receipt.get("releaseTag") != tag:
         fail("rollback receipt releaseTag does not match the selected release")
@@ -120,9 +229,38 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", required=True)
     parser.add_argument("--checksums", required=True, type=Path)
+    parser.add_argument("--signature", required=True, type=Path)
     parser.add_argument("--receipt", required=True, type=Path)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    parser.add_argument(
+        "--expected-ota-signing-key-id",
+        choices=sorted(OTA_SIGNING_KEY_IDS),
+    )
+    parser.add_argument(
+        "--allow-missing-legacy-ota-signing-key-id",
+        action="store_true",
+    )
+    parser.add_argument("--bridge-release-tag")
+    parser.add_argument("--bridge-source-sha")
+    parser.add_argument("--bridge-receipt-sha256")
     args = parser.parse_args()
-    artifact, artifact_sha256 = resolve(args.tag, args.checksums, args.receipt)
+    try:
+        artifact, artifact_sha256 = resolve(
+            args.tag,
+            args.checksums,
+            args.receipt,
+            signature_path=args.signature,
+            registry_path=args.registry,
+            expected_ota_signing_key_id=args.expected_ota_signing_key_id,
+            bridge_release_tag=args.bridge_release_tag,
+            bridge_source_sha=args.bridge_source_sha,
+            bridge_receipt_sha256=args.bridge_receipt_sha256,
+            allow_missing_legacy_ota_signing_key_id=(
+                args.allow_missing_legacy_ota_signing_key_id
+            ),
+        )
+    except TrustRegistryError as error:
+        fail(str(error))
     print(artifact)
     print(artifact_sha256)
     return 0

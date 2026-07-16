@@ -13,7 +13,8 @@ public record NdcPricingRequest(
     string Ndc,
     IReadOnlyList<SelectorPatch>? Patches = null,
     string? PmsFingerprint = null,
-    string? ScreenSignatureV1 = null);
+    string? ScreenSignatureV1 = null,
+    string CostBasis = PricingApprovalContract.CostPerUnitBasis);
 
 /// <summary>
 /// PHI-free live structural identity captured by Helper immediately before a
@@ -48,7 +49,9 @@ public record SupplierPriceResult(
     IReadOnlyList<SelectorObservation>? Observations = null,
     decimal? BaselineCostPerUnit = null,
     decimal? Quantity = null,
-    int OmittedSelectorObservations = 0);
+    int OmittedSelectorObservations = 0,
+    decimal? PackageCost = null,
+    string CostBasis = PricingApprovalContract.CostPerUnitBasis);
 
 /// <summary>Stable, PHI-free safety failures shared by Helper and Core.</summary>
 public static class PricingSafetyErrors
@@ -74,13 +77,16 @@ public record PricingJobSpec(
     string SupplierColumn,
     string CostColumn,
     string? ApprovalId = null,
-    string? GrantDigest = null);
+    string? GrantDigest = null,
+    string CostBasis = PricingApprovalContract.CostPerUnitBasis);
 
 public static class PricingJobDefaults
 {
     public const string NdcColumn = "NDC";
     public const string SupplierColumn = "Best Supplier";
     public const string CostColumn = "Best Cost Per Unit";
+    public const string PackageSupplierColumn = "Cheapest Supplier";
+    public const string PackageCostColumn = "Cost";
     public const string AmbiguousLegacyCostColumn = "Best Cost";
     public const string LegacySupplierColumn = "Supplier";
     public const string LegacyCostColumn = "Cost (per unit)";
@@ -98,6 +104,23 @@ public record PricingJobProgress(
     // Stable machine reason-code when Status is "halted" (e.g. "helper_unreachable") so the cloud
     // cockpit shows an exact badge instead of inferring from free-text. Null for non-halted runs.
     string? HaltReason = null);
+
+/// <summary>
+/// PHI-free local phase signal. It intentionally cannot carry an NDC, path,
+/// supplier, drug name, or free-text detail.
+/// </summary>
+public sealed record PricingJobLocalProgress(
+    PricingJobLocalPhase Phase,
+    int ProcessedItems,
+    int TotalItems,
+    int NeedsReviewItems);
+
+public enum PricingJobLocalPhase
+{
+    PricingItems,
+    CreatingSpreadsheet,
+    VerifyingResults,
+}
 
 public static class PricingJobStatus
 {

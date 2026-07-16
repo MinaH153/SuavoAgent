@@ -1,0 +1,622 @@
+name: OTA v1 bridge - stage
+run-name: Stage v1 bridge ${{ inputs.version }} @ ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-hex SHA at the current head of main
+        required: true
+        type: string
+      version:
+        description: Exact unused stable tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: suavoagent-production-release
+  cancel-in-progress: false
+
+jobs:
+  source-gate:
+    runs-on: ubuntu-latest
+    environment: suavoagent-production-signing
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      version_numeric: ${{ steps.gate.outputs.version_numeric }}
+      authenticode_signer_sha256: ${{ steps.gate.outputs.authenticode_signer_sha256 }}
+      vc_redist_x64_url: ${{ steps.gate.outputs.vc_redist_x64_url }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Prove exact protected Release 1 source and configuration
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+          SIGNING_ENABLED: ${{ vars.SIGNING_ENABLED }}
+          WIX_OSMF_EULA_ACCEPTED: ${{ vars.WIX_OSMF_EULA_ACCEPTED }}
+          VC_REDIST_X64_URL: ${{ vars.VC_REDIST_X64_URL }}
+          AUTHENTICODE_SIGNER_SHA256: ${{ vars.AUTHENTICODE_SIGNER_SHA256 }}
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          shopt -s nocasematch
+          [[ "$GITHUB_REPOSITORY" == "MinaH153/SuavoAgent" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$INPUT_SHA" == "${GITHUB_SHA,,}" ]]
+          [[ "$(git rev-parse HEAD)" == "$INPUT_SHA" ]]
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$INPUT_SHA" ]]
+          if [[ ! "$VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Bridge version must be exact stable vMAJOR.MINOR.PATCH."
+            exit 1
+          fi
+          if (( 10#${BASH_REMATCH[1]} > 255 || 10#${BASH_REMATCH[2]} > 255 || 10#${BASH_REMATCH[3]} > 65535 )); then
+            echo "::error::Bridge version is outside the Windows Installer boundary."
+            exit 1
+          fi
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1
+          tag_status=$?
+          set -e
+          if [[ $tag_status -eq 0 ]]; then
+            echo "::error::Bridge tag already exists."
+            exit 1
+          elif [[ $tag_status -ne 2 ]]; then
+            echo "::error::Could not prove bridge tag absence."
+            exit 1
+          fi
+          set +e
+          release_error="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" 2>&1 >/dev/null)"
+          release_status=$?
+          set -e
+          if [[ $release_status -eq 0 ]]; then
+            echo "::error::Bridge release already exists."
+            exit 1
+          elif [[ "$release_error" != *"HTTP 404"* ]]; then
+            echo "::error::Could not prove bridge release absence."
+            exit 1
+          fi
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > existing-releases.json
+          python3 scripts/v1_bridge_run_metadata.py assert-version-newest \
+            --releases existing-releases.json --version "$VERSION"
+          python3 scripts/v1_bridge_run_metadata.py assert-release-absent \
+            --releases existing-releases.json --version "$VERSION"
+          [[ "$SIGNING_ENABLED" == "true" ]]
+          [[ "$WIX_OSMF_EULA_ACCEPTED" == "true" ]]
+          [[ "$VC_REDIST_X64_URL" =~ ^https://[^[:space:]]+$ ]]
+          [[ "$AUTHENTICODE_SIGNER_SHA256" =~ ^[A-Fa-f0-9]{64}(,[A-Fa-f0-9]{64}){0,15}$ ]]
+          for value in ES_USERNAME ES_PASSWORD ES_CREDENTIAL_ID ES_TOTP_SECRET; do
+            [[ -n "${!value}" ]] || { echo "::error::Missing eSigner input $value."; exit 1; }
+          done
+          python3 scripts/v1_bridge_cli.py assert-bridge-source
+          bash scripts/verify-production-shell-boundary.sh
+          printf 'version=%s\nversion_numeric=%s\nauthenticode_signer_sha256=%s\nvc_redist_x64_url=%s\n' \
+            "$VERSION" "${VERSION#v}" "${AUTHENTICODE_SIGNER_SHA256,,}" \
+            "$VC_REDIST_X64_URL" >> "$GITHUB_OUTPUT"
+
+  full-windows-suite:
+    runs-on: windows-latest
+    needs: source-gate
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - name: Prove checkout is exact bridge SHA
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD).Trim().ToLowerInvariant() -ne '${{ inputs.source_sha }}') {
+            throw 'Bridge checkout SHA mismatch.'
+          }
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.128
+      - name: Restore and build exact locked Windows graph
+        shell: pwsh
+        run: |
+          dotnet restore SuavoAgent.sln --locked-mode -p:ContinuousIntegrationBuild=true
+          foreach ($project in @('Core', 'Broker', 'Helper', 'Watchdog', 'Setup')) {
+            dotnet restore "src/SuavoAgent.$project" -r win-x64 --locked-mode -p:ContinuousIntegrationBuild=true
+          }
+          dotnet build SuavoAgent.sln -c Release --no-restore -p:ContinuousIntegrationBuild=true
+      - name: Run complete Windows regression suite
+        run: >-
+          dotnet test SuavoAgent.sln -c Release --no-build -v normal
+          --logger "trx;LogFilePrefix=v1-bridge-windows-tests"
+          --collect "XPlat Code Coverage"
+          --results-directory TestResults/windows
+          -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.DeterministicReport=true
+      - name: Upload exact-SHA Windows evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: v1-bridge-windows-tests-${{ inputs.source_sha }}
+          path: |
+            TestResults/windows/**/*.trx
+            TestResults/windows/**/coverage.cobertura.xml
+          if-no-files-found: error
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [source-gate, full-windows-suite]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.128
+      - name: Restore, verify, build, and test exact source
+        env:
+          VERSION_NUMERIC: ${{ needs.source-gate.outputs.version_numeric }}
+          AUTHENTICODE_SIGNER_SHA256: ${{ needs.source-gate.outputs.authenticode_signer_sha256 }}
+        run: |
+          set -euo pipefail
+          dotnet restore SuavoAgent.sln --locked-mode -p:ContinuousIntegrationBuild=true
+          for project in Core Broker Helper Watchdog Setup; do
+            dotnet restore "src/SuavoAgent.$project" -r win-x64 --locked-mode -p:ContinuousIntegrationBuild=true
+          done
+          python3 scripts/verify-release-trust-inputs.py --trust-phase bridge-v1
+          python3 scripts/generate-release-legal-bundle.py --check --require-release-eligible
+          python3 scripts/verify-external-release-assets.py
+          python3 -m unittest tests/test_aggregate_coverage.py tests/test_installer_rehearsal_script.py tests/test_resolve_release_rollback_evidence.py tests/test_release_workflow_gates.py tests/test_v1_bridge_release.py -v
+          dotnet build SuavoAgent.sln -c Release --no-restore -p:Version="$VERSION_NUMERIC" -p:AuthenticodeSignerSha256="$AUTHENTICODE_SIGNER_SHA256" -p:ContinuousIntegrationBuild=true
+          dotnet test SuavoAgent.sln -c Release --no-build -v normal \
+            --collect "XPlat Code Coverage" --results-directory TestResults/coverage \
+            -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.DeterministicReport=true
+          python3 scripts/aggregate_coverage.py TestResults/coverage --expect-reports 10 \
+            --require-all-projects --json TestResults/linux-coverage-summary.json
+      - name: Upload exact-SHA Linux coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-linux-coverage-${{ inputs.source_sha }}
+          path: TestResults/coverage/**/coverage.cobertura.xml
+          if-no-files-found: error
+      - name: Publish unsigned Windows cohort
+        env:
+          VERSION_NUMERIC: ${{ needs.source-gate.outputs.version_numeric }}
+          AUTHENTICODE_SIGNER_SHA256: ${{ needs.source-gate.outputs.authenticode_signer_sha256 }}
+        run: |
+          set -euo pipefail
+          for project in Core Broker Helper Watchdog Setup; do
+            dotnet publish "src/SuavoAgent.$project" -c Release -r win-x64 --self-contained \
+              -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true \
+              -p:Version="$VERSION_NUMERIC" -p:AuthenticodeSignerSha256="$AUTHENTICODE_SIGNER_SHA256" \
+              -p:ContinuousIntegrationBuild=true --no-restore -o release/
+          done
+          mkdir -p release/legal/license-texts release/legal/evidence
+          cp src/SuavoAgent.Setup/Legal/THIRD-PARTY-NOTICES.txt release/legal/
+          cp legal/THIRD-PARTY-PROVENANCE.json legal/external-assets.json release/legal/
+          cp legal/license-texts/*.txt release/legal/license-texts/
+          cp legal/evidence/*.json release/legal/evidence/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-unsigned-${{ needs.source-gate.outputs.version }}
+          path: release/
+          retention-days: 7
+
+  production-coverage:
+    runs-on: ubuntu-latest
+    needs: [source-gate, build, full-windows-suite]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-linux-coverage-${{ inputs.source_sha }}
+          path: TestResults/combined/linux
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-windows-tests-${{ inputs.source_sha }}
+          path: TestResults/combined/windows
+      - name: Enforce production coverage on both operating systems
+        run: |
+          python3 -m unittest tests/test_aggregate_coverage.py tests/test_installer_rehearsal_script.py tests/test_resolve_release_rollback_evidence.py tests/test_release_workflow_gates.py tests/test_v1_bridge_release.py -v
+          python3 scripts/aggregate_coverage.py TestResults/combined --expect-reports 20 \
+            --require-all-projects --minimum-line 80 --minimum-branch 80 \
+            --json TestResults/production-coverage-summary.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-production-coverage-${{ inputs.source_sha }}
+          path: TestResults/production-coverage-summary.json
+          if-no-files-found: error
+
+  sign-windows:
+    runs-on: ubuntu-latest
+    environment: suavoagent-production-signing
+    needs: [source-gate, build, full-windows-suite, production-coverage]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-unsigned-${{ needs.source-gate.outputs.version }}
+          path: release
+      - run: mkdir -p release/signed
+      - name: Set up verified eSigner Java runtime
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
+        with:
+          distribution: temurin
+          java-version: '11.0.31+11'
+          verify-signature: true
+      - name: Sign exact executable cohort with verified CodeSignTool
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse HEAD)" == "${{ inputs.source_sha }}" ]]
+          [[ "$(git rev-parse origin/main)" == "${{ inputs.source_sha }}" ]]
+          scripts/esigner-codesign-hardened.sh release/signed \
+            release/SuavoAgent.Core.exe release/SuavoAgent.Broker.exe \
+            release/SuavoAgent.Helper.exe release/SuavoAgent.Watchdog.exe \
+            release/SuavoSetup.exe
+      - name: Preserve legal closure and transient MSI configuration
+        run: |
+          cp -R release/legal release/signed/legal
+          cp release/appsettings.json release/signed/appsettings.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-final-${{ needs.source-gate.outputs.version }}
+          path: release/signed/
+          retention-days: 7
+
+  build-msi:
+    runs-on: windows-latest
+    needs: [source-gate, sign-windows]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.128
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-final-${{ inputs.version }}
+          path: release
+      - name: Verify exact signed cohort and assemble MSI payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $allowed = '${{ needs.source-gate.outputs.authenticode_signer_sha256 }}'.Split(',') | ForEach-Object { $_.ToUpperInvariant() }
+          $executables = @('SuavoAgent.Core.exe','SuavoAgent.Broker.exe','SuavoAgent.Helper.exe','SuavoAgent.Watchdog.exe','SuavoSetup.exe')
+          foreach ($name in $executables) {
+            $signature = Get-AuthenticodeSignature -LiteralPath "release/$name"
+            if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw "Invalid Authenticode: $name" }
+            $actual = $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant()
+            if ($actual -notin $allowed) { throw "Unapproved Authenticode publisher: $name" }
+          }
+          foreach ($directory in @('Core','Broker','Helper','Watchdog','Setup')) { New-Item -ItemType Directory -Path "payload/$directory" -Force | Out-Null }
+          Copy-Item release/SuavoAgent.Core.exe payload/Core/SuavoAgent.Core.exe
+          Copy-Item release/SuavoAgent.Broker.exe payload/Broker/SuavoAgent.Broker.exe
+          Copy-Item release/SuavoAgent.Helper.exe payload/Helper/SuavoAgent.Helper.exe
+          Copy-Item release/SuavoAgent.Watchdog.exe payload/Watchdog/SuavoAgent.Watchdog.exe
+          Copy-Item release/SuavoSetup.exe payload/Setup/SuavoSetup.exe
+          Copy-Item release/appsettings.json payload/Core/appsettings.json
+      - name: Restore locked WiX graph and build deterministic MSI
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+          VERSION_NUMERIC: ${{ needs.source-gate.outputs.version_numeric }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet restore installer/SuavoAgent.Msi/SuavoAgent.Msi.wixproj --locked-mode
+          $epoch = [long](git show -s --format=%ct '${{ inputs.source_sha }}')
+          $timestamp = [DateTimeOffset]::FromUnixTimeSeconds($epoch).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ss.fffffff+00:00')
+          dotnet build installer/SuavoAgent.Msi/SuavoAgent.Msi.wixproj -c Release --no-restore `
+            -p:AcceptEula=wix7 -p:SuavoAgentVersion=$env:VERSION_NUMERIC `
+            -p:InstallerMetadataTimestampUtc=$timestamp -p:PayloadRoot="$env:GITHUB_WORKSPACE/payload" `
+            -p:ContinuousIntegrationBuild=true
+          $candidates = @(Get-ChildItem installer/SuavoAgent.Msi/bin -Recurse -Filter SuavoAgent.msi -File)
+          if ($candidates.Count -ne 1) { throw "Expected one MSI output, found $($candidates.Count)." }
+          New-Item -ItemType Directory -Path msi -Force | Out-Null
+          Copy-Item $candidates[0].FullName "msi/SuavoAgent-$env:VERSION-win-x64.msi"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-msi-unsigned-${{ inputs.version }}
+          path: msi/*.msi
+          retention-days: 1
+
+  sign-msi:
+    runs-on: ubuntu-latest
+    environment: suavoagent-production-signing
+    needs: [source-gate, build-msi]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-msi-unsigned-${{ inputs.version }}
+          path: msi
+      - run: mkdir -p msi/signed
+      - name: Set up verified eSigner Java runtime
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
+        with:
+          distribution: temurin
+          java-version: '11.0.31+11'
+          verify-signature: true
+      - name: Sign customer MSI with verified CodeSignTool
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse HEAD)" == "${{ inputs.source_sha }}" ]]
+          [[ "$(git rev-parse origin/main)" == "${{ inputs.source_sha }}" ]]
+          scripts/esigner-codesign-hardened.sh msi/signed \
+            "msi/SuavoAgent-${{ inputs.version }}-win-x64.msi"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-msi-${{ inputs.version }}
+          path: msi/signed/*.msi
+          retention-days: 7
+
+  build-bundle:
+    runs-on: windows-latest
+    needs: [source-gate, sign-windows, sign-msi]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.128
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-msi-${{ inputs.version }}
+          path: signed-msi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-final-${{ inputs.version }}
+          path: release
+      - name: Stage signed MSI and exact reviewed prerequisite
+        shell: pwsh
+        env:
+          VC_REDIST_X64_URL: ${{ needs.source-gate.outputs.vc_redist_x64_url }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = @(Get-ChildItem signed-msi -Filter *.msi -File)
+          if ($msi.Count -ne 1) { throw "Expected one signed MSI, found $($msi.Count)." }
+          & .\scripts\Test-InstallerAuthenticode.ps1 -Path $msi[0].FullName `
+            -AllowedSignerSha256 '${{ needs.source-gate.outputs.authenticode_signer_sha256 }}'
+          $signature = Get-AuthenticodeSignature -LiteralPath $msi[0].FullName
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw 'Embedded MSI signature is invalid.' }
+          $allowed = '${{ needs.source-gate.outputs.authenticode_signer_sha256 }}'.Split(',') | ForEach-Object { $_.ToUpperInvariant() }
+          $actual = $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant()
+          if ($actual -notin $allowed) { throw 'Embedded MSI signer is not approved.' }
+          New-Item -ItemType Directory -Path installer/SuavoAgent.Msi/bin/x64/Release -Force | Out-Null
+          Copy-Item $msi[0].FullName installer/SuavoAgent.Msi/bin/x64/Release/SuavoAgent.msi
+          Invoke-WebRequest -Uri $env:VC_REDIST_X64_URL -OutFile vc_redist.x64.exe -MaximumRedirection 3
+          $expected = 'cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b'
+          if ((Get-FileHash vc_redist.x64.exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expected) { throw 'VC++ prerequisite digest mismatch.' }
+      - name: Build deterministic Burn bundle without rebuilding MSI
+        shell: pwsh
+        env:
+          VERSION_NUMERIC: ${{ needs.source-gate.outputs.version_numeric }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet restore installer/SuavoAgent.Bundle/SuavoAgent.Bundle.wixproj --locked-mode
+          $epoch = [long](git show -s --format=%ct '${{ inputs.source_sha }}')
+          $timestamp = [DateTimeOffset]::FromUnixTimeSeconds($epoch).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ss.fffffff+00:00')
+          dotnet build installer/SuavoAgent.Bundle/SuavoAgent.Bundle.wixproj -c Release --no-restore `
+            -p:AcceptEula=wix7 -p:BuildProjectReferences=false -p:SuavoAgentVersion=$env:VERSION_NUMERIC `
+            -p:InstallerMetadataTimestampUtc=$timestamp -p:PayloadRoot="$env:GITHUB_WORKSPACE/release" `
+            -p:VCRedistPath="$env:GITHUB_WORKSPACE/vc_redist.x64.exe" -p:ContinuousIntegrationBuild=true
+          $candidates = @(Get-ChildItem installer/SuavoAgent.Bundle/bin -Recurse -Filter SuavoAgent-Setup.exe -File)
+          if ($candidates.Count -ne 1) { throw "Expected one Burn output, found $($candidates.Count)." }
+          New-Item -ItemType Directory -Path bundle -Force | Out-Null
+          Copy-Item $candidates[0].FullName bundle/SuavoAgent-Setup.exe
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-bundle-unsigned-${{ inputs.version }}
+          path: bundle/*.exe
+          retention-days: 1
+
+  sign-bundle:
+    runs-on: ubuntu-latest
+    environment: suavoagent-production-signing
+    needs: [source-gate, build-bundle]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-bundle-unsigned-${{ inputs.version }}
+          path: bundle
+      - run: mkdir -p bundle/signed
+      - name: Set up verified eSigner Java runtime
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a
+        with:
+          distribution: temurin
+          java-version: '11.0.31+11'
+          verify-signature: true
+      - name: Sign customer Burn bundle with verified CodeSignTool
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          git fetch --no-tags origin main --depth=1
+          [[ "$(git rev-parse HEAD)" == "${{ inputs.source_sha }}" ]]
+          [[ "$(git rev-parse origin/main)" == "${{ inputs.source_sha }}" ]]
+          scripts/esigner-codesign-hardened.sh bundle/signed bundle/SuavoAgent-Setup.exe
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-bundle-${{ inputs.version }}
+          path: bundle/signed/*.exe
+          retention-days: 7
+
+  windows-smoke:
+    runs-on: windows-latest
+    needs: [source-gate, sign-windows, sign-msi, sign-bundle]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-final-${{ inputs.version }}
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-msi-${{ inputs.version }}
+          path: installer-smoke
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-bundle-${{ inputs.version }}
+          path: bundle-smoke
+      - name: Probe exact signed cohort and scan with Defender
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/generate-release-sbom.py --release-dir release `
+            --version '${{ inputs.version }}' --source-commit '${{ inputs.source_sha }}' `
+            --output release/suavoagent.spdx.json
+          if ($LASTEXITCODE -ne 0) { throw 'Pre-final release probe SBOM generation failed.' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 `
+            -Mode ReleaseArtifact -ReleaseDir release -MaintenancePath release/SuavoSetup.exe `
+            -AllowedSignerSha256 '${{ needs.source-gate.outputs.authenticode_signer_sha256 }}' -RequireAuthenticodeSignature -Json
+          & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File release -DisableRemediation
+      - name: Rehearse signed MSI install, repair, and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = @(Get-ChildItem installer-smoke -Filter *.msi -File)
+          if ($msi.Count -ne 1) { throw "Expected one signed MSI, found $($msi.Count)." }
+          & .\scripts\Invoke-SuavoAgentInstallerRehearsal.ps1 `
+            -InstallerKind Msi `
+            -InstallerPath $msi[0].FullName `
+            -MsiPath $msi[0].FullName `
+            -ExpectedReleaseTag '${{ inputs.version }}' `
+            -AllowedSignerSha256 '${{ needs.source-gate.outputs.authenticode_signer_sha256 }}' `
+            -EvidenceDirectory 'installer-rehearsal-evidence/msi'
+          & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File $msi[0].FullName -DisableRemediation
+      - name: Rehearse signed customer bundle install, repair, and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = @(Get-ChildItem installer-smoke -Filter *.msi -File)
+          if ($msi.Count -ne 1) { throw "Expected one signed MSI, found $($msi.Count)." }
+          $bundle = @(Get-ChildItem bundle-smoke -Filter *.exe -File)
+          if ($bundle.Count -ne 1) { throw "Expected one bundle, found $($bundle.Count)." }
+          & .\scripts\Invoke-SuavoAgentInstallerRehearsal.ps1 `
+            -InstallerKind Bundle `
+            -InstallerPath $bundle[0].FullName `
+            -MsiPath $msi[0].FullName `
+            -ExpectedReleaseTag '${{ inputs.version }}' `
+            -AllowedSignerSha256 '${{ needs.source-gate.outputs.authenticode_signer_sha256 }}' `
+            -EvidenceDirectory 'installer-rehearsal-evidence/bundle'
+          & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File $bundle[0].FullName -DisableRemediation
+
+      - name: Upload installer rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: v1-bridge-installer-rehearsal-${{ inputs.version }}
+          path: installer-rehearsal-evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+  prepare-request:
+    runs-on: ubuntu-latest
+    needs: [source-gate, windows-smoke]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-final-${{ inputs.version }}
+          path: stage/release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-msi-${{ inputs.version }}
+          path: stage/release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v1-bridge-bundle-${{ inputs.version }}
+          path: stage/release
+      - name: Resolve exact signed rollback and build immutable request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          AUTHENTICODE_SIGNER_SHA256: ${{ needs.source-gate.outputs.authenticode_signer_sha256 }}
+        run: |
+          set -euo pipefail
+          rm stage/release/appsettings.json
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1
+          tag_status=$?
+          set -e
+          [[ $tag_status -eq 2 ]] || { echo "::error::Tag exists or absence could not be proven."; exit 1; }
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > release-pages.json
+          RELEASES="$(jq -c '[.[][] | {tagName: .tag_name, isDraft: .draft, isPrerelease: .prerelease}]' release-pages.json)"
+          ROLLBACK_TAG="$(printf '%s' "$RELEASES" | python3 scripts/select-release-rollback-tag.py "$VERSION")"
+          [[ -n "$ROLLBACK_TAG" ]] || { echo "::error::No stable signed rollback release exists."; exit 1; }
+          rollback="$(mktemp -d)"
+          trap 'rm -rf "$rollback"' EXIT
+          gh release download "$ROLLBACK_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern checksums.sha256 --pattern checksums.sha256.sig \
+            --pattern field-release-receipt.json --dir "$rollback"
+          python3 scripts/v1_bridge_run_metadata.py verify-v1 --input "$rollback/checksums.sha256" \
+            --signature "$rollback/checksums.sha256.sig" --format der
+          mapfile -t evidence < <(python3 scripts/resolve-release-rollback-evidence.py \
+            --tag "$ROLLBACK_TAG" --checksums "$rollback/checksums.sha256" \
+            --signature "$rollback/checksums.sha256.sig" \
+            --receipt "$rollback/field-release-receipt.json" \
+            --expected-ota-signing-key-id ota-update-v1 \
+            --allow-missing-legacy-ota-signing-key-id)
+          [[ ${#evidence[@]} -eq 2 ]]
+          ROLLBACK_ARTIFACT="${evidence[0]}"
+          ROLLBACK_SHA="${evidence[1]}"
+          gh release download "$ROLLBACK_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ROLLBACK_ARTIFACT" --dir "$rollback"
+          [[ "$(sha256sum "$rollback/$ROLLBACK_ARTIFACT" | awk '{print $1}')" == "$ROLLBACK_SHA" ]]
+          python3 scripts/v1_bridge_cli.py prepare-request \
+            --release-dir stage/release --output stage/bridge-signing-request.json \
+            --repository "$GITHUB_REPOSITORY" --source-sha "${{ inputs.source_sha }}" \
+            --stage-run-id "$GITHUB_RUN_ID" --stage-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --version "$VERSION" --rollback-tag "$ROLLBACK_TAG" \
+            --rollback-artifact "$ROLLBACK_ARTIFACT" --rollback-sha "$ROLLBACK_SHA" \
+            --authenticode-signer-sha256 "$AUTHENTICODE_SIGNER_SHA256" \
+            --regenerate-final-sbom
+      - name: Upload immutable local-signing handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: suavoagent-v1-bridge-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stage/
+          retention-days: 7
+          if-no-files-found: error

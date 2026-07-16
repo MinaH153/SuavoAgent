@@ -590,6 +590,70 @@ public sealed class PricingTerminalAckOutboxTests
         });
     }
 
+    [Fact]
+    public void Pricing_failure_ack_persists_explicit_package_cost_basis()
+    {
+        using var db = new AgentStateDb(":memory:");
+        var ack = PricingTerminalAck.PricingFailed(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "uia",
+            10,
+            8,
+            2,
+            "pricing_job_failed",
+            PricingApprovalContract.PackageCostBasis);
+
+        var persisted = db.StagePricingTerminalAck(CommandId, ack);
+
+        Assert.Equal(
+            PricingApprovalContract.PackageCostBasis,
+            persisted.Ack.CostBasis);
+        var json = JsonSerializer.Serialize(persisted.Ack.BuildResult());
+        Assert.Contains("\"costBasis\":\"package_cost\"", json);
+    }
+
+    [Theory]
+    [InlineData("pricing_worklist_source_unavailable")]
+    [InlineData("pricing_worklist_generation_failed")]
+    [InlineData("pricing_worklist_validation_failed")]
+    [InlineData("pricing_worklist_empty")]
+    [InlineData("pricing_report_permission_blocked")]
+    [InlineData("pricing_pioneerrx_not_open")]
+    [InlineData("pricing_report_open_failed")]
+    [InlineData("pricing_report_filters_failed")]
+    [InlineData("pricing_report_generation_failed")]
+    [InlineData("pricing_report_export_failed")]
+    [InlineData("pricing_report_save_dialog_blocked")]
+    [InlineData("pricing_report_storage_unavailable")]
+    [InlineData("pricing_report_validation_failed")]
+    [InlineData("pricing_report_cancelled")]
+    [InlineData("pricing_output_publication_failed")]
+    public void Generated_worklist_failures_remain_finite_early_ack_codes(string code)
+    {
+        using var db = new AgentStateDb(":memory:");
+        var persisted = db.StagePricingTerminalAck(
+            CommandId,
+            PricingTerminalAck.Early(code));
+
+        Assert.Equal(code, persisted.Ack.ErrorCode);
+    }
+
+    [Fact]
+    public void Package_surface_failure_remains_a_finite_terminal_reason()
+    {
+        var ack = PricingTerminalAck.PricingFailed(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "uia",
+            10,
+            3,
+            0,
+            "pricing_package_cost_surface_unavailable",
+            PricingApprovalContract.PackageCostBasis);
+
+        Assert.Equal("pricing_package_cost_surface_unavailable", ack.ReasonCode);
+        Assert.Equal(PricingApprovalContract.PackageCostBasis, ack.CostBasis);
+    }
+
     private static PricingTerminalAckOutbox CreateOutbox(
         AgentStateDb db,
         Func<string, bool, object?, string?, CancellationToken, Task<bool>> send) =>

@@ -18,11 +18,9 @@ namespace SuavoAgent.Helper.Workflows;
 /// Executes the PioneerRx pricing lookup workflow via UIA:
 ///   Item menu → Rx Item → Quick Search (NDC) → Pricing tab → read supplier grid
 ///
-/// Navigation path confirmed from field screenshots (Apr 4, 2026):
-///   - Top menu: Item → Rx Item opens "Edit Rx Item" window
+/// Navigation path confirmed from field screenshots (Apr 4, 2026): Item → Rx Item opens Edit Rx Item.
 ///   - Quick Search field at top accepts NDC
-///   - Pricing tab shows supplier catalog with Cost, Cost Per Unit columns
-///   - Cheapest = row with lowest Cost Per Unit (sorted ascending by default)
+///   - Pricing tab shows supplier catalog with Cost and Cost Per Unit columns
 /// </summary>
 public sealed partial class PricingWorkflow
 {
@@ -133,7 +131,7 @@ public sealed partial class PricingWorkflow
             Observe(SelectorStepId.OpenRxItem, SelectorOutcome.Resolved, SelectorFailureKind.None);
 
             // Step 2: Find the Edit Rx Item window
-            var editWindow = WaitForWindow(automation, EditRxItemWindowTitle);
+            var editWindow = WaitForWindow(automation);
             if (editWindow == null)
             {
                 Observe(SelectorStepId.QuickSearchField, SelectorOutcome.Failed, SelectorFailureKind.Timeout);
@@ -143,7 +141,13 @@ public sealed partial class PricingWorkflow
             try
             {
                 // Step 3: Type NDC into Quick Search and press Enter
-                if (!SearchByNdc(editWindow, cf, request.Ndc, resolver, out var searchBox))
+                if (!SearchByNdc(
+                        editWindow,
+                        cf,
+                        request.Ndc,
+                        request.CostBasis,
+                        resolver,
+                        out var searchBox))
                 {
                     Observe(SelectorStepId.QuickSearchField, SelectorOutcome.Failed, SelectorFailureKind.ElementNotFound,
                         ScanCandidates(editWindow, cf, ControlType.Edit));
@@ -170,6 +174,17 @@ public sealed partial class PricingWorkflow
                     return Done(Fail(request, "Could not click Pricing tab"));
                 }
                 Observe(SelectorStepId.PricingTab, SelectorOutcome.Resolved, SelectorFailureKind.None);
+
+                if (request.CostBasis == PricingApprovalContract.PackageCostBasis)
+                {
+                    NarrateVisibleRead("Cost");
+                    var packageResult = ReadPackageCostResult(request, editWindow, cf, out _);
+                    Observe(SelectorStepId.SupplierGrid, packageResult.Found ? SelectorOutcome.Resolved : SelectorOutcome.Failed,
+                        packageResult.Found ? SelectorFailureKind.None : SelectorFailureKind.GridEmpty);
+                    return Done(packageResult);
+                }
+                if (request.CostBasis != PricingApprovalContract.CostPerUnitBasis)
+                    return Done(Fail(request, "pricing_cost_basis_unsupported"));
 
                 // Step 5: Read the supplier grid. VISION-PRIMARY (SEE "the one on top" via OCR) +
                 // EXACT-VERIFY (UIA cell value) so an OCR misread never writes a wrong cost. When
@@ -521,270 +536,6 @@ public sealed partial class PricingWorkflow
         catch { /* fall through to Click */ }
 
         ExecuteLiveMutation(() => el.AsMenuItem()?.Click());
-    }
-
-    private Window? WaitForWindow(UIA2Automation automation, string title)
-    {
-        var deadline = DateTime.UtcNow + ElementTimeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            EnsureLiveActuation();
-            try
-            {
-                var desktop = automation.GetDesktop();
-                var cf = automation.ConditionFactory;
-                var win = desktop.FindFirstDescendant(cf.ByName(title))?.AsWindow();
-                if (win != null) return win;
-            }
-            catch { }
-            Thread.Sleep(200);
-        }
-        return null;
-    }
-
-    // SearchByNdc was Codex-flagged as brittle for 500-row batches:
-    // the original sequence was Focus -> Sleep(100) -> Ctrl+A -> Sleep(50) ->
-    // Type(ndc) -> Sleep(100) -> Enter -> Sleep(800) with no verification.
-    // Window focus changes mid-row (toast popups, antivirus dialogs, or just
-    // OS desktop redraws) would silently drop keystrokes or fire Enter against
-    // the wrong control. Now we:
-    //   (1) find the search box,
-    //   (2) attempt the type-and-press sequence up to MaxTypeAttempts times,
-    //       verifying after each that the box actually contains the NDC we
-    //       intended to send before pressing Enter,
-    //   (3) bail with false (caller writes a failure result for the row) if
-    //       all attempts fail rather than firing Enter against an unknown state.
-    private const int MaxTypeAttempts = 2;
-
-    private bool SearchByNdc(Window editWindow, ConditionFactory cf, string ndc, SelectorResolver resolver,
-        out AutomationElement? resolvedSearchBox)
-    {
-        resolvedSearchBox = null;
-        try
-        {
-            // Quick Search is a text box near the top of the Edit Rx Item window
-            var deadline = DateTime.UtcNow + ElementTimeout;
-            AutomationElement? searchBox = null;
-            while (DateTime.UtcNow < deadline)
-            {
-                EnsureLiveActuation();
-                // Learned patch first, then the builtin (ControlType=Edit + HelpText "Quick Search").
-                var builtin = new FlaUI.Core.Conditions.AndCondition(
-                    cf.ByControlType(ControlType.Edit),
-                    cf.ByHelpText(QuickSearchHint));
-                var (box, res) = resolver.FindFirst(editWindow, cf, SelectorStepId.QuickSearchField, builtin);
-                searchBox = box;
-                if (searchBox != null) LogIfLearned(SelectorStepId.QuickSearchField, res);
-
-                if (searchBox != null) break;
-                Thread.Sleep(200);
-            }
-
-            if (searchBox == null) return false;
-
-            // Capture the resolved box so VerifyLoadedNdc can exclude this exact
-            // element by identity (RuntimeId) — robust even when HelpText is absent.
-            resolvedSearchBox = searchBox;
-            PrepareVisibleAction(searchBox, "Searching", "Cost Per Unit");
-
-            for (int attempt = 1; attempt <= MaxTypeAttempts; attempt++)
-            {
-                ExecuteLiveMutation(searchBox.Focus);
-                Thread.Sleep(100);
-
-                // Clear existing text then type NDC
-                ExecuteLiveMutation(() => Keyboard.TypeSimultaneously(
-                    FlaUI.Core.WindowsAPI.VirtualKeyShort.CONTROL,
-                    FlaUI.Core.WindowsAPI.VirtualKeyShort.KEY_A));
-                Thread.Sleep(50);
-                ExecuteLiveMutation(() => Keyboard.Type(ndc));
-                Thread.Sleep(150);
-
-                // Before firing Enter, confirm the search box actually contains
-                // the NDC we just typed. A common failure mode is that the OS
-                // shifted focus between Focus() and Type() — Ctrl+A was a no-op
-                // and Type() landed in some other window. Polling the textbox
-                // value here catches that without nuking the user's foreground.
-                if (SearchBoxContainsNdc(searchBox, ndc))
-                {
-                    ExecuteLiveMutation(() =>
-                        Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.RETURN));
-                    Thread.Sleep(800);
-                    return true;
-                }
-
-                _logger.Warning(
-                    "PricingWorkflow: identifier search attempt {Attempt}/{Max} did not verify; retrying",
-                    attempt, MaxTypeAttempts);
-                // Brief backoff before next attempt — gives a transient focus
-                // thief (notification, modal) time to clear.
-                Thread.Sleep(300);
-            }
-
-            _logger.Warning(
-                "PricingWorkflow: identifier search stopped after {Max} unverified attempts",
-                MaxTypeAttempts);
-            return false;
-        }
-        catch (PricingActuationGateClosedException) { throw; }
-        catch (Exception)
-        {
-            _logger.Debug("PricingWorkflow: identifier search failed locally");
-            return false;
-        }
-    }
-
-    private static bool SearchBoxContainsNdc(AutomationElement searchBox, string ndc)
-    {
-        try
-        {
-            var text = searchBox.AsTextBox()?.Text ?? searchBox.Name ?? "";
-            if (string.IsNullOrEmpty(text)) return false;
-            // Match permissively — PioneerRx may apply input masks (5-4-2) or
-            // strip non-digits. Compare digit-only forms.
-            var typedDigits = new string(ndc.Where(char.IsDigit).ToArray());
-            var observedDigits = new string(text.Where(char.IsDigit).ToArray());
-            return observedDigits.Contains(typedDigits, StringComparison.Ordinal);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Verifies that the Edit Rx Item window contains the expected NDC after Quick Search loads.
-    /// Scans the loaded item's text-bearing elements for the normalized NDC (hyphens removed,
-    /// 11 digits) — EXCLUDING the Quick Search box, which retains the typed query and would
-    /// tautologically "verify" any NDC (see <see cref="IsQuickSearchField"/>).
-    /// Returns false if the NDC is not found within the element timeout, indicating the wrong
-    /// item was loaded or no result was returned.
-    /// </summary>
-    private bool VerifyLoadedNdc(Window editWindow, ConditionFactory cf, string ndc, AutomationElement? searchBox)
-    {
-        // Caller already normalized to 11-digit canonical form upstream (ExcelPricingReader).
-        // If this invariant breaks we'd silently match shorter substrings, so assert + fall back.
-        var normalizedNdc = NdcNormalizer.TryNormalize(ndc);
-        if (string.IsNullOrEmpty(normalizedNdc))
-        {
-            _logger.Warning("PricingWorkflow: requested identifier could not be normalized");
-            return false;
-        }
-
-        // Identity of the Quick Search box we typed into, read once. VerifyLoadedNdc
-        // excludes that exact element so the tautology (matching the box's own echoed
-        // query) can't pass — by identity, not HelpText, so it holds with no HelpText.
-        var searchBoxRid = UiaGridReader.TryGetRuntimeId(searchBox);
-
-        var deadline = DateTime.UtcNow + ElementTimeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            EnsureLiveActuation();
-            try
-            {
-                // Materialize once. [C-3] NEVER verify against the Quick Search box: it still holds
-                // the NDC we just typed, so matching it is tautological. Exclude it by element
-                // IDENTITY (the exact box SearchByNdc typed into) so the exclusion holds even when
-                // PioneerRx exposes no HelpText; verify only the loaded item.
-                var texts = editWindow.FindAllDescendants(cf.ByControlType(ControlType.Edit))
-                    .Concat(editWindow.FindAllDescendants(cf.ByControlType(ControlType.Text)))
-                    .Where(el => !IsSearchBox(el, searchBoxRid))
-                    .Select(SafeText)
-                    .Where(t => !string.IsNullOrEmpty(t))
-                    .ToList();
-                // Do-Not-Use must be a FULL-PASS check BEFORE any NDC match. PioneerRx returns a red
-                // "(Do Not Use)" duplicate sharing the active item's NDC; the NDC lives in an Edit
-                // field (enumerated first) while the "(Do Not Use)" marker is a separate Text label.
-                // A per-element early-return on the NDC match would accept the item before the marker
-                // element is ever inspected — the exact hole this guard exists to close. Scan ALL
-                // candidates for the marker first; if any hits, refuse to price.
-                if (texts.Any(PricingGridReader.LooksLikeDoNotUse))
-                {
-                    _logger.Warning("PricingWorkflow: loaded item is marked Do Not Use; refusing to price");
-                    return false;
-                }
-
-                foreach (var raw in texts)
-                {
-                    // PioneerRx may display the NDC in any supported shape; normalize before compare
-                    // to avoid false negatives on 4-4-2 / 5-3-2 layouts.
-                    if (NdcNormalizer.TryNormalize(raw.Trim()) == normalizedNdc)
-                        return true;
-
-                    // Fallback: substring check against digit-only form, for cases where the NDC
-                    // is embedded inside a longer descriptor ("NDC 50242-0041-21 — OMEPRAZOLE …")
-                    var digitsOnly = new string(raw.Where(char.IsDigit).ToArray());
-                    if (digitsOnly.Contains(normalizedNdc, StringComparison.Ordinal))
-                        return true;
-                }
-            }
-            catch { }
-            Thread.Sleep(300);
-        }
-
-        _logger.Warning("PricingWorkflow: loaded item did not verify within {Timeout}s",
-            ElementTimeout.TotalSeconds);
-        return false;
-    }
-
-    /// <summary>
-    /// Reads an element's text WITHOUT throwing. <c>el.AsTextBox().Text</c> reaches the Value pattern,
-    /// which THROWS on a plain Text/Label control that doesn't implement it — and that exception,
-    /// caught by the scan's try/catch, aborted the ENTIRE <see cref="VerifyLoadedNdc"/> pass before it
-    /// could match (the loaded item's NDC lives in a Text label, e.g. PioneerRx's "NDC: 00093-5056-98").
-    /// Prefer the Value pattern only when supported; otherwise use the element Name (a Text control's
-    /// Name IS its rendered text). Never throws, so one unreadable control can't sink the whole scan.
-    /// </summary>
-    private static string SafeText(AutomationElement el)
-    {
-        try
-        {
-            if (el.Patterns.Value.IsSupported)
-            {
-                var v = el.Patterns.Value.Pattern.Value;
-                if (!string.IsNullOrEmpty(v)) return v;
-            }
-        }
-        catch { /* Value not really available — fall back to Name */ }
-        return el.Name ?? "";
-    }
-
-    /// <summary>
-    /// True if <paramref name="el"/> is the Quick Search box that <see cref="VerifyLoadedNdc"/>
-    /// must NOT verify against (it retains the typed query, so matching it confirms the requested
-    /// NDC regardless of what actually loaded — a tautology).
-    /// <para>
-    /// PRIMARY: element identity. <paramref name="searchBoxRid"/> is the RuntimeId of the exact box
-    /// <see cref="SearchByNdc"/> typed into; comparing RuntimeIds excludes that one element whether
-    /// or not PioneerRx exposes HelpText, and never false-skips a different field that merely shares
-    /// a HelpText string. FALLBACK: only when the box's identity is unknown (RuntimeId unreadable,
-    /// e.g. the resolver never captured it) do we fall back to the HelpText marker — best effort,
-    /// matching legacy behaviour.
-    /// </para>
-    /// </summary>
-    private static bool IsSearchBox(AutomationElement el, int[]? searchBoxRid)
-    {
-        if (searchBoxRid is { Length: > 0 })
-        {
-            var rid = UiaGridReader.TryGetRuntimeId(el);
-            if (rid != null) return RuntimeIdEquals(rid, searchBoxRid);
-            // RuntimeId unreadable on this candidate — fall through to the HelpText marker.
-        }
-        return IsQuickSearchField(el);
-    }
-
-
-    private static bool RuntimeIdEquals(int[] a, int[] b) => a.SequenceEqual(b);
-
-    /// <summary>
-    /// Degraded fallback identity check: matches the HelpText marker <see cref="SearchByNdc"/>
-    /// resolves the box by (<see cref="QuickSearchHint"/>). Used only when RuntimeId identity is
-    /// unavailable. The property fetch is guarded — a UIA read can throw, treated as "not the box".
-    /// </summary>
-    private static bool IsQuickSearchField(AutomationElement el)
-    {
-        try { return string.Equals(el.HelpText, QuickSearchHint, StringComparison.OrdinalIgnoreCase); }
-        catch { return false; }
     }
 
 }

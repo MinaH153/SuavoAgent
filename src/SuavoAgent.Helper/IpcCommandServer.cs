@@ -80,6 +80,8 @@ public sealed partial class IpcCommandServer : IDisposable
 {
     private readonly string _pipeName;
     private readonly PricingWorkflow _pricing;
+    private readonly PioneerRxTop500ExportWorkflow? _top500Export;
+    private readonly PioneerRxPricedWorkbookStore? _pricedWorkbookStore;
     private readonly ScreenCaptureController? _vision;
     private readonly VisionGenerationGate _visionGenerationGate;
     private readonly VisionRuntimeStatusTracker? _visionRuntimeStatus;
@@ -104,6 +106,7 @@ public sealed partial class IpcCommandServer : IDisposable
     internal Task Completion => _listenTask ?? Task.CompletedTask;
 
     private readonly bool _relaxClientPathValidation;
+    private readonly bool _allowNonPioneerRxCapabilities;
 
     // ------------------------------------------------------------------
     // Dispatch wedge watchdog. This server keeps one active pipe plus one pending listener but
@@ -138,14 +141,20 @@ public sealed partial class IpcCommandServer : IDisposable
         bool relaxClientPathValidation = false,
         Action? onWedgedDispatch = null,
         SuavoAgent.Helper.Presence.PresencePreferenceStore? presenceStore = null,
-        VisionRuntimeStatusTracker? visionRuntimeStatus = null)
+        VisionRuntimeStatusTracker? visionRuntimeStatus = null,
+        bool allowNonPioneerRxCapabilities = true,
+        PioneerRxTop500ExportWorkflow? top500Export = null,
+        PioneerRxPricedWorkbookStore? pricedWorkbookStore = null)
     {
         _presenceStore = presenceStore;
         _pipeName = pipeName;
         _pricing = pricing;
+        _top500Export = top500Export;
+        _pricedWorkbookStore = pricedWorkbookStore;
         _visionGenerationGate = visionGenerationGate ??
             throw new ArgumentNullException(nameof(visionGenerationGate));
         _visionRuntimeStatus = visionRuntimeStatus;
+        _allowNonPioneerRxCapabilities = allowNonPioneerRxCapabilities;
         _relaxClientPathValidation = relaxClientPathValidation;
         _vision = vision;
         _locator = locator;

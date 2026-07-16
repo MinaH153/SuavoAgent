@@ -106,4 +106,40 @@ public sealed class PricingApprovalContractParsingTests
         Assert.Equal("valid", revokeCode);
         Assert.Equal(revocation, parsedRevoke!.Revocation);
     }
+
+    [Fact]
+    public void PackageInstall_RequiresV2EnvelopeAndV2PackageGrant()
+    {
+        var proposal = PricingTestAuthority.Proposal(
+            PricingTestAuthority.Contract(
+                modality: "uia",
+                costBasis: PricingApprovalContract.PackageCostBasis),
+            Now);
+        var grant = PricingTestAuthority.Grant(proposal, Now);
+        var commandId = Guid.NewGuid().ToString("D");
+        var exact = JsonSerializer.SerializeToElement(new
+        {
+            schemaVersion = PricingApprovalContract.PackageSchemaVersion,
+            commandId,
+            grant,
+        });
+
+        Assert.True(PricingApprovalCommandContract.TryParseInstall(
+            exact,
+            out var parsed,
+            out var code));
+        Assert.Equal("valid", code);
+        Assert.Equal(PricingApprovalContract.PackageSchemaVersion, parsed!.Grant.SchemaVersion);
+
+        var mismatchedEnvelope = JsonSerializer.SerializeToElement(new
+        {
+            schemaVersion = PricingApprovalContract.SchemaVersion,
+            commandId,
+            grant,
+        });
+        Assert.False(PricingApprovalCommandContract.TryParseInstall(
+            mismatchedEnvelope,
+            out _,
+            out _));
+    }
 }

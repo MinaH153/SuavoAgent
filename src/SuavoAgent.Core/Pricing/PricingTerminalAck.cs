@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using SuavoAgent.Contracts.Pricing;
 
 namespace SuavoAgent.Core.Pricing;
 
@@ -17,7 +18,8 @@ internal sealed record PricingTerminalAck(
     int? FailedItems = null,
     string? ReasonCode = null,
     int? CandidateCount = null,
-    bool? HelperVersionSuspect = null)
+    bool? HelperVersionSuspect = null,
+    string? CostBasis = null)
 {
     internal const string NoResult = "none";
     internal const string CancelledResult = "cancelled";
@@ -60,6 +62,21 @@ internal sealed record PricingTerminalAck(
         "helper_unreachable",
         "pricing_discovery_unavailable",
         "pricing_discovery_exception",
+        "pricing_worklist_source_unavailable",
+        "pricing_worklist_generation_failed",
+        "pricing_worklist_validation_failed",
+        "pricing_worklist_empty",
+        "pricing_report_permission_blocked",
+        "pricing_pioneerrx_not_open",
+        "pricing_report_open_failed",
+        "pricing_report_filters_failed",
+        "pricing_report_generation_failed",
+        "pricing_report_export_failed",
+        "pricing_report_save_dialog_blocked",
+        "pricing_report_storage_unavailable",
+        "pricing_report_validation_failed",
+        "pricing_report_cancelled",
+        "pricing_output_publication_failed",
     }.ToFrozenSet(StringComparer.Ordinal);
 
     internal static readonly FrozenSet<string> TerminalFailureCodes = new[]
@@ -70,6 +87,7 @@ internal sealed record PricingTerminalAck(
         "actuation_gate_closed",
         "pioneerrx_not_attached",
         "pricing_brain_operator_required",
+        "pricing_package_cost_surface_unavailable",
         "pricing_job_failed",
     }.ToFrozenSet(StringComparer.Ordinal);
 
@@ -108,7 +126,8 @@ internal sealed record PricingTerminalAck(
         int totalItems,
         int completedItems,
         int failedItems,
-        string reasonCode) =>
+        string reasonCode,
+        string costBasis = PricingApprovalContract.CostPerUnitBasis) =>
         new PricingTerminalAck(
             PricingFailedResult,
             reasonCode,
@@ -117,7 +136,8 @@ internal sealed record PricingTerminalAck(
             totalItems,
             completedItems,
             failedItems,
-            reasonCode).Validated();
+            reasonCode,
+            CostBasis: costBasis).Validated();
 
     internal static PricingTerminalAck LocalConfirmation(int candidateCount) =>
         new PricingTerminalAck(
@@ -160,6 +180,7 @@ internal sealed record PricingTerminalAck(
             completedItems = CompletedItems,
             failedItems = FailedItems,
             reason = ReasonCode,
+            costBasis = CostBasis,
         },
         LocalConfirmationResult => new
         {
@@ -186,7 +207,7 @@ internal sealed record PricingTerminalAck(
     {
         var emptyAuxiliary = JobId is null && Mode is null && TotalItems is null &&
             CompletedItems is null && FailedItems is null && ReasonCode is null &&
-            CandidateCount is null && HelperVersionSuspect is null;
+            CandidateCount is null && HelperVersionSuspect is null && CostBasis is null;
         var valid = ResultKind switch
         {
             NoResult => emptyAuxiliary && EarlyFailureCodes.Contains(ErrorCode),
@@ -200,17 +221,20 @@ internal sealed record PricingTerminalAck(
             LocalConfirmationResult =>
                 JobId is null && Mode is null && TotalItems is null &&
                 CompletedItems is null && FailedItems is null && ReasonCode is null &&
-                HelperVersionSuspect is null && CandidateCount is >= 1 and <= 100 &&
+                HelperVersionSuspect is null && CostBasis is null &&
+                CandidateCount is >= 1 and <= 100 &&
                 ErrorCode == "pricing_local_confirmation_required",
             AutopilotRejectedResult =>
                 JobId is null && Mode is null && TotalItems is null &&
                 CompletedItems is null && FailedItems is null && CandidateCount is null &&
-                HelperVersionSuspect is null && ReasonCode == ErrorCode &&
+                HelperVersionSuspect is null && CostBasis is null &&
+                ReasonCode == ErrorCode &&
                 AutopilotFailureCodes.Contains(ErrorCode),
             DiscoveryFailedResult =>
                 JobId is null && Mode is null && TotalItems is null &&
                 CompletedItems is null && FailedItems is null && CandidateCount is null &&
-                HelperVersionSuspect is not null && ReasonCode == ErrorCode &&
+                HelperVersionSuspect is not null && CostBasis is null &&
+                ReasonCode == ErrorCode &&
                 DiscoveryFailureCodes.Contains(ErrorCode),
             _ => false,
         };
@@ -225,7 +249,8 @@ internal sealed record PricingTerminalAck(
         IsCount(TotalItems) && IsCount(CompletedItems) && IsCount(FailedItems) &&
         CompletedItems!.Value + FailedItems!.Value <= TotalItems!.Value &&
         ReasonCode == ErrorCode && TerminalFailureCodes.Contains(ErrorCode) &&
-        CandidateCount is null && HelperVersionSuspect is null;
+        CandidateCount is null && HelperVersionSuspect is null &&
+        PricingApprovalContract.IsSupportedCostBasis(CostBasis);
 
     private static bool IsCount(int? value) => value is >= 0 and <= 1_000_000;
 

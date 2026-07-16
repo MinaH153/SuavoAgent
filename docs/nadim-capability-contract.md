@@ -81,11 +81,11 @@ not net profit. No live reimbursement source, runtime registration, signed comma
 dashboard trace, PioneerRx writeback, rollback, or auto-block exists. Report-only/manual entry remains
 the correct first field mode; clinical interchangeability and any mutation remain pharmacist-controlled.
 
-## Generating the top-500 (his last manual step) — local components built
+## Generating the top-500 (his last manual step) — signed chain built, field proof open
 
 | Capability | Source | Status | Evidence |
 |---|---|---|---|
-| **Generate** the top-500 itself: Rx Binoculars → Transaction Search (Jan1–today, Generic, Rx-not-OTC, No Schedule) → Top-X ranked by dispensed → export | video narration + his sheet's filter header | ◐ local SQL builder/generator/writer; command + live schema proof open | `SqlTopDispensedQueryBuilder`, `SqlTopDispensedGenerator`, and `ExcelTop500Writer` are locally tested. Unresolved Rx/OTC or schedule mappings now stop safely and yield no worklist. No production `generate_top_dispensed` command or generate→price→output chain exists; the actual column types, values, collation, and parameterized execution still require field proof before a report is trusted. |
+| **Generate & price** the top generic NDC list: approved local PioneerRx aggregate source → ranked Top-X → local pricing input → existing verified pricing executor | video narration + his sheet's filter header | ◐ signed generate→price→result chain built; live source proof open | Versioned pack `pharmacy_rx_generate_v2` stays under signed `find_and_run_pricing_job`, PIC approval binding, dormant/observation authority, replay, outbox, and audit controls. `TopDispensedWorklistBuilder` resolves bounded metadata, runs parameterized aggregate SQL, canonicalizes NDCs, atomically publishes a protected local workbook, re-reads it, then hands it to the existing executor; no patient/Rx rows or source workbook upload. Unresolved statuses, schema, Rx/OTC, or schedule mappings fail closed. Production remains NO-GO until Nadim's exact PioneerRx columns/values/statuses are ground-truthed and a clean-install synthetic run returns a verified result. No verified Rx Binoculars UI/export selector path exists. |
 
 ## Other capabilities he showed (out of current scope)
 | Name-vs-NDC search safety ("(Do Not Use)" pink rows, combo-drug HCTZ pollution) | frames | ✅ partial — `LooksLikeDoNotUse` guards the pricing path; general name-search UX not in scope |

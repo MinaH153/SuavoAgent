@@ -30,8 +30,14 @@ internal static class Program
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 "SuavoAgent", "diagnostics", "events.jsonl"),
             Dsn = Environment.GetEnvironmentVariable("SUAVO_SENTRY_DSN"),
-            EnableSentry = true,
+            EnableSentry = !MsiCleanHostPreflightRunner.IsRequested(args),
         });
+
+        // A direct first-install MSI runs this read-only gate from the current
+        // embedded package before InstallValidate. It refuses unrecognized
+        // legacy product, service, process, directory, task, or shortcut state.
+        if (MsiCleanHostPreflightRunner.IsRequested(args))
+            return MsiCleanHostPreflightRunner.Run(args);
 
         // MSI invokes fixed, non-sensitive apply/rollback/commit maintenance modes
         // as elevated in-script actions around service startup. Route any occurrence
@@ -40,10 +46,11 @@ internal static class Program
         if (MsiServiceHardeningRunner.IsRequested(args))
             return MsiServiceHardeningRunner.Run(args);
 
-        // Successful MSI commit retires the exact former developer-publish
-        // Broker launch even if the operator never opens device pairing.
-        if (MsiLegacyInteractiveRetirementRunner.IsRequested(args))
-            return MsiLegacyInteractiveRetirementRunner.Run(args);
+        // This commit-only MSI mode records a one-use, PHI-negative proof that
+        // the signed installer reached a successful first-install commit.
+        // Maintenance repairs deliberately cannot mint this release receipt.
+        if (MsiRelease1InstallMarkerRunner.IsRequested(args))
+            return MsiRelease1InstallMarkerRunner.Run(args);
 
         if (IsDoctorMode(args))
         {

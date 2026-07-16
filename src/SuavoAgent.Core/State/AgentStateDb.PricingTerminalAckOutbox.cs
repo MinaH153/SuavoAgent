@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Pricing;
 
 namespace SuavoAgent.Core.State;
@@ -49,12 +50,12 @@ public sealed partial class AgentStateDb
                 INSERT INTO pricing_terminal_ack_outbox (
                     command_id, result_kind, error_code, job_id, mode,
                     total_items, completed_items, failed_items, reason_code,
-                    candidate_count, helper_version_suspect, payload_sha256,
+                    candidate_count, helper_version_suspect, cost_basis, payload_sha256,
                     state, attempt_count, next_attempt_at, created_at)
                 VALUES (
                     @command, @kind, @error, @job, @mode,
                     @total, @completed, @failed, @reason,
-                    @candidate_count, @helper_suspect, @digest,
+                    @candidate_count, @helper_suspect, @cost_basis, @digest,
                     'pending', 0, @now, @now)
                 """);
             AddPricingTerminalAckParameters(insert, commandId, ack, digest);
@@ -200,7 +201,12 @@ public sealed partial class AgentStateDb
             reader.IsDBNull(7) ? null : reader.GetInt32(7),
             reader.IsDBNull(8) ? null : reader.GetString(8),
             reader.IsDBNull(9) ? null : reader.GetInt32(9),
-            reader.IsDBNull(10) ? null : reader.GetInt64(10) == 1).Validated();
+            reader.IsDBNull(10) ? null : reader.GetInt64(10) == 1,
+            reader.IsDBNull(17)
+                ? reader.GetString(1) == PricingTerminalAck.PricingFailedResult
+                    ? PricingApprovalContract.CostPerUnitBasis
+                    : null
+                : reader.GetString(17)).Validated();
         return new(
             reader.GetString(0),
             ack,
@@ -236,6 +242,8 @@ public sealed partial class AgentStateDb
             ack.HelperVersionSuspect is null
                 ? DBNull.Value
                 : ack.HelperVersionSuspect.Value ? 1 : 0);
+        command.Parameters.AddWithValue(
+            "@cost_basis", (object?)ack.CostBasis ?? DBNull.Value);
         command.Parameters.AddWithValue("@digest", digest);
     }
 
@@ -249,7 +257,8 @@ public sealed partial class AgentStateDb
         SELECT command_id, result_kind, error_code, job_id, mode,
                total_items, completed_items, failed_items, reason_code,
                candidate_count, helper_version_suspect, payload_sha256,
-               state, attempt_count, next_attempt_at, created_at, delivered_at
+               state, attempt_count, next_attempt_at, created_at, delivered_at,
+               cost_basis
           FROM pricing_terminal_ack_outbox
         """;
 }

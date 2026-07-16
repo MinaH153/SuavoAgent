@@ -137,6 +137,49 @@ public sealed class HandleBoundAclTests
     }
 
     [Fact]
+    public void Read_side_batch_verification_accepts_only_exact_acl_without_repair()
+    {
+        var path = Absolute("verify-exact");
+        var policy = ServiceInstaller.BuildProtectedAclPolicy(
+            ServiceInstaller.ProtectedDirectoryKind.Maintenance,
+            directory: false,
+            inherit: false);
+        var native = new FakeNative();
+        native.Add(path, Identity(path, directory: false));
+        native.SetSnapshot(path, new(
+            HandleBoundAcl.SystemSid,
+            IsDaclProtected: true,
+            policy.Aces));
+
+        new HandleBoundAcl(native).VerifyBatch([new(path, false, policy)]);
+
+        Assert.Empty(native.Mutations);
+    }
+
+    [Fact]
+    public void Read_side_batch_verification_rejects_extra_writer_without_repair()
+    {
+        var path = Absolute("verify-forged-acl");
+        var policy = ServiceInstaller.BuildProtectedAclPolicy(
+            ServiceInstaller.ProtectedDirectoryKind.Maintenance,
+            directory: false,
+            inherit: false);
+        var native = new FakeNative();
+        native.Add(path, Identity(path, directory: false));
+        native.SetSnapshot(path, new(
+            HandleBoundAcl.SystemSid,
+            IsDaclProtected: true,
+            policy.Aces.Append(new HandleBoundAclAce(
+                CoreServiceIdentity.ServiceSid,
+                FileSystemRights.Modify)).ToArray()));
+
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            new HandleBoundAcl(native).VerifyBatch([new(path, false, policy)]));
+
+        Assert.Empty(native.Mutations);
+    }
+
+    [Fact]
     public void Handle_identity_mismatch_aborts_before_set_security_info()
     {
         var path = Absolute("identity-swap");
@@ -364,6 +407,12 @@ public sealed class HandleBoundAclTests
         {
             var normalized = HandleBoundAcl.NormalizeExpectedPath(path);
             _objects.Add(normalized, new(normalized, identities));
+        }
+
+        internal void SetSnapshot(string path, HandleBoundAclSnapshot snapshot)
+        {
+            var normalized = HandleBoundAcl.NormalizeExpectedPath(path);
+            _objects[normalized].Snapshot = snapshot;
         }
 
         public IDisposable EnableRequiredPrivileges() => new NoopDisposable();

@@ -83,10 +83,9 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
         try
         {
             // Identification level EXPLICITLY: the Helper's primary identity proof is reading
-            // this client's token SID via RunAsClient impersonation. The parameterless overload
-            // sends no SQOS at all, leaving the impersonation ceiling to OS defaults — on field
-            // boxes that rung then comes back inconclusive and the de-privileged Helper falls
-            // through to image-path reads that ACCESS_DENY (the command-pipe strand).
+            // this client's enabled token groups from the pipe impersonation token. The
+            // parameterless overload sends no SQOS at all, leaving the impersonation ceiling to
+            // OS defaults and making that identity check inconclusive on field boxes.
             // Identification is the least privilege that still lets the server read WHO we are.
             var pipe = new NamedPipeClientStream(
                 ".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous,

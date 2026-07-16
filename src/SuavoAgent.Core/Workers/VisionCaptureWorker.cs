@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Security;
 using SuavoAgent.Contracts.Vision;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
@@ -56,6 +57,7 @@ public sealed class VisionCaptureWorker : BackgroundService
     private readonly VisionCaptureTelemetry _telemetry;
     private readonly IVisionShadowReasoner? _reasoner;
     private readonly IPostSigner? _cloud;
+    private readonly ObservationActivationAuthority? _observationAuthority;
     private long _frameUploadCounter;
 
     public VisionCaptureWorker(
@@ -67,7 +69,8 @@ public sealed class VisionCaptureWorker : BackgroundService
         TimeProvider? clock = null,
         VisionCaptureTelemetry? telemetry = null,
         IVisionShadowReasoner? reasoner = null,
-        IPostSigner? cloud = null)
+        IPostSigner? cloud = null,
+        ObservationActivationAuthority? observationAuthority = null)
     {
         _logger = logger;
         _agentOptions = agentOptions.Value;
@@ -78,6 +81,7 @@ public sealed class VisionCaptureWorker : BackgroundService
         _telemetry = telemetry ?? new VisionCaptureTelemetry();
         _reasoner = reasoner;
         _cloud = cloud;
+        _observationAuthority = observationAuthority;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -124,6 +128,14 @@ public sealed class VisionCaptureWorker : BackgroundService
     /// </summary>
     public async Task<TickResult> TickAsync(CancellationToken ct)
     {
+        using var activation = _observationAuthority?.TryAcquireExecutionLease(ct);
+        if (_observationAuthority is not null && activation is null)
+        {
+            _telemetry.RecordSkipped(ObservationActivationCodes.StateMissing);
+            return TickResult.Skipped(ObservationActivationCodes.StateMissing);
+        }
+        if (activation is not null) ct = activation.Token;
+
         var options = _visionOptions.CurrentValue;
         if (!options.Enabled)
         {

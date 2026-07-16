@@ -87,6 +87,9 @@ public sealed partial class HeartbeatWorker
                 "update",
                 StringComparison.Ordinal) || string.Equals(
                 cmd.Command,
+                Release1ConvergenceCommand.Name,
+                StringComparison.Ordinal) || string.Equals(
+                cmd.Command,
                 SelfUninstallContract.CommandName,
                 StringComparison.Ordinal) || string.Equals(
                 cmd.Command,
@@ -119,6 +122,50 @@ public sealed partial class HeartbeatWorker
                     return;
                 }
                 _logger.LogWarning("core.command.signature_rejected");
+                return;
+            }
+
+            // Command signatures authenticate the control plane; they never
+            // confer workstation-observation authority. This is the single
+            // dispatch boundary for every command, including future/unknown
+            // names. Only the explicit audited maintenance set can run while
+            // dormant. Observation commands hold a current signed execution
+            // lease for the complete inline handler lifetime.
+            var commandLifetime = ct;
+            using var observationAdmission =
+                ObservationActivationCommandPolicy.Admit(
+                    cmd.Command,
+                    _observationAuthority,
+                    commandLifetime);
+            if (!observationAdmission.Admitted)
+            {
+                RejectObservationCommand(cmd, observationAdmission.Code);
+                return;
+            }
+            ct = observationAdmission.Token;
+
+            // One-time Release 1 signing-root convergence is an append-only,
+            // PHI-negative outbox. Persist the complete verified command before
+            // consuming either nonce; all network phases then retry independently.
+            if (string.Equals(
+                    cmd.Command,
+                    Release1ConvergenceCommand.Name,
+                    StringComparison.Ordinal))
+            {
+                var registered = await HandleRelease1ConvergenceChallengeAsync(
+                        scEl,
+                        cmd,
+                        ct)
+                    .ConfigureAwait(false);
+                if (registered)
+                {
+                    if (!_commandVerifier.TryConsumeVerifiedNonce(cmd.Nonce))
+                        _logger.LogDebug(
+                            "Release 1 challenge nonce already consumed in memory");
+                    if (!_stateDb.TryRecordNonce(cmd.Nonce))
+                        _logger.LogDebug(
+                            "Release 1 challenge nonce already persisted");
+                }
                 return;
             }
 
@@ -443,7 +490,8 @@ public sealed partial class HeartbeatWorker
                         () => ExecutePricingCommandIfCurrentAsync(
                             cmd,
                             pricingCommandId,
-                            () => HandleRunPricingJobAsync(scEl, ct)),
+                            commandLifetime,
+                            token => HandleRunPricingJobAsync(scEl, token)),
                         CancellationToken.None);
                     break;
                 case "find_and_run_pricing_job":
@@ -451,7 +499,8 @@ public sealed partial class HeartbeatWorker
                         () => ExecutePricingCommandIfCurrentAsync(
                             cmd,
                             pricingCommandId,
-                            () => HandleFindAndRunPricingJobAsync(scEl, ct)),
+                            commandLifetime,
+                            token => HandleFindAndRunPricingJobAsync(scEl, token)),
                         CancellationToken.None);
                     break;
                 case "show_cursor":
@@ -469,9 +518,11 @@ public sealed partial class HeartbeatWorker
                     break;
                 case "run_workflow":
                     _ = Task.Run(
-                        () => ExecuteLiveCommandIfCurrentAsync(
-                            cmd, () => HandleRunWorkflowAsync(scEl, cmd, ct)),
-                        ct);
+                        () => ExecuteDetachedObservationCommandIfCurrentAsync(
+                            cmd,
+                            commandLifetime,
+                            token => HandleRunWorkflowAsync(scEl, cmd, token)),
+                        CancellationToken.None);
                     break;
                 case "abort_workflow":
                     await ExecuteLiveCommandIfCurrentAsync(
@@ -483,39 +534,51 @@ public sealed partial class HeartbeatWorker
                     break;
                 case "navigate_app":
                     _ = Task.Run(
-                        () => ExecuteLiveCommandIfCurrentAsync(
-                            cmd, () => HandleNavigateAppAsync(scEl, cmd, ct)),
-                        ct);
+                        () => ExecuteDetachedObservationCommandIfCurrentAsync(
+                            cmd,
+                            commandLifetime,
+                            token => HandleNavigateAppAsync(scEl, cmd, token)),
+                        CancellationToken.None);
                     break;
                 case "navigate_pricing":
                     _ = Task.Run(
-                        () => ExecuteLiveCommandIfCurrentAsync(
-                            cmd, () => HandleNavigatePricingAsync(scEl, cmd, ct)),
-                        ct);
+                        () => ExecuteDetachedObservationCommandIfCurrentAsync(
+                            cmd,
+                            commandLifetime,
+                            token => HandleNavigatePricingAsync(scEl, cmd, token)),
+                        CancellationToken.None);
                     break;
                 case "replay_template":
                     _ = Task.Run(
-                        () => ExecuteLiveCommandIfCurrentAsync(
-                            cmd, () => HandleReplayTemplateAsync(scEl, cmd, ct)),
-                        ct);
+                        () => ExecuteDetachedObservationCommandIfCurrentAsync(
+                            cmd,
+                            commandLifetime,
+                            token => HandleReplayTemplateAsync(scEl, cmd, token)),
+                        CancellationToken.None);
                     break;
                 case "run_learned_template":
                     _ = Task.Run(
-                        () => ExecuteLiveCommandIfCurrentAsync(
-                            cmd, () => HandleRunLearnedTemplateAsync(scEl, cmd, ct)),
-                        ct);
+                        () => ExecuteDetachedObservationCommandIfCurrentAsync(
+                            cmd,
+                            commandLifetime,
+                            token => HandleRunLearnedTemplateAsync(scEl, cmd, token)),
+                        CancellationToken.None);
                     break;
                 case "explore_sandbox":
                     _ = Task.Run(
-                        () => ExecuteLiveCommandIfCurrentAsync(
-                            cmd, () => HandleSandboxExploreAsync(scEl, cmd, ct)),
-                        ct);
+                        () => ExecuteDetachedObservationCommandIfCurrentAsync(
+                            cmd,
+                            commandLifetime,
+                            token => HandleSandboxExploreAsync(scEl, cmd, token)),
+                        CancellationToken.None);
                     break;
                 case "replay_skill":
                     _ = Task.Run(
-                        () => ExecuteLiveCommandIfCurrentAsync(
-                            cmd, () => HandleReplaySkillAsync(scEl, cmd, ct)),
-                        ct);
+                        () => ExecuteDetachedObservationCommandIfCurrentAsync(
+                            cmd,
+                            commandLifetime,
+                            token => HandleReplaySkillAsync(scEl, cmd, token)),
+                        CancellationToken.None);
                     break;
                 case "abort_navigation":
                     await ExecuteLiveCommandIfCurrentAsync(
@@ -573,12 +636,51 @@ public sealed partial class HeartbeatWorker
         await execute().ConfigureAwait(false);
     }
 
+    private void RejectObservationCommand(SignedCommand command, string code)
+    {
+        // Persist the exact verified nonce before returning. An authority or
+        // release-policy rejection may never execute later after activation,
+        // restart, or control-plane redelivery.
+        _stateDb.TryRecordNonce(command.Nonce);
+        _commandVerifier?.TryConsumeVerifiedNonce(command.Nonce);
+        _logger.LogWarning(
+            "core.command.observation_policy_rejected code={Code}",
+            code);
+    }
+
+    private async Task ExecuteDetachedObservationCommandIfCurrentAsync(
+        SignedCommand command,
+        CancellationToken lifetime,
+        Func<CancellationToken, Task> execute)
+    {
+        if (lifetime.IsCancellationRequested || _commandVerifier is null ||
+            !_commandVerifier.VerifyExecutionAuthority(command).IsValid)
+        {
+            _logger.LogWarning("core.command.execution_authority_expired");
+            return;
+        }
+
+        using var admission = ObservationActivationCommandPolicy.Admit(
+            command.Command,
+            _observationAuthority,
+            lifetime);
+        if (!admission.Admitted)
+        {
+            _logger.LogWarning(
+                "core.command.observation_policy_rejected code={Code}",
+                admission.Code);
+            return;
+        }
+        await execute(admission.Token).ConfigureAwait(false);
+    }
+
     private async Task ExecutePricingCommandIfCurrentAsync(
         SignedCommand command,
         string commandId,
-        Func<Task> execute)
+        CancellationToken lifetime,
+        Func<CancellationToken, Task> execute)
     {
-        if (_commandVerifier is null ||
+        if (lifetime.IsCancellationRequested || _commandVerifier is null ||
             !_commandVerifier.VerifyExecutionAuthority(command).IsValid)
         {
             _logger.LogWarning("core.command.execution_authority_expired");
@@ -589,7 +691,24 @@ public sealed partial class HeartbeatWorker
                 .ConfigureAwait(false);
             return;
         }
-        await execute().ConfigureAwait(false);
+
+        using var admission = ObservationActivationCommandPolicy.Admit(
+            command.Command,
+            _observationAuthority,
+            lifetime);
+        if (!admission.Admitted)
+        {
+            _logger.LogWarning(
+                "core.command.observation_policy_rejected code={Code}",
+                admission.Code);
+            await AckPricingFailureAsync(
+                    commandId,
+                    PricingTerminalAck.Early("pricing_execution_exception"),
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            return;
+        }
+        await execute(admission.Token).ConfigureAwait(false);
     }
 
 }

@@ -29,21 +29,33 @@ internal sealed record UpdateClaimValidationResult(
 internal sealed class NativeUpdateClaimValidator
 {
     private readonly IReadOnlyDictionary<string, string> _commandKeys;
-    private readonly string _updatePublicKey;
+    private readonly IReadOnlyDictionary<string, string> _updatePublicKeys;
 
     public NativeUpdateClaimValidator()
         : this(
             RemoteCommandTrust.CreateProductionKeyRegistry(),
-            UpdateActivationContract.ProductionUpdatePublicKeyDer)
+            UpdateActivationContract.ProductionUpdatePublicKeys)
     {
     }
 
     internal NativeUpdateClaimValidator(
         IReadOnlyDictionary<string, string> commandKeys,
         string updatePublicKey)
+        : this(
+            commandKeys,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [OtaUpdateTrust.LegacyV1KeyId] = updatePublicKey,
+            })
+    {
+    }
+
+    internal NativeUpdateClaimValidator(
+        IReadOnlyDictionary<string, string> commandKeys,
+        IReadOnlyDictionary<string, string> updatePublicKeys)
     {
         _commandKeys = commandKeys;
-        _updatePublicKey = updatePublicKey;
+        _updatePublicKeys = updatePublicKeys;
     }
 
     public UpdateClaimValidationResult Validate(
@@ -74,7 +86,7 @@ internal sealed class NativeUpdateClaimValidator
             var validation = UpdateActivationContract.Validate(
                 request!,
                 _commandKeys,
-                _updatePublicKey,
+                _updatePublicKeys,
                 now,
                 identity.AgentId,
                 identity.MachineFingerprint,

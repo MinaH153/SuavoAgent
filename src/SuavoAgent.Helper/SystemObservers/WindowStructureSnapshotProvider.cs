@@ -386,13 +386,16 @@ internal static class UiaSnapshotWorkerMode
 {
     internal const string Switch = "--uia-snapshot-worker";
 
+    internal static bool IsCandidate(IReadOnlyList<string> args) =>
+        args.Count > 0 && string.Equals(args[0], Switch, StringComparison.Ordinal);
+
     internal static bool TryRun(
         IReadOnlyList<string> args,
         TextWriter output,
         out int exitCode)
     {
         exitCode = 0;
-        if (args.Count == 0 || !string.Equals(args[0], Switch, StringComparison.Ordinal))
+        if (!IsCandidate(args))
             return false;
 
         WindowStructureSnapshot snapshot;

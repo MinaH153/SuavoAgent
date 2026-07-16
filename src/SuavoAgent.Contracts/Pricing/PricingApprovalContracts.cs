@@ -91,20 +91,49 @@ public sealed record PricingApprovalRevocation(
 /// </summary>
 public static class PricingApprovalContract
 {
+    // Approval v1 is permanently bound to cost_per_unit. Package-cost authority
+    // is a distinct signed contract so a legacy grant can never authorize it.
     public const int SchemaVersion = 1;
+    public const int PackageSchemaVersion = 2;
     public const string InstallCommandName = "install_pricing_cost_basis_approval";
     public const string RevokeCommandName = "revoke_pricing_cost_basis_approval";
     public const string CostPerUnitBasis = "cost_per_unit";
+    public const string PackageCostBasis = "package_cost";
     public const string PharmacistInChargeRole = "pharmacist_in_charge";
     public const string SnapshotContractV1 = "source_policy_snapshot_v1";
+    public const string PackageSnapshotContractV2 = "source_policy_snapshot_v2";
     public const string ProposalCanonicalPrefix = "suavo.pricing-approval-proposal.v1";
+    public const string PackageProposalCanonicalPrefix =
+        "suavo.pricing-approval-proposal.v2";
     public const string ProposalReceiptCanonicalPrefix =
         "suavo.pricing-approval-proposal-receipt.v1";
+    public const string PackageProposalReceiptCanonicalPrefix =
+        "suavo.pricing-approval-proposal-receipt.v2";
     public const string GrantCanonicalPrefix = "suavo.pricing-approval-grant.v1";
+    public const string PackageGrantCanonicalPrefix = "suavo.pricing-approval-grant.v2";
     public const string RevocationCanonicalPrefix = "suavo.pricing-approval-revocation.v1";
+    public const string PackageRevocationCanonicalPrefix =
+        "suavo.pricing-approval-revocation.v2";
     public static readonly TimeSpan ProposalLifetime = TimeSpan.FromHours(24);
     public static readonly TimeSpan MaximumGrantLifetime = TimeSpan.FromDays(366);
     public static readonly TimeSpan MaximumFutureSkew = TimeSpan.FromMinutes(5);
+
+    public static bool IsSupportedCostBasis(string? value) => value is
+        CostPerUnitBasis or PackageCostBasis;
+
+    public static int SchemaVersionForCostBasis(string costBasis) => costBasis switch
+    {
+        CostPerUnitBasis => SchemaVersion,
+        PackageCostBasis => PackageSchemaVersion,
+        _ => throw new ArgumentOutOfRangeException(nameof(costBasis)),
+    };
+
+    public static string SnapshotContractForCostBasis(string costBasis) => costBasis switch
+    {
+        CostPerUnitBasis => SnapshotContractV1,
+        PackageCostBasis => PackageSnapshotContractV2,
+        _ => throw new ArgumentOutOfRangeException(nameof(costBasis)),
+    };
 
     private static readonly HashSet<string> RevocationReasons = new(
         new[]
@@ -119,7 +148,9 @@ public static class PricingApprovalContract
 
     public static string ProposalCanonical(PricingApprovalProposal proposal) =>
         JoinCanonical(
-            ProposalCanonicalPrefix,
+            proposal.SchemaVersion == PackageSchemaVersion
+                ? PackageProposalCanonicalPrefix
+                : ProposalCanonicalPrefix,
             proposal.SchemaVersion.ToString(CultureInfo.InvariantCulture),
             proposal.ProposalId,
             proposal.PharmacyId,
@@ -140,7 +171,9 @@ public static class PricingApprovalContract
 
     public static string ProposalReceiptCanonical(
         PricingApprovalProposalReceipt receipt) => JoinCanonical(
-            ProposalReceiptCanonicalPrefix,
+            receipt.SchemaVersion == PackageSchemaVersion
+                ? PackageProposalReceiptCanonicalPrefix
+                : ProposalReceiptCanonicalPrefix,
             receipt.SchemaVersion.ToString(CultureInfo.InvariantCulture),
             receipt.ProposalId,
             receipt.ProposalDigest,
@@ -157,7 +190,9 @@ public static class PricingApprovalContract
 
     public static string GrantCanonical(PricingApprovalGrant grant) =>
         JoinCanonical(
-            GrantCanonicalPrefix,
+            grant.SchemaVersion == PackageSchemaVersion
+                ? PackageGrantCanonicalPrefix
+                : GrantCanonicalPrefix,
             grant.SchemaVersion.ToString(CultureInfo.InvariantCulture),
             grant.ApprovalId,
             grant.ProposalId,
@@ -185,7 +220,9 @@ public static class PricingApprovalContract
 
     public static string RevocationCanonical(PricingApprovalRevocation revocation) =>
         JoinCanonical(
-            RevocationCanonicalPrefix,
+            revocation.SchemaVersion == PackageSchemaVersion
+                ? PackageRevocationCanonicalPrefix
+                : RevocationCanonicalPrefix,
             revocation.SchemaVersion.ToString(CultureInfo.InvariantCulture),
             revocation.RevocationId,
             revocation.ApprovalId,
@@ -211,7 +248,9 @@ public static class PricingApprovalContract
         string costBasis,
         string snapshotContract,
         long freshnessSeconds) => LengthPrefixedDigest(
-            "pricing_observation_policy_v1",
+            costBasis == PackageCostBasis
+                ? "pricing_observation_policy_v2"
+                : "pricing_observation_policy_v1",
             modality,
             schemaDigest,
             statusPolicyDigest,
@@ -225,7 +264,12 @@ public static class PricingApprovalContract
         out string code)
     {
         code = "pricing_approval_proposal_invalid";
-        if (proposal is null || proposal.SchemaVersion != SchemaVersion ||
+        if (proposal is null ||
+            !IsValidApprovalTuple(
+                proposal.SchemaVersion,
+                proposal.CostBasis,
+                proposal.SnapshotContract,
+                proposal.Modality) ||
             !CanonicalUuid(proposal.ProposalId) ||
             !SafeToken(proposal.PharmacyId, 160) ||
             !SafeToken(proposal.AgentId, 160) ||
@@ -233,9 +277,7 @@ public static class PricingApprovalContract
             proposal.Modality is not ("sql" or "uia" or "vision") ||
             !LowerHex64(proposal.SchemaDigest) ||
             !LowerHex64(proposal.StatusPolicyDigest) ||
-            proposal.CostBasis != CostPerUnitBasis ||
             !LowerHex64(proposal.PolicyDigest) ||
-            proposal.SnapshotContract != SnapshotContractV1 ||
             proposal.FreshnessSeconds is < 1 or > 86_400 ||
             proposal.ObservedAtUtc > now + MaximumFutureSkew ||
             proposal.ExpiresAtUtc <= proposal.ObservedAtUtc ||
@@ -266,7 +308,12 @@ public static class PricingApprovalContract
         out string code)
     {
         code = "pricing_approval_grant_invalid";
-        if (grant is null || grant.SchemaVersion != SchemaVersion ||
+        if (grant is null ||
+            !IsValidApprovalTuple(
+                grant.SchemaVersion,
+                grant.CostBasis,
+                grant.SnapshotContract,
+                grant.Modality) ||
             !CanonicalUuid(grant.ApprovalId) ||
             !CanonicalUuid(grant.ProposalId) ||
             !LowerHex64(grant.ProposalDigest) ||
@@ -278,9 +325,7 @@ public static class PricingApprovalContract
             grant.Modality is not ("sql" or "uia" or "vision") ||
             !LowerHex64(grant.SchemaDigest) ||
             !LowerHex64(grant.StatusPolicyDigest) ||
-            grant.CostBasis != CostPerUnitBasis ||
             !LowerHex64(grant.PolicyDigest) ||
-            grant.SnapshotContract != SnapshotContractV1 ||
             grant.FreshnessSeconds is < 1 or > 86_400 ||
             !SafeToken(grant.KeyId, 64) ||
             grant.IssuedAtUtc > now + MaximumFutureSkew ||
@@ -322,7 +367,9 @@ public static class PricingApprovalContract
         out string code)
     {
         code = "pricing_approval_proposal_receipt_invalid";
-        if (receipt is null || receipt.SchemaVersion != SchemaVersion ||
+        if (receipt is null ||
+            receipt.SchemaVersion != proposal.SchemaVersion ||
+            receipt.SchemaVersion is not (SchemaVersion or PackageSchemaVersion) ||
             !CanonicalUuid(receipt.ProposalId) ||
             !LowerHex64(receipt.ProposalDigest) ||
             !SafeToken(receipt.PharmacyId, 160) ||
@@ -357,7 +404,8 @@ public static class PricingApprovalContract
         out string code)
     {
         code = "pricing_approval_revocation_invalid";
-        if (revocation is null || revocation.SchemaVersion != SchemaVersion ||
+        if (revocation is null ||
+            revocation.SchemaVersion is not (SchemaVersion or PackageSchemaVersion) ||
             !CanonicalUuid(revocation.RevocationId) ||
             !CanonicalUuid(revocation.ApprovalId) ||
             !CanonicalUuid(revocation.ProposalId) ||
@@ -386,6 +434,7 @@ public static class PricingApprovalContract
     public static bool GrantMatchesProposal(
         PricingApprovalGrant grant,
         PricingApprovalProposal proposal) =>
+        grant.SchemaVersion == proposal.SchemaVersion &&
         grant.ProposalId == proposal.ProposalId &&
         FixedHexEquals(grant.ProposalDigest, proposal.ProposalDigest) &&
         grant.PharmacyId == proposal.PharmacyId &&
@@ -404,6 +453,7 @@ public static class PricingApprovalContract
     public static bool RevocationMatchesGrant(
         PricingApprovalRevocation revocation,
         PricingApprovalGrant grant) =>
+        revocation.SchemaVersion == grant.SchemaVersion &&
         revocation.ApprovalId == grant.ApprovalId &&
         revocation.ProposalId == grant.ProposalId &&
         FixedHexEquals(revocation.ProposalDigest, grant.ProposalDigest) &&
@@ -412,6 +462,19 @@ public static class PricingApprovalContract
         revocation.MachineFingerprint == grant.MachineFingerprint &&
         FixedHexEquals(revocation.PolicyDigest, grant.PolicyDigest) &&
         revocation.RevokedAtUtc >= grant.IssuedAtUtc - MaximumFutureSkew;
+
+    private static bool IsValidApprovalTuple(
+        int schemaVersion,
+        string costBasis,
+        string snapshotContract,
+        string modality) =>
+        (schemaVersion == SchemaVersion &&
+         costBasis == CostPerUnitBasis &&
+         snapshotContract == SnapshotContractV1) ||
+        (schemaVersion == PackageSchemaVersion &&
+         costBasis == PackageCostBasis &&
+         snapshotContract == PackageSnapshotContractV2 &&
+         modality == "uia");
 
     private static bool VerifySignature(
         string canonical,

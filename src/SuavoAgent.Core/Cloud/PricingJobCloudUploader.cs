@@ -125,12 +125,14 @@ public sealed partial class PricingJobCloudUploader
     private static readonly FrozenSet<string> BodyKeys = new[]
     {
         "commandId", "approvalId", "grantDigest", "status", "mode",
+        "costBasis",
         "totalItems", "completedItems",
         "failedItems", "omittedInvalidItems", "omittedSelectorObservations", "items",
     }.ToFrozenSet(StringComparer.Ordinal);
     private static readonly FrozenSet<string> ItemKeys = new[]
     {
         "rowIndex", "ndc", "found", "supplierName", "costPerUnit",
+        "packageCost",
         "baselineCostPerUnit", "quantity", "status", "confidence", "source",
         "localEvidenceId", "selectorObservations",
     }.ToFrozenSet(StringComparer.Ordinal);
@@ -276,7 +278,8 @@ public sealed partial class PricingJobCloudUploader
                     execution.Progress.FailedItems,
                     results,
                     spec.ApprovalId,
-                    spec.GrantDigest);
+                    spec.GrantDigest,
+                    spec.CostBasis);
                 entry = _db.StagePricingResultPayload(
                     spec.JobId, commandId, sourceUploadId, payload.Json,
                     payload.ItemCount,
@@ -535,10 +538,11 @@ public sealed partial class PricingJobCloudUploader
         int failedItems,
         IReadOnlyList<SupplierPriceResult> results,
         string? approvalId = null,
-        string? grantDigest = null) =>
+        string? grantDigest = null,
+        string costBasis = PricingApprovalContract.CostPerUnitBasis) =>
         BuildPersistedPayloadEnvelope(
             jobId, commandId, status, source, totalItems, completedItems,
-            failedItems, results, approvalId, grantDigest).Json;
+            failedItems, results, approvalId, grantDigest, costBasis).Json;
 
     internal static PersistedPricingPayload BuildPersistedPayloadEnvelope(
         string jobId,
@@ -550,11 +554,13 @@ public sealed partial class PricingJobCloudUploader
         int failedItems,
         IReadOnlyList<SupplierPriceResult> results,
         string? approvalId = null,
-        string? grantDigest = null)
+        string? grantDigest = null,
+        string costBasis = PricingApprovalContract.CostPerUnitBasis)
     {
         if (!SafeEvidenceIdPattern.IsMatch(jobId) ||
             commandId is not null && !SafeEvidenceIdPattern.IsMatch(commandId) ||
-            (approvalId is null) != (grantDigest is null))
+            (approvalId is null) != (grantDigest is null) ||
+            !PricingApprovalContract.IsSupportedCostBasis(costBasis))
             throw new InvalidOperationException("pricing_result_identity_invalid");
         if (!string.Equals(status, PricingJobStatus.Completed, StringComparison.Ordinal))
             throw new InvalidOperationException("pricing_result_not_complete");
@@ -565,6 +571,8 @@ public sealed partial class PricingJobCloudUploader
                 PricingResultContentPolicy.CanonicalNdcOrNull(result.Ndc) ?? ""))
             .Where(result => result.CanonicalNdc.Length == 11)
             .ToArray();
+        if (safeResults.Any(result => result.Result.CostBasis != costBasis))
+            throw new InvalidOperationException("pricing_result_cost_basis_mismatch");
         var omittedInvalidItems = results.Count - safeResults.Length;
         var totalSelectorObservations = CountSelectorObservations(results);
         var derivedCompletedItems = safeResults.Count(result => result.Result.Found);
@@ -586,6 +594,7 @@ public sealed partial class PricingJobCloudUploader
 
         var withObservations = SerializePersistedPayload(
             jobId, commandId, approvalId, grantDigest, status, source,
+            costBasis,
             totalItems, completedItems,
             failedItems, omittedInvalidItems, totalSelectorObservations,
             safeResults, includeObservations: true);
@@ -597,6 +606,7 @@ public sealed partial class PricingJobCloudUploader
         // unit before considering the required pricing result body oversized.
         var requiredOnly = SerializePersistedPayload(
             jobId, commandId, approvalId, grantDigest, status, source,
+            costBasis,
             totalItems, completedItems,
             failedItems, omittedInvalidItems, totalSelectorObservations,
             safeResults, includeObservations: false);
@@ -613,6 +623,7 @@ public sealed partial class PricingJobCloudUploader
         string? grantDigest,
         string status,
         string source,
+        string costBasis,
         int totalItems,
         int completedItems,
         int failedItems,
@@ -630,6 +641,7 @@ public sealed partial class PricingJobCloudUploader
             grantDigest,
             status,
             mode = SafeSource(source),
+            costBasis,
             totalItems,
             completedItems,
             failedItems,
@@ -643,6 +655,7 @@ public sealed partial class PricingJobCloudUploader
                 supplierName = PricingResultContentPolicy.CloudSafeSupplierName(
                     item.Result.SupplierName),
                 costPerUnit = item.Result.CostPerUnit,
+                packageCost = item.Result.PackageCost,
                 // Preserve the existing PHI-negative payload contract exactly.
                 baselineCostPerUnit = item.Result.BaselineCostPerUnit,
                 quantity = item.Result.Quantity,
@@ -778,18 +791,4 @@ public sealed partial class PricingJobCloudUploader
         !PhonePattern.IsMatch(value) &&
         !LocalPathPattern.IsMatch(value);
 
-    private static string SafeSource(string? value)
-    {
-        return value is "sql" or "uia" or "vision"
-            ? value
-            : throw new InvalidOperationException("pricing_result_source_invalid");
-    }
-
-    private static string SourceFromExecutionMode(string? value) => value switch
-    {
-        "SqlFirst" => "sql",
-        "UiaFirst" => "uia",
-        "VisionFirst" => "vision",
-        _ => SafeSource(value),
-    };
 }

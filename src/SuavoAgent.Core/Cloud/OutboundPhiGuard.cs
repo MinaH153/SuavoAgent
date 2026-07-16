@@ -45,6 +45,38 @@ internal static class OutboundPhiGuard
         "rxdeliveryqueue",
     };
 
+    // Closed, PHI-negative Release 1 convergence vocabulary. These names carry only
+    // cryptographic identities, signed release metadata, exact machine boot proofs,
+    // or enumerated ceremony outcomes. Keeping this list field-specific preserves the
+    // strict guard for every unrelated payload instead of adding a route bypass.
+    private static readonly HashSet<string> Release1OperationalFields = new(
+        StringComparer.Ordinal)
+    {
+        "purpose",
+        "attestationauthority",
+        "attestationkeyid",
+        "maintenancekeyid",
+        "maintenancepublickeyspkiderbase64",
+        "installedreleasetag",
+        "installedsourcesha",
+        "installertype",
+        "installtransactionid",
+        "installmode",
+        "proofsignaturebase64url",
+        "installreceiptsignaturebase64url",
+        "attestationsignaturebase64url",
+        "bootidatinstall",
+        "bootidbeforerestart",
+        "bootidafterrestart",
+        "runningreleasetag",
+        "runningsourcesha",
+        "phiclassification",
+        "otasigningkeyid",
+        "updatemanifestname",
+        "updatemanifestcanonical",
+        "updatemanifestsignaturep1363hex",
+    };
+
     public static void AssertAllowed(string path, string body, AgentOptions options)
     {
         using var doc = JsonDocument.Parse(body);
@@ -234,8 +266,11 @@ internal static class OutboundPhiGuard
              propertyName.Contains("timestamp", StringComparison.OrdinalIgnoreCase) ||
              propertyName.Contains("capturedat", StringComparison.OrdinalIgnoreCase) ||
              propertyName.Contains("syncedat", StringComparison.OrdinalIgnoreCase) ||
+             Release1OperationalFields.Contains(propertyName) ||
              propertyName is "ndc" or "evidenceid" or "scanwindowid" or "sessionid" or "schemaversion" or "schemasignature" or
                  "writebackid" or "commandid" or "candidateid" or "pharmacyid" or "orderid" or "inboxitemid" or
+                 "agentid" or "workstationid" or "machinefingerprint" or "devicekeyid" or
+                 "releasecohort" or "requestnonce" or "signature" or
                  "approvalid" or "ruleid" or "templateid" or "runid" or
                  "transition" or "transitionat" or "resultcode" or "completedat" or "idempotent" or
                  "pms" or "pmsversion" or "status" or "outcome" or "severity" or "source" or "sourcedetail" or

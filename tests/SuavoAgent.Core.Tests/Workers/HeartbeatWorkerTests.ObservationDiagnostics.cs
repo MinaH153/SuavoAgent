@@ -28,7 +28,7 @@ public partial class HeartbeatWorkerTests
     // ── Command Dispatch: show_intent_cursor ──
 
     [Fact]
-    public async Task ShowIntentCursor_ValidPayload_RelaysToHelperAndAudits()
+    public async Task ShowIntentCursor_ValidPayload_IsRejectedByReleasePolicy()
     {
         var before = _db.GetAuditEntryCount();
         var response = BuildResponseJson("show_intent_cursor", new
@@ -42,15 +42,12 @@ public partial class HeartbeatWorkerTests
 
         await InvokeProcessAsync(response);
 
-        var sent = Assert.Single(_intentCursorClient.Requests);
-        Assert.Equal(120.0, sent.X.GetValueOrDefault());
-        Assert.Equal(240.0, sent.Y.GetValueOrDefault());
-        Assert.Equal(900, sent.DurationMs);
-        Assert.True(_db.GetAuditEntryCount() > before);
+        Assert.Empty(_intentCursorClient.Requests);
+        Assert.Equal(before, _db.GetAuditEntryCount());
     }
 
     [Fact]
-    public async Task ShowCursor_CloudCommandAlias_RelaysToHelperAndAudits()
+    public async Task ShowCursor_CloudCommandAlias_IsRejectedByReleasePolicy()
     {
         var before = _db.GetAuditEntryCount();
         var response = BuildResponseJson("show_cursor", new
@@ -64,15 +61,12 @@ public partial class HeartbeatWorkerTests
 
         await InvokeProcessAsync(response);
 
-        var sent = Assert.Single(_intentCursorClient.Requests);
-        Assert.Equal(120.0, sent.X.GetValueOrDefault());
-        Assert.Equal(240.0, sent.Y.GetValueOrDefault());
-        Assert.Equal(900, sent.DurationMs);
-        Assert.True(_db.GetAuditEntryCount() > before);
+        Assert.Empty(_intentCursorClient.Requests);
+        Assert.Equal(before, _db.GetAuditEntryCount());
     }
 
     [Fact]
-    public async Task ShowIntentCursor_PrimaryCenterAnchor_RelaysWithoutScreenCoordinates()
+    public async Task ShowIntentCursor_PrimaryCenterAnchor_IsRejectedByReleasePolicy()
     {
         var response = BuildResponseJson("show_intent_cursor", new
         {
@@ -84,10 +78,7 @@ public partial class HeartbeatWorkerTests
 
         await InvokeProcessAsync(response);
 
-        var sent = Assert.Single(_intentCursorClient.Requests);
-        Assert.Null(sent.X);
-        Assert.Null(sent.Y);
-        Assert.Equal(IntentCursorAnchors.PrimaryCenter, sent.Anchor);
+        Assert.Empty(_intentCursorClient.Requests);
     }
 
     [Fact]
@@ -107,7 +98,7 @@ public partial class HeartbeatWorkerTests
     }
 
     [Fact]
-    public async Task ShowIntentCursor_GlidePayload_RelaysToHelperWithTarget()
+    public async Task ShowIntentCursor_GlidePayload_IsRejectedByReleasePolicy()
     {
         // The agentic glide: x,y start + toX,toY target + easing. The PHI safety
         // guard must ALLOW these (toX/toY are numbers; easing is a constrained
@@ -129,11 +120,7 @@ public partial class HeartbeatWorkerTests
 
         await InvokeProcessAsync(response);
 
-        var sent = Assert.Single(_intentCursorClient.Requests);
-        Assert.Equal(300.0, sent.X.GetValueOrDefault());
-        Assert.Equal(1100.0, sent.ToX.GetValueOrDefault());
-        Assert.Equal(680.0, sent.ToY.GetValueOrDefault());
-        Assert.Equal("ease_in_out_cubic", sent.Easing);
+        Assert.Empty(_intentCursorClient.Requests);
     }
 
     [Fact]
@@ -189,7 +176,7 @@ public partial class HeartbeatWorkerTests
     // ── Command Dispatch: computer-use observe/propose (synthetic, non-PHI) ──
 
     [Fact]
-    public async Task ComputerUseObserve_SyntheticPayload_AuditsWithoutCapturingScreenshots()
+    public async Task ComputerUseObserve_SyntheticPayload_IsRejectedByReleasePolicy()
     {
         var before = _db.GetAuditEntryCount();
         var response = BuildResponseJson("computer_use_observe", new
@@ -202,12 +189,12 @@ public partial class HeartbeatWorkerTests
 
         await InvokeProcessAsync(response);
 
-        Assert.True(_db.GetAuditEntryCount() > before);
+        Assert.Equal(before, _db.GetAuditEntryCount());
         Assert.Empty(_intentCursorClient.Requests);
     }
 
     [Fact]
-    public async Task ComputerUsePropose_SyntheticPayload_AuditsWithoutMutatingPioneerRx()
+    public async Task ComputerUsePropose_SyntheticPayload_IsRejectedByReleasePolicy()
     {
         var before = _db.GetAuditEntryCount();
         var response = BuildResponseJson("computer_use_propose", new
@@ -221,7 +208,7 @@ public partial class HeartbeatWorkerTests
 
         await InvokeProcessAsync(response);
 
-        Assert.True(_db.GetAuditEntryCount() > before);
+        Assert.Equal(before, _db.GetAuditEntryCount());
         Assert.Empty(_intentCursorClient.Requests);
     }
 

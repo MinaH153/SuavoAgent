@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using SuavoAgent.Contracts.Maintenance;
+using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Pricing;
 
@@ -592,6 +593,9 @@ public sealed partial class AgentStateDb
                 status.GetString() != "completed" ||
                 !root.TryGetProperty("mode", out var mode) ||
                 mode.ValueKind != JsonValueKind.String ||
+                !root.TryGetProperty("costBasis", out var costBasis) ||
+                costBasis.ValueKind != JsonValueKind.String ||
+                !PricingApprovalContract.IsSupportedCostBasis(costBasis.GetString()) ||
                 !root.TryGetProperty("totalItems", out var total) ||
                 !total.TryGetInt32(out var totalItems) ||
                 !root.TryGetProperty("completedItems", out var completed) ||
@@ -606,7 +610,8 @@ public sealed partial class AgentStateDb
                 totalItems,
                 completedItems,
                 failedItems,
-                "pricing_job_failed");
+                "pricing_job_failed",
+                costBasis.GetString()!);
         }
         catch (Exception ex) when (ex is JsonException or ArgumentException)
         {

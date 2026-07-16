@@ -19,7 +19,8 @@ public sealed partial class HeartbeatWorker
             () => BuildTrustedPricingAutonomyScope()?.ScopeDigest,
             _serviceProvider.GetService<ILogger<PricingCommandRecoveryCoordinator>>() ??
                 Microsoft.Extensions.Logging.Abstractions
-                    .NullLogger<PricingCommandRecoveryCoordinator>.Instance);
+                    .NullLogger<PricingCommandRecoveryCoordinator>.Instance,
+            pricedWorkbookPublisher: _pricedWorkbookPublisher);
         await coordinator.RecoverAsync(ct).ConfigureAwait(false);
     }
 

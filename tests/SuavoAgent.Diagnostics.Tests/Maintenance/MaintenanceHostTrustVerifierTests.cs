@@ -94,6 +94,29 @@ public sealed class MaintenanceHostTrustVerifierTests
     }
 
     [Fact]
+    public void Rotation_registry_accepts_v2_signed_maintenance_receipt()
+    {
+        using var fixture = new TrustFixture();
+        fixture.WriteReleaseReceipt();
+        using var unrelatedV1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var roots = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [OtaUpdateTrust.LegacyV1KeyId] =
+                Convert.ToBase64String(unrelatedV1.ExportSubjectPublicKeyInfo()),
+            [OtaUpdateTrust.CurrentV2KeyId] = fixture.PublicKeyDer,
+        };
+
+        var result = MaintenanceHostTrustVerifier.Verify(
+            fixture.HostPath,
+            roots,
+            _ => AuthenticodePublisherTrust.Trusted(
+                AuthenticodePublisherVerifier.ExpectedPublisher));
+
+        Assert.True(result.IsTrusted, result.Code);
+        Assert.Equal(MaintenanceTrustSource.SignedReleaseChecksums, result.Source);
+    }
+
+    [Fact]
     public void Release_receipt_rejects_signed_wrong_setup_hash()
     {
         using var fixture = new TrustFixture();

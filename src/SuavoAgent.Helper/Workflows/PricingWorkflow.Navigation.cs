@@ -76,7 +76,8 @@ public sealed partial class PricingWorkflow
             false,
             null,
             null,
-            error);
+            error,
+            CostBasis: request.CostBasis);
 
     private sealed class PricingActuationGateClosedException(
         string rejectionCode) : Exception

@@ -27,10 +27,10 @@ public static class SelfUpdater
     //   5. Remove old key from registry in next release
     // During the transition window, agents accept BOTH keys.
 
-    // ECDSA P-256 public key for update manifest verification.
-    // Private key: ~/.suavo/signing-key.pem (Joshua's Mac).
-    internal const string UpdatePublicKeyDer =
-        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA==";
+    // Compatibility alias for single-root tests. Production verification uses the complete,
+    // source-reviewed v1/v2 transition registry in OtaUpdateTrust.
+    internal static string UpdatePublicKeyDer =>
+        OtaUpdateTrust.ProductionTrustedPublicKeys[OtaUpdateTrust.LegacyV1KeyId];
 
     // ECDSA P-256 public key for signed control-plane commands (fetch_patient, decommission, update).
     // Separate from update key — compromise of one doesn't grant the other.
@@ -93,7 +93,11 @@ public static class SelfUpdater
     /// </summary>
     internal static bool VerifyManifestSignature(
         string manifestCanonical, string? signatureHex, ILogger logger)
-        => VerifyManifestSignature(manifestCanonical, signatureHex, UpdatePublicKeyDer, logger);
+        => VerifyManifestSignature(
+            manifestCanonical,
+            signatureHex,
+            OtaUpdateTrust.ProductionTrustedPublicKeys,
+            logger);
 
     // Key-injectable overload (QA wave2.5 test seam): the production path above passes the embedded
     // UpdatePublicKeyDer, so behavior is unchanged. Tests pass a generated key so the full
@@ -102,6 +106,20 @@ public static class SelfUpdater
     // that made the OTA verify accept nothing (brick all agents) would now be caught.
     internal static bool VerifyManifestSignature(
         string manifestCanonical, string? signatureHex, string publicKeyDerBase64, ILogger logger)
+        => VerifyManifestSignature(
+            manifestCanonical,
+            signatureHex,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [OtaUpdateTrust.LegacyV1KeyId] = publicKeyDerBase64,
+            },
+            logger);
+
+    internal static bool VerifyManifestSignature(
+        string manifestCanonical,
+        string? signatureHex,
+        IReadOnlyDictionary<string, string> updatePublicKeys,
+        ILogger logger)
     {
         if (string.IsNullOrEmpty(signatureHex))
         {
@@ -120,17 +138,10 @@ public static class SelfUpdater
 
         try
         {
-            using var ecdsa = ECDsa.Create();
-            ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(publicKeyDerBase64), out _);
-
-            var manifestBytes = Encoding.UTF8.GetBytes(manifestCanonical);
-            var signatureBytes = Convert.FromHexString(signatureHex);
-
-            var valid = ecdsa.VerifyData(
-                manifestBytes,
-                signatureBytes,
-                HashAlgorithmName.SHA256,
-                DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+            var valid = OtaUpdateTrust.VerifyP1363Hex(
+                updatePublicKeys,
+                manifestCanonical,
+                signatureHex);
 
             if (!valid)
             {
@@ -145,6 +156,84 @@ public static class SelfUpdater
         {
             logger.LogSafeWarning(ex);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Verifies an exact P1363 manifest signature against the complete reviewed registry and
+    /// returns the one OTA root that authenticated it. A zero- or multi-root match fails closed.
+    /// </summary>
+    internal static string? ResolveManifestSigningKeyId(
+        string manifestCanonical,
+        string? signatureHex,
+        ILogger logger) => ResolveManifestSigningKeyId(
+            manifestCanonical,
+            signatureHex,
+            OtaUpdateTrust.ProductionTrustedPublicKeys,
+            logger);
+
+    internal static string? ResolveManifestSigningKeyId(
+        string manifestCanonical,
+        string? signatureHex,
+        IReadOnlyDictionary<string, string> updatePublicKeys,
+        ILogger logger)
+    {
+        if (string.IsNullOrEmpty(manifestCanonical) ||
+            signatureHex is not { Length: 128 } ||
+            !signatureHex.All(Uri.IsHexDigit))
+        {
+            logger.LogWarning("Update manifest signature is not exact P1363 hex — rejecting");
+            return null;
+        }
+
+        try
+        {
+            // This first pass validates every configured root before any individual match is
+            // trusted. OtaUpdateTrust rejects duplicate, malformed, or unexpected roots.
+            if (!OtaUpdateTrust.VerifyP1363Hex(
+                    updatePublicKeys,
+                    manifestCanonical,
+                    signatureHex))
+            {
+                logger.LogWarning("Update manifest signature is INVALID — rejecting");
+                return null;
+            }
+
+            string? matchedKeyId = null;
+            foreach (var (keyId, publicKey) in updatePublicKeys)
+            {
+                var exactRoot = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [keyId] = publicKey,
+                };
+                if (!OtaUpdateTrust.VerifyP1363Hex(
+                        exactRoot,
+                        manifestCanonical,
+                        signatureHex))
+                    continue;
+                if (matchedKeyId is not null)
+                {
+                    logger.LogWarning("Update manifest signature matched multiple roots — rejecting");
+                    return null;
+                }
+                matchedKeyId = keyId;
+            }
+
+            if (matchedKeyId is null)
+            {
+                logger.LogWarning("Update manifest signing root could not be resolved — rejecting");
+                return null;
+            }
+
+            logger.LogInformation(
+                "Update manifest signature verified with exact root {OtaSigningKeyId}",
+                matchedKeyId);
+            return matchedKeyId;
+        }
+        catch (Exception ex)
+        {
+            logger.LogSafeWarning(ex);
+            return null;
         }
     }
 
@@ -216,7 +305,12 @@ public static class SelfUpdater
         var validation = UpdateActivationContract.Validate(
             request,
             trustedCommandKeys ?? RemoteCommandTrust.CreateProductionKeyRegistry(),
-            updatePublicKeyDerBase64 ?? UpdateActivationContract.ProductionUpdatePublicKeyDer,
+            updatePublicKeyDerBase64 is null
+                ? UpdateActivationContract.ProductionUpdatePublicKeys
+                : new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [OtaUpdateTrust.LegacyV1KeyId] = updatePublicKeyDerBase64,
+                },
             now,
             signedCommand.AgentId,
             signedCommand.MachineFingerprint);

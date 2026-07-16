@@ -1,5 +1,6 @@
 using System;
 using SuavoAgent.Broker;
+using SuavoAgent.Contracts.Security;
 using Xunit;
 
 namespace SuavoAgent.Broker.Tests;
@@ -18,6 +19,22 @@ namespace SuavoAgent.Broker.Tests;
 // frees up for the Helper that can actually see the screen. These tests pin the pure decision.
 public class SessionWatcherStaleSessionTests
 {
+    [Fact]
+    public void MissingOrRevokedActivation_CannotLaunchHelper()
+    {
+        Assert.False(SessionWatcher.IsHelperLaunchAuthorized(
+            ObservationActivationSnapshot.Dormant(ObservationActivationCodes.StateMissing)));
+        Assert.True(SessionWatcher.IsHelperLaunchAuthorized(new(
+            true,
+            ObservationActivationCodes.Active,
+            3,
+            "lease",
+            "nonce",
+            DateTimeOffset.MaxValue,
+            "3.92.2",
+            ObservationActivationIdentityStore.PolicyDigest)));
+    }
+
     [Fact]
     public void HelperInActiveSession_IsNotStale()
     {

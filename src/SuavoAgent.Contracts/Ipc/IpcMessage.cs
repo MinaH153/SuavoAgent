@@ -30,6 +30,11 @@ public static class IpcCommands
     public const string PricingLookup = "pricing_lookup";
     public const string PricingObservationContext = "pricing_observation_context";
     public const string PricingJobProgress = "pricing_job_progress";
+    public const string PioneerRxTop500Export = "pioneerrx_top500_export";
+    public const string PioneerRxTop500ReadArtifact = "pioneerrx_top500_read_artifact";
+    public const string PioneerRxPricedWorkbookBegin = "pioneerrx_priced_workbook_begin";
+    public const string PioneerRxPricedWorkbookChunk = "pioneerrx_priced_workbook_chunk";
+    public const string PioneerRxPricedWorkbookCommit = "pioneerrx_priced_workbook_commit";
 
     // File discovery — Core→Helper command channel. Helper runs
     // FileLocatorService in the user session; Core can't because it
@@ -71,6 +76,7 @@ public static class IpcStatus
 {
     public const int Ok = 200;
     public const int BadRequest = 400;
+    public const int Forbidden = 403;
     public const int NotFound = 404;
     public const int Timeout = 408;
     public const int InternalError = 500;

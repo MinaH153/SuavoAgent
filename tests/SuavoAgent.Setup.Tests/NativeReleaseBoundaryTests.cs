@@ -211,6 +211,9 @@ public sealed class NativeReleaseBoundaryTests
         var ci = ReadRepoFile(".github/workflows/ci.yml");
         var release = ReadRepoFile(".github/workflows/release.yml");
         var hotfix = ReadRepoFile(".github/workflows/hotfix.yml");
+        var productionRelease = ReadRepoFile(
+            ".github/workflows/production-release-signing.yml");
+        var releaseBoundary = release + "\n" + productionRelease;
         var releaseGate = ReadRepoFile("docs/hardening/release-gate.md");
         var sharedBuild = ReadRepoFile("Directory.Build.props");
 
@@ -252,10 +255,13 @@ public sealed class NativeReleaseBoundaryTests
         Assert.Contains("OTA_KMS_KEY_ID", release);
         Assert.Contains("AWS_SIGNING_ROLE_ARN", release);
         Assert.Contains("id-token: write", release);
-        Assert.Contains("aws-kms-sign-ecdsa-p256.sh", release);
-        Assert.Contains("actions/attest-build-provenance@", release);
-        Assert.DoesNotContain("SIGNING_KEY_PEM", release);
-        Assert.Contains("sslcom/actions-codesigner@", release);
+        Assert.Contains("aws-kms-sign-ecdsa-p256.sh", releaseBoundary);
+        Assert.Contains("actions/attest-build-provenance@", releaseBoundary);
+        Assert.DoesNotContain("SIGNING_KEY_PEM", releaseBoundary);
+        Assert.Contains("scripts/esigner-codesign-hardened.sh", release);
+        Assert.Contains("actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a", release);
+        Assert.Contains("verify-signature: true", release);
+        Assert.DoesNotContain("sslcom/actions-codesigner@", release);
         Assert.DoesNotContain("sign_passthrough:", release);
         Assert.DoesNotContain("Upload as final (unsigned)", release);
         Assert.DoesNotContain("MODE=unsigned", release);
@@ -263,7 +269,7 @@ public sealed class NativeReleaseBoundaryTests
         // runs on ubuntu-latest. Guard against accidental regression.
         Assert.DoesNotContain("[self-hosted, windows, yubikey]", release);
         Assert.Contains("Cloud signing key", releaseGate);
-        Assert.Contains("sslcom/actions-codesigner", releaseGate);
+        Assert.Contains("hardened eSigner wrapper", releaseGate);
         Assert.Contains("windows-release-smoke", release);
         Assert.Contains("Test-SuavoAgentReleaseProbe.ps1", release);
         Assert.Contains("-RequireAuthenticodeSignature", release);
@@ -278,13 +284,17 @@ public sealed class NativeReleaseBoundaryTests
         Assert.Contains("update-manifest-vX.Y.Z.sig", releaseGate);
         Assert.Contains("Production migration evidence", releaseGate);
         Assert.Contains("OTA_FULL_COHORT_MANIFEST: ${{ vars.OTA_FULL_COHORT_MANIFEST }}", release);
-        Assert.Contains("compose-ota-manifest.sh", release);
+        Assert.Contains("compose-ota-manifest.sh", releaseBoundary);
+        AssertNormalReleaseCallerBoundary(release);
     }
 
     [Fact]
     public void Hotfix_workflow_preserves_field_release_evidence_gate()
     {
         var hotfix = ReadRepoFile(".github/workflows/hotfix.yml");
+        var productionRelease = ReadRepoFile(
+            ".github/workflows/production-release-signing.yml");
+        var releaseBoundary = hotfix + "\n" + productionRelease;
 
         Assert.Contains("contents: read", hotfix);
         // Hotfixes use the same eSigner cloud signing gate as releases.
@@ -299,10 +309,13 @@ public sealed class NativeReleaseBoundaryTests
         Assert.Contains("OTA_KMS_KEY_ID", hotfix);
         Assert.Contains("AWS_SIGNING_ROLE_ARN", hotfix);
         Assert.Contains("id-token: write", hotfix);
-        Assert.Contains("aws-kms-sign-ecdsa-p256.sh", hotfix);
-        Assert.Contains("actions/attest-build-provenance@", hotfix);
-        Assert.DoesNotContain("SIGNING_KEY_PEM", hotfix);
-        Assert.Contains("sslcom/actions-codesigner@", hotfix);
+        Assert.Contains("aws-kms-sign-ecdsa-p256.sh", releaseBoundary);
+        Assert.Contains("actions/attest-build-provenance@", releaseBoundary);
+        Assert.DoesNotContain("SIGNING_KEY_PEM", releaseBoundary);
+        Assert.Contains("scripts/esigner-codesign-hardened.sh", hotfix);
+        Assert.Contains("actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a", hotfix);
+        Assert.Contains("verify-signature: true", hotfix);
+        Assert.DoesNotContain("sslcom/actions-codesigner@", hotfix);
         Assert.DoesNotContain("sign_passthrough:", hotfix);
         Assert.DoesNotContain("Upload as final (unsigned)", hotfix);
         Assert.DoesNotContain("MODE=unsigned", hotfix);
@@ -312,45 +325,55 @@ public sealed class NativeReleaseBoundaryTests
         Assert.Contains("-RequireAuthenticodeSignature", hotfix);
         Assert.Contains("suavoagent-hotfix-smoked-zip", hotfix);
         Assert.Contains("needs.windows-release-smoke.result == 'success'", hotfix);
-        Assert.Contains("field-release-receipt.json", hotfix);
-        Assert.Contains("\"rollbackArtifact\"", hotfix);
-        Assert.Contains("track2QueenValidation", hotfix);
-        Assert.Contains("SuavoSetup.exe \"SuavoAgent-${VERSION}-win-x64.msi\" SuavoAgent-Setup.exe suavoagent.spdx.json field-release-receipt.json", hotfix);
-        Assert.Contains("release/SuavoAgent-*-win-x64.msi", hotfix);
-        Assert.Contains("release/SuavoAgent-Setup.exe", hotfix);
-        Assert.Contains("release/field-release-receipt.json", hotfix);
-        Assert.Contains("**Authenticode:** Signed (SSL.com eSigner Cloud EV).", hotfix);
+        Assert.Contains("field-release-receipt.json", releaseBoundary);
+        Assert.Contains("\"rollbackArtifact\"", releaseBoundary);
+        Assert.Contains("track2QueenValidation", releaseBoundary);
+        Assert.Contains("SuavoSetup.exe \"SuavoAgent-${VERSION}-win-x64.msi\"", productionRelease);
+        Assert.Contains("SuavoAgent-Setup.exe suavoagent.spdx.json field-release-receipt.json", productionRelease);
+        Assert.Contains("publication-paths", productionRelease);
+        Assert.Contains("validate-release-assets", productionRelease);
+        Assert.Contains("Authenticode, installer smoke", productionRelease);
         Assert.Contains("OTA_FULL_COHORT_MANIFEST: ${{ vars.OTA_FULL_COHORT_MANIFEST }}", hotfix);
-        Assert.Contains("compose-ota-manifest.sh", hotfix);
+        Assert.Contains("compose-ota-manifest.sh", releaseBoundary);
         Assert.DoesNotContain("Unsigned (SmartScreen warning expected)", hotfix);
+        AssertNormalReleaseCallerBoundary(hotfix);
     }
 
     [Fact]
     public void Release_workflows_bind_setup_source_manifest_and_signed_rollback_receipts()
     {
-        foreach (var workflow in new[]
+        var productionRelease = ReadRepoFile(
+            ".github/workflows/production-release-signing.yml");
+        foreach (var caller in new[]
                  {
                      ReadRepoFile(".github/workflows/release.yml"),
                      ReadRepoFile(".github/workflows/hotfix.yml"),
                  })
         {
+            var workflow = caller + "\n" + productionRelease;
             Assert.Contains("ARTIFACT=\"SuavoAgent-Setup.exe\"", workflow);
             Assert.Contains("\"artifact\": os.environ[\"ARTIFACT\"]", workflow);
             Assert.Contains("\"sourceCommit\": os.environ[\"GITHUB_SHA\"]", workflow);
             Assert.DoesNotContain("ROLLBACK_ARTIFACT=\"SuavoAgent-Setup-${ROLLBACK_TAG}-win-x64.exe\"", workflow);
             Assert.Contains("--pattern checksums.sha256.sig", workflow);
             Assert.Contains("--pattern field-release-receipt.json", workflow);
-            Assert.Contains("openssl dgst -sha256 -verify", workflow);
+            Assert.Contains("--signature \"$rollback/checksums.sha256.sig\"", workflow);
+            Assert.Contains("--bridge-release-tag \"$BRIDGE_TAG\"", workflow);
+            Assert.Contains("--bridge-source-sha \"$BRIDGE_SOURCE_SHA\"", workflow);
+            Assert.Contains("--bridge-receipt-sha256 \"$BRIDGE_RECEIPT_SHA\"", workflow);
+            Assert.Contains("\"otaSigningKeyId\": \"ota-update-v2\"", workflow);
+            Assert.Contains("--require-key-id ota-update-v2", workflow);
+            Assert.Contains("assert-signing-public-key", workflow);
             Assert.Contains("select-release-rollback-tag.py", workflow);
             Assert.Contains("resolve-release-rollback-evidence.py", workflow);
-            Assert.Contains("ROLLBACK_ARTIFACT=\"${ROLLBACK_EVIDENCE[0]}\"", workflow);
-            Assert.Contains("ROLLBACK_ACTUAL_SHA", workflow);
-            Assert.Contains("artifact bytes do not match its signed receipt", workflow);
-            Assert.Contains("No signed stable release strictly lower than $VERSION", workflow);
+            Assert.Contains("ROLLBACK_ARTIFACT=\"${evidence[0]}\"", workflow);
+            Assert.Contains("sha256sum \"$rollback/$ROLLBACK_ARTIFACT\"", workflow);
+            Assert.Contains("No signed stable rollback exists", workflow);
             Assert.Contains("update-manifest-${VERSION}.txt\" \"update-manifest-${VERSION}.sig\" > checksums.sha256", workflow);
             Assert.True(
-                workflow.IndexOf("Generate + sign OTA update manifest", StringComparison.Ordinal) <
-                workflow.IndexOf("Generate + sign final release checksums", StringComparison.Ordinal));
+                workflow.IndexOf("Generate exact full-cohort OTA manifest bytes", StringComparison.Ordinal) <
+                workflow.IndexOf("Generate exact checksum payload", StringComparison.Ordinal));
+            AssertNormalReleaseCallerBoundary(caller);
         }
 
         var probe = ReadRepoFile("scripts/Test-SuavoAgentReleaseProbe.ps1");
@@ -361,12 +384,15 @@ public sealed class NativeReleaseBoundaryTests
     [Fact]
     public void Release_and_hotfix_publish_only_signed_native_customer_installers()
     {
-        foreach (var workflow in new[]
+        var productionRelease = ReadRepoFile(
+            ".github/workflows/production-release-signing.yml");
+        foreach (var caller in new[]
                  {
                      ReadRepoFile(".github/workflows/release.yml"),
                      ReadRepoFile(".github/workflows/hotfix.yml"),
                  })
         {
+            var workflow = caller + "\n" + productionRelease;
             Assert.Contains("build_msi:", workflow);
             Assert.Contains("sign_msi:", workflow);
             Assert.Contains("build_bundle:", workflow);
@@ -376,10 +402,17 @@ public sealed class NativeReleaseBoundaryTests
             Assert.Contains("cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b", workflow);
             Assert.Contains("-p:BuildProjectReferences=false", workflow);
             Assert.Contains("Get-AuthenticodeSignature", workflow);
-            Assert.Contains("Start-Process msiexec.exe", workflow);
-            Assert.Contains("release/SuavoAgent-*-win-x64.msi", workflow);
-            Assert.Contains("release/SuavoAgent-Setup.exe", workflow);
+            Assert.Contains("Test-InstallerAuthenticode.ps1", workflow);
+            Assert.Contains("Invoke-SuavoAgentInstallerRehearsal.ps1", workflow);
+            Assert.Contains("-InstallerKind Msi", workflow);
+            Assert.Contains("-InstallerKind Bundle", workflow);
+            Assert.Contains("-MsiPath", workflow);
+            Assert.Contains("installer-rehearsal-evidence/", workflow);
+            Assert.Contains("publication-paths", productionRelease);
+            Assert.Contains("SuavoAgent-${VERSION}-win-x64.msi", productionRelease);
+            Assert.Contains("SuavoAgent-Setup.exe", productionRelease);
             Assert.DoesNotContain("release/suavoagent-*-win-x64.zip", workflow);
+            AssertNormalReleaseCallerBoundary(caller);
         }
     }
 
@@ -462,6 +495,25 @@ public sealed class NativeReleaseBoundaryTests
             ? File.ReadAllText(candidate)
             : throw new FileNotFoundException(
                 $"Could not locate repository file: {relativePath}");
+    }
+
+    private static void AssertNormalReleaseCallerBoundary(string caller)
+    {
+        const string marker = "\n  release:\n";
+        var start = caller.LastIndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0, "normal release caller job is missing");
+        var releaseJob = caller[start..];
+        Assert.Contains(
+            "needs: [build, sign_windows, sign_msi, sign_bundle, windows-release-smoke]",
+            releaseJob);
+        Assert.Contains("uses: ./.github/workflows/production-release-signing.yml", releaseJob);
+        Assert.Contains("version: ${{ inputs.version }}", releaseJob);
+        Assert.Contains("actions: read", releaseJob);
+        Assert.Contains("attestations: write", releaseJob);
+        Assert.Contains("contents: write", releaseJob);
+        Assert.Contains("id-token: write", releaseJob);
+        Assert.DoesNotContain("${{ vars.", releaseJob);
+        Assert.DoesNotContain("${{ secrets.", releaseJob);
     }
 
     private static string FindRepositoryRoot()

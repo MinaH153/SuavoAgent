@@ -178,6 +178,68 @@ public sealed class HandleBoundAcl
         }
     }
 
+    /// <summary>
+    /// Verifies existing protected objects without repairing them. Every target
+    /// is opened no-follow and retained without write/delete sharing until its
+    /// identity, SYSTEM owner, protected DACL, and exact ACE set have all been
+    /// checked. This is the read-side counterpart to <see cref="ApplyBatch" />
+    /// for evidence that must be rejected, rather than trusted after ACL repair.
+    /// </summary>
+    public void VerifyBatch(IEnumerable<HandleBoundAclMutation> mutations)
+    {
+        ArgumentNullException.ThrowIfNull(mutations);
+        var requested = mutations.ToArray();
+        if (requested.Length == 0) return;
+        if (requested.Length > MaximumTreeEntries)
+            throw new InvalidDataException("Protected ACL batch is too large.");
+
+        var duplicate = requested
+            .GroupBy(item => NormalizeExpectedPath(item.Path), StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => group.Count() != 1);
+        if (duplicate is not null)
+            throw new InvalidDataException("Protected ACL batch contains a duplicate path.");
+
+        using var privileges = _native.EnableRequiredPrivileges();
+        var opened = new List<OpenedMutation>(requested.Length);
+        try
+        {
+            foreach (var mutation in requested)
+            {
+                ValidatePolicy(mutation.Policy);
+                if (!mutation.IsDirectory && mutation.Policy.Aces.Any(
+                        ace => ace.InheritanceFlags != default))
+                    throw new InvalidDataException(
+                        "Protected file ACL verification cannot contain inheritable ACEs.");
+                var expected = NormalizeExpectedPath(mutation.Path);
+                var handle = _native.OpenNoFollow(expected);
+                try
+                {
+                    var identity = ValidateOpenedObject(handle, expected, mutation.IsDirectory);
+                    opened.Add(new(handle, identity, mutation.Policy));
+                }
+                catch
+                {
+                    handle.Dispose();
+                    throw;
+                }
+            }
+
+            foreach (var entry in opened)
+            {
+                EnsureIdentityUnchanged(entry.Handle, entry.Identity);
+                var snapshot = _native.ReadSecurity(entry.Handle);
+                EnsureIdentityUnchanged(entry.Handle, entry.Identity);
+                if (!IsExact(snapshot, entry.Policy))
+                    throw new UnauthorizedAccessException(
+                        "Protected ACL target has an unexpected owner or access rule.");
+            }
+        }
+        finally
+        {
+            foreach (var entry in opened) entry.Handle.Dispose();
+        }
+    }
+
     private void ProtectDirectory(
         IHandleBoundAclObject handle,
         string expectedPath,

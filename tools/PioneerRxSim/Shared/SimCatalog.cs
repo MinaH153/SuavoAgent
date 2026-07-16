@@ -15,7 +15,10 @@ public sealed record SimSupplierRow(
     /// <summary>Non-null = the grid exposes this TRUNCATED string as the cell's UIA Name
     /// (DevExpress-style render truncation) while ValuePattern still carries the full
     /// Supplier. Probes GetCellText's ValuePattern-over-Name preference.</summary>
-    string? TruncatedAutomationName = null);
+    string? TruncatedAutomationName = null,
+    bool Linked = true,
+    string InventoryGroup = "Rx",
+    bool Discontinued = false);
 
 public sealed record SimItem(
     string Ndc11,
@@ -53,7 +56,7 @@ public sealed record NdcExpectation(
 public static class SimCatalog
 {
     // ── NDCs (11-digit canonical) ────────────────────────────────────────────
-    public const string NdcMultiSupplier = "00060073460"; // raw in workbook: 0006-0734-60 (4-4-2)
+    public const string NdcMultiSupplier = "00006073460"; // raw in workbook: 0006-0734-60 (4-4-2)
     public const string NdcSingleSupplier = "50242004121"; // raw: 50242-041-21 (5-3-2)
     public const string NdcNoMatch = "99999999999"; // raw: 99999-9999-99 — NOT seeded
     public const string NdcWinnerLast = "68645055290"; // raw: 68645-0552-90 (5-4-2)
@@ -133,8 +136,18 @@ public static class SimCatalog
             }),
             new SimItem(NdcTwoSupplier, "METFORMIN ER 500MG TAB", new[]
             {
-                new SimSupplierRow("AmerisourceBergen", "10099201", "1000 CT", 18.20m, 0.0182m, "Active", "2026-05-15"),
-                new SimSupplierRow("Granules Direct", "55099202", "1000 CT", 16.90m, 0.0169m, "Active", "2026-06-03"),
+                // Package-cost adversaries mirror Nadim's live grid. The package winner
+                // (Real Value Rx, $3.16) intentionally disagrees with the CPU winner
+                // (McKesson, $4.95 / 500 = $0.0099 per unit).
+                new SimSupplierRow("Unlinked Bargain", "10099200", "100 CT", 1.00m, 0.1000m, "Available", "2026-06-01", Linked: false),
+                new SimSupplierRow("340B Bargain", "10099201", "100 CT", 1.50m, 0.1000m, "Available", "2026-06-01", InventoryGroup: "340B"),
+                // Adversarial live mismatch: Status still says Available, so
+                // row-level status checks alone cannot identify it. Only the
+                // fixed Include Discontinued=No filter removes this cheapest row.
+                new SimSupplierRow("Discontinued Available Bargain", "10099199", "100 CT", 0.50m, 0.0050m, "Available", "2025-08-01", Discontinued: true),
+                new SimSupplierRow("Discontinued Bargain", "10099202", "100 CT", 2.00m, 0.0050m, "Discontinued", "2025-09-01"),
+                new SimSupplierRow("Real Value Rx", "755511106", "100 CT", 3.16m, 0.0316m, "Available", "2026-06-03"),
+                new SimSupplierRow("McKesson", "1583772", "500 CT", 4.95m, 0.0099m, "Available", "2026-06-04"),
             }),
             new SimItem(NdcPrecision, "PANTOPRAZOLE 40MG TAB", new[]
             {
@@ -256,7 +269,11 @@ public static class SimCatalog
                 : new NdcExpectation(NdcAllDiscontinued, ExpectationKind.MustMatch,
                     variant == SimVariant.CurrencyCells ? NoUsableError : happyStatus, null, null, VariantProof(variant)),
 
-            Happy(NdcTwoSupplier, "Granules Direct", 0.0169m, "Two-supplier minimum."),
+            Happy(
+                NdcTwoSupplier,
+                "McKesson",
+                0.0099m,
+                "CPU winner differs from the eligible package-cost winner (Real Value Rx at $3.16)."),
             Happy(NdcPrecision, "Camber Direct", 0.0795m, "Sub-cent precision (0.0795 beats 0.0800) survives text→decimal."),
             invalidRow,
         };

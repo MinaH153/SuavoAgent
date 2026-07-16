@@ -350,6 +350,17 @@ internal static partial class ServiceInstaller
             FileSystemRights.Modify,
             InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit,
             ApplyRecursively: true),
+        // Signed observation leases and their PHI-free local binding are
+        // readable by Helper/browser-host but writable only by services/admins.
+        new(
+            Path.Combine(
+                dataDir,
+                SuavoAgent.Contracts.Security.ObservationActivationAuthority.StateDirectoryName),
+            true,
+            true,
+            FileSystemRights.ReadAndExecute,
+            InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit,
+            ApplyRecursively: true),
         new(Path.Combine(dataDir, "actuation.json"), false, false, FileSystemRights.Read),
         new(Path.Combine(dataDir, "pioneerrx.json"), false, false, FileSystemRights.Read),
         new(

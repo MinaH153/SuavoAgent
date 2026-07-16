@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
+using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Pricing;
 
 namespace SuavoAgent.Core.State;
@@ -182,9 +183,12 @@ public sealed partial class AgentStateDb
             observation.Modality is not ("sql" or "uia" or "vision") ||
             !IsLowerHexSha256(observation.SchemaDigest) ||
             !IsLowerHexSha256(observation.StatusPolicyDigest) ||
-            observation.CostBasis != PricingObservationPolicy.CostPerUnitBasis ||
+            !PricingApprovalContract.IsSupportedCostBasis(observation.CostBasis) ||
             !IsLowerHexSha256(observation.PolicyDigest) ||
-            observation.SnapshotContract != PricingObservationPolicy.SnapshotContractV1 ||
+            observation.SnapshotContract != PricingApprovalContract
+                .SnapshotContractForCostBasis(observation.CostBasis) ||
+            (observation.CostBasis == PricingApprovalContract.PackageCostBasis &&
+             observation.Modality != "uia") ||
             observation.FreshnessWindow <= TimeSpan.Zero ||
             observation.FreshnessWindow > TimeSpan.FromHours(24) ||
             !SafePricingEvidenceId.IsMatch(authority.PharmacyId) ||

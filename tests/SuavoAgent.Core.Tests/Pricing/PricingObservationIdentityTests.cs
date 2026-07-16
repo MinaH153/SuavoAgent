@@ -70,7 +70,9 @@ public sealed class PricingObservationIdentityTests : IDisposable
     public void Resume_RejectsAnyObservationSemanticChange(string change)
     {
         var now = new DateTimeOffset(2026, 7, 13, 12, 0, 0, TimeSpan.Zero);
-        var original = PricingTestAuthority.Contract();
+        var original = change == "cost_basis"
+            ? PricingTestAuthority.Contract(modality: "uia")
+            : PricingTestAuthority.Contract();
         var originalAuthority = PricingTestAuthority.Authority(original);
         var job = NewJob($"job-{change}");
         Assert.True(Bind(job, original, originalAuthority, now, out _));
@@ -80,7 +82,9 @@ public sealed class PricingObservationIdentityTests : IDisposable
             "modality" => PricingTestAuthority.Contract(modality: "uia"),
             "schema" => PricingTestAuthority.Contract(schemaMarker: "schema-v2"),
             "status" => PricingTestAuthority.Contract(statusMarker: "status-v2"),
-            "cost_basis" => PricingTestAuthority.Contract(costBasis: "pack_cost"),
+            "cost_basis" => PricingTestAuthority.Contract(
+                modality: "uia",
+                costBasis: PricingObservationPolicy.PackageCostBasis),
             _ => throw new ArgumentOutOfRangeException(nameof(change)),
         };
 

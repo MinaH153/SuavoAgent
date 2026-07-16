@@ -25,6 +25,8 @@ namespace PioneerRxSim;
 public sealed class EditRxItemWindow : Window
 {
     public sealed record SupplierRowVm(
+        string Linked,
+        string InventoryGroup,
         string Supplier,
         string? SupplierAutomationName,
         string ItemNumber,
@@ -32,7 +34,14 @@ public sealed class EditRxItemWindow : Window
         string CostDisplay,
         string CostPerUnitDisplay,
         string Status,
-        string LastPurchase);
+        string LastPurchase,
+        bool Discontinued);
+
+    public sealed record SearchResultRowVm(
+        string Name,
+        string Strength,
+        string Ndc,
+        string PackageSize);
 
     private readonly SimOptions _options;
     private readonly IReadOnlyDictionary<string, SimItem> _items;
@@ -41,8 +50,12 @@ public sealed class EditRxItemWindow : Window
     private readonly TextBlock _itemName = new();
     private readonly TextBlock _itemNdc = new();
     private readonly TextBlock _searchMessage = new();
+    private readonly DataGrid _searchResults = new();
+    private readonly ObservableCollection<SearchResultRowVm> _searchResultRows = new();
     private readonly TabControl _tabs = new();
     private readonly ObservableCollection<SupplierRowVm> _rows = new();
+    private readonly ComboBox _includeDiscontinued = new();
+    private readonly ComboBox _inventoryGroup = new();
 
     private IReadOnlyList<SupplierRowVm>? _stagedRows;
     private bool _batchesStarted;
@@ -95,7 +108,12 @@ public sealed class EditRxItemWindow : Window
         AutomationProperties.SetAutomationId(_quickSearch, "txtQuickSearch");
         _quickSearch.KeyDown += (_, e) =>
         {
-            if (e.Key == Key.Enter) BeginSearch(_quickSearch.Text);
+            if (e.Key != Key.Enter) return;
+            e.Handled = true;
+            if (_searchResults.Visibility == Visibility.Visible)
+                CommitSelectedSearchResult();
+            else
+                BeginSearch(_quickSearch.Text);
         };
         searchRow.Children.Add(_quickSearch);
 
@@ -105,6 +123,10 @@ public sealed class EditRxItemWindow : Window
         searchRow.Children.Add(_searchMessage);
         DockPanel.SetDock(searchRow, Dock.Top);
         root.Children.Add(searchRow);
+
+        BuildQuickSearchResults();
+        DockPanel.SetDock(_searchResults, Dock.Top);
+        root.Children.Add(_searchResults);
 
         // Item identity panel — the Text elements VerifyLoadedNdc scans.
         // Tree order matters: the item NAME (where "(Do Not Use)" lives) precedes the NDC.
@@ -147,6 +169,42 @@ public sealed class EditRxItemWindow : Window
     {
         var panel = new DockPanel { Margin = new Thickness(8) };
 
+        var filters = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 0, 0, 6),
+        };
+        filters.Children.Add(new TextBlock
+        {
+            Text = "Include Discontinued:",
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        });
+        _includeDiscontinued.ItemsSource = new[] { "Yes", "No" };
+        _includeDiscontinued.SelectedItem = "Yes";
+        _includeDiscontinued.Width = 72;
+        AutomationProperties.SetAutomationId(
+            _includeDiscontinued,
+            "cmbIncludeDiscontinued");
+        AutomationProperties.SetHelpText(
+            _includeDiscontinued,
+            "Include Discontinued:");
+        filters.Children.Add(_includeDiscontinued);
+        filters.Children.Add(new TextBlock
+        {
+            Text = "Inventory Group:",
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(18, 0, 6, 0),
+        });
+        _inventoryGroup.ItemsSource = new[] { "All", "Rx", "340B" };
+        _inventoryGroup.SelectedItem = "All";
+        _inventoryGroup.Width = 82;
+        AutomationProperties.SetAutomationId(_inventoryGroup, "cmbInventoryGroup");
+        AutomationProperties.SetHelpText(_inventoryGroup, "Inventory Group:");
+        filters.Children.Add(_inventoryGroup);
+        DockPanel.SetDock(filters, Dock.Top);
+        panel.Children.Add(filters);
+
         var caption = new TextBlock
         {
             Text = "Supplier Catalog",
@@ -175,6 +233,14 @@ public sealed class EditRxItemWindow : Window
         };
         AutomationProperties.SetAutomationId(grid, "grdSupplierCatalog");
 
+        // Nadim's live grid exposes Linked as Yes/No text to UIA/OCR, not a
+        // guessed boolean ordinal. Package-cost selection parses this exact cell.
+        grid.Columns.Add(TextCol("Linked", nameof(SupplierRowVm.Linked), 70));
+        grid.Columns.Add(TextCol(
+            "Inventory Group",
+            nameof(SupplierRowVm.InventoryGroup),
+            110));
+
         // Supplier column: narrow + ellipsis, with the DevExpress-style behavior of exposing the
         // TRUNCATED render text as the cell's UIA Name while ValuePattern carries the full value.
         var supplierCol = new DataGridTextColumn
@@ -194,7 +260,7 @@ public sealed class EditRxItemWindow : Window
         grid.Columns.Add(supplierCol);
 
         grid.Columns.Add(TextCol("Item #", nameof(SupplierRowVm.ItemNumber), 90));
-        grid.Columns.Add(TextCol("Package Size", nameof(SupplierRowVm.PackageSize), 110));
+        grid.Columns.Add(TextCol("Shipping Size", nameof(SupplierRowVm.PackageSize), 110));
         grid.Columns.Add(TextCol("Cost", nameof(SupplierRowVm.CostDisplay), 90));
         // The header PricingWorkflow.ResolvePricingColumns resolves by NAME — renamed under
         // the renamed-cost variant to prove the fail-closed path.
@@ -206,10 +272,48 @@ public sealed class EditRxItemWindow : Window
         // cheapest row is NOT row 1 for the seeded data — "never trust row 1".
         var view = CollectionViewSource.GetDefaultView(_rows);
         view.SortDescriptions.Add(new SortDescription(nameof(SupplierRowVm.Supplier), ListSortDirection.Ascending));
+        view.Filter = value => value is SupplierRowVm row &&
+            (string.Equals(
+                 _includeDiscontinued.SelectedItem as string,
+                 "Yes",
+                 StringComparison.Ordinal) || !row.Discontinued) &&
+            ((_inventoryGroup.SelectedItem as string) is not { } group ||
+             group == "All" ||
+             string.Equals(row.InventoryGroup, group, StringComparison.Ordinal));
+        _includeDiscontinued.SelectionChanged += (_, _) => view.Refresh();
+        _inventoryGroup.SelectionChanged += (_, _) => view.Refresh();
         grid.ItemsSource = view;
 
         panel.Children.Add(grid);
         return panel;
+    }
+
+    private void BuildQuickSearchResults()
+    {
+        _searchResults.AutoGenerateColumns = false;
+        _searchResults.IsReadOnly = true;
+        _searchResults.CanUserAddRows = false;
+        _searchResults.CanUserDeleteRows = false;
+        _searchResults.HeadersVisibility = DataGridHeadersVisibility.Column;
+        _searchResults.SelectionMode = DataGridSelectionMode.Single;
+        _searchResults.SelectionUnit = DataGridSelectionUnit.FullRow;
+        _searchResults.MaxHeight = 150;
+        _searchResults.Visibility = Visibility.Collapsed;
+        _searchResults.ItemsSource = _searchResultRows;
+        _searchResults.KeyDown += (_, eventArgs) =>
+        {
+            if (eventArgs.Key != Key.Enter) return;
+            eventArgs.Handled = true;
+            CommitSelectedSearchResult();
+        };
+        AutomationProperties.SetAutomationId(_searchResults, "grdQuickSearchResults");
+        _searchResults.Columns.Add(TextCol("Name", nameof(SearchResultRowVm.Name), 250));
+        _searchResults.Columns.Add(TextCol("Strength", nameof(SearchResultRowVm.Strength), 120));
+        _searchResults.Columns.Add(TextCol("NDC", nameof(SearchResultRowVm.Ndc), 130));
+        _searchResults.Columns.Add(TextCol(
+            "Package Size",
+            nameof(SearchResultRowVm.PackageSize),
+            110));
     }
 
     private static DataGridTextColumn TextCol(string header, string path, double width) => new()
@@ -223,6 +327,8 @@ public sealed class EditRxItemWindow : Window
 
     private void BeginSearch(string rawQuery)
     {
+        _searchResults.Visibility = Visibility.Collapsed;
+        _searchResultRows.Clear();
         _searchMessage.Text = "Searching…";
         _searchMessage.Foreground = Brushes.DimGray;
 
@@ -239,17 +345,37 @@ public sealed class EditRxItemWindow : Window
 
     private void ExecuteSearch(string rawQuery)
     {
-        var digits = new string(rawQuery.Where(char.IsDigit).ToArray());
+        var ndc11 = SimNdcNormalizer.TryNormalize(rawQuery);
 
-        if (digits.Length == 11 && _items.TryGetValue(digits, out var item))
+        if (ndc11 is not null && _items.TryGetValue(ndc11, out var item))
         {
-            LoadItem(item.Ndc11, fromPersistence: false);
+            // Enter #1 opens a realistic multi-row chooser; the active row is
+            // highlighted while a same-NDC Do-Not-Use duplicate remains visible.
+            _searchResultRows.Add(new SearchResultRowVm(
+                item.DisplayName,
+                "",
+                FormatNdc542(item.Ndc11),
+                "1"));
+            _searchResultRows.Add(new SearchResultRowVm(
+                item.DisplayName.ToUpperInvariant() + "@",
+                "",
+                FormatNdc542(item.Ndc11),
+                "1"));
+            _searchResultRows.Add(new SearchResultRowVm(
+                item.DisplayName + " (Do Not Use)",
+                "",
+                FormatNdc542(item.Ndc11),
+                "1"));
+            _searchResultRows.Add(new SearchResultRowVm(
+                item.DisplayName + " - alternate source",
+                "",
+                FormatNdc542(item.Ndc11),
+                "1"));
+            _searchResults.Visibility = Visibility.Visible;
+            _searchResults.SelectedIndex = 0;
+            _searchResults.ScrollIntoView(_searchResults.SelectedItem);
+            _searchResults.Focus();
             _searchMessage.Text = "";
-
-            if (_options.ClearSearchAfterLoad)
-                _quickSearch.Clear();
-            // else: the typed NDC stays visible in the Quick Search box — the adversarial
-            // default that makes VerifyLoadedNdc's Edit-scan tautological (see SimOptions).
         }
         else
         {
@@ -263,12 +389,28 @@ public sealed class EditRxItemWindow : Window
         }
     }
 
+    private void CommitSelectedSearchResult()
+    {
+        if (_searchResults.SelectedItem is not SearchResultRowVm selected)
+            return;
+        var ndc = SimNdcNormalizer.TryNormalize(selected.Ndc);
+        if (ndc is null) return;
+        _searchResults.Visibility = Visibility.Collapsed;
+        _searchResultRows.Clear();
+        LoadItem(ndc, fromPersistence: false);
+        if (_options.ClearSearchAfterLoad)
+            _quickSearch.Clear();
+        else
+            _quickSearch.Focus();
+    }
+
     private void LoadItem(string ndc11, bool fromPersistence)
     {
         if (!_items.TryGetValue(ndc11, out var item)) return;
 
         _itemName.Text = item.DisplayName;
         _itemNdc.Text = FormatNdc542(item.Ndc11);
+        Title = $"Edit Rx Item - {item.DisplayName}";
         if (!fromPersistence) MainWindow.PersistedNdc = item.Ndc11;
 
         // Stage the supplier rows; they materialize in timed batches once the Pricing tab is
@@ -277,14 +419,19 @@ public sealed class EditRxItemWindow : Window
         _rows.Clear();
         _batchesStarted = false;
         _stagedRows = item.Suppliers.Select(s => new SupplierRowVm(
+            s.Linked ? "Yes" : "No",
+            s.InventoryGroup,
             s.Supplier,
             s.TruncatedAutomationName,
             s.ItemNumber,
             s.PackageSize,
-            s.Cost.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            s.Cost.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture),
             _options.FormatCost(s.CostPerUnit),
             s.Status,
-            s.LastPurchase)).ToList();
+            s.LastPurchase,
+            s.Discontinued || s.Status.Contains(
+                "Discontinued",
+                StringComparison.OrdinalIgnoreCase))).ToList();
 
         StartBatchesIfReady();
     }

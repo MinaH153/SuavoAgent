@@ -13,11 +13,6 @@ internal static class BinaryDownloader
     internal const string RepoOwner = "MinaH153";
     internal const string RepoName = "SuavoAgent";
 
-    // ECDSA P-256 public key for checksum signature verification (DER/SubjectPublicKeyInfo, Base64)
-    // Matches the mode-600 offline private key at ~/.suavo/signing-key.pem.
-    private const string PublicKeyBase64 =
-        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA==";
-
     // ONE list of truth for every runtime executable Setup must download. ServiceInstaller
     // refuses to register ANY service when a service binary is absent from the install
     // dir — the 2026-06-10 fresh-install brick was exactly this list missing
@@ -307,12 +302,37 @@ internal static class BinaryDownloader
     /// <see cref="ECDsa.VerifyData(byte[], byte[], HashAlgorithmName)"/> assumes.
     /// </summary>
     internal static bool VerifyChecksumSignature(byte[] checksumBytes, byte[] derSignature)
-    {
-        using var ecdsa = ECDsa.Create();
-        ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(PublicKeyBase64), out _);
-        return ecdsa.VerifyData(
-            checksumBytes, derSignature, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
-    }
+        => VerifyChecksumSignature(
+            checksumBytes,
+            derSignature,
+            OtaUpdateTrust.ProductionTrustedPublicKeys);
+
+    internal static bool VerifyChecksumSignature(
+        byte[] checksumBytes,
+        byte[] derSignature,
+        IReadOnlyDictionary<string, string> trustedRoots) =>
+        OtaUpdateTrust.VerifyDer(trustedRoots, checksumBytes, derSignature);
+
+    internal static bool VerifyChecksumSignatureForKeyId(
+        string otaSigningKeyId,
+        byte[] checksumBytes,
+        byte[] derSignature) =>
+        VerifyChecksumSignatureForKeyId(
+            otaSigningKeyId,
+            checksumBytes,
+            derSignature,
+            OtaUpdateTrust.ProductionTrustedPublicKeys);
+
+    internal static bool VerifyChecksumSignatureForKeyId(
+        string otaSigningKeyId,
+        byte[] checksumBytes,
+        byte[] derSignature,
+        IReadOnlyDictionary<string, string> trustedRoots) =>
+        OtaUpdateTrust.VerifyDerForKeyId(
+            trustedRoots,
+            otaSigningKeyId,
+            checksumBytes,
+            derSignature);
 
     /// <summary>
     /// Downloads a file with progress reporting.

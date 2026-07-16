@@ -37,12 +37,14 @@ internal static class PricingTestAuthority
         var schema = PricingObservationPolicy.Digest(schemaMarker);
         var status = PricingObservationPolicy.Digest(statusMarker);
         var window = freshness ?? PricingObservationPolicy.DefaultFreshnessWindow;
+        var snapshotContract = PricingApprovalContract
+            .SnapshotContractForCostBasis(costBasis);
         var policy = PricingApprovalContract.ComputeObservationPolicyDigest(
             modality,
             schema,
             status,
             costBasis,
-            PricingObservationPolicy.SnapshotContractV1,
+            snapshotContract,
             (long)window.TotalSeconds);
         return new PricingObservationContract(
             modality,
@@ -50,7 +52,7 @@ internal static class PricingTestAuthority
             status,
             costBasis,
             policy,
-            PricingObservationPolicy.SnapshotContractV1,
+            snapshotContract,
             window);
     }
 
@@ -86,7 +88,7 @@ internal static class PricingTestAuthority
         string machineFingerprint = MachineFingerprint)
     {
         var unsigned = new PricingApprovalProposal(
-            PricingApprovalContract.SchemaVersion,
+            PricingApprovalContract.SchemaVersionForCostBasis(contract.CostBasis),
             Guid.NewGuid().ToString("D"),
             new string('0', 64),
             pharmacyId,
@@ -113,7 +115,7 @@ internal static class PricingTestAuthority
         DateTimeOffset? expiresAt = null)
     {
         var unsigned = new PricingApprovalGrant(
-            PricingApprovalContract.SchemaVersion,
+            proposal.SchemaVersion,
             Guid.NewGuid().ToString("D"),
             proposal.ProposalId,
             proposal.ProposalDigest,
@@ -144,7 +146,7 @@ internal static class PricingTestAuthority
         DateTimeOffset receivedAt)
     {
         var unsigned = new PricingApprovalProposalReceipt(
-            PricingApprovalContract.SchemaVersion,
+            proposal.SchemaVersion,
             proposal.ProposalId,
             proposal.ProposalDigest,
             proposal.PharmacyId,
@@ -166,7 +168,7 @@ internal static class PricingTestAuthority
         string reasonCode = "pic_revoked")
     {
         var unsigned = new PricingApprovalRevocation(
-            PricingApprovalContract.SchemaVersion,
+            grant.SchemaVersion,
             Guid.NewGuid().ToString("D"),
             grant.ApprovalId,
             grant.ProposalId,
@@ -264,7 +266,7 @@ internal static class PricingTestAuthority
         var commandId = Guid.NewGuid().ToString("D");
         var dataJson = JsonSerializer.Serialize(new
         {
-            schemaVersion = PricingApprovalContract.SchemaVersion,
+            schemaVersion = grant.SchemaVersion,
             commandId,
             grant,
         });
@@ -292,7 +294,7 @@ internal static class PricingTestAuthority
         var commandId = Guid.NewGuid().ToString("D");
         var dataJson = JsonSerializer.Serialize(new
         {
-            schemaVersion = PricingApprovalContract.SchemaVersion,
+            schemaVersion = revocation.SchemaVersion,
             commandId,
             revocation,
         });
@@ -354,7 +356,8 @@ internal static class PricingTestAuthority
         DateTimeOffset? expires = null) => new()
     {
         Approved = true,
-        SchemaVersion = PricingApprovalContract.SchemaVersion,
+        SchemaVersion = PricingApprovalContract.SchemaVersionForCostBasis(
+            contract.CostBasis),
         ApprovalId = Guid.NewGuid().ToString("D"),
         PharmacyId = pharmacyId,
         ApproverId = "pic-test",

@@ -43,6 +43,34 @@ public sealed class NativeUpdateClaimStoreTests : IDisposable
     }
 
     [Fact]
+    public void Native_validator_accepts_v2_manifest_under_rotation_registry()
+    {
+        var fixture = CreateFixture(includeMaintenance: true);
+        using var unrelatedV1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var validator = new NativeUpdateClaimValidator(
+            new Dictionary<string, string>
+            {
+                [fixture.Request.KeyId] =
+                    Convert.ToBase64String(_commandKey.ExportSubjectPublicKeyInfo()),
+            },
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [OtaUpdateTrust.LegacyV1KeyId] =
+                    Convert.ToBase64String(unrelatedV1.ExportSubjectPublicKeyInfo()),
+                [OtaUpdateTrust.CurrentV2KeyId] =
+                    Convert.ToBase64String(_updateKey.ExportSubjectPublicKeyInfo()),
+            });
+
+        var result = validator.Validate(
+            fixture.RequestPath,
+            fixture.PayloadDirectory,
+            fixture.Identity,
+            Now);
+
+        Assert.True(result.IsValid, result.Code);
+    }
+
+    [Fact]
     public void Existing_identical_durable_claim_is_idempotently_resumed()
     {
         var fixture = CreateFixture(includeMaintenance: true);

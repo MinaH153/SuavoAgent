@@ -1,4 +1,5 @@
 using SuavoAgent.Core.Cloud;
+using SuavoAgent.Contracts.Pricing;
 
 namespace SuavoAgent.Core.Pricing;
 
@@ -13,7 +14,8 @@ internal static class PricingTerminalAckPolicy
     internal static PricingTerminalAck? FromResultSync(
         PricingJobCloudUploadReceipt? receipt,
         string jobId,
-        PricingJobExecutionResult execution)
+        PricingJobExecutionResult execution,
+        string costBasis = PricingApprovalContract.CostPerUnitBasis)
     {
         if (receipt is null || receipt.Accepted || !receipt.VerifiedTerminal)
             return null;
@@ -26,6 +28,7 @@ internal static class PricingTerminalAckPolicy
             progress.TotalItems,
             progress.CompletedItems,
             progress.FailedItems,
-            "pricing_job_failed");
+            "pricing_job_failed",
+            costBasis);
     }
 }

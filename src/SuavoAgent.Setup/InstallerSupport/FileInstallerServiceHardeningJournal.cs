@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SuavoAgent.Contracts.Security;
@@ -8,16 +9,17 @@ using SuavoAgent.Contracts.Security;
 namespace SuavoAgent.Setup.InstallerSupport;
 
 /// <summary>
-/// Durable, non-PHI rollback state for the MSI service-hardening action. The
-/// installed host stores it beside itself under the protected Program Files
-/// directory and immediately applies a SYSTEM/Administrators-only exact DACL.
+/// Durable, non-PHI rollback state for the MSI service-hardening action. Each
+/// journal is bound to one MSI invocation and has an explicit pending/committed
+/// phase so a later repair can never replay an older snapshot.
 /// </summary>
 internal sealed class FileInstallerServiceHardeningJournal
     : IInstallerServiceHardeningJournal
 {
     internal const string FileName = ".msi-service-hardening.rollback.json";
-    internal const int SchemaVersion = 1;
-    internal const int MaximumBytes = 4 * 1024;
+    internal const int SchemaVersion = 2;
+    internal const int MaximumBytes = 8 * 1024;
+    private const uint MoveFileReplaceExisting = 0x00000001;
     private const uint MoveFileWriteThrough = 0x00000008;
 
     private readonly string _path;
@@ -42,33 +44,85 @@ internal sealed class FileInstallerServiceHardeningJournal
             ?? throw new ArgumentNullException(nameof(secureJournal));
     }
 
-    internal static FileInstallerServiceHardeningJournal CreateForInstalledHost() =>
-        new(Path.Combine(AppContext.BaseDirectory, FileName));
+    internal static FileInstallerServiceHardeningJournal CreateForInstallDirectory(
+        string installDirectory) =>
+        new(Path.Combine(
+            MsiInstallerInvocation.RequireFixedInstallDirectory(installDirectory),
+            FileName));
 
-    public void Save(
+    public void SavePending(
+        string invocationId,
         IReadOnlyDictionary<string, InstallerServiceConfiguration> snapshots)
     {
+        ValidateInvocationId(invocationId);
         ValidateSnapshots(snapshots);
         if (File.Exists(_path))
             throw new IOException("A service-hardening rollback journal already exists.");
 
-        // A stale temporary file can only precede the first SCM mutation because
-        // the final rename completes before Execute starts writing services.
-        File.Delete(_temporaryPath);
-        var document = new JournalDocument(
-            SchemaVersion,
-            MsiServiceHardeningTransaction.ServiceNames
-                .Select(name => new JournalEntry(
-                    name,
-                    snapshots[name].DelayedAutoStart,
-                    snapshots[name].ServiceSidType))
-                .ToArray());
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
-        if (bytes.Length > MaximumBytes)
-            throw new InvalidDataException("The rollback journal exceeds its fixed bound.");
+        var document = Document(
+            invocationId,
+            InstallerTransactionJournalPhase.Pending,
+            snapshots);
+        WriteDocument(document, replaceExisting: false);
+    }
 
+    public InstallerServiceHardeningJournalState? Load()
+    {
+        if (!File.Exists(_path))
+            return null;
+
+        var document = ReadDocument();
+        var snapshots = document.Services.ToDictionary(
+            static entry => entry.Name,
+            static entry => new InstallerServiceConfiguration(
+                entry.DelayedAutoStart,
+                entry.ServiceSidType),
+            StringComparer.Ordinal);
+        ValidateSnapshots(snapshots);
+        return new(document.InvocationId, ParsePhase(document.Phase), snapshots);
+    }
+
+    public void MarkCommitted(string invocationId)
+    {
+        ValidateInvocationId(invocationId);
+        var state = Load() ?? throw new IOException(
+            "The service-hardening rollback journal is unavailable.");
+        if (!string.Equals(state.InvocationId, invocationId, StringComparison.Ordinal) ||
+            state.Phase != InstallerTransactionJournalPhase.Pending)
+            throw new InvalidDataException(
+                "The service-hardening rollback journal cannot be committed.");
+
+        WriteDocument(
+            Document(invocationId, InstallerTransactionJournalPhase.Committed, state.Snapshots),
+            replaceExisting: true);
+    }
+
+    public void Delete(
+        string invocationId,
+        InstallerTransactionJournalPhase phase)
+    {
+        ValidateInvocationId(invocationId);
+        var state = Load() ?? throw new IOException(
+            "The service-hardening rollback journal is unavailable.");
+        if (!string.Equals(state.InvocationId, invocationId, StringComparison.Ordinal) ||
+            state.Phase != phase)
+            throw new InvalidDataException(
+                "The service-hardening rollback journal identity is invalid.");
+
+        // Delete the journal last. A temporary-file cleanup failure must never
+        // discard the durable rollback/commit phase first.
+        File.Delete(_temporaryPath);
+        File.Delete(_path);
+        if (File.Exists(_path))
+            throw new IOException("The service-hardening journal remains present.");
+    }
+
+    private void WriteDocument(JournalDocument document, bool replaceExisting)
+    {
+        var bytes = CanonicalBytes(document);
         try
         {
+            File.Delete(_temporaryPath);
             using (var stream = new FileStream(
                        _temporaryPath,
                        FileMode.CreateNew,
@@ -81,22 +135,25 @@ internal sealed class FileInstallerServiceHardeningJournal
                 stream.Flush(flushToDisk: true);
             }
 
-            MoveIntoPlace(_temporaryPath, _path);
+            MoveIntoPlace(_temporaryPath, _path, replaceExisting);
             _secureJournal(_path);
+            if (!CryptographicOperations.FixedTimeEquals(
+                    bytes,
+                    File.ReadAllBytes(_path)))
+                throw new IOException(
+                    "The service-hardening rollback journal is not durable.");
         }
         catch
         {
             TryDeleteTemporaryFile();
-            TryDeleteJournalFile();
+            if (!replaceExisting)
+                TryDeleteJournalFile();
             throw;
         }
     }
 
-    public IReadOnlyDictionary<string, InstallerServiceConfiguration>? Load()
+    private JournalDocument ReadDocument()
     {
-        if (!File.Exists(_path))
-            return null;
-
         byte[] bytes;
         using (var stream = new FileStream(
                    _path,
@@ -115,39 +172,70 @@ internal sealed class FileInstallerServiceHardeningJournal
         var document = JsonSerializer.Deserialize<JournalDocument>(bytes, JsonOptions)
             ?? throw new InvalidDataException("The rollback journal is empty.");
         if (document.SchemaVersion != SchemaVersion ||
+            !MsiInstallerInvocation.IsValidInvocationId(document.InvocationId) ||
             document.Services.Count != MsiServiceHardeningTransaction.ServiceNames.Count)
-        {
             throw new InvalidDataException("The rollback journal schema is invalid.");
-        }
+        _ = ParsePhase(document.Phase);
 
-        var snapshots = new Dictionary<string, InstallerServiceConfiguration>(
-            StringComparer.Ordinal);
+        var observedNames = new HashSet<string>(StringComparer.Ordinal);
         for (var index = 0; index < document.Services.Count; index++)
         {
             var expectedName = MsiServiceHardeningTransaction.ServiceNames[index];
             var entry = document.Services[index];
             if (!string.Equals(entry.Name, expectedName, StringComparison.Ordinal) ||
                 !IsSupportedSidType(entry.ServiceSidType) ||
-                !snapshots.TryAdd(
-                    entry.Name,
-                    new InstallerServiceConfiguration(
-                        entry.DelayedAutoStart,
-                        entry.ServiceSidType)))
-            {
-                throw new InvalidDataException("The rollback journal service cohort is invalid.");
-            }
+                !observedNames.Add(entry.Name))
+                throw new InvalidDataException(
+                    "The rollback journal service cohort is invalid.");
         }
-
-        ValidateSnapshots(snapshots);
-        return snapshots;
+        if (!CryptographicOperations.FixedTimeEquals(bytes, CanonicalBytes(document)))
+            throw new InvalidDataException("The rollback journal is not canonical.");
+        return document;
     }
 
-    public void Delete()
+    private static JournalDocument Document(
+        string invocationId,
+        InstallerTransactionJournalPhase phase,
+        IReadOnlyDictionary<string, InstallerServiceConfiguration> snapshots) =>
+        new(
+            SchemaVersion,
+            invocationId,
+            PhaseText(phase),
+            MsiServiceHardeningTransaction.ServiceNames
+                .Select(name => new JournalEntry(
+                    name,
+                    snapshots[name].DelayedAutoStart,
+                    snapshots[name].ServiceSidType))
+                .ToArray());
+
+    private static byte[] CanonicalBytes(JournalDocument document)
     {
-        // Delete the committed journal last. If temporary cleanup fails, the
-        // rollback action must still have the durable snapshot available.
-        File.Delete(_temporaryPath);
-        File.Delete(_path);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
+        if (bytes.Length is <= 0 or > MaximumBytes)
+            throw new InvalidDataException("The rollback journal exceeds its fixed bound.");
+        return bytes;
+    }
+
+    private static string PhaseText(InstallerTransactionJournalPhase phase) =>
+        phase switch
+        {
+            InstallerTransactionJournalPhase.Pending => "pending",
+            InstallerTransactionJournalPhase.Committed => "committed",
+            _ => throw new InvalidDataException("The rollback journal phase is invalid."),
+        };
+
+    private static InstallerTransactionJournalPhase ParsePhase(string? phase) =>
+        phase switch
+        {
+            "pending" => InstallerTransactionJournalPhase.Pending,
+            "committed" => InstallerTransactionJournalPhase.Committed,
+            _ => throw new InvalidDataException("The rollback journal phase is invalid."),
+        };
+
+    private static void ValidateInvocationId(string invocationId)
+    {
+        if (!MsiInstallerInvocation.IsValidInvocationId(invocationId))
+            throw new InvalidDataException("The MSI invocation identity is invalid.");
     }
 
     private static void ValidateSnapshots(
@@ -162,24 +250,26 @@ internal sealed class FileInstallerServiceHardeningJournal
                 !MsiServiceHardeningTransaction.ServiceNames.Contains(
                     name,
                     StringComparer.Ordinal)))
-        {
-            throw new InvalidDataException("The exact service-hardening snapshot is required.");
-        }
+            throw new InvalidDataException(
+                "The exact service-hardening snapshot is required.");
     }
 
     private static bool IsSupportedSidType(uint value) => value is 0 or 1 or 3;
 
-    private static void MoveIntoPlace(string source, string destination)
+    private static void MoveIntoPlace(
+        string source,
+        string destination,
+        bool replaceExisting)
     {
         if (!OperatingSystem.IsWindows())
         {
-            File.Move(source, destination, overwrite: false);
+            File.Move(source, destination, overwrite: replaceExisting);
             return;
         }
 
-        // MOVEFILE_WRITE_THROUGH does not return until the durable rename has
-        // completed. Omitting REPLACE_EXISTING keeps stale journals fail-closed.
-        if (!MoveFileEx(source, destination, MoveFileWriteThrough))
+        var flags = MoveFileWriteThrough |
+            (replaceExisting ? MoveFileReplaceExisting : 0);
+        if (!MoveFileEx(source, destination, flags))
             throw new Win32Exception(Marshal.GetLastWin32Error());
     }
 
@@ -195,22 +285,18 @@ internal sealed class FileInstallerServiceHardeningJournal
         catch { }
     }
 
-    internal static HandleBoundAclPolicy BuildJournalAclPolicy() =>
-        new(
-            HandleBoundAcl.SystemSid,
-            [
-                new HandleBoundAclAce(
-                    HandleBoundAcl.SystemSid,
-                    FileSystemRights.FullControl),
-                new HandleBoundAclAce(
-                    HandleBoundAcl.AdministratorsSid,
-                    FileSystemRights.FullControl),
-            ]);
+    internal static HandleBoundAclPolicy BuildJournalAclPolicy() => new(
+        HandleBoundAcl.SystemSid,
+        [
+            new HandleBoundAclAce(
+                HandleBoundAcl.SystemSid,
+                FileSystemRights.FullControl),
+            new HandleBoundAclAce(
+                HandleBoundAcl.AdministratorsSid,
+                FileSystemRights.FullControl),
+        ]);
 
-    private static void SecureJournal(string path)
-    {
-        // Apply the exact protected DACL through the existing no-follow,
-        // file-ID-pinned boundary. It rejects reparse points and hard links.
+    private static void SecureJournal(string path) =>
         new HandleBoundAcl().ApplyBatch(
         [
             new HandleBoundAclMutation(
@@ -218,7 +304,6 @@ internal sealed class FileInstallerServiceHardeningJournal
                 IsDirectory: false,
                 BuildJournalAclPolicy()),
         ]);
-    }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -229,6 +314,8 @@ internal sealed class FileInstallerServiceHardeningJournal
 
     private sealed record JournalDocument(
         int SchemaVersion,
+        string InvocationId,
+        string Phase,
         IReadOnlyList<JournalEntry> Services);
 
     private sealed record JournalEntry(
@@ -236,7 +323,11 @@ internal sealed class FileInstallerServiceHardeningJournal
         bool DelayedAutoStart,
         uint ServiceSidType);
 
-    [DllImport("kernel32.dll", EntryPoint = "MoveFileExW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "MoveFileExW",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool MoveFileEx(
         string existingFileName,

@@ -1,0 +1,335 @@
+name: Protected normal release signing
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Canonical stable release tag
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  attestations: write
+  contents: write
+  id-token: write
+
+jobs:
+  sign-and-publish-reviewed-release:
+    runs-on: ubuntu-latest
+    environment: suavoagent-production-signing
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Prove exact closed normal-release caller and current protected main
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+          OTA_FULL_COHORT_MANIFEST: ${{ vars.OTA_FULL_COHORT_MANIFEST }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "MinaH153/SuavoAgent" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$RUNNER_ENVIRONMENT" == "github-hosted" ]]
+          case "$GITHUB_WORKFLOW_REF" in
+            MinaH153/SuavoAgent/.github/workflows/release.yml@refs/heads/main|\
+            MinaH153/SuavoAgent/.github/workflows/hotfix.yml@refs/heads/main) ;;
+            *) echo "::error::Unapproved normal-release caller: $GITHUB_WORKFLOW_REF"; exit 1 ;;
+          esac
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          python3 - "$VERSION_INPUT" >> "$GITHUB_ENV" <<'PY'
+          import re
+          import sys
+          match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", sys.argv[1])
+          if match is None:
+              raise SystemExit("version must be canonical stable vMAJOR.MINOR.PATCH")
+          parts = tuple(int(value) for value in match.groups())
+          if parts[0] > 255 or parts[1] > 255 or parts[2] > 65535:
+              raise SystemExit("version exceeds Windows Installer bounds")
+          print(f"VERSION={sys.argv[1]}")
+          print("VERSION_NUMERIC=" + ".".join(str(value) for value in parts))
+          PY
+          python3 scripts/verify-release-trust-inputs.py --trust-phase normal-v2
+          python3 scripts/v1_bridge_cli.py assert-normal-release \
+            --full-cohort-manifest "$OTA_FULL_COHORT_MANIFEST"
+      - name: Validate exact non-exportable v2 authority and live Release 1
+        env:
+          AWS_SIGNING_ROLE_ARN: ${{ vars.AWS_SIGNING_ROLE_ARN }}
+          AWS_SIGNING_REGION: ${{ vars.AWS_SIGNING_REGION }}
+          GH_TOKEN: ${{ github.token }}
+          OTA_KMS_KEY_ID: ${{ vars.OTA_KMS_KEY_ID }}
+          OTA_KMS_PUBLIC_KEY_DER_BASE64: ${{ vars.OTA_KMS_PUBLIC_KEY_DER_BASE64 }}
+        run: |
+          set -euo pipefail
+          [[ "$AWS_SIGNING_ROLE_ARN" == "arn:aws:iam::855763870758:role/github-actions/SuavoAgentProductionOtaSigningV2" ]]
+          [[ "$AWS_SIGNING_REGION" == "us-east-1" ]]
+          [[ "$OTA_KMS_KEY_ID" == "arn:aws:kms:us-east-1:855763870758:key/44bd84dc-8f6d-4692-b8ba-40a026db0331" ]]
+          python3 scripts/ota_update_trust_roots.py \
+            assert-signing-public-key "$OTA_KMS_PUBLIC_KEY_DER_BASE64" --key-id ota-update-v2
+          bash scripts/verify-live-v1-bridge-release.sh
+      - name: Download exact signed executable cohort
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: suavoagent-final-${{ inputs.version }}
+          path: release
+      - name: Download exact signed customer MSI
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: suavoagent-msi-${{ inputs.version }}
+          path: release
+      - name: Download exact signed customer bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: suavoagent-bundle-${{ inputs.version }}
+          path: release
+      - name: Generate field release receipt from a signed prior rollback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release
+          ARTIFACT="SuavoAgent-Setup.exe"
+          ARTIFACT_SHA="$(sha256sum "$ARTIFACT" | awk '{print $1}')"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > release-pages.json
+          RELEASES="$(jq -c '[.[][] | {tagName: .tag_name, isDraft: .draft, isPrerelease: .prerelease}]' release-pages.json)"
+          ROLLBACK_TAG="$(printf '%s' "$RELEASES" | python3 ../scripts/select-release-rollback-tag.py "$VERSION")"
+          [[ -n "$ROLLBACK_TAG" ]] || { echo "::error::No signed stable rollback exists."; exit 1; }
+          rollback="$(mktemp -d)"
+          trap 'rm -rf "$rollback"' EXIT
+          gh release download "$ROLLBACK_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern checksums.sha256 --pattern checksums.sha256.sig \
+            --pattern field-release-receipt.json --dir "$rollback"
+          BRIDGE_TAG="$(jq -er '.bridgeReleaseTag' ../security/ota-v1-bridge-convergence-claim.json)"
+          BRIDGE_SOURCE_SHA="$(jq -er '.bridgeSourceSha' ../security/ota-v1-bridge-convergence-claim.json)"
+          BRIDGE_RECEIPT_SHA="$(jq -er '.releaseBindings.releaseReceiptSha256' ../security/ota-fleet-inventory-snapshot.json)"
+          mapfile -t evidence < <(python3 ../scripts/resolve-release-rollback-evidence.py \
+            --tag "$ROLLBACK_TAG" --checksums "$rollback/checksums.sha256" \
+            --signature "$rollback/checksums.sha256.sig" \
+            --receipt "$rollback/field-release-receipt.json" \
+            --registry ../security/ota-update-trust-roots.json \
+            --bridge-release-tag "$BRIDGE_TAG" \
+            --bridge-source-sha "$BRIDGE_SOURCE_SHA" \
+            --bridge-receipt-sha256 "$BRIDGE_RECEIPT_SHA")
+          [[ ${#evidence[@]} -eq 2 ]]
+          ROLLBACK_ARTIFACT="${evidence[0]}"
+          ROLLBACK_SHA="${evidence[1]}"
+          gh release download "$ROLLBACK_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ROLLBACK_ARTIFACT" --dir "$rollback"
+          [[ "$(sha256sum "$rollback/$ROLLBACK_ARTIFACT" | awk '{print $1}')" == "$ROLLBACK_SHA" ]]
+          export ARTIFACT ARTIFACT_SHA ROLLBACK_TAG ROLLBACK_ARTIFACT ROLLBACK_SHA
+          python3 - <<'PY'
+          import json
+          import os
+          version = os.environ["VERSION"]
+          receipt = {
+              "releaseTag": version,
+              "version": os.environ["VERSION_NUMERIC"],
+              "sourceCommit": os.environ["GITHUB_SHA"],
+              "artifact": os.environ["ARTIFACT"],
+              "artifactSha256": os.environ["ARTIFACT_SHA"],
+              "authenticode": "required-valid",
+              "checksumSignature": "checksums.sha256.sig",
+              "manifestSignature": f"update-manifest-{version}.sig",
+              "otaSigningKeyId": "ota-update-v2",
+              "track2QueenValidation": "do-not-run-against-older-tags",
+              "rollbackArtifact": {
+                  "releaseTag": os.environ["ROLLBACK_TAG"],
+                  "artifact": os.environ["ROLLBACK_ARTIFACT"],
+                  "artifactSha256": os.environ["ROLLBACK_SHA"],
+                  "releaseUrl": (
+                      f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/"
+                      f"{os.environ['ROLLBACK_TAG']}/{os.environ['ROLLBACK_ARTIFACT']}"
+                  ),
+              },
+          }
+          with open("field-release-receipt.json", "w", encoding="utf-8") as output:
+              json.dump(receipt, output, indent=2, sort_keys=True)
+              output.write("\n")
+          PY
+      - name: Generate exact full-cohort OTA manifest bytes
+        run: |
+          set -euo pipefail
+          cd release
+          CORE_SHA="$(sha256sum SuavoAgent.Core.exe | awk '{print $1}')"
+          BROKER_SHA="$(sha256sum SuavoAgent.Broker.exe | awk '{print $1}')"
+          HELPER_SHA="$(sha256sum SuavoAgent.Helper.exe | awk '{print $1}')"
+          WATCHDOG_SHA="$(sha256sum SuavoAgent.Watchdog.exe | awk '{print $1}')"
+          MAINTENANCE_SHA="$(sha256sum SuavoSetup.exe | awk '{print $1}')"
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}"
+          MANIFEST="$(bash ../scripts/compose-ota-manifest.sh \
+            "$BASE_URL" "$CORE_SHA" "$BROKER_SHA" "$HELPER_SHA" \
+            "$VERSION_NUMERIC" "$WATCHDOG_SHA" "$MAINTENANCE_SHA")"
+          printf '%s' "$MANIFEST" > "update-manifest-${VERSION}.txt"
+      - name: Revalidate current authority immediately before role assumption
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          bash scripts/verify-live-v1-bridge-release.sh
+      - name: Assume exact OIDC-bound production signer role
+        id: aws
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
+        with:
+          role-to-assume: ${{ vars.AWS_SIGNING_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_SIGNING_REGION }}
+          role-duration-seconds: 900
+          output-credentials: true
+          output-env-credentials: false
+      - name: Sign exact manifest with reviewed ota-update-v2
+        env: &kms_environment
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+          AWS_REGION: ${{ vars.AWS_SIGNING_REGION }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_SIGNING_REGION }}
+          GH_TOKEN: ${{ github.token }}
+          OTA_KMS_KEY_ID: ${{ vars.OTA_KMS_KEY_ID }}
+          OTA_KMS_PUBLIC_KEY_DER_BASE64: ${{ vars.OTA_KMS_PUBLIC_KEY_DER_BASE64 }}
+          OTA_KMS_EXPECTED_KEY_ID: ota-update-v2
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          bash scripts/verify-live-v1-bridge-release.sh
+          cd release
+          bash ../scripts/aws-kms-sign-ecdsa-p256.sh \
+            "update-manifest-${VERSION}.txt" "update-manifest-${VERSION}.sig" p1363-hex
+      - name: Generate exact checksum payload
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum SuavoAgent.Core.exe SuavoAgent.Broker.exe SuavoAgent.Helper.exe \
+            SuavoAgent.Watchdog.exe SuavoSetup.exe "SuavoAgent-${VERSION}-win-x64.msi" \
+            SuavoAgent-Setup.exe suavoagent.spdx.json field-release-receipt.json \
+            "update-manifest-${VERSION}.txt" "update-manifest-${VERSION}.sig" > checksums.sha256
+      - name: Sign exact checksums with reviewed ota-update-v2
+        env: *kms_environment
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          bash scripts/verify-live-v1-bridge-release.sh
+          cd release
+          bash ../scripts/aws-kms-sign-ecdsa-p256.sh checksums.sha256 checksums.sha256.sig der
+      - name: Attest signed binaries, installers, legal bundle, and SBOM
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            release/*.exe
+            release/*.msi
+            release/legal/*
+            release/legal/license-texts/*
+            release/legal/evidence/*
+            release/suavoagent.spdx.json
+      - name: Create, validate, and publish one exact draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          validate_release_tag_ruleset() {
+            local stem="$1"
+            local list_path="${stem}-ruleset-list.json"
+            local details_path="${stem}-rulesets.json"
+            local ndjson_path="${stem}-rulesets.ndjson"
+            gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/rulesets?per_page=100" > "$list_path"
+            mapfile -t ruleset_ids < <(
+              jq -r '[.[][] | .id | select(type == "number" and . > 0)] | unique[]' \
+                "$list_path"
+            )
+            : > "$ndjson_path"
+            for ruleset_id in "${ruleset_ids[@]}"; do
+              gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+                "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id" >> "$ndjson_path"
+              printf '\n' >> "$ndjson_path"
+            done
+            jq -s '.' "$ndjson_path" > "$details_path"
+            python3 scripts/validate-release-tag-ruleset.py \
+              --input "$details_path" --repository "$GITHUB_REPOSITORY"
+          }
+          git fetch --no-tags origin main
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          bash scripts/verify-live-v1-bridge-release.sh
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > release-history.json
+          python3 scripts/v1_bridge_run_metadata.py assert-version-newest \
+            --releases release-history.json --version "$VERSION"
+          python3 scripts/v1_bridge_run_metadata.py assert-release-absent \
+            --releases release-history.json --version "$VERSION"
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1
+          tag_status=$?
+          set -e
+          [[ $tag_status -eq 2 ]]
+          validate_release_tag_ruleset before-draft
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            > immutable-releases-before-draft.json
+          [[ "$(jq -r .enabled immutable-releases-before-draft.json)" == "true" ]]
+          mapfile -t files < <(python3 scripts/v1_bridge_run_metadata.py publication-paths \
+            --release-dir release --version "$VERSION")
+          [[ ${#files[@]} -gt 12 ]]
+          printf '%s\n' "SuavoAgent $VERSION" \
+            "Automated stable release from exact protected main $GITHUB_SHA." \
+            "Full Windows tests, coverage, Authenticode, installer smoke, v2 OTA signatures, rollback, legal, and SBOM gates passed." \
+            > release-notes.txt
+          gh release create "$VERSION" "${files[@]}" --repo "$GITHUB_REPOSITORY" --draft \
+            --target "$GITHUB_SHA" --title "$VERSION - Phantom" --notes-file release-notes.txt
+          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,isDraft,tagName,targetCommitish > draft-release.json
+          [[ "$(jq -r .isDraft draft-release.json)" == "true" ]]
+          [[ "$(jq -r .tagName draft-release.json)" == "$VERSION" ]]
+          [[ "$(jq -r .targetCommitish draft-release.json)" == "$GITHUB_SHA" ]]
+          RELEASE_ID="$(jq -r .databaseId draft-release.json)"
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq .object.sha)" == "$GITHUB_SHA" ]]
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" > draft-assets.json
+          python3 scripts/v1_bridge_run_metadata.py validate-release-assets \
+            --assets draft-assets.json --release-dir release --version "$VERSION"
+          git fetch --no-tags origin main
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq .object.sha)" == "$GITHUB_SHA" ]]
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" > immutable-releases.json
+          [[ "$(jq -r .enabled immutable-releases.json)" == "true" ]]
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > prepublish-release.json
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+            > prepublish-assets.json
+          python3 scripts/v1_bridge_run_metadata.py validate-publication-state \
+            --release prepublish-release.json --assets prepublish-assets.json \
+            --release-dir release --version "$VERSION" --source-sha "$GITHUB_SHA" \
+            --expected-release-id "$RELEASE_ID" --expected-draft true \
+            --expected-immutable false
+          validate_release_tag_ruleset before-publish
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" --method PATCH \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -f make_latest=true > publish-response.json
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > published-release.json
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" \
+            > published-assets.json
+          python3 scripts/v1_bridge_run_metadata.py validate-publication-state \
+            --release published-release.json --assets published-assets.json \
+            --reference-assets prepublish-assets.json --release-dir release \
+            --version "$VERSION" --source-sha "$GITHUB_SHA" \
+            --expected-release-id "$RELEASE_ID" --expected-draft false \
+            --expected-immutable true
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq .object.sha)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" --jq .id)" == "$RELEASE_ID" ]]

@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SuavoAgent.Helper\SuavoAgent.Helper.csproj" />
+    <ProjectReference Include="..\..\tools\PioneerRxSim\Shared\PioneerRxSim.Shared.csproj" />
   </ItemGroup>
 
   <!-- FlaUI.UIA2 needs UIAutomationClient (Microsoft.WindowsDesktop.App) at runtime. Pull it in ONLY

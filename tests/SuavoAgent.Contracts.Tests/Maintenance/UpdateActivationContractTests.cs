@@ -111,6 +111,27 @@ public sealed class UpdateActivationContractTests
     }
 
     [Fact]
+    public void Validate_RotationRegistryAcceptsManifestSignedByV2()
+    {
+        using var fixture = RequestFixture.Create(includeMaintenance: true);
+        using var unrelatedV1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var result = UpdateActivationContract.Validate(
+            fixture.Request,
+            new Dictionary<string, string> { [fixture.Request.KeyId] = fixture.CommandPublicKey },
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [OtaUpdateTrust.LegacyV1KeyId] =
+                    Convert.ToBase64String(unrelatedV1.ExportSubjectPublicKeyInfo()),
+                [OtaUpdateTrust.CurrentV2KeyId] = fixture.UpdatePublicKey,
+            },
+            Now,
+            fixture.Request.AgentId,
+            fixture.Request.MachineFingerprint);
+
+        Assert.True(result.IsValid, result.Code);
+    }
+
+    [Fact]
     public void TryDeserialize_UnknownField_IsRejected()
     {
         using var fixture = RequestFixture.Create(includeMaintenance: true);

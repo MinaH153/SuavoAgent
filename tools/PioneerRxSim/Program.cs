@@ -11,6 +11,16 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        if (args.Contains("--foreign-save-dialog", StringComparer.Ordinal))
+        {
+            var dialogApp = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+            return dialogApp.Run(new TopDispensedSaveAsWindow(_ => { })
+            {
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                Topmost = true,
+            });
+        }
+
         SimOptions options;
         try
         {

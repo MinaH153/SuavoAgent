@@ -436,6 +436,47 @@ public partial class HeartbeatWorkerTests
         }
     }
 
+    private sealed class FakeTopDispensedWorklistBuilder
+        : ITopDispensedWorklistBuilder
+    {
+        public TopDispensedWorklistBuildResult Result { get; set; } =
+            TopDispensedWorklistBuildResult.Fail(
+                "pricing_worklist_source_unavailable");
+        public List<string> CommandIds { get; } = new();
+
+        public Task<TopDispensedWorklistBuildResult> BuildAsync(
+            string commandId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CommandIds.Add(commandId);
+            return Task.FromResult(Result);
+        }
+    }
+
+    private sealed class FakeHeartbeatIpcCommandClient : IIpcCommandClient
+    {
+        public bool IsConnected => true;
+
+        public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct) =>
+            Task.FromResult(true);
+
+        public Task<IpcResponse?> SendAsync(
+            IpcRequest request,
+            TimeSpan timeout,
+            CancellationToken ct)
+        {
+            var data = JsonSerializer.SerializeToElement(
+                new HelperPingInfo(1234, 1, 1, true));
+            return Task.FromResult<IpcResponse?>(new IpcResponse(
+                request.Id,
+                IpcStatus.Ok,
+                request.Command,
+                data,
+                null));
+        }
+    }
+
     private sealed class CancellationBlockingPostSigner : IPostSigner
     {
         public string? BoundAgentInstanceId =>

@@ -188,12 +188,19 @@ public sealed partial class AgentStateDb
         using var command = transaction.Connection!.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT revocation_id, approval_id, proposal_id, proposal_digest,
-                   pharmacy_id, agent_id, machine_fingerprint, policy_digest,
-                   reason_code, revoked_at_utc, key_id, signature
-              FROM pricing_approval_revocations
-             WHERE approval_id = @approval
-             ORDER BY revoked_at_utc ASC, revocation_id ASC
+            SELECT revocation.revocation_id, revocation.approval_id,
+                   revocation.proposal_id, revocation.proposal_digest,
+                   revocation.pharmacy_id, revocation.agent_id,
+                   revocation.machine_fingerprint, revocation.policy_digest,
+                   revocation.reason_code, revocation.revoked_at_utc,
+                   revocation.key_id, revocation.signature,
+                   proposal.cost_basis
+              FROM pricing_approval_revocations revocation
+              JOIN pricing_approval_proposals proposal
+                ON proposal.proposal_id = revocation.proposal_id
+             WHERE revocation.approval_id = @approval
+             ORDER BY revocation.revoked_at_utc ASC,
+                      revocation.revocation_id ASC
              LIMIT 1
             """;
         command.Parameters.AddWithValue("@approval", approvalId);
@@ -204,7 +211,8 @@ public sealed partial class AgentStateDb
     private static PricingApprovalProposal ReadProposal(
         SqliteDataReader reader,
         int offset = 0) => new(
-            PricingApprovalContract.SchemaVersion,
+            PricingApprovalContract.SchemaVersionForCostBasis(
+                reader.GetString(offset + 8)),
             reader.GetString(offset),
             reader.GetString(offset + 1),
             reader.GetString(offset + 2),
@@ -223,7 +231,8 @@ public sealed partial class AgentStateDb
     private static PricingApprovalGrant ReadGrant(
         SqliteDataReader reader,
         int offset = 0) => new(
-            PricingApprovalContract.SchemaVersion,
+            PricingApprovalContract.SchemaVersionForCostBasis(
+                reader.GetString(offset + 11)),
             reader.GetString(offset),
             reader.GetString(offset + 1),
             reader.GetString(offset + 2),
@@ -246,7 +255,7 @@ public sealed partial class AgentStateDb
 
     private static PricingApprovalRevocation ReadRevocation(
         SqliteDataReader reader) => new(
-            PricingApprovalContract.SchemaVersion,
+            PricingApprovalContract.SchemaVersionForCostBasis(reader.GetString(12)),
             reader.GetString(0),
             reader.GetString(1),
             reader.GetString(2),

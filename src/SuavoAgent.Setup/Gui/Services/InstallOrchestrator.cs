@@ -295,7 +295,35 @@ internal sealed class InstallOrchestrator
                 installerVersion: _ctx.InstallerVersion,
                 machineFingerprint: _ctx.MachineFingerprint!));
 
-        ConsoleUI.WriteOk("Secret-free appsettings + consent receipt written");
+        var activationDirectory = Path.Combine(
+            _ctx.DataDir,
+            SuavoAgent.Contracts.Security.ObservationActivationAuthority.StateDirectoryName);
+        Directory.CreateDirectory(activationDirectory);
+        var releaseCohort = _ctx.Config.ReleaseTag.TrimStart('v', 'V');
+        var activationIdentity = new SuavoAgent.Contracts.Security.ObservationActivationIdentity(
+            _ctx.AgentId!,
+            _ctx.AgentId!,
+            _ctx.Config.PharmacyId,
+            _ctx.MachineFingerprint!,
+            _ctx.Config.DeviceKeyId
+                ?? throw new InstallException("Device authority key is missing."),
+            releaseCohort,
+            SuavoAgent.Contracts.Security.ObservationActivationIdentityStore.PolicyDigest);
+        File.WriteAllText(
+            Path.Combine(
+                activationDirectory,
+                SuavoAgent.Contracts.Security.ObservationActivationIdentityStore.FileName),
+            SuavoAgent.Contracts.Security.ObservationActivationIdentityStore.Serialize(
+                activationIdentity));
+        if (!SuavoAgent.Contracts.Security.ObservationControlStateStore.TryInitialize(
+                Path.Combine(
+                    activationDirectory,
+                    SuavoAgent.Contracts.Security.ObservationControlStateStore.FileName),
+                activationIdentity,
+                DateTimeOffset.UtcNow))
+            throw new InstallException("Observation pause control state could not be initialized.");
+
+        ConsoleUI.WriteOk("Secret-free appsettings, consent receipt, and dormant observation identity written");
 
     }
 

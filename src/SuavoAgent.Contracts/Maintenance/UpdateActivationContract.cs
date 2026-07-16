@@ -110,9 +110,15 @@ public static partial class UpdateActivationContract
     public static readonly TimeSpan MaximumRequestAge = TimeSpan.FromMinutes(30);
     public static readonly TimeSpan MaximumFutureSkew = TimeSpan.FromSeconds(30);
 
-    public const string ProductionUpdateKeyId = "ota-update-v1";
-    public const string ProductionUpdatePublicKeyDer =
-        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBLRvZ572EpqNab9CxJ9/b/GfHpHOrhWkpaaCzIkXQ5d2dwiqdJHlxvrgN0/zCsgp/ccnDXed4DFCkh6wUWCvWA==";
+    public const string ProductionUpdateKeyId = OtaUpdateTrust.LegacyV1KeyId;
+
+    /// <summary>Compatibility alias for tests and pre-rotation callers that inject one root.</summary>
+    public static string ProductionUpdatePublicKeyDer =>
+        OtaUpdateTrust.ProductionTrustedPublicKeys[OtaUpdateTrust.LegacyV1KeyId];
+
+    /// <summary>Production bridge registry: v1 plus v2 only after the reviewed v2 SPKI is committed.</summary>
+    public static IReadOnlyDictionary<string, string> ProductionUpdatePublicKeys =>
+        OtaUpdateTrust.ProductionTrustedPublicKeys;
 
     public static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -351,8 +357,28 @@ public static partial class UpdateActivationContract
         string? expectedAgentId = null,
         string? expectedMachineFingerprint = null,
         TimeSpan? maximumAge = null)
+        => Validate(
+            request,
+            trustedCommandKeys,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [OtaUpdateTrust.LegacyV1KeyId] = updatePublicKeyDerBase64,
+            },
+            now,
+            expectedAgentId,
+            expectedMachineFingerprint,
+            maximumAge);
+
+    public static UpdateActivationValidationResult Validate(
+        UpdateActivationRequest request,
+        IReadOnlyDictionary<string, string> trustedCommandKeys,
+        IReadOnlyDictionary<string, string> updatePublicKeys,
+        DateTimeOffset now,
+        string? expectedAgentId = null,
+        string? expectedMachineFingerprint = null,
+        TimeSpan? maximumAge = null)
     {
-        if (request is null || trustedCommandKeys is null)
+        if (request is null || trustedCommandKeys is null || updatePublicKeys is null)
             return UpdateActivationValidationResult.Reject("request_invalid");
         if (request.SchemaVersion != SchemaVersion)
             return UpdateActivationValidationResult.Reject("schema_mismatch");
@@ -403,7 +429,7 @@ public static partial class UpdateActivationContract
         var manifestResult = ValidateManifest(
             request.ManifestCanonical,
             request.ManifestSignature,
-            updatePublicKeyDerBase64);
+            updatePublicKeys);
         return manifestResult;
     }
 
@@ -411,6 +437,18 @@ public static partial class UpdateActivationContract
         string canonical,
         string signatureHex,
         string updatePublicKeyDerBase64)
+        => ValidateManifest(
+            canonical,
+            signatureHex,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [OtaUpdateTrust.LegacyV1KeyId] = updatePublicKeyDerBase64,
+            });
+
+    public static UpdateActivationValidationResult ValidateManifest(
+        string canonical,
+        string signatureHex,
+        IReadOnlyDictionary<string, string> updatePublicKeys)
     {
         if (string.IsNullOrEmpty(canonical) ||
             !string.Equals(canonical, canonical.Trim(), StringComparison.Ordinal) ||
@@ -455,7 +493,7 @@ public static partial class UpdateActivationContract
                 fields[hashIndexes[index]].ToLowerInvariant()));
         }
 
-        if (!VerifyUpdateSignature(canonical, signatureHex, updatePublicKeyDerBase64))
+        if (!VerifyUpdateSignature(canonical, signatureHex, updatePublicKeys))
             return UpdateActivationValidationResult.Reject("manifest_signature_invalid");
 
         return UpdateActivationValidationResult.Valid(new UpdatePackageManifest(
@@ -530,10 +568,8 @@ public static partial class UpdateActivationContract
     private static bool VerifyUpdateSignature(
         string canonical,
         string signatureHex,
-        string publicKeyDerBase64) =>
-        signatureHex.Length == 128 &&
-        signatureHex.All(Uri.IsHexDigit) &&
-        VerifySignature(publicKeyDerBase64, canonical, signatureHex, signatureIsHex: true);
+        IReadOnlyDictionary<string, string> trustedRoots) =>
+        OtaUpdateTrust.VerifyP1363Hex(trustedRoots, canonical, signatureHex);
 
     private static bool VerifySignature(
         string publicKeyDerBase64,

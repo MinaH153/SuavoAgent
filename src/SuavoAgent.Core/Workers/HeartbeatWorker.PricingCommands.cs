@@ -301,7 +301,8 @@ public sealed partial class HeartbeatWorker
                     progress.TotalItems,
                     progress.CompletedItems,
                     progress.FailedItems,
-                    failureCode));
+                    failureCode,
+                    spec.CostBasis));
                 return;
             }
 
@@ -315,7 +316,8 @@ public sealed partial class HeartbeatWorker
                 var terminalAck = PricingTerminalAckPolicy.FromResultSync(
                     uploadReceipt,
                     jobId,
-                    execution);
+                    execution,
+                    spec.CostBasis);
                 if (terminalAck is not null)
                 {
                     await AckAsync(terminalAck);
@@ -418,9 +420,6 @@ public sealed partial class HeartbeatWorker
     {
         var dataEl = CommandDataObject(scEl);
         var pack = ReadStringProperty(dataEl, "pack");
-        var ndcColumn = PricingJobDefaults.NdcColumn;
-        var supplierColumn = PricingJobDefaults.SupplierColumn;
-        var costColumn = PricingJobDefaults.CostColumn;
         var rawCommandId = ReadStringProperty(dataEl, "commandId");
         if (!IsCanonicalUuidV4(rawCommandId, out var commandId) ||
             !TryReadPricingAuthorityBinding(
@@ -440,7 +439,17 @@ public sealed partial class HeartbeatWorker
             return AckPricingFailureAsync(commandId!, ack, ct);
         }
 
-        if (!string.Equals(pack, "pharmacy_rx", StringComparison.Ordinal))
+        var generatedV2Pack = string.Equals(
+            pack,
+            "pharmacy_rx_generate_v2",
+            StringComparison.Ordinal);
+        var top500PackageCostV3Pack = string.Equals(
+            pack,
+            "pharmacy_rx_top500_package_cost_v3",
+            StringComparison.Ordinal);
+        if (!generatedV2Pack &&
+            !top500PackageCostV3Pack &&
+            !string.Equals(pack, "pharmacy_rx", StringComparison.Ordinal))
         {
             _logger.LogWarning("core.command.pricing_pack_rejected");
             await AckAsync(PricingTerminalAck.Early("unknown_pack"));
@@ -518,6 +527,102 @@ public sealed partial class HeartbeatWorker
             }
         }
 
+        if (top500PackageCostV3Pack)
+        {
+            if (_cloudClient is null ||
+                _topDispensedWorklistProgressBuilder is null ||
+                _pricedWorkbookPublisher is null ||
+                _pricingJobExecutor is not IProgressReportingPricingJobExecutor)
+            {
+                await AckAsync(PricingTerminalAck.Early(
+                    "pricing_worklist_source_unavailable"));
+                return;
+            }
+            var progressPublisher = new PricingCommandProgressPublisher(
+                _cloudClient,
+                commandId!);
+            var worklist = await ContinueAfterBestEffortInitialProgressAsync(
+                    progressPublisher,
+                    token => _topDispensedWorklistProgressBuilder.BuildAsync(
+                        commandId!,
+                        async (progress, progressToken) =>
+                        {
+                            _ = await progressPublisher.PublishFixedAsync(
+                                    progress,
+                                    progressToken)
+                                .ConfigureAwait(false);
+                        },
+                        token),
+                    runToken)
+                .ConfigureAwait(false);
+            if (!worklist.Ok || worklist.WorkbookPath is null)
+            {
+                await AckAsync(PricingTerminalAck.Early(
+                    worklist.ErrorCode ?? "pricing_worklist_generation_failed"));
+                return;
+            }
+            _logger.LogInformation(
+                "core.command.pricing_worklist_generated count={Count}",
+                worklist.ItemCount);
+            var outcome = await ExecutePricingPathAsync(
+                    worklist.WorkbookPath,
+                    commandId!,
+                    approvalId!,
+                    grantDigest!,
+                    autonomyExecutionMode,
+                    autonomyAdmission,
+                    autonomyRunId,
+                    AckAsync,
+                    PricingApprovalContract.PackageCostBasis,
+                    runToken,
+                    progressPublisher,
+                    requireUserVisiblePublication: true)
+                .ConfigureAwait(false);
+            autonomyExecution = outcome.Execution;
+            autonomyRecorded = outcome.AutonomyRecorded;
+            autonomyTerminalReason = outcome.TerminalReason;
+            return;
+        }
+
+        if (generatedV2Pack)
+        {
+            if (_topDispensedWorklistBuilder is null)
+            {
+                await AckAsync(PricingTerminalAck.Early(
+                    "pricing_worklist_source_unavailable"));
+                return;
+            }
+            var worklist = await _topDispensedWorklistBuilder.BuildAsync(
+                    commandId!,
+                    runToken)
+                .ConfigureAwait(false);
+            if (!worklist.Ok || worklist.WorkbookPath is null)
+            {
+                await AckAsync(PricingTerminalAck.Early(
+                    worklist.ErrorCode ?? "pricing_worklist_generation_failed"));
+                return;
+            }
+            _logger.LogInformation(
+                "core.command.pricing_worklist_generated count={Count}",
+                worklist.ItemCount);
+            var outcome = await ExecutePricingPathAsync(
+                    worklist.WorkbookPath,
+                    commandId!,
+                    approvalId!,
+                    grantDigest!,
+                    autonomyExecutionMode,
+                    autonomyAdmission,
+                    autonomyRunId,
+                    AckAsync,
+                    PricingApprovalContract.CostPerUnitBasis,
+                    runToken)
+                .ConfigureAwait(false);
+            autonomyExecution = outcome.Execution;
+            autonomyRecorded = outcome.AutonomyRecorded;
+            autonomyTerminalReason = outcome.TerminalReason;
+            return;
+        }
+
         if (_discoveryClient is null)
         {
             _logger.LogWarning("find_and_run_pricing_job: discovery not registered");
@@ -548,146 +653,24 @@ public sealed partial class HeartbeatWorker
             discoveryResult.Best is not null,
             discoveryResult.Best?.Confidence.ToString("F2") ?? "-");
 
-        // ---- Decision: auto-run, confirm, or ask operator ---------------------
-        if (discoveryResult.Resolution == FileDiscoveryResolution.AutoUse && discoveryResult.Best is not null)
+        if (discoveryResult.Resolution == FileDiscoveryResolution.AutoUse &&
+            discoveryResult.Best is not null)
         {
-            var chosenPath = discoveryResult.Best.Candidate.Candidate.AbsolutePath;
-
-            // Same safety gates as run_pricing_job: .xlsx only, local absolute,
-            // canonical path matches.
-            if (!IsExcelPathSafe(chosenPath, out var canonical, out var unsafeReason))
-            {
-                _logger.LogWarning("core.command.pricing_path_rejected");
-                await AckAsync(PricingTerminalAck.PathRejected(unsafeReason));
-                return;
-            }
-
-            if (!await _pricingJobSemaphore.WaitAsync(TimeSpan.Zero, runToken).ConfigureAwait(false))
-            {
-                _logger.LogWarning("find_and_run_pricing_job: another pricing job is already running");
-                await AckAsync(PricingTerminalAck.Early("pricing_job_in_flight"));
-                return;
-            }
-
-            try
-            {
-                // Same gate as run_pricing_job: never start a UIA run the Broker is about to
-                // kill the Helper out from under (sentinel checked under the semaphore).
-                if (HelperRestartRequest.IsPending(HelperRestartRequest.DefaultPath(), DateTimeOffset.UtcNow))
-                {
-                    _logger.LogWarning("find_and_run_pricing_job: refused — a Helper restart is pending");
-                    await AckAsync(PricingTerminalAck.Early(
-                        "helper_restart_in_progress"));
-                    return;
-                }
-
-                var proposedSpec = new PricingJobSpec(
-                    Guid.NewGuid().ToString("N"),
-                    canonical,
-                    ndcColumn,
-                    supplierColumn,
-                    costColumn,
-                    approvalId,
-                    grantDigest);
-                var jobSpec = (_pricingJobExecutor as IRecoverablePricingJobExecutor)?
-                    .GetRecoverableSpec(proposedSpec, commandId) ?? proposedSpec;
-                if (!string.Equals(
-                        jobSpec.ApprovalId,
-                        approvalId,
-                        StringComparison.Ordinal) ||
-                    !string.Equals(
-                        jobSpec.GrantDigest,
-                        grantDigest,
-                        StringComparison.Ordinal))
-                {
-                    await AckAsync(PricingTerminalAck.Early(
-                        "pricing_job_authority_binding_invalid"));
-                    return;
-                }
-                var jobId = jobSpec.JobId;
-                if (!ReferenceEquals(jobSpec, proposedSpec) && jobSpec.JobId != proposedSpec.JobId)
-                    _logger.LogInformation("core.command.pricing_same_job_resume_admitted");
-                _pricingJobCloudUploader?.PrepareDelivery(
-                    jobSpec, commandId, null, _options.PricingExecutor);
-                if (!_stateDb.MarkPricingCommandIntentAdmitted(
-                        commandId!,
-                        PricingExecutionMode(_options.PricingExecutor),
-                        autonomyExecutionMode == AutonomyExecutionMode.Auto
-                            ? "auto"
-                            : "supervised",
-                        autonomyAdmission.Scope.ScopeDigest,
-                        autonomyAdmission.TrustedIdentity))
-                {
-                    await AckAsync(PricingTerminalAck.Early(
-                        "pricing_execution_exception"));
-                    return;
-                }
-                _logger.LogInformation("core.command.pricing_auto_run_started");
-
-                var execution = await _pricingJobExecutor.RunAsync(jobSpec, runToken);
-                autonomyExecution = execution;
-                var progress = execution.Progress;
-                var failureCode = PricingTerminalFailureCode(progress.HaltReason);
-                if (!execution.Ok)
-                {
-                    autonomyTerminalReason = "execution_terminal";
-                    autonomyRecorded = TryRecordPricingAutonomy(
-                        autonomyRunId, autonomyAdmission, execution, autonomyExecutionMode);
-                    await AckAsync(PricingTerminalAck.PricingFailed(
-                        jobId,
-                        execution.Mode,
-                        progress.TotalItems,
-                        progress.CompletedItems,
-                        progress.FailedItems,
-                        failureCode));
-                    return;
-                }
-
-                autonomyTerminalReason = "result_sync_failed";
-                var uploadReceipt = _pricingJobCloudUploader is null
-                    ? null
-                    : await _pricingJobCloudUploader.UploadAsync(
-                        jobSpec, execution, commandId, runToken).ConfigureAwait(false);
-                if (uploadReceipt?.Accepted != true)
-                {
-                    var terminalAck = PricingTerminalAckPolicy.FromResultSync(
-                        uploadReceipt,
-                        jobId,
-                        execution);
-                    if (terminalAck is not null)
-                    {
-                        await AckAsync(terminalAck);
-                        return;
-                    }
-                    _pricingTerminalAckOutbox?.MarkResultPending(commandId!);
-                    _logger.LogWarning("core.command.pricing_result_sync_deferred");
-                    return;
-                }
-
-                _pricingTerminalAckOutbox?.MarkCompleted(commandId!);
-
-                autonomyTerminalReason = "execution_terminal";
-                autonomyRecorded = TryRecordPricingAutonomy(
-                    autonomyRunId, autonomyAdmission, execution, autonomyExecutionMode);
-
-                // Receipt insertion atomically terminalizes the command. Do not
-                // introduce a second, weaker completion channel via ACK.
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                // Fire-and-forget: a throw here (SqlFirst executor's unguarded SQLite/workbook boundary)
-                // would otherwise leave the row stuck Pending with no failure ack. Always ack.
-                _logger.LogError(
-                    "find_and_run_pricing_job: unexpected failure during auto-run ({ErrorType})",
-                    ex.GetType().Name);
-                await AckAsync(PricingTerminalAck.Early(
-                    "pricing_execution_exception"));
-            }
-            finally
-            {
-                _pricingJobSemaphore.Release();
-            }
+            var outcome = await ExecutePricingPathAsync(
+                    discoveryResult.Best.Candidate.Candidate.AbsolutePath,
+                    commandId!,
+                    approvalId!,
+                    grantDigest!,
+                    autonomyExecutionMode,
+                    autonomyAdmission,
+                    autonomyRunId,
+                    AckAsync,
+                    PricingApprovalContract.CostPerUnitBasis,
+                    runToken)
+                .ConfigureAwait(false);
+            autonomyExecution = outcome.Execution;
+            autonomyRecorded = outcome.AutonomyRecorded;
+            autonomyTerminalReason = outcome.TerminalReason;
             return;
         }
 

@@ -158,8 +158,16 @@ public sealed class SystemObservationRuntimeTests
         var profile = Assert.Single(
             captured,
             item => item.Type == BehavioralEventType.StationProfile);
-        var serialized = System.Text.Json.JsonSerializer.Serialize(profile);
-        Assert.DoesNotContain(Environment.MachineName, serialized, StringComparison.OrdinalIgnoreCase);
+        using var document = System.Text.Json.JsonDocument.Parse(
+            Assert.IsType<string>(profile.TreeHash));
+        Assert.False(document.RootElement.TryGetProperty("machineName", out _));
+        var machineNameHash = Assert.IsType<string>(
+            document.RootElement.GetProperty("machineNameHash").GetString());
+        Assert.Matches("^[0-9a-f]{64}$", machineNameHash);
+        Assert.False(string.Equals(
+            Environment.MachineName,
+            machineNameHash,
+            StringComparison.OrdinalIgnoreCase));
     }
 
     [Theory]

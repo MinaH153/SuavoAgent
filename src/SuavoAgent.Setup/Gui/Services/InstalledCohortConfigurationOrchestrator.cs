@@ -15,9 +15,15 @@ internal sealed class InstalledCohortConfigurationOrchestrator
     internal sealed record PhaseEvent(Phase Phase, string Message, int? Percent = null);
 
     private readonly InstallContext _context;
+    private readonly Release1InstallReceiptWriter? _release1ReceiptWriter;
 
-    internal InstalledCohortConfigurationOrchestrator(InstallContext context) =>
+    internal InstalledCohortConfigurationOrchestrator(
+        InstallContext context,
+        Release1InstallReceiptWriter? release1ReceiptWriter = null)
+    {
         _context = context ?? throw new ArgumentNullException(nameof(context));
+        _release1ReceiptWriter = release1ReceiptWriter;
+    }
 
     internal async Task RunAsync(
         IProgress<PhaseEvent> progress,
@@ -29,6 +35,17 @@ internal sealed class InstalledCohortConfigurationOrchestrator
         progress.Report(new(Phase.Validate, "Verifying the installed signed cohort"));
         var maintenanceRoot = DefaultMaintenanceRoot();
         var coordinator = new NativeInstallCoordinator();
+        var sidecars = await Release1TrustSidecarHydrator.HydrateAsync(
+                _context.Config,
+                _context.InstallDir,
+                _context.DataDir,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!sidecars.Succeeded)
+            throw new InstallException(
+                "SuavoAgent could not retrieve and verify this install's signed release proof. " +
+                "Check the internet connection and try again. Support code: " +
+                sidecars.Code);
         if (!ValidateInstalledCohort(_context, requireCurrentInstalledHost: true))
             throw new InstallException(
                 "The installed SuavoAgent files could not be proven authentic and complete.");
@@ -103,7 +120,10 @@ internal sealed class InstalledCohortConfigurationOrchestrator
                         _context.DataDir,
                         TimeSpan.FromSeconds(90));
                 },
-                CompleteAuthority: () => CompleteAuthority(_context),
+                CompleteAuthority: () => CompleteAuthority(
+                    _context,
+                    _release1ReceiptWriter ??
+                    Release1InstallReceiptWriter.CreateProduction()),
                 AbortAuthority: () => AbortAuthority(_context)));
 
         var result = transaction.Execute();
@@ -210,8 +230,19 @@ internal sealed class InstalledCohortConfigurationOrchestrator
         return true;
     }
 
-    private static bool CompleteAuthority(InstallContext context)
+    private static bool CompleteAuthority(
+        InstallContext context,
+        Release1InstallReceiptWriter release1ReceiptWriter)
     {
+        var receipt = release1ReceiptWriter.Write(
+            context.InstallDir,
+            context.DataDir,
+            context.Config.ReleaseTag,
+            context.MachineFingerprint ?? throw new InvalidOperationException(
+                "Machine fingerprint is missing."),
+            context.Config.MaintenanceKeyId ?? throw new InvalidOperationException(
+                "Maintenance key identity is missing."));
+        if (!receipt.Succeeded) return false;
         InitialCredentialPersister.Complete(context.DataDir, context.Config);
         return true;
     }

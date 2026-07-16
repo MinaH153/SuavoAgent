@@ -383,6 +383,38 @@ public class PricingExecutorConfigTests : IDisposable
     }
 
     [Fact]
+    public async Task PricingJobRunner_ReportsOnlyFixedPhiFreeLocalPhases()
+    {
+        var updates = new List<PricingJobLocalProgress>();
+        var runner = new PricingJobRunner(
+            new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
+            new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
+            _db,
+            NullLogger<PricingJobRunner>.Instance,
+            interLookupDelay: TimeSpan.Zero,
+            trustedApprovalKeys: PricingTestAuthority.TrustedPublicKeys,
+            localProgressObserver: updates.Add);
+        var spec = NewSpec(
+            CreateInvalidNdcWorkbook(rowCount: 1),
+            "job-uia-local-progress");
+
+        await RunIpcAsync(runner, spec, new CountingNullIpcClient());
+
+        Assert.Equal(
+            new[]
+            {
+                PricingJobLocalPhase.PricingItems,
+                PricingJobLocalPhase.PricingItems,
+                PricingJobLocalPhase.CreatingSpreadsheet,
+                PricingJobLocalPhase.VerifyingResults,
+            },
+            updates.Select(update => update.Phase));
+        Assert.Equal(1, updates[^1].ProcessedItems);
+        Assert.Equal(1, updates[^1].TotalItems);
+        Assert.Equal(1, updates[^1].NeedsReviewItems);
+    }
+
+    [Fact]
     public async Task PricingJobRunner_RevocationAfterTempFlush_NeverPublishesSibling()
     {
         var issuedAt = DateTimeOffset.UtcNow;

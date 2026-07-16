@@ -5,6 +5,29 @@ starts. The exact signed artifact must pass every evidence group below.
 
 ## 1. Release identity and provenance
 
+- [ ] The Release/Hotfix workflow was manually dispatched from the exact
+      current tip of protected `main`; no tag-triggered or stale-SHA path was
+      used.
+- [ ] `suavoagent-production-signing` allows protected `main` only, requires an
+      independent reviewer, prevents self-review, and disables administrator
+      bypass.
+- [ ] Stable-tag rules restrict updates and deletions with no bypass but allow
+      creation, so draft-first publication can create the exact new tag and no
+      actor can move/delete it during validation; immutable releases are enabled.
+- [ ] All `ES_*`, Authenticode, AWS/KMS, WiX, and prerequisite values exist only
+      in the protected signing environment. Repository-level `ES_*` copies and
+      `SIGNING_KEY_PEM` are absent. Non-environment build jobs receive the
+      validated prerequisite URL only through a protected job output.
+- [ ] `suavoagent-v1-bridge-finalization` has the same review/no-bypass controls
+      and contains no signing credential or OIDC authority.
+- [ ] A reviewed in-place CloudFormation change set against existing stack
+      `SuavoAgentProductionOtaSigningV2` shows no create/import/delete/replace;
+      the exact existing OIDC provider, role, KMS key
+      `44bd84dc-8f6d-4692-b8ba-40a026db0331`, alias, policies, outputs, and key
+      retention attributes remain under the same logical and physical identities.
+- [ ] OIDC trust has three independent exact protected-main caller/called-workflow
+      pairs: bridge authorizer/bridge signer, Release/normal signer, and
+      Hotfix/normal signer. It does not admit a caller/workflow cross product.
 - [ ] Immutable `vX.Y.Z` tag and source commit recorded.
 - [ ] Release URL and artifact SHA-256 recorded.
 - [ ] `checksums.sha256` and its detached signature published and verified.
@@ -12,6 +35,26 @@ starts. The exact signed artifact must pass every evidence group below.
 - [ ] The manifest format is accepted by the oldest cohort allowed to receive
       the update; a full-cohort manifest is not enabled until the compatibility
       rollout proves support.
+- [ ] Release 1 used separate successful stage and v2 authorization runs, the
+      owner-local six-argument v1 signer consumed their exact request and
+      descriptor artifacts, and finalization bound both run IDs and attempts.
+- [ ] Stage, authorization, local signing, and finalization each re-proved the
+      same current authoritative `main`; if `main` advanced, both earlier runs
+      were discarded and repeated.
+- [ ] Before the first v2-signed release, inventory schema 2 is signed by v2,
+      every registered host has a unique enrolled P-256 device key, evidence
+      schema 3 contains the exact inventory host set and each closed machine
+      attestation verifies under its own enrolled key, and the canonical claim
+      schema 3 verifies specifically under historic v1.
+- [ ] Every machine attestation proves exact Release 1 bindings, full installer
+      reinstall, observed restart, successful v1 no-op rehearsal, and
+      PHI-negative content. A central KMS signature or legacy 11-field OTA alone
+      is not convergence.
+- [ ] Source passed exactly one allowed trust phase: `bridge-v1` (no convergence
+      artifacts), `convergence-v1` (three signed inputs and no claim outputs),
+      or `normal-v2` (all five artifacts and v2 selected).
+- [ ] `OTA_FULL_COHORT_MANIFEST` is exact lowercase `true` only after that
+      convergence proof, making the first v2 hop a 13-field full-cohort update.
 - [ ] Release and hotfix signing preflight failed closed unless the approved
       eSigner Cloud signing key credentials were present.
 - [ ] Every shipped Windows executable has a valid, timestamped Authenticode
@@ -20,13 +63,20 @@ starts. The exact signed artifact must pass every evidence group below.
 - [ ] No binary was modified after signing.
 
 Unsigned passthrough artifacts are never field, pharmacy, or Queen releases.
-The release workflow uses `sslcom/actions-codesigner` for the approved cloud
-signing operation; unsigned passthrough is not a Queen/field release.
+The release workflow uses the repository's hardened eSigner wrapper with exact
+Temurin and CodeSignTool pins for the approved cloud-signing operation; the
+deprecated container action is forbidden and unsigned passthrough is not a Queen/field release.
 
 Required release evidence includes the customer-facing **Native installer URL**,
 `checksums.sha256.sig`, `update-manifest-vX.Y.Z.sig`, and any applicable
 **Production migration evidence** (project, migration name, operator, and UTC
 deployment time).
+
+The normal-v2 gate remains **closed** until an authoritative fleet inventory
+producer, device attestation key provisioning/enrollment path, and device proof
+signing backend exist and emit real evidence. Never fabricate those files,
+reuse a device key across hosts, or substitute the central v2 KMS key for a
+device signature. See `docs/signing.md` for the exact ceremony and commands.
 
 ## 2. Build, test, and security evidence
 

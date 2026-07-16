@@ -268,6 +268,7 @@ public sealed partial class AgentStateDb
         string sourceMode;
         string? approvalId;
         string? grantDigest;
+        string costBasis;
         using (var intent = CreateCommand(transaction, """
             SELECT delivery.command_id, delivery.source_upload_id,
                    delivery.source_mode, delivery.approval_id,
@@ -277,7 +278,7 @@ public sealed partial class AgentStateDb
                    job.approval_id, job.grant_digest,
                    command_intent.pricing_approval_id,
                    command_intent.pricing_grant_digest,
-                   identity.modality
+                   identity.modality, identity.cost_basis
               FROM pricing_result_delivery_intents delivery
               JOIN pricing_jobs job ON job.job_id = delivery.job_id
               JOIN pricing_job_input_identity identity
@@ -297,6 +298,7 @@ public sealed partial class AgentStateDb
             sourceMode = reader.GetString(2);
             approvalId = reader.IsDBNull(5) ? null : reader.GetString(5);
             grantDigest = reader.IsDBNull(6) ? null : reader.GetString(6);
+            costBasis = reader.GetString(12);
             if (approvalId is null || grantDigest is null ||
                 commandId is not null &&
                  (Enumerable.Range(3, 8).Any(reader.IsDBNull) ||
@@ -318,7 +320,7 @@ public sealed partial class AgentStateDb
         var results = ReadPricingResults(transaction, jobId);
         var payload = PricingJobCloudUploader.BuildPersistedPayloadEnvelope(
             jobId, commandId, status, sourceMode, total, completed, failed,
-            results, approvalId, grantDigest);
+            results, approvalId, grantDigest, costBasis);
         var digest = Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(payload.Json))).ToLowerInvariant();
         StagePricingResultPayload(
@@ -351,6 +353,7 @@ public sealed partial class AgentStateDb
         int failed)
     {
         if ((spec.ApprovalId is null) != (spec.GrantDigest is null) ||
+            !PricingApprovalContract.IsSupportedCostBasis(spec.CostBasis) ||
             spec.ApprovalId is not null &&
             !IsCanonicalPricingApprovalId(spec.ApprovalId) ||
             spec.GrantDigest is not null &&
@@ -362,7 +365,7 @@ public sealed partial class AgentStateDb
             identity.Transaction = transaction;
             identity.CommandText = """
                 SELECT excel_path, ndc_column, supplier_column, cost_column,
-                       approval_id, grant_digest
+                       approval_id, grant_digest, cost_basis
                   FROM pricing_jobs
                  WHERE job_id = @id
                 """;
@@ -376,7 +379,8 @@ public sealed partial class AgentStateDb
                  (reader.IsDBNull(4) ? null : reader.GetString(4)) !=
                     spec.ApprovalId ||
                  (reader.IsDBNull(5) ? null : reader.GetString(5)) !=
-                    spec.GrantDigest))
+                    spec.GrantDigest ||
+                 reader.GetString(6) != spec.CostBasis))
                 throw new InvalidOperationException(
                     "pricing_job_spec_identity_conflict");
         }
@@ -386,11 +390,11 @@ public sealed partial class AgentStateDb
         command.CommandText = """
             INSERT INTO pricing_jobs (
                 job_id, excel_path, ndc_column, supplier_column, cost_column,
-                approval_id, grant_digest,
+                approval_id, grant_digest, cost_basis,
                 status, total_items, completed_items, failed_items, updated_at
             ) VALUES (
                 @id, @path, @ndc, @supplier, @cost,
-                @approval, @grant,
+                @approval, @grant, @basis,
                 @status, @total, @completed, @failed, datetime('now')
             ) ON CONFLICT(job_id) DO UPDATE SET
                 status = excluded.status,
@@ -408,6 +412,7 @@ public sealed partial class AgentStateDb
             "@approval", (object?)spec.ApprovalId ?? DBNull.Value);
         command.Parameters.AddWithValue(
             "@grant", (object?)spec.GrantDigest ?? DBNull.Value);
+        command.Parameters.AddWithValue("@basis", spec.CostBasis);
         command.Parameters.AddWithValue("@status", status);
         command.Parameters.AddWithValue("@total", total);
         command.Parameters.AddWithValue("@completed", completed);
@@ -423,7 +428,8 @@ public sealed partial class AgentStateDb
         command.Transaction = transaction;
         command.CommandText = """
             SELECT job_id, row_index, ndc, found, supplier_name, cost_per_unit,
-                   baseline_cost_per_unit, quantity, error_message, observations_json,
+                   package_cost, cost_basis, baseline_cost_per_unit, quantity,
+                   error_message, observations_json,
                    omitted_selector_observations
               FROM pricing_results
              WHERE job_id = @job
@@ -441,14 +447,16 @@ public sealed partial class AgentStateDb
                 reader.GetInt32(3) == 1,
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : (decimal)reader.GetDouble(5),
-                reader.IsDBNull(8) ? null : reader.GetString(8),
-                reader.IsDBNull(9)
+                reader.IsDBNull(10) ? null : reader.GetString(10),
+                reader.IsDBNull(11)
                     ? null
                     : JsonSerializer.Deserialize<List<SelectorObservation>>(
-                        reader.GetString(9)),
+                        reader.GetString(11)),
+                reader.IsDBNull(8) ? null : (decimal)reader.GetDouble(8),
+                reader.IsDBNull(9) ? null : (decimal)reader.GetDouble(9),
+                reader.GetInt32(12),
                 reader.IsDBNull(6) ? null : (decimal)reader.GetDouble(6),
-                reader.IsDBNull(7) ? null : (decimal)reader.GetDouble(7),
-                reader.GetInt32(10)));
+                reader.GetString(7)));
         }
         return results;
     }

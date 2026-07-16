@@ -60,6 +60,32 @@ public class ExcelTop500WriterTests : IDisposable
         Assert.Equal("00093512401", result.Rows[0].NdcNormalized);
     }
 
+    [Fact]
+    public void Atomic_publication_is_readable_and_never_overwrites_command_output()
+    {
+        var first = new[]
+        {
+            new TopDispensedRow("Metformin", "500 mg", "00093512401", 900m),
+        };
+        var replacement = new[]
+        {
+            new TopDispensedRow("Atorvastatin", "40 mg", "60505258008", 1m),
+        };
+        var path = Path.Combine(_tempDir, "command-id.xlsx");
+        var writer = new ExcelTop500Writer(
+            NullLogger<ExcelTop500Writer>.Instance);
+
+        Assert.True(writer.WriteAtomically(path, first));
+        Assert.False(writer.WriteAtomically(path, replacement));
+        Assert.Empty(Directory.GetFiles(_tempDir, ".*.tmp.xlsx"));
+
+        var result = new ExcelPricingReader(
+            NullLogger<ExcelPricingReader>.Instance).Read(path, "NDC");
+        Assert.True(result.Success, result.Error);
+        Assert.Single(result.Rows);
+        Assert.Equal("00093512401", result.Rows[0].NdcNormalized);
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_tempDir, recursive: true); } catch { /* best effort */ }

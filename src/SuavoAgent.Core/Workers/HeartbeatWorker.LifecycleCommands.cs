@@ -204,7 +204,10 @@ public sealed partial class HeartbeatWorker
                 return;
             }
 
-            if (receipt.State is "staged" or "confirmed")
+            var isSameVersion = UpdateActivationContract.VersionsEquivalent(
+                manifest.Version,
+                _options.Version);
+            if (!isSameVersion && receipt.State is "staged" or "confirmed")
             {
                 WriteUpdateHealthEvidence(
                     receipt.State == "confirmed" ? "current" : "staged_for_system_activation",
@@ -212,16 +215,17 @@ public sealed partial class HeartbeatWorker
                 return;
             }
 
-            if (UpdateActivationContract.VersionsEquivalent(manifest.Version, _options.Version))
+            if (isSameVersion)
             {
-                _logger.LogDebug("Already running v{Version} — skipping update", manifest.Version);
-                WriteUpdateHealthEvidence(
-                    "current",
-                    targetVersion,
-                    lastErrorKind: null,
-                    consecutiveFailures: 0,
-                    channel: targetChannel);
-                _stateDb.MarkUpdateCommandReceipt(commandId, "confirmed");
+                HandleSameVersionUpdate(
+                    dataEl,
+                    manifest,
+                    manifestStr,
+                    signatureHex,
+                    commandId,
+                    command,
+                    receipt.State,
+                    targetChannel);
                 return;
             }
 
