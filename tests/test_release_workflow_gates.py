@@ -150,6 +150,16 @@ class ReleaseWorkflowGateTests(unittest.TestCase):
         stage = workflow("v1-bridge-stage.yml")
         source_gate = job_block(stage, "source-gate")
         self.assertIn('[[ "$GITHUB_REF_PROTECTED" == "true" ]]', source_gate)
+        self.assertEqual(
+            stage.count("actions/checkout@"),
+            stage.count("ref: ${{ github.sha }}"),
+            "release-stage code must never be checked out from a dispatch input",
+        )
+        self.assertNotIn("ref: ${{ inputs.source_sha }}", stage)
+        finalizer = workflow("v1-bridge-finalize.yml")
+        resmoke = job_block(finalizer, "windows-resmoke")
+        self.assertIn("ref: ${{ github.sha }}", resmoke)
+        self.assertNotIn("ref: ${{ needs.verify-stage-response.outputs.source_sha }}", resmoke)
         for job_name in ("sign-windows", "sign-msi", "sign-bundle"):
             with self.subTest(workflow="v1-bridge-stage.yml", job=job_name):
                 signing = job_block(stage, job_name)
