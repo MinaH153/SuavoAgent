@@ -243,6 +243,21 @@ public sealed class LearnedPmsAdapterBoundaryTests
     }
 
     [Fact]
+    public void ConnectionString_ForcesEncryptionAndCertificateValidationAfterCallerValues()
+    {
+        using var adapter = Adapter(
+            connectionString: "Server=127.0.0.1,1;Database=none;Encrypt=False;TrustServerCertificate=True");
+        var field = typeof(LearnedPmsAdapter).GetField(
+            "_connectionString",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(field);
+        var parsed = new SqlConnectionStringBuilder((string)field!.GetValue(adapter)!);
+        Assert.True(parsed.Encrypt);
+        Assert.False(parsed.TrustServerCertificate);
+    }
+
+    [Fact]
     public async Task PullReady_PreCancelledRequestPropagatesCancellation()
     {
         using var adapter = Adapter();

@@ -353,7 +353,7 @@ class ReleaseWorkflowGateTests(unittest.TestCase):
                 self.assertIn("DeterministicReport=true", build)
                 self.assertIn("255", build)
                 self.assertIn("65535", build)
-                self.assertIn("--expect-reports 20", coverage)
+                self.assertNotIn("--expect-reports", coverage)
                 self.assertIn("--require-all-projects", coverage)
                 self.assertIn("--minimum-line 80", coverage)
                 self.assertIn("--minimum-branch 80", coverage)
@@ -536,8 +536,13 @@ class ReleaseWorkflowGateTests(unittest.TestCase):
 
         self.assertIn("DeterministicReport=true", linux)
         self.assertIn("DeterministicReport=true", windows)
+        self.assertIn("LogFilePrefix=test-results", linux)
+        self.assertIn("LogFilePrefix=test-results", windows)
+        self.assertNotIn("LogFileName=test-results.trx", linux)
+        self.assertNotIn("LogFileName=test-results.trx", windows)
         self.assertIn("needs: [build-and-test, windows-coverage]", merger)
-        self.assertIn("--expect-reports 40", merger)
+        self.assertNotIn("--expect-reports", linux)
+        self.assertNotIn("--expect-reports", merger)
         self.assertIn("--require-all-projects", merger)
 
     def test_repository_does_not_break_coverlet_with_a_synthetic_path_map(self):

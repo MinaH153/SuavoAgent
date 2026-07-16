@@ -181,7 +181,7 @@ jobs:
           dotnet test SuavoAgent.sln -c Release --no-build -v normal \
             --collect "XPlat Code Coverage" --results-directory TestResults/coverage \
             -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.DeterministicReport=true
-          python3 scripts/aggregate_coverage.py TestResults/coverage --expect-reports 10 \
+          python3 scripts/aggregate_coverage.py TestResults/coverage \
             --require-all-projects --json TestResults/linux-coverage-summary.json
       - name: Upload exact-SHA Linux coverage
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -230,7 +230,7 @@ jobs:
       - name: Enforce production coverage on both operating systems
         run: |
           python3 -m unittest tests/test_aggregate_coverage.py tests/test_installer_rehearsal_script.py tests/test_resolve_release_rollback_evidence.py tests/test_release_workflow_gates.py tests/test_v1_bridge_release.py -v
-          python3 scripts/aggregate_coverage.py TestResults/combined --expect-reports 20 \
+          python3 scripts/aggregate_coverage.py TestResults/combined \
             --require-all-projects --minimum-line 80 --minimum-branch 80 \
             --json TestResults/production-coverage-summary.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -66,12 +66,7 @@ public sealed class LearnedPmsAdapter : ILocalPmsAdapter, IDisposable
         string rxNumberDataType = "nvarchar")
     {
         PmsName = pmsName;
-        var sqlConnection = new SqlConnectionStringBuilder(connectionString)
-        {
-            Encrypt = true,
-            TrustServerCertificate = false,
-        };
-        _connectionString = sqlConnection.ConnectionString;
+        _connectionString = RequireEncryptedConnectionString(connectionString);
         DetectionQuery = detectionQuery;
         StatusParameters = statusParameters;
         DetectionValidationQuery = detectionValidationQuery;
@@ -377,6 +372,16 @@ public sealed class LearnedPmsAdapter : ILocalPmsAdapter, IDisposable
     {
         _conn?.Dispose();
         _conn = null;
+    }
+
+    private static string RequireEncryptedConnectionString(string connectionString)
+    {
+        var parsed = new SqlConnectionStringBuilder(connectionString);
+        parsed.Remove("Encrypt");
+        parsed.Remove("TrustServerCertificate");
+
+        // This suffix is last so caller-provided downgrade flags cannot override it.
+        return parsed.ConnectionString + ";Encrypt=True;TrustServerCertificate=False";
     }
 
     private void ThrowIfDisposed() =>

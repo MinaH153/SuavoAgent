@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -383,6 +384,14 @@ class V1BridgeReleaseTests(unittest.TestCase):
         existing.write_text("occupied", encoding="ascii")
         with self.assertRaises(bridge.BridgeError):
             bridge.local_sign(self.fixture.local_arguments(response_json=existing))
+
+    def test_local_signing_responses_are_owner_only(self) -> None:
+        arguments = self.fixture.local_arguments()
+        bridge.local_sign(arguments)
+
+        for path in (arguments.response_json, arguments.response_b64):
+            with self.subTest(path=path.name):
+                self.assertEqual(0, stat.S_IMODE(path.stat().st_mode) & 0o077)
 
     def test_successful_stage_finalization_is_not_replayable(self) -> None:
         runs = self.fixture.root / "runs.json"

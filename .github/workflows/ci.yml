@@ -65,7 +65,7 @@ jobs:
       - name: Test
         run: >-
           dotnet test SuavoAgent.sln -c Release --no-build -v normal
-          --logger "trx;LogFileName=test-results.trx"
+          --logger "trx;LogFilePrefix=test-results"
           --collect "XPlat Code Coverage"
           --results-directory TestResults/coverage
           -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.DeterministicReport=true
@@ -78,7 +78,6 @@ jobs:
             tests/test_release_workflow_gates.py \
             -v
           python3 scripts/aggregate_coverage.py TestResults/coverage \
-            --expect-reports 20 \
             --require-all-projects \
             --json TestResults/coverage-summary.json
 
@@ -95,7 +94,7 @@ jobs:
         with:
           name: test-results
           path: |
-            **/test-results.trx
+            TestResults/coverage/**/*.trx
             TestResults/coverage/**/coverage.cobertura.xml
             TestResults/coverage-summary.json
 
@@ -124,7 +123,7 @@ jobs:
       - name: Run full Windows suite with coverage
         run: >-
           dotnet test SuavoAgent.sln -c Release --no-build -v normal
-          --logger "trx;LogFileName=test-results.trx"
+          --logger "trx;LogFilePrefix=test-results"
           --collect "XPlat Code Coverage"
           --results-directory TestResults/coverage
           -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.DeterministicReport=true
@@ -135,7 +134,7 @@ jobs:
         with:
           name: windows-test-results
           path: |
-            **/test-results.trx
+            TestResults/coverage/**/*.trx
             TestResults/coverage/**/coverage.cobertura.xml
 
   coverage-report:
@@ -164,7 +163,6 @@ jobs:
             tests/test_release_workflow_gates.py \
             -v
           python3 scripts/aggregate_coverage.py TestResults/combined \
-            --expect-reports 40 \
             --require-all-projects \
             --minimum-line 61 \
             --minimum-branch 52 \

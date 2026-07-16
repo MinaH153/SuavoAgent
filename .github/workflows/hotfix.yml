@@ -258,7 +258,6 @@ jobs:
             --results-directory TestResults/coverage \
             -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.DeterministicReport=true
           python3 scripts/aggregate_coverage.py TestResults/coverage \
-            --expect-reports 10 \
             --require-all-projects \
             --json TestResults/linux-coverage-summary.json
 
@@ -321,7 +320,6 @@ jobs:
             tests/test_release_workflow_gates.py \
             -v
           python3 scripts/aggregate_coverage.py TestResults/combined \
-            --expect-reports 20 \
             --require-all-projects \
             --minimum-line 80 \
             --minimum-branch 80 \

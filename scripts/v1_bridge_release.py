@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
 from typing import Any
@@ -119,10 +120,14 @@ def _read_regular(path: Path, maximum_bytes: int, label: str) -> bytes:
         return read_regular_once(path, maximum_bytes, label)
     except SecureFileError as error:
         raise BridgeError(str(error)) from error
-def _exclusive_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+def _exclusive_write(path: Path, data: bytes) -> None:
     if path.exists() or path.is_symlink():
         raise BridgeError(f"output already exists: {path}")
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        stat.S_IRUSR | stat.S_IWUSR,
+    )
     try:
         with os.fdopen(descriptor, "wb") as output:
             output.write(data)
@@ -616,9 +621,9 @@ def local_sign(arguments: argparse.Namespace) -> None:
     }
     response_raw = _canonical_json(response)
     response_b64 = base64.b64encode(response_raw) + b"\n"
-    _exclusive_write(arguments.response_json, response_raw, 0o644)
+    _exclusive_write(arguments.response_json, response_raw)
     try:
-        _exclusive_write(arguments.response_b64, response_b64, 0o644)
+        _exclusive_write(arguments.response_b64, response_b64)
     except BaseException:
         arguments.response_json.unlink(missing_ok=True)
         raise
