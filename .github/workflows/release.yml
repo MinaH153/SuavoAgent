@@ -118,6 +118,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Enforce native production and customer boundary
         run: bash scripts/verify-production-shell-boundary.sh
 

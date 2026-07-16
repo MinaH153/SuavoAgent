@@ -151,8 +151,8 @@ public sealed class NavigateLlmReasoningTests
         var ctx = NavigateReasoning.BuildContext(objective, memory);
 
         // (1) The loop's multi-step working memory is threaded into the reasoning context.
-        Assert.True(ctx.Flags.ContainsKey("prior_actions"));
-        Assert.Contains("press_keys", ctx.Flags["prior_actions"]);
+        Assert.NotNull(ctx.LocalReasoningTranscript);
+        Assert.Contains("press_keys", ctx.LocalReasoningTranscript);
 
         var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Click", "Type", "PressKey" };
         var proposal = await llm.ProposeAsync(new InferenceRequest
@@ -227,8 +227,8 @@ public sealed class NavigateLlmReasoningTests
         var memory = ContextAccumulator.RecordObservation(m2, screen);
 
         var ctx = NavigateReasoning.BuildContext(objective, memory);
-        Assert.True(ctx.Flags.ContainsKey("prior_actions"));
-        Assert.Contains("press_keys", ctx.Flags["prior_actions"]);
+        Assert.NotNull(ctx.LocalReasoningTranscript);
+        Assert.Contains("press_keys", ctx.LocalReasoningTranscript);
 
         var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Click", "Type", "PressKey" };
         var proposal = await llm.ProposeAsync(new InferenceRequest

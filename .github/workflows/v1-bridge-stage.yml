@@ -36,6 +36,9 @@ jobs:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
 
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Prove exact protected Release 1 source and configuration
         id: gate
         env:
