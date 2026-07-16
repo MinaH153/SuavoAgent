@@ -19,7 +19,7 @@ namespace SuavoAgent.Core.Tests.Mission;
 public sealed class ClickBySignatureVerbTests
 {
     private static Dictionary<string, object?> Params(
-        string? automationId = "saveBtn", string? controlType = "Button", string? processName = "notepad") =>
+        string? automationId = "saveBtn", string? controlType = "Button", string? processName = "calc.exe") =>
         new() { ["automationId"] = automationId, ["controlType"] = controlType, ["process_name"] = processName };
 
     [Fact]

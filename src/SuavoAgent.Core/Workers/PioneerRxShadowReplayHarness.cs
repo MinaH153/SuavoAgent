@@ -106,16 +106,12 @@ internal sealed class PioneerRxShadowReplayHarness
         EnsureAbsent(candidateJson, _forbiddenInCandidate, "forbiddenInCandidate");
         EnsureAbsent(payloadJson, _forbiddenEverywhere, "forbiddenEverywhere");
 
-        if (includeLegacyDeliveryQueue)
-        {
-            EnsureAbsent(candidateJson, _minimumNecessaryInQueue, "minimumNecessaryInCandidate");
-            EnsurePresent(queueJson, _minimumNecessaryInQueue, "minimumNecessaryInQueue");
-        }
-        else
-        {
-            EnsureAbsent(payloadJson, _forbiddenInCandidate, "forbiddenInCandidate");
-            EnsureAbsent(payloadJson, _minimumNecessaryInQueue, "minimumNecessaryInQueue");
-        }
+        // The legacy switch is permanently inert. Raw medication names and every token that old
+        // fixtures classified as "minimum necessary in queue" must now be absent in both modes.
+        EnsureAbsent(payloadJson, _forbiddenInCandidate, "forbiddenInCandidate");
+        EnsureAbsent(payloadJson, _minimumNecessaryInQueue, "retiredLegacyQueueTokens");
+        if (queuePresent)
+            throw new InvalidOperationException("Legacy rxDeliveryQueue unexpectedly reappeared.");
 
         var candidates = data.GetProperty("rxOrderCandidates").EnumerateArray().ToArray();
         var evidenceIds = candidates

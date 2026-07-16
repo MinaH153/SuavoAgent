@@ -25,7 +25,7 @@ public class VcRedistPreflightTests
             providerFactory: () => throw new System.Exception("must not download when already present"),
             installer: new VcRedistInstaller(runProcess: (_, _, _) => Task.FromResult(0)));
 
-        var outcome = await preflight.EnsureAsync(System.IO.Path.GetTempPath(), CancellationToken.None);
+        var outcome = await preflight.EnsureAsync(CancellationToken.None);
 
         Assert.Equal(VcRedistPreflightState.AlreadyPresent, outcome.State);
     }
@@ -35,6 +35,9 @@ public class VcRedistPreflightTests
     {
         var installed = false;
         var checker = new VcRedistChecker(fileExists: _ => installed, readRegistryVersion: () => null);
+        var staging = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(),
+            "suavo-vc-preflight-" + System.Guid.NewGuid().ToString("N"));
         var preflight = new VcRedistPreflight(
             checker: checker,
             providerFactory: () => new VcRedistProvider(
@@ -43,10 +46,22 @@ public class VcRedistPreflightTests
                 System.Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(new byte[] { 1, 2, 3 })).ToLowerInvariant()),
             installer: new VcRedistInstaller(
                 runProcess: (_, _, _) => { installed = true; return Task.FromResult(0); },
-                checker: checker));
+                checker: checker,
+                verifyBeforeLaunch: _ => true),
+            createStagingDirectory: () =>
+            {
+                System.IO.Directory.CreateDirectory(staging);
+                return staging;
+            },
+            protectAndVerifyExecutable: (_, _) => true,
+            cleanupStagingDirectory: (directory, _) =>
+                System.IO.Directory.Delete(directory, recursive: true));
 
-        var outcome = await preflight.EnsureAsync(System.IO.Path.GetTempPath(), CancellationToken.None);
+        var outcome = await preflight.EnsureAsync(CancellationToken.None);
 
-        Assert.Equal(VcRedistPreflightState.Installed, outcome.State);
+        Assert.True(
+            outcome.State == VcRedistPreflightState.Installed,
+            outcome.Detail);
+        Assert.False(System.IO.Directory.Exists(staging));
     }
 }

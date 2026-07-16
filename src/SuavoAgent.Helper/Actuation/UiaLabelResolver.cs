@@ -39,7 +39,12 @@ public sealed class UiaLabelResolver : IDisposable
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<UiaLabelResolver>();
     }
 
-    public ResolvedTarget? Resolve(string label, string processName, MatchMode mode, TimeSpan timeout)
+    public ResolvedTarget? Resolve(
+        string label,
+        string processName,
+        MatchMode mode,
+        TimeSpan timeout,
+        Func<int, bool>? processGuard = null)
     {
         if (string.IsNullOrWhiteSpace(label) || string.IsNullOrWhiteSpace(processName))
             return null;
@@ -62,6 +67,7 @@ public sealed class UiaLabelResolver : IDisposable
                 {
                     foreach (var proc in procs)
                     {
+                        if (processGuard is not null && !processGuard(proc.Id)) continue;
                         var resolved = TryResolveInProcess(proc, label, mode);
                         if (resolved is not null)
                         {
@@ -78,9 +84,8 @@ public sealed class UiaLabelResolver : IDisposable
             Thread.Sleep(150);
         }
 
-        _logger.Warning("UiaLabelResolver: '{Label}' not found in '{Process}' within {TimeoutMs}ms",
-            label, processName, (int)timeout.TotalMilliseconds);
-        LogAvailableNames(candidates, processName, label);
+        _logger.Warning("UiaLabelResolver did not find the requested target within {TimeoutMs}ms",
+            (int)timeout.TotalMilliseconds);
         return null;
     }
 
@@ -99,11 +104,11 @@ public sealed class UiaLabelResolver : IDisposable
 
             var cx = (int)(rect.Left + rect.Width / 2);
             var cy = (int)(rect.Top + rect.Height / 2);
-            return new ResolvedTarget(cx, cy, label, proc.ProcessName, proc.Id);
+            return new ResolvedTarget(cx, cy, "structural_target", "approved_target", proc.Id);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.Debug(ex, "UiaLabelResolver: resolve failed for pid={Pid}", proc.Id);
+            _logger.Debug("UiaLabelResolver failed while reading an approved UI tree");
             return null;
         }
     }
@@ -235,7 +240,13 @@ public sealed class UiaLabelResolver : IDisposable
     /// against a workflow-supplied <c>expected</c> (not the locator), so reading Name is correct here.
     /// Returns null when the element or a value cannot be read within the timeout.
     /// </summary>
-    public string? ReadElementValue(string processName, string? automationId, string? name, string? controlType, TimeSpan timeout)
+    public string? ReadElementValue(
+        string processName,
+        string? automationId,
+        string? name,
+        string? controlType,
+        TimeSpan timeout,
+        Func<int, bool>? processGuard = null)
     {
         if (string.IsNullOrWhiteSpace(processName)) return null;
         var deadline = DateTimeOffset.UtcNow + timeout;
@@ -252,6 +263,7 @@ public sealed class UiaLabelResolver : IDisposable
                 {
                     foreach (var proc in procs)
                     {
+                        if (processGuard is not null && !processGuard(proc.Id)) continue;
                         try
                         {
                             var window = ResolveWindow(proc);
@@ -327,7 +339,10 @@ public sealed class UiaLabelResolver : IDisposable
     /// (developer-assigned, not PHI) + accessible name (PHI-SCRUBBED via PhiPatternGuard + length-
     /// capped). Only elements with an automationId or a name are returned; capped at <paramref name="max"/>.
     /// </summary>
-    public IReadOnlyList<DiscoveredElement> DiscoverElements(string processName, int max)
+    public IReadOnlyList<DiscoveredElement> DiscoverElements(
+        string processName,
+        int max,
+        Func<int, bool>? processGuard = null)
     {
         var found = new List<DiscoveredElement>();
         if (string.IsNullOrWhiteSpace(processName)) return found;
@@ -342,6 +357,7 @@ public sealed class UiaLabelResolver : IDisposable
             {
                 foreach (var proc in procs)
                 {
+                    if (processGuard is not null && !processGuard(proc.Id)) continue;
                     AutomationElement? window;
                     try { window = ResolveWindow(proc); } catch { continue; }
                     if (window is null) continue;
@@ -376,7 +392,22 @@ public sealed class UiaLabelResolver : IDisposable
 
     private static string SafeAutomationId(AutomationElement e)
     {
-        try { return e.AutomationId ?? string.Empty; } catch { return string.Empty; }
+        try { return SanitizeAutomationId(e.AutomationId); } catch { return string.Empty; }
+    }
+
+    internal static string SanitizeAutomationId(string? automationId)
+    {
+        if (string.IsNullOrEmpty(automationId) || automationId.Length > 128) return string.Empty;
+        if (!char.IsAsciiLetter(automationId[0])) return string.Empty;
+        foreach (var ch in automationId)
+        {
+            if (!(char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-' or '.' or ':')) return string.Empty;
+        }
+        var digitCount = automationId.Count(char.IsDigit);
+        if (digitCount > 4 || automationId.Contains("guid", StringComparison.OrdinalIgnoreCase))
+            return string.Empty;
+        if (PhiPatternGuard.ContainsPotentialPhi(automationId, out _)) return string.Empty;
+        return automationId;
     }
 
     // Accessible names can carry PHI on a real PMS — drop any name that matches a PHI pattern, and
@@ -384,51 +415,24 @@ public sealed class UiaLabelResolver : IDisposable
     // "Document") pass through.
     private static string ScrubName(string? name)
     {
-        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
-        if (PhiPatternGuard.ContainsPotentialPhi(name, out _)) return string.Empty;
-        var trimmed = name.Trim();
-        return trimmed.Length > 48 ? trimmed[..48] : trimmed;
+        _ = name;
+        return string.Empty;
     }
 
     /// <summary>
-    /// Discovery aid: when a label can't be resolved, log the accessible names ACTUALLY present so the
-    /// real control names are visible instead of guessed. Names are PHI-scrubbed (PhiPatternGuard) and
-    /// this writes to the LOCAL log only — never cloud telemetry — so it is safe on a PMS box. Capped
-    /// to keep the line bounded. This is the "name the field you blocked" principle applied to UIA.
+    /// Legacy diagnostic hook retained as a no-op. Accessible UI names are never logged because a
+    /// pattern filter cannot prove that arbitrary PMS text is free of PHI.
     /// </summary>
-    private void LogAvailableNames(IReadOnlyList<string> candidates, string processName, string label)
+    private void LogAvailableNames(
+        IReadOnlyList<string> candidates,
+        string processName,
+        string label,
+        Func<int, bool>? processGuard)
     {
-        try
-        {
-            foreach (var candidate in candidates)
-            {
-                var procs = Process.GetProcessesByName(candidate);
-                try
-                {
-                    foreach (var proc in procs)
-                    {
-                        var window = ResolveWindow(proc);
-                        if (window is null) continue;
-                        var names = window.FindAllDescendants()
-                            .Select(SafeName)
-                            .Where(n => !string.IsNullOrWhiteSpace(n)
-                                && !PhiPatternGuard.ContainsPotentialPhi(n!, out _))
-                            .Distinct()
-                            .Take(80)
-                            .ToArray();
-                        _logger.Warning(
-                            "UiaLabelResolver discovery: '{Label}' absent; {Count} PHI-safe named elements in '{Process}': [{Names}]",
-                            label, names.Length, processName, string.Join(" | ", names));
-                        return; // one window is enough
-                    }
-                }
-                finally { foreach (var p in procs) p.Dispose(); }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.Debug(ex, "UiaLabelResolver: discovery dump failed");
-        }
+        _ = candidates;
+        _ = processName;
+        _ = label;
+        _ = processGuard;
     }
 
     public void Dispose()

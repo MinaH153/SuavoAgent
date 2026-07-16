@@ -8,7 +8,7 @@ namespace SuavoAgent.Setup.Tests;
 /// ConsentReceiptData serializes to the schema HeartbeatWorker uploads on first
 /// heartbeat. Any drift between these tests and the upload contract breaks
 /// cloud intake for every new pharmacy. Keep the field list in lockstep with
-/// <c>bootstrap.ps1</c>'s consentReceipt hashtable.
+/// the signed native installer's consent receipt.
 /// </summary>
 public sealed class ConsentReceiptDataTests
 {
@@ -32,7 +32,7 @@ public sealed class ConsentReceiptDataTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("1.0", root.GetProperty("consentVersion").GetString());
+        Assert.Equal("2.0", root.GetProperty("consentVersion").GetString());
         Assert.Equal("CA", root.GetProperty("businessState").GetString());
         Assert.False(root.GetProperty("mandatoryNoticeState").GetBoolean());
         Assert.True(root.GetProperty("termsAccepted").GetBoolean());

@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using SuavoAgent.Contracts.Pricing;
@@ -14,10 +15,14 @@ namespace SuavoAgent.Adapters.PioneerRx.Pricing;
 /// </summary>
 public sealed class SqlSupplierPriceLookup : ISupplierPriceLookup
 {
-    private readonly DiscoveredPricingSchema _schema;
+    public const string InvalidNdcCode = "pricing_ndc_invalid";
+
     private readonly Func<CancellationToken, Task<SqlConnection>> _connectionFactory;
     private readonly ILogger<SqlSupplierPriceLookup> _logger;
     private readonly string _query;
+    private readonly IReadOnlyList<string> _eligibleStatuses;
+    private readonly PricingSqlColumnShape _ndcShape;
+    private readonly PricingSqlColumnShape _statusShape;
 
     // Per-query timeout must be short — 500 NDCs × 2s = 1000s ceiling, well under the UIA path.
     private const int CommandTimeoutSeconds = 5;
@@ -27,16 +32,27 @@ public sealed class SqlSupplierPriceLookup : ISupplierPriceLookup
         Func<CancellationToken, Task<SqlConnection>> connectionFactory,
         ILogger<SqlSupplierPriceLookup> logger)
     {
-        _schema = schema ?? throw new ArgumentNullException(nameof(schema));
+        ArgumentNullException.ThrowIfNull(schema);
         _connectionFactory = connectionFactory ?? throw new ArgumentNullException(nameof(connectionFactory));
         _logger = logger;
-        _query = SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema);
+
+        // Snapshot the mutable IReadOnlyList implementation before query construction so the SQL
+        // placeholder count and the values bound at execution can never diverge after admission.
+        var statusSnapshot = schema.AvailableStatusValues?.ToArray()
+            ?? throw new InvalidOperationException(SqlPricingQueryBuilder.StatusEligibilityUnresolvedCode);
+        var schemaSnapshot = schema with { AvailableStatusValues = statusSnapshot };
+        _eligibleStatuses = SqlPricingQueryBuilder.GetValidatedEligibleStatuses(schemaSnapshot);
+        (_ndcShape, _statusShape) = SqlPricingQueryBuilder.GetValidatedFilterShapes(
+            schemaSnapshot,
+            _eligibleStatuses);
+        _query = SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schemaSnapshot);
     }
 
     public async Task<SupplierPriceResult> FindCheapestSupplierAsync(
         string jobId, int rowIndex, string ndc11, CancellationToken ct)
     {
-        ArgumentException.ThrowIfNullOrEmpty(ndc11);
+        if (!IsCanonicalNdc11(ndc11))
+            return Miss(jobId, rowIndex, ndc11 ?? string.Empty, InvalidNdcCode);
 
         try
         {
@@ -44,7 +60,7 @@ public sealed class SqlSupplierPriceLookup : ISupplierPriceLookup
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = _query;
             cmd.CommandTimeout = CommandTimeoutSeconds;
-            cmd.Parameters.Add(new SqlParameter(SqlPricingQueryBuilder.NdcParameter, ndc11));
+            BindQueryParameters(cmd, ndc11, _eligibleStatuses, _ndcShape, _statusShape);
 
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             if (!await reader.ReadAsync(ct))
@@ -66,15 +82,15 @@ public sealed class SqlSupplierPriceLookup : ISupplierPriceLookup
         {
             throw;
         }
-        catch (SqlException ex)
+        catch (SqlException)
         {
-            _logger.LogWarning(ex, "SqlSupplierPriceLookup: SQL error for NDC {Ndc}", ndc11);
-            return Miss(jobId, rowIndex, ndc11, $"SQL error {ex.Number}: {ex.Message}");
+            _logger.LogWarning("SqlSupplierPriceLookup: SQL operation failed");
+            return Miss(jobId, rowIndex, ndc11, "SQL operation failed");
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.LogWarning(ex, "SqlSupplierPriceLookup: unhandled error for NDC {Ndc}", ndc11);
-            return Miss(jobId, rowIndex, ndc11, ex.Message);
+            _logger.LogWarning("SqlSupplierPriceLookup: lookup failed locally");
+            return Miss(jobId, rowIndex, ndc11, "Supplier lookup failed locally");
         }
     }
 
@@ -95,6 +111,46 @@ public sealed class SqlSupplierPriceLookup : ISupplierPriceLookup
             int i => i,
             _ => null,
         };
+    }
+
+    private static bool IsCanonicalNdc11(string? value)
+    {
+        if (value is not { Length: 11 }) return false;
+        foreach (var character in value)
+        {
+            if (character is < '0' or > '9') return false;
+        }
+        return true;
+    }
+
+    internal static void BindQueryParameters(
+        SqlCommand command,
+        string ndc11,
+        IReadOnlyList<string> eligibleStatuses,
+        PricingSqlColumnShape ndcShape,
+        PricingSqlColumnShape statusShape)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(eligibleStatuses);
+
+        if (!PricingSqlTypePolicy.TryAddClassificationParameter(
+                command,
+                SqlPricingQueryBuilder.NdcParameter,
+                ndc11,
+                ndcShape,
+                SqlPricingQueryBuilder.MaximumNdcColumnSize))
+            throw new InvalidOperationException(SqlPricingQueryBuilder.ColumnTypeUnresolvedCode);
+
+        for (int i = 0; i < eligibleStatuses.Count; i++)
+        {
+            if (!PricingSqlTypePolicy.TryAddClassificationParameter(
+                    command,
+                    SqlPricingQueryBuilder.StatusParameterName(i),
+                    eligibleStatuses[i],
+                    statusShape,
+                    SqlPricingQueryBuilder.MaximumStatusColumnSize))
+                throw new InvalidOperationException(SqlPricingQueryBuilder.ColumnTypeUnresolvedCode);
+        }
     }
 
     private static SupplierPriceResult Miss(string jobId, int rowIndex, string ndc, string reason) =>

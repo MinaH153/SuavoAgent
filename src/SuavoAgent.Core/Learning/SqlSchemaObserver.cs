@@ -14,6 +14,8 @@ public sealed class SqlSchemaObserver : ILearningObserver
 {
     private readonly AgentStateDb _db;
     private readonly string _pharmacySalt;
+    private readonly bool _trustServerCertificate;
+    private readonly string? _serverCertificateSha256;
     private readonly ILogger _logger;
     private volatile bool _running;
     private int _eventsCollected;
@@ -23,11 +25,18 @@ public sealed class SqlSchemaObserver : ILearningObserver
     public string Name => "sql";
     public ObserverPhase ActivePhases => ObserverPhase.Discovery | ObserverPhase.Pattern | ObserverPhase.Model;
 
-    public SqlSchemaObserver(AgentStateDb db, string pharmacySalt, ILogger<SqlSchemaObserver> logger)
+    public SqlSchemaObserver(
+        AgentStateDb db,
+        string pharmacySalt,
+        ILogger<SqlSchemaObserver> logger,
+        bool trustServerCertificate = false,
+        string? serverCertificateSha256 = null)
     {
         _db = db;
         _pharmacySalt = pharmacySalt;
         _logger = logger;
+        _trustServerCertificate = trustServerCertificate;
+        _serverCertificateSha256 = serverCertificateSha256;
     }
 
     public static string InferColumnPurpose(string columnName)
@@ -53,7 +62,16 @@ public sealed class SqlSchemaObserver : ILearningObserver
 
     public async Task DiscoverSchemaAsync(string sessionId, SqlConnection conn, CancellationToken ct)
     {
-        var serverHash = PhiScrubber.HmacHash(conn.DataSource, _pharmacySalt);
+        var sourceIdentity = await SqlSourceIdentityVerifier.ComputeAsync(
+            conn,
+            _pharmacySalt,
+            _trustServerCertificate,
+            _serverCertificateSha256,
+            ct);
+        _db.BeginDiscoveredSchemaSnapshot(
+            sessionId,
+            sourceIdentity.Digest,
+            sourceIdentity.DatabaseName);
 
         // Full column catalog via INFORMATION_SCHEMA
         const string schemaQuery = """
@@ -63,34 +81,165 @@ public sealed class SqlSchemaObserver : ILearningObserver
             ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
             """;
 
-        await using var cmd = new SqlCommand(schemaQuery, conn);
-        cmd.CommandTimeout = 30;
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-
-        while (await reader.ReadAsync(ct))
+        try
         {
-            var schema = reader.GetString(0);
-            var table = reader.GetString(1);
-            var column = reader.GetString(2);
-            var dataType = reader.GetString(3);
-            var maxLen = reader.IsDBNull(4) ? (int?)null : reader.GetInt32(4);
-            var nullable = reader.GetString(5) == "YES";
-            var purpose = InferColumnPurpose(column);
+            await using (var cmd = new SqlCommand(schemaQuery, conn))
+            {
+                cmd.CommandTimeout = 30;
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var schema = reader.GetString(0);
+                    var table = reader.GetString(1);
+                    var column = reader.GetString(2);
+                    var dataType = reader.GetString(3);
+                    var maxLen = reader.IsDBNull(4) ? (int?)null : reader.GetInt32(4);
+                    var nullable = reader.GetString(5) == "YES";
+                    var purpose = InferColumnPurpose(column);
 
-            _db.InsertDiscoveredSchema(sessionId, serverHash, conn.Database,
-                schema, table, column, dataType, maxLen, nullable,
-                isPk: false, isFk: IsLikelyForeignKey(column),
-                fkTargetTable: null, fkTargetColumn: null, inferredPurpose: purpose);
+                    _db.InsertDiscoveredSchema(sessionId, sourceIdentity.Digest, conn.Database,
+                        schema, table, column, dataType, maxLen, nullable,
+                        isPk: false, isFk: false,
+                        fkTargetTable: null, fkTargetColumn: null, inferredPurpose: purpose);
 
-            _eventsCollected++;
+                    _eventsCollected++;
+                }
+            }
+
+            // Only enabled, trusted, single-column constraints and single-column
+            // unique keys are eligible. The snapshot is marked complete only
+            // after both catalog passes finish; a crash/failure leaves it
+            // permanently ineligible for adapter generation.
+            await DiscoverUniqueColumnsAsync(sessionId, conn, ct);
+            await DiscoverForeignKeysAsync(sessionId, conn, ct);
+            _db.CompleteDiscoveredSchemaSnapshot(sessionId);
+        }
+        catch
+        {
+            _db.InvalidateDiscoveredSchemaSnapshot(sessionId);
+            throw;
         }
 
         _db.AppendLearningAudit(sessionId, "sql", "discover",
             $"{conn.Database}:{_eventsCollected} columns", phiScrubbed: false);
         _lastActivity = DateTimeOffset.UtcNow;
 
-        _logger.LogInformation("Schema discovery: {Count} columns cataloged from {Db}",
-            _eventsCollected, conn.Database);
+        _logger.LogInformation(
+            "core.learning.schema_columns_cataloged count={Count}",
+            _eventsCollected);
+    }
+
+    private async Task DiscoverForeignKeysAsync(
+        string sessionId,
+        SqlConnection conn,
+        CancellationToken ct)
+    {
+        const string foreignKeyQuery = """
+            WITH fk_shape AS (
+                SELECT constraint_object_id, COUNT(*) AS component_count
+                FROM sys.foreign_key_columns
+                GROUP BY constraint_object_id
+            )
+            SELECT
+                OBJECT_SCHEMA_NAME(fkc.parent_object_id),
+                OBJECT_NAME(fkc.parent_object_id),
+                COL_NAME(fkc.parent_object_id, fkc.parent_column_id),
+                OBJECT_SCHEMA_NAME(fkc.referenced_object_id),
+                OBJECT_NAME(fkc.referenced_object_id),
+                COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id)
+            FROM sys.foreign_key_columns AS fkc
+            INNER JOIN sys.foreign_keys AS fk
+                ON fk.object_id = fkc.constraint_object_id
+            INNER JOIN fk_shape AS shape
+                ON shape.constraint_object_id = fkc.constraint_object_id
+            WHERE fk.is_disabled = 0
+              AND fk.is_not_trusted = 0
+              AND shape.component_count = 1
+              AND EXISTS (
+                SELECT 1
+                FROM sys.indexes AS unique_index
+                INNER JOIN sys.index_columns AS unique_column
+                    ON unique_column.object_id = unique_index.object_id
+                   AND unique_column.index_id = unique_index.index_id
+                   AND unique_column.key_ordinal > 0
+                WHERE unique_index.object_id = fkc.referenced_object_id
+                  AND unique_index.is_unique = 1
+                  AND unique_index.is_disabled = 0
+                  AND unique_index.is_hypothetical = 0
+                  AND unique_index.has_filter = 0
+                  AND unique_column.column_id = fkc.referenced_column_id
+                  AND 1 = (
+                    SELECT COUNT(*)
+                    FROM sys.index_columns AS key_component
+                    WHERE key_component.object_id = unique_index.object_id
+                      AND key_component.index_id = unique_index.index_id
+                      AND key_component.key_ordinal > 0
+                  )
+              )
+            ORDER BY fkc.parent_object_id, fkc.constraint_column_id
+            """;
+        await using var command = new SqlCommand(foreignKeyQuery, conn)
+        {
+            CommandTimeout = 15,
+        };
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (Enumerable.Range(0, 6).Any(reader.IsDBNull))
+                continue;
+            _db.BindDiscoveredForeignKey(
+                sessionId,
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5));
+        }
+    }
+
+    private async Task DiscoverUniqueColumnsAsync(
+        string sessionId,
+        SqlConnection conn,
+        CancellationToken ct)
+    {
+        const string query = """
+            SELECT
+                OBJECT_SCHEMA_NAME(unique_index.object_id),
+                OBJECT_NAME(unique_index.object_id),
+                COL_NAME(unique_column.object_id, unique_column.column_id)
+            FROM sys.indexes AS unique_index
+            INNER JOIN sys.index_columns AS unique_column
+                ON unique_column.object_id = unique_index.object_id
+               AND unique_column.index_id = unique_index.index_id
+               AND unique_column.key_ordinal > 0
+            WHERE unique_index.is_unique = 1
+              AND unique_index.is_disabled = 0
+              AND unique_index.is_hypothetical = 0
+              AND unique_index.has_filter = 0
+              AND 1 = (
+                SELECT COUNT(*)
+                FROM sys.index_columns AS key_component
+                WHERE key_component.object_id = unique_index.object_id
+                  AND key_component.index_id = unique_index.index_id
+                  AND key_component.key_ordinal > 0
+              )
+            ORDER BY unique_index.object_id, unique_index.index_id
+            """;
+        await using var command = new SqlCommand(query, conn)
+        {
+            CommandTimeout = 15,
+        };
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (Enumerable.Range(0, 3).Any(reader.IsDBNull)) continue;
+            _db.InsertDiscoveredUniqueColumn(
+                sessionId,
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2));
+        }
     }
 
     public async Task CheckDmvAccessAsync(SqlConnection conn, CancellationToken ct)
@@ -116,7 +265,7 @@ public sealed class SqlSchemaObserver : ILearningObserver
     public async Task StartAsync(string sessionId, CancellationToken ct)
     {
         _running = true;
-        _logger.LogInformation("SqlSchemaObserver started for session {Session}", sessionId);
+        _logger.LogInformation("core.learning.sql_schema_observer_started");
         // Actual discovery triggered by LearningWorker with a SqlConnection
         await Task.CompletedTask;
     }

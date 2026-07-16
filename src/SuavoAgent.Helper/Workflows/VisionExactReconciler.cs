@@ -62,8 +62,10 @@ public static class VisionExactReconciler
                 return Decision.Accepted(u.Supplier, u.CostPerUnit, "vision+exact",
                     Math.Min(1.0, v.Confidence + 0.2));
 
-            var reason =
-                $"vision_exact_mismatch (vision={Norm(v.Supplier)}@{v.CostPerUnit}, exact={Norm(u.Supplier)}@{u.CostPerUnit})";
+            // Reject reasons cross the Helper/Core boundary and may be persisted or uploaded.
+            // Never echo OCR/UIA values here: OCR text is untrusted screen content and could
+            // contain PHI if the foreground surface changed unexpectedly.
+            const string reason = "vision_exact_mismatch";
             return policy == MismatchPolicy.TrustExact
                 ? Decision.Accepted(u.Supplier, u.CostPerUnit, "exact_over_vision_mismatch", 0.5)
                 : Decision.Rejected(reason);

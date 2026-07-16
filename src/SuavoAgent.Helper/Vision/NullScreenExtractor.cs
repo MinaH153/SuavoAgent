@@ -6,8 +6,8 @@ namespace SuavoAgent.Helper.Vision;
 /// <summary>
 /// Placeholder extractor used before Week 3b (Tesseract OCR) / 3c (VLM) ship.
 /// Returns a ScreenFrame with empty TextRegions and Elements so the pipeline
-/// end-to-end is exercisable without a real extractor. IsReady is always
-/// true — the "extractor" is literally a no-op.
+/// end-to-end is exercisable without a real OCR extractor. It is deliberately
+/// NOT ready: an empty-frame no-op must never be mistaken for working OCR.
 ///
 /// Internal by design: callers should obtain scrubbed extractors via
 /// <see cref="ScrubbedExtractorFactory"/> so PHI scrubbing is enforced by
@@ -16,7 +16,7 @@ namespace SuavoAgent.Helper.Vision;
 internal sealed class NullScreenExtractor : IScreenExtractor
 {
     public string ExtractorId => "null";
-    public bool IsReady => true;
+    public bool IsReady => false;
 
     public Task<ScreenFrame?> ExtractAsync(ScreenBytes screen, CancellationToken ct)
     {

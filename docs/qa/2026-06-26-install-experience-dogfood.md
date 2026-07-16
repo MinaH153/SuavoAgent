@@ -1,5 +1,16 @@
 # SuavoAgent install-experience dogfood — 2026-06-26
 
+> **ARCHIVED / DO NOT USE — historical QA evidence only.** Findings below are a
+> dated snapshot and intentionally retain the old command and installer variants
+> that were observed. They are not current customer instructions. The approved
+> lifecycle is `docs/sales/windows-agent-lifecycle.md`.
+>
+> **Current native replacement (2026-07-13):** the WiX MSI now owns Programs
+> and Features plus service registration; Burn and the Start menu expose the
+> installed configuration-only pairing UI; MSI commit independently retires
+> the exact former developer-publish Broker shortcut/process. This archived
+> table remains evidence of the old path, not current open status.
+
 Live end-to-end test of the **self-serve install experience** a pharmacy goes
 through, driven on the demo box (Workstation `8DC472B9`, agent `15c16aae…`,
 pharmacy = "Hillcrest Pharmacy"), via Chrome Remote Desktop. Goal: is it

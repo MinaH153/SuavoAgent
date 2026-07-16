@@ -26,7 +26,8 @@ public class PomExporterSeedTests : IDisposable
         var (json, _) = exporter.Export();
         var doc = JsonDocument.Parse(json);
         var behavioral = doc.RootElement.GetProperty("behavioral");
-        Assert.Equal("ver-hash-1", behavioral.GetProperty("pmsVersionHash").GetString());
+        Assert.Matches("^[a-f0-9]{64}$", behavioral.GetProperty("pmsVersionHash").GetString());
+        Assert.DoesNotContain("ver-hash-1", json, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -42,7 +43,11 @@ public class PomExporterSeedTests : IDisposable
 
         var item = trajectory.EnumerateArray().First();
         Assert.Equal("seed", item.GetProperty("origin").GetString());
-        Assert.Equal("digest-abc", item.GetProperty("firstSeedDigest").GetString());
+        Assert.Matches("^[a-f0-9]{64}$", item.GetProperty("firstSeedDigest").GetString());
+        Assert.Matches("^[a-f0-9]{64}$", item.GetProperty("correlationToken").GetString());
+        Assert.False(item.TryGetProperty("correlationKey", out _));
+        Assert.DoesNotContain("digest-abc", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("t1:btn1:q1", json, StringComparison.Ordinal);
         Assert.Equal("2026-04-14T00:00:00Z", item.GetProperty("seededAt").GetString());
     }
 

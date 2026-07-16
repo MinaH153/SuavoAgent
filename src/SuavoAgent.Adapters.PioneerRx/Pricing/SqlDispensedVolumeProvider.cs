@@ -72,8 +72,9 @@ public sealed class SqlDispensedVolumeProvider : IPharmacyBaselineVolumeProvider
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex,
-                "SqlDispensedVolumeProvider: volume lookup failed for NDC {Ndc}; quantity left null", ndc11);
+            _logger.LogWarning(
+                "SqlDispensedVolumeProvider: volume lookup failed; quantity left null (type={ExceptionType})",
+                ex.GetType().Name);
             return PharmacyBaselineVolume.None;
         }
     }

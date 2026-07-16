@@ -63,6 +63,21 @@ public sealed class TemplatePlanCompilerTests
         Assert.Equal("notepad", plan[0].Action!.Parameters!["process_name"]);
     }
 
+    [Theory]
+    [InlineData(TemplateStepKind.Type)]
+    [InlineData(TemplateStepKind.PressKey)]
+    public void Compile_ThreadsProcessName_IntoKeyboardSteps(
+        TemplateStepKind kind)
+    {
+        var hint = kind == TemplateStepKind.Type
+            ? new KeyHint(null, KeyHintPlaceholder.RxNumberEchoed)
+            : new KeyHint("Enter", null);
+        var plan = TemplatePlanCompiler.Compile(
+            new[] { Step(0, kind, hint: hint) }, processName: "notepad");
+
+        Assert.Equal("notepad", plan[0].Action!.Parameters!["process_name"]);
+    }
+
     [Fact]
     public void Compile_NoProcess_OmitsProcessNameKey()
     {

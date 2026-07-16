@@ -8,7 +8,7 @@
              x:DataType="vm:ConsentViewModel">
 
     <UserControl.Styles>
-        <!-- The CTA is ALWAYS visible: enabled = gold gradient; disabled = a clearly
+        <!-- The CTA is ALWAYS visible: enabled = sapphire; disabled = a clearly
              styled, still-readable button (never invisible, never a mystery). -->
         <Style Selector="Button.cta">
             <Setter Property="Background" Value="{DynamicResource SuavoAccentBrush}" />
@@ -47,7 +47,7 @@
             <TextBlock Text="Terms &amp; consent"
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="28" FontWeight="Light"/>
-            <TextBlock Text="SuavoAgent observes workstation activity to automate your regulated workflows. Nothing uploads until you agree."
+            <TextBlock Text="SuavoAgent observes workstation activity to automate your regulated workflows. No observation data uploads until you agree."
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"
                        TextWrapping="Wrap"/>
@@ -68,7 +68,7 @@
                         <TextBlock Text="What it collects"
                                    Foreground="{DynamicResource SuavoAccentTextBrush}"
                                    FontWeight="SemiBold" FontSize="13"/>
-                        <TextBlock Text="Application usage patterns and durations; workstation hardware profile; shift timing from login / logout; website domain categories (not URLs); print event counts (not document content)."
+                        <TextBlock Text="Application names and usage duration; workstation hardware profile; login / logout and lock timing; print-event counts (not document names or content); spreadsheet file types (not file names or cells); structural controls and one-way-hashed labels in approved work apps; coarse key categories and timing in the approved pharmacy app (never the actual key or text). Browser domain categories are collected only when the authenticated browser connector is installed and connected."
                                    Foreground="{DynamicResource SuavoTextBrush}"
                                    FontSize="13" LineHeight="20"
                                    TextWrapping="Wrap"/>
@@ -78,7 +78,27 @@
                         <TextBlock Text="What it never collects"
                                    Foreground="{DynamicResource SuavoSuccessBrush}"
                                    FontWeight="SemiBold" FontSize="13"/>
-                        <TextBlock Text="Keystrokes, passwords, or typed text; screen captures or screenshots; email / chat / message content; personal browsing history or specific URLs; file contents or document data."
+                        <TextBlock Text="Passwords, actual keys, or typed text; screenshots of unrelated or personal applications; email / chat / message content; personal browsing history or specific URLs; document names, print content, or spreadsheet cell content."
+                                   Foreground="{DynamicResource SuavoTextBrush}"
+                                   FontSize="13" LineHeight="20"
+                                   TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Exact-window vision, when enabled"
+                                   Foreground="{DynamicResource SuavoAccentTextBrush}"
+                                   FontWeight="SemiBold" FontSize="13"/>
+                        <TextBlock Text="Only the exact foreground window of the signed, locally approved pharmacy application may be captured. Capture stops if the window, process identity, or signed approval changes. Retained pixels are encrypted, access-controlled, time-limited, and processed locally with PHI scrubbing before any derived frame may leave the Helper."
+                                   Foreground="{DynamicResource SuavoTextBrush}"
+                                   FontSize="13" LineHeight="20"
+                                   TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="How Autopilot stays under your control"
+                                   Foreground="{DynamicResource SuavoAccentTextBrush}"
+                                   FontWeight="SemiBold" FontSize="13"/>
+                        <TextBlock Text="Learning starts in capture-only mode. Draft automations cannot click or type until they pass shadow checks and an authorized user approves them. The pharmacist panda stays visible while SuavoAgent is running and provides Pause and Stop controls."
                                    Foreground="{DynamicResource SuavoTextBrush}"
                                    FontSize="13" LineHeight="20"
                                    TextWrapping="Wrap"/>
@@ -88,7 +108,7 @@
                         <TextBlock Text="Legal requirements"
                                    Foreground="{DynamicResource SuavoDangerBrush}"
                                    FontWeight="SemiBold" FontSize="13"/>
-                        <TextBlock Text="CT, DE, NY require written employee notice before monitoring. CA requires CCPA notice at collection. Employee notification is recommended best practice in every state."
+                        <TextBlock Text="Your organization is responsible for providing any notice or consent required by applicable workplace privacy and monitoring law. Setup records the authorizing representative and a local consent receipt. This product disclosure is not legal advice."
                                    Foreground="{DynamicResource SuavoTextBrush}"
                                    FontSize="13" LineHeight="20"
                                    TextWrapping="Wrap"/>

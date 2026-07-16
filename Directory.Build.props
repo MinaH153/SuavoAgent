@@ -30,6 +30,36 @@
     <AssemblyVersion>$(Version)</AssemblyVersion>
     <FileVersion>$(Version)</FileVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
+
+    <!-- A vulnerable transitive dependency is a release failure, not an
+         informational restore warning. Audit the full graph and promote every
+         NuGet severity to an error so the clean local result cannot regress. -->
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <WarningsAsErrors>$(WarningsAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
+
+    <!-- Every project carries a checked-in, transitive dependency lock. CI
+         opts into locked mode so restore cannot silently rewrite the graph. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+    <RuntimeFrameworkVersion Condition="'$(RuntimeIdentifier)' == 'win-x64'">8.0.28</RuntimeFrameworkVersion>
+    <!-- Declaring (not selecting) the sole production RID lets one checked-in
+         lock graph cover portable unit-test builds and exact win-x64 publish. -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+
+    <!-- Do not compiler-PathMap source documents here. Coverlet 6 treats the
+         synthetic /_/ tree as non-local and can emit an empty report for an
+         otherwise fully exercised assembly. The hardened merger canonicalizes
+         Linux and Windows checkout paths to repository-owned src/ identities
+         after collection, without changing the PDB source documents that the
+         collector needs for instrumentation. -->
   </PropertyGroup>
+
+  <!-- Empty local builds fail closed. Production release workflows must pass
+       the reviewed SHA-256 signer-certificate allowlist explicitly. -->
+  <ItemGroup>
+    <AssemblyMetadata Include="SuavoAuthenticodeSignerSha256"
+                      Value="$(AuthenticodeSignerSha256)" />
+  </ItemGroup>
 
 </Project>

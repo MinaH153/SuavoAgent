@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using SuavoAgent.Contracts.Behavioral;
+using SuavoAgent.Contracts.Reasoning;
 
 namespace SuavoAgent.Core.Agentic;
 
@@ -156,7 +158,11 @@ public sealed record PerceivedScreen(
     bool Scrubbed,
     IReadOnlyList<string> ElementSummary,
     string? WindowTitle = null,
-    IReadOnlyList<string>? Signatures = null);
+    IReadOnlyList<string>? Signatures = null,
+    string? ProcessName = null,
+    IReadOnlyList<ElementSignature>? ElementFingerprints = null,
+    IReadOnlyList<StructuralElementObservation>? StructuralElementStates = null,
+    bool CloudStructuralStateEligible = false);
 
 /// <summary>Result of executing one action through the actuation chain.</summary>
 public enum ActStatus { Success, Rejected, Failed }

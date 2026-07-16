@@ -1,54 +1,90 @@
-using System.Security.Cryptography;
-using System.Text;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using FlaUI.Core.AutomationElements;
-using FlaUI.Core.Definitions;
 using Serilog;
 using SuavoAgent.Contracts.Behavioral;
+using SuavoAgent.Helper.SystemObservers;
 
 namespace SuavoAgent.Helper.Behavioral;
 
 /// <summary>
-/// Periodic depth-first tree walker. Snapshots PMS window structure every 60 seconds.
-/// Reads GREEN+YELLOW properties only — NEVER Value, Text, Selection, HelpText.
+/// Periodic PMS tree observer. The parent Helper only locates the approved
+/// process's HWND through Win32; every UIA property read and tree walk runs in
+/// a killable subprocess with a hard deadline.
 /// </summary>
 public sealed class UiaTreeObserver
 {
-    private const int MaxDepth = 8;
     private static readonly TimeSpan WalkInterval = TimeSpan.FromSeconds(60);
 
-    // Trip A 2026-04-25 hard-reset prevention. PioneerRx is a deep WinForms
-    // tree; with UIA2 marshalling overhead a single walk on a busy install
-    // can pin a CPU core for 30+ seconds. Bound the walk so a single tree
-    // walk can't dominate the window between walks, and skip the next walk
-    // if the previous one was already that slow — letting the observer
-    // breathe instead of stacking back-to-back walks.
-    private const int MaxElementsPerWalk = 5000;
-    private static readonly TimeSpan SlowWalkSkipThreshold = TimeSpan.FromSeconds(30);
-
-    private readonly string _pharmacySalt;
     private readonly BehavioralEventBuffer _buffer;
     private readonly ILogger _logger;
-    private TimeSpan _lastWalkDuration = TimeSpan.Zero;
+    private readonly Action<string>? _onTreeHash;
+    private readonly Func<int> _expectedProcessId;
+    private readonly Func<int, bool> _processTrusted;
+    private readonly IPmsWindowLocator _windowLocator;
+    private readonly IWindowStructureSnapshotProvider _snapshotProvider;
+    private readonly object _statusLock = new();
+
+    private long _lastWalkDurationTicks;
+    private string? _lastFailureCode;
+    private int _lastElementCount;
+    private int _lastSnapshotTruncated;
+    private int _walkActive;
 
     public UiaTreeObserver(
         string pharmacySalt,
         BehavioralEventBuffer buffer,
-        ILogger logger)
+        ILogger logger,
+        Action<string>? onTreeHash = null,
+        Func<int>? expectedProcessId = null,
+        Func<int, bool>? processTrusted = null)
+        : this(
+            pharmacySalt,
+            buffer,
+            logger,
+            expectedProcessId ?? (() => -1),
+            processTrusted ?? (_ => false),
+            new Win32PmsWindowLocator(),
+            new IsolatedWindowStructureSnapshotProvider(),
+            onTreeHash)
     {
-        _pharmacySalt = pharmacySalt;
-        _buffer = buffer;
-        _logger = logger.ForContext<UiaTreeObserver>();
     }
 
-    /// <summary>
-    /// Loops every 60 seconds, walking the window returned by <paramref name="getWindow"/>.
-    /// Exits cleanly on cancellation.
-    /// </summary>
+    internal UiaTreeObserver(
+        string pharmacySalt,
+        BehavioralEventBuffer buffer,
+        ILogger logger,
+        Func<int> expectedProcessId,
+        Func<int, bool> processTrusted,
+        IPmsWindowLocator windowLocator,
+        IWindowStructureSnapshotProvider snapshotProvider,
+        Action<string>? onTreeHash = null)
+    {
+        // Tree snapshots intentionally exclude Name/text, so no salt crosses
+        // the worker protocol. Keep the parameter for the established API.
+        _ = pharmacySalt;
+        _buffer = buffer;
+        _logger = logger.ForContext<UiaTreeObserver>();
+        _expectedProcessId = expectedProcessId;
+        _processTrusted = processTrusted;
+        _windowLocator = windowLocator;
+        _snapshotProvider = snapshotProvider;
+        _onTreeHash = onTreeHash;
+    }
+
+    public int LastElementCount => Volatile.Read(ref _lastElementCount);
+    public bool LastSnapshotTruncated => Volatile.Read(ref _lastSnapshotTruncated) != 0;
+    public string? LastFailureCode => Volatile.Read(ref _lastFailureCode);
+    public TimeSpan LastWalkDuration =>
+        TimeSpan.FromTicks(Volatile.Read(ref _lastWalkDurationTicks));
+
     public async Task RunAsync(Func<Window?> getWindow, CancellationToken ct)
     {
         _logger.Information(
-            "UiaTreeObserver started (interval={IntervalSec}s, maxElements={MaxElems}, slowSkipThreshold={SkipSec}s)",
-            WalkInterval.TotalSeconds, MaxElementsPerWalk, SlowWalkSkipThreshold.TotalSeconds);
+            "UiaTreeObserver started (interval={IntervalSec}s, hardTimeout={TimeoutSec}s, maxElements={MaxElements})",
+            WalkInterval.TotalSeconds,
+            IsolatedWindowStructureSnapshotProvider.CaptureTimeout.TotalSeconds,
+            FlaUiWindowStructureSnapshotProvider.MaximumElements(WindowStructureCaptureProfile.Pms));
 
         while (!ct.IsCancellationRequested)
         {
@@ -61,208 +97,229 @@ public sealed class UiaTreeObserver
                 break;
             }
 
-            // Back-pressure: if the last walk burned more than the skip
-            // threshold, take this cycle off so we don't stack walks back
-            // to back. A single walk that takes 35s on a 60s cadence
-            // already eats >half the breathing room — two in a row would
-            // saturate the CPU.
-            if (_lastWalkDuration > SlowWalkSkipThreshold)
-            {
-                _logger.Warning(
-                    "UiaTreeObserver: skipping walk — previous walk took {Sec:F1}s (threshold {ThreshSec}s). " +
-                    "PioneerRx tree may be unusually deep or UIA2 marshalling slow.",
-                    _lastWalkDuration.TotalSeconds,
-                    SlowWalkSkipThreshold.TotalSeconds);
-                _lastWalkDuration = TimeSpan.Zero;
-                continue;
-            }
-
+            Window? window;
             try
             {
-                var window = getWindow();
-                if (window is null)
-                {
-                    _logger.Debug("UiaTreeObserver: window not available, skipping walk");
-                    continue;
-                }
-
-                WalkTree(window);
+                // This reads only the already-attached object reference. The
+                // Window is never dereferenced by this observer in the parent.
+                window = getWindow();
             }
             catch (Exception ex)
             {
-                _logger.Warning(ex, "UiaTreeObserver: walk failed");
+                _logger.Warning(
+                    "UiaTreeObserver: window resolver failed ({ExceptionType})",
+                    ex.GetType().FullName);
+                ReportFailure("window_resolver_failed");
+                continue;
             }
+
+            if (window is null)
+            {
+                ReportFailure("window_unavailable");
+                continue;
+            }
+
+            WalkTree(window);
         }
 
         _logger.Information("UiaTreeObserver stopped");
     }
 
     /// <summary>
-    /// Walks the window depth-first (max 8 levels, max 5000 elements),
-    /// scrubs each element, computes a SHA-256 tree hash, and enqueues a
-    /// TreeSnapshot event. Records the wall-clock duration so the next
-    /// cycle can skip if this one was slow.
+    /// Preserves the established API but deliberately does not dereference the
+    /// FlaUI Window. HWND resolution is Win32-only and PID-bound.
     /// </summary>
     public void WalkTree(Window window)
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        var scrubbedElements = new List<ScrubbedElement>();
-        var hashParts = new List<string>();
+        ArgumentNullException.ThrowIfNull(window);
+        CaptureExpectedWindow();
+    }
 
-        // Window inherits AutomationElement — pass directly. WalkElement
-        // checks scrubbedElements.Count against MaxElementsPerWalk on every
-        // recursion so a runaway tree truncates rather than stalls.
-        WalkElement(window, depth: 0, scrubbedElements, hashParts);
+    internal void CaptureExpectedWindow()
+    {
+        if (Interlocked.CompareExchange(ref _walkActive, 1, 0) != 0)
+        {
+            ReportFailure("capture_busy");
+            return;
+        }
 
-        var treeHash = ComputeTreeHash(hashParts);
-        _buffer.Enqueue(BehavioralEvent.TreeSnapshot(treeHash));
-
-        sw.Stop();
-        _lastWalkDuration = sw.Elapsed;
-
-        var truncated = scrubbedElements.Count >= MaxElementsPerWalk;
-        if (truncated || sw.Elapsed > SlowWalkSkipThreshold)
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            PublishCapture(CaptureIsolated(), stopwatch.Elapsed);
+        }
+        catch (Exception ex)
         {
             _logger.Warning(
-                "UiaTreeObserver: walk slow — {Count} elements in {Ms}ms (truncated={Trunc})",
-                scrubbedElements.Count, sw.ElapsedMilliseconds, truncated);
+                "UiaTreeObserver: isolated capture failed ({ExceptionType})",
+                ex.GetType().FullName);
+            ReportFailure("capture_exception");
         }
-        else
+        finally
         {
-            _logger.Debug("UiaTreeObserver: walked {Count} elements in {Ms}ms, hash={Hash}",
-                scrubbedElements.Count, sw.ElapsedMilliseconds, treeHash[..8]);
+            stopwatch.Stop();
+            Volatile.Write(ref _lastWalkDurationTicks, stopwatch.Elapsed.Ticks);
+            Interlocked.Exchange(ref _walkActive, 0);
         }
     }
 
-    // ── Private ──────────────────────────────────────────────────────────────
-
-    private void WalkElement(
-        AutomationElement element,
-        int depth,
-        List<ScrubbedElement> output,
-        List<string> hashParts)
+    internal void PublishCapture(UiaTreeCapture capture, TimeSpan duration)
     {
-        if (depth > MaxDepth) return;
-        // Element budget — prevents UIA enumeration from running unbounded
-        // on a degenerate tree (the kind of failure mode that took 5
-        // hours to diagnose at Nadim's). Truncation is logged in WalkTree.
-        if (output.Count >= MaxElementsPerWalk) return;
+        ArgumentNullException.ThrowIfNull(capture);
 
-        try
+        if (!capture.Success
+            || capture.ElementCount <= 0
+            || string.IsNullOrWhiteSpace(capture.TreeHash))
         {
-            // GREEN tier only — ControlType, AutomationId, ClassName, Name, BoundingRect
-            var controlType = TryGetControlType(element);
-            var automationId = TryGet(() => element.AutomationId);
-            var className = TryGet(() => element.ClassName);
-            var name = TryGet(() => element.Name);
-            var boundingRect = TryGet(() => element.BoundingRectangle.ToString());
-
-            // Track child index per ControlType among siblings at this level
-            // (passed in via depth; actual sibling position is handled by WalkChildren)
-            var raw = new RawElementProperties(
-                ControlType: controlType,
-                AutomationId: automationId,
-                ClassName: className,
-                Name: name,
-                BoundingRect: boundingRect,
-                Depth: depth,
-                ChildIndex: 0); // overridden in WalkChildren
-
-            var scrubbed = UiaPropertyScrubber.TryScrub(raw, _pharmacySalt);
-            if (scrubbed is not null)
-            {
-                output.Add(scrubbed);
-                // Hash contribution: structural identity only (no Name)
-                hashParts.Add($"{controlType}|{automationId}|{className}");
-            }
-
-            WalkChildren(element, depth, output, hashParts);
+            ReportFailure(capture.FailureCode ?? "empty_tree");
+            return;
         }
-        catch (Exception ex)
+
+        Volatile.Write(ref _lastElementCount, capture.ElementCount);
+        Volatile.Write(ref _lastSnapshotTruncated, capture.Truncated ? 1 : 0);
+
+        _buffer.Enqueue(new BehavioralEvent
         {
-            _logger.Debug(ex, "UiaTreeObserver: error reading element at depth {Depth}", depth);
+            Type = BehavioralEventType.TreeSnapshot,
+            Subtype = "pioneerrx",
+            TreeHash = capture.TreeHash,
+            ElementId = capture.Truncated ? "truncated" : "complete",
+            OccurrenceCount = capture.ElementCount,
+            Timestamp = DateTimeOffset.UtcNow,
+        });
+        _onTreeHash?.Invoke(capture.TreeHash);
+
+        lock (_statusLock)
+        {
+            if (_lastFailureCode is not null)
+                _buffer.Enqueue(BehavioralEvent.ObserverStatus("uia_tree", "recovered"));
+            _lastFailureCode = null;
         }
+
+        _logger.Debug(
+            "UiaTreeObserver: isolated capture returned {Count} elements in {Ms}ms (truncated={Truncated}, hash={Hash})",
+            capture.ElementCount,
+            duration.TotalMilliseconds,
+            capture.Truncated,
+            capture.TreeHash[..Math.Min(8, capture.TreeHash.Length)]);
     }
 
-    private void WalkChildren(
-        AutomationElement element,
-        int depth,
-        List<ScrubbedElement> output,
-        List<string> hashParts)
+    private UiaTreeCapture CaptureIsolated()
     {
-        if (depth >= MaxDepth) return;
+        int expectedProcessId;
+        try { expectedProcessId = _expectedProcessId(); }
+        catch { return Failure("expected_process_unavailable"); }
+        if (expectedProcessId <= 0)
+            return Failure("expected_process_unavailable");
+        if (!IsProcessTrusted(expectedProcessId))
+            return Failure("process_authority_denied");
 
-        try
+        if (!_windowLocator.TryLocate(expectedProcessId, out var windowHandle)
+            || windowHandle == 0)
         {
-            var children = element.FindAllChildren();
-            if (children is null) return;
-
-            // Track child index per ControlType for positional fallback ID
-            var countByControlType = new Dictionary<string, int>(StringComparer.Ordinal);
-
-            foreach (var child in children)
-            {
-                try
-                {
-                    var controlType = TryGetControlType(child);
-                    var automationId = TryGet(() => child.AutomationId);
-                    var className = TryGet(() => child.ClassName);
-                    var name = TryGet(() => child.Name);
-                    var boundingRect = TryGet(() => child.BoundingRectangle.ToString());
-
-                    var ctKey = controlType ?? "Unknown";
-                    countByControlType.TryGetValue(ctKey, out var childIndex);
-                    countByControlType[ctKey] = childIndex + 1;
-
-                    var raw = new RawElementProperties(
-                        ControlType: controlType,
-                        AutomationId: automationId,
-                        ClassName: className,
-                        Name: name,
-                        BoundingRect: boundingRect,
-                        Depth: depth + 1,
-                        ChildIndex: childIndex);
-
-                    var scrubbed = UiaPropertyScrubber.TryScrub(raw, _pharmacySalt);
-                    if (scrubbed is not null)
-                    {
-                        output.Add(scrubbed);
-                        hashParts.Add($"{controlType}|{automationId}|{className}");
-                    }
-
-                    WalkChildren(child, depth + 1, output, hashParts);
-                }
-                catch (Exception ex)
-                {
-                    _logger.Debug(ex, "UiaTreeObserver: error on child at depth {Depth}", depth + 1);
-                }
-            }
+            return Failure("window_handle_unavailable");
         }
-        catch (Exception ex)
+
+        var snapshot = _snapshotProvider.Capture(
+            windowHandle,
+            expectedProcessId,
+            WindowStructureCaptureProfile.Pms);
+        if (!snapshot.Success)
+            return Failure(snapshot.FailureCode ?? "capture_failed");
+        if (!IsProcessTrusted(expectedProcessId))
+            return Failure("process_authority_denied");
+        if (snapshot.WindowHandle != windowHandle.ToInt64()
+            || snapshot.ProcessId != expectedProcessId)
         {
-            _logger.Debug(ex, "UiaTreeObserver: FindAllChildren failed at depth {Depth}", depth);
+            return Failure("worker_identity_mismatch");
         }
+
+        return new UiaTreeCapture(
+            true,
+            snapshot.TreeHash,
+            snapshot.ElementCount,
+            snapshot.Truncated,
+            null);
     }
 
-    private static string ComputeTreeHash(List<string> parts)
-    {
-        if (parts.Count == 0)
-            return "empty";
+    private static UiaTreeCapture Failure(string code) =>
+        new(false, null, 0, false, code);
 
-        var combined = string.Join('\n', parts);
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(combined));
-        return Convert.ToHexString(bytes).ToLowerInvariant();
+    private bool IsProcessTrusted(int processId)
+    {
+        try { return _processTrusted(processId); }
+        catch { return false; }
     }
 
-    private static string? TryGetControlType(AutomationElement el)
+    private void ReportFailure(string code)
     {
-        try { return el.ControlType.ToString(); }
-        catch { return null; }
-    }
-
-    private static string? TryGet(Func<string?> getter)
-    {
-        try { return getter(); }
-        catch { return null; }
+        lock (_statusLock)
+        {
+            if (string.Equals(_lastFailureCode, code, StringComparison.Ordinal)) return;
+            _lastFailureCode = code;
+            _buffer.Enqueue(BehavioralEvent.ObserverStatus("uia_tree", code));
+        }
     }
 }
+
+internal interface IPmsWindowLocator
+{
+    bool TryLocate(int expectedProcessId, out nint windowHandle);
+}
+
+/// <summary>
+/// Finds a visible, unowned top-level HWND for the already-approved PID.
+/// It never reads titles or invokes UI Automation.
+/// </summary>
+internal sealed class Win32PmsWindowLocator : IPmsWindowLocator
+{
+    private const uint GetWindowOwner = 4;
+
+    public bool TryLocate(int expectedProcessId, out nint windowHandle)
+    {
+        windowHandle = 0;
+        if (!OperatingSystem.IsWindows() || expectedProcessId <= 0) return false;
+
+        nint candidate = 0;
+        _ = EnumWindows((handle, parameter) =>
+        {
+            _ = parameter;
+            GetWindowThreadProcessId(handle, out var processId);
+            if (processId != (uint)expectedProcessId
+                || !IsWindowVisible(handle)
+                || GetWindow(handle, GetWindowOwner) != 0)
+            {
+                return true;
+            }
+
+            candidate = handle;
+            return false;
+        }, 0);
+
+        windowHandle = candidate;
+        return candidate != 0;
+    }
+
+    private delegate bool EnumWindowsCallback(nint windowHandle, nint parameter);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumWindowsCallback callback, nint parameter);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(nint windowHandle);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetWindow(nint windowHandle, uint command);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint windowHandle, out uint processId);
+}
+
+internal sealed record UiaTreeCapture(
+    bool Success,
+    string? TreeHash,
+    int ElementCount,
+    bool Truncated,
+    string? FailureCode);

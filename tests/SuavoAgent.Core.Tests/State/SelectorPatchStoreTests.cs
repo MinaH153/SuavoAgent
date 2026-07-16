@@ -30,7 +30,7 @@ public class SelectorPatchStoreTests : IDisposable
         new(id, "skill-x", SelectorStepId.QuickSearchField, pms, screen,
             new ElementSignature("Edit", "ndcSearchBox", "PioneerRxEdit"),
             new[] { new ElementSignature("Edit", "altSearchBox", null) },
-            0.85, "seed-digest", version);
+            0.85, "seed-digest", version, "pharmacist_in_charge");
 
     [Fact]
     public void Upsert_GetActive_RoundTrips()
@@ -50,6 +50,7 @@ public class SelectorPatchStoreTests : IDisposable
         Assert.Equal(0.85, got.Confidence, 3);
         Assert.Equal("seed-digest", got.SeedDigest);
         Assert.Equal(1, got.Version);
+        Assert.Equal("pharmacist_in_charge", got.ApprovedByRole);
     }
 
     [Fact]

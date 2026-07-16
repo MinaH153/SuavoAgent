@@ -36,7 +36,7 @@ public class CompositeScreenExtractorTests
     [Fact]
     public async Task Extract_TextNull_StillReturnsUiaFrame()
     {
-        // Tesseract failure shouldn't lose deterministic UIA data.
+        // UIA-only is valid only when OCR was deliberately not required.
         var text = new FakeText { Output = null };
         var uia = new FakeUia
         {
@@ -48,6 +48,23 @@ public class CompositeScreenExtractorTests
         Assert.NotNull(result);
         Assert.Empty(result.TextRegions);
         Assert.Single(result.Elements);
+    }
+
+    [Fact]
+    public async Task Extract_RequiredOcrNull_FailsClosedInsteadOfFalseUiaSuccess()
+    {
+        var text = new FakeText { Output = null };
+        var uia = new FakeUia
+        {
+            Output = new[] { UiaElement("Button", "Save", 0, 0, 10, 10) },
+        };
+
+        var result = await new CompositeScreenExtractor(
+            text,
+            uia,
+            requireTextSuccess: true).ExtractAsync(Screen, default);
+
+        Assert.Null(result);
     }
 
     [Fact]

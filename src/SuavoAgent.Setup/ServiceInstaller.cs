@@ -1,22 +1,27 @@
 using System.Diagnostics;
-using Microsoft.Win32;
+using SuavoAgent.Contracts.Maintenance;
+using SuavoAgent.Contracts.Security;
+using SuavoAgent.Setup.Security;
 using SuavoAgent.Setup.Verify;
 
 namespace SuavoAgent.Setup;
 
 /// <summary>
-/// Registers and starts SuavoAgent Windows services using sc.exe.
-/// Mirrors the bootstrap.ps1 service registration logic.
+/// Registers and starts SuavoAgent Windows services using the Windows Service
+/// Control utility. The signed maintenance host owns runtime repair; no script is
+/// persisted or executed by this installer.
 /// </summary>
-internal static class ServiceInstaller
+internal static partial class ServiceInstaller
 {
-    private const string CoreServiceName = "SuavoAgent.Core";
+    private const string CoreServiceName = CoreServiceIdentity.ServiceName;
     private const string BrokerServiceName = "SuavoAgent.Broker";
     private const string WatchdogServiceName = "SuavoAgent.Watchdog";
 
     /// <summary>
     /// Full service installation pipeline: stop existing -> register -> ACL -> start -> verify.
-    /// Returns true if Core is running. Watchdog + Broker may take a moment to settle.
+    /// Returns true only when the complete service cohort is running. The interactive
+    /// Helper is intentionally not part of this result because a locked/headless machine
+    /// can legitimately have no interactive desktop session.
     /// </summary>
     public static bool InstallAndStart(string installDir, string dataDir)
     {
@@ -26,9 +31,14 @@ internal static class ServiceInstaller
         StopAndRemove(BrokerServiceName);
         StopAndRemove(CoreServiceName);
 
-        // Step 2: Create directories
+        // Step 2: Create only the two roots, then identity-pin and protect them
+        // before any child creation, binary lookup, or SCM registration. A
+        // preplanted reparse root therefore fails before Windows follows it to
+        // create logs or registers a service binary outside the signed cohort.
         Directory.CreateDirectory(installDir);
-        Directory.CreateDirectory(Path.Combine(dataDir, "logs"));
+        Directory.CreateDirectory(dataDir);
+        LockdownInstallDirectoryAcl(installDir);
+        LockdownDataDirectoryAcl(dataDir);
 
         // Step 3: Register services
         var corePath = Path.Combine(installDir, "SuavoAgent.Core.exe");
@@ -51,8 +61,22 @@ internal static class ServiceInstaller
             return false;
         }
 
-        // Core — runs as LocalService (least privilege)
-        RunSc($"create {CoreServiceName} binPath= \"\\\"{corePath}\\\"\" start= delayed-auto obj= \"NT AUTHORITY\\LocalService\"");
+        // Core runs under LocalService for least privilege, but all protected
+        // resources authorize its unique NT SERVICE\SuavoAgent.Core SID. The
+        // SID type must be enabled before any runtime ACL is applied; otherwise
+        // a fresh service cannot read its own binary or write ProgramData.
+        RunSc($"create {CoreServiceName} binPath= \"\\\"{corePath}\\\"\" start= delayed-auto obj= \"{CoreServiceIdentity.AccountName}\"");
+        RunCmd(
+            "sc.exe",
+            $"sidtype \"{CoreServiceName}\" unrestricted",
+            throwOnFailure: true);
+        var coreSidType = RunCmd(
+            "sc.exe",
+            $"qsidtype \"{CoreServiceName}\"",
+            throwOnFailure: true);
+        if (!coreSidType.Contains("UNRESTRICTED", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"{CoreServiceName} did not report SERVICE_SID_TYPE_UNRESTRICTED.");
         RunSc($"description {CoreServiceName} \"Suavo pharmacy agent - SQL polling, cloud sync\"");
         RunSc($"failure {CoreServiceName} reset= 3600 actions= restart/5000/restart/30000/restart/60000");
         RunSc($"failureflag {CoreServiceName} 1");
@@ -69,8 +93,8 @@ internal static class ServiceInstaller
         // the Broker's OWN session (Session 0) — an invisible desktop where the
         // intent cursor, screen capture, and UIA never render. That regression
         // (a prior "LocalSystem was excessive" edit) blinded the pilot box on
-        // 2026-06-01. install.ps1 + bootstrap.ps1 already register LocalSystem;
-        // this keeps the GUI/console installer in sync. Not a privilege grab —
+        // 2026-06-01. Keep every native install/repair path on this identity.
+        // This is not a privilege grab —
         // the Helper itself drops to the de-privileged user token; only the
         // supervisor needs SeTcb.
         RunSc($"create {BrokerServiceName} binPath= \"\\\"{brokerPath}\\\"\" start= delayed-auto obj= \"LocalSystem\"");
@@ -80,25 +104,37 @@ internal static class ServiceInstaller
         RunSc($"config {BrokerServiceName} depend= {CoreServiceName}");
         ConsoleUI.WriteOk($"{BrokerServiceName} service registered");
 
-        // Watchdog — runs as LocalSystem (needs SCM sc.exe start/query + the
-        // right to invoke bootstrap.ps1 --repair). No service dependency on
+        // Watchdog — runs as LocalSystem (needs SCM start/query plus authority
+        // to launch the fixed signed native maintenance host). No dependency on
         // Core/Broker because Watchdog must be able to restart them even when
         // they have failed. Recovery backoff is longer (10s/60s/5min) because
         // the whole point of Watchdog is that it survives churn.
         RunSc($"create {WatchdogServiceName} binPath= \"\\\"{watchdogPath}\\\"\" start= delayed-auto obj= \"LocalSystem\"");
-        RunSc($"description {WatchdogServiceName} \"Suavo pharmacy agent - process watchdog (auto-restarts Core/Broker, escalates to bootstrap --repair)\"");
+        RunSc($"description {WatchdogServiceName} \"Suavo pharmacy agent - native process watchdog and maintenance coordinator\"");
         RunSc($"failure {WatchdogServiceName} reset= 3600 actions= restart/10000/restart/60000/restart/300000");
         RunSc($"failureflag {WatchdogServiceName} 1");
         ConsoleUI.WriteOk($"{WatchdogServiceName} service registered");
 
-        // Step 4: Lock down data directory ACL (install dir already locked in Phase 4),
+        // Step 4: Reassert both live roots now that the service SID exists,
         // then carve out the Helper's minimum. The Helper runs as the INTERACTIVE
         // user (CreateProcessAsUser — it must own the visible desktop), so a
-        // SYSTEM/Admins/LocalService-only DACL makes it die on its first log write
+        // SYSTEM/Admins/Core-service-SID-only DACL makes it die on its first log write
         // before it can log anything (2026-06-10 crash-loop: Broker relaunched a
         // fresh PID every 5s, zero helper logs, cloud stuck helper_attached=false).
-        LockdownDirectoryAcl(dataDir);
+        // The exact handle-bound policies also remove every legacy shared-service
+        // ACE; no separate path-based ACL migration is permitted here.
+        LockdownInstallDirectoryAcl(installDir);
+        GrantInteractiveHelperExeAccess(installDir);
+        LockdownDataDirectoryAcl(dataDir);
+        if (!VisionRegistryProvisioner.ProvisionAndRetireLegacy(dataDir))
+            throw new InvalidOperationException(
+                "Vision registry authority provisioning failed.");
         GrantInteractiveHelperAccess(dataDir);
+        if (!ReleaseOcrCohortProvisioner.ReassertInstalledCohortAcls(
+                dataDir,
+                TryLockdownVisionCohortAcl))
+            throw new InvalidOperationException(
+                "Reviewed vision cohort ACL reassertion failed.");
 
         // Step 5: Start services — Core first, then Broker (depends on Core),
         // then Watchdog last so it doesn't race the fresh Core/Broker starts.
@@ -136,7 +172,7 @@ internal static class ServiceInstaller
         // crash-loop class on the spot instead of via cloud telemetry 10 minutes
         // later (2026-06-10: ACL lockdown killed the Helper pre-log; install still
         // said success).
-        if (coreRunning && brokerRunning)
+        if (RequiredServicesRunning(coreRunning, brokerRunning, watchdogRunning))
         {
             if (WaitForHelperProcess(TimeSpan.FromSeconds(20)))
                 ConsoleUI.WriteOk("SuavoAgent.Helper is running in the interactive session");
@@ -146,7 +182,7 @@ internal static class ServiceInstaller
                     "check the data-dir ACL carve-out and the broker log for a launch loop");
         }
 
-        return coreRunning; // Core must be up; Watchdog will repair Broker if needed.
+        return RequiredServicesRunning(coreRunning, brokerRunning, watchdogRunning);
     }
 
     /// <summary>
@@ -164,207 +200,27 @@ internal static class ServiceInstaller
         // Windows service — so stopping the services above does not kill it, and it keeps a file
         // lock on SuavoAgent.Helper.exe in the install dir. Without this, the very next binary
         // download fails with "the file is being used by another process" on every reinstall/update.
-        // (bootstrap.ps1 has done this since Nadim's 2026-04-25 reinstall; the GUI installer did not,
-        // which is exactly the failure hit on 2026-06-05.)
-        KillOrphanProcesses();
+        // This process cleanup is required before every native reinstall/update;
+        // omitting it caused the 2026-06-05 locked-binary failure.
+        _ = KillCohortProcessesExceptCurrent();
     }
 
     /// <summary>
-    /// Symmetric uninstall: stop + delete all three services (watchdog-first, kills the
-    /// orphan Helper that locks binaries), then remove the data directory and the install
-    /// directory. Directory deletes are best-effort with retry (a just-killed Helper can
-    /// briefly hold a handle). Safe to call when services / dirs are already absent.
+    /// Kills only an exact runtime executable from the MSI-owned install
+    /// directory (Helper especially) after service stop. A same-named process
+    /// elsewhere on the workstation is never ownership evidence.
     /// </summary>
-    public static UninstallResult Uninstall(string installDir, string dataDir)
-    {
-        var result = new UninstallResult();
-
-        ConsoleUI.WriteInfo("Stopping and removing SuavoAgent services (watchdog-first)...");
-        StopServices(); // watchdog -> broker -> core + KillOrphanProcesses
-        result.ServicesRemoved = true;
-
-        // Data directory: state.db, state.key, configs, logs, learned templates, audit.
-        if (Directory.Exists(dataDir))
-        {
-            result.DataDirRemoved = SafeDeleteDirectory(dataDir);
-            if (result.DataDirRemoved) ConsoleUI.WriteOk($"Removed data dir: {dataDir}");
-            else ConsoleUI.WriteWarn($"Could not fully remove data dir: {dataDir}");
-        }
-        else { result.DataDirRemoved = true; }
-
-        // Install directory: service binaries + appsettings.json (DPAPI-sealed credentials).
-        var appsettings = Path.Combine(installDir, "appsettings.json");
-        if (File.Exists(appsettings)) { try { File.Delete(appsettings); } catch { /* removed with the dir below */ } }
-        if (Directory.Exists(installDir))
-        {
-            result.InstallDirRemoved = SafeDeleteDirectory(installDir);
-            if (result.InstallDirRemoved) ConsoleUI.WriteOk($"Removed install dir: {installDir}");
-            else ConsoleUI.WriteWarn($"Could not fully remove install dir: {installDir} (a file may still be locked)");
-        }
-        else { result.InstallDirRemoved = true; }
-
-        // Add/Remove Programs entry (written on install) + defensive cleanup of any older
-        // SOFTWARE\SuavoAgent key. Services were already removed above. The staged uninstaller
-        // exe lives in installDir and is removed with the dir delete above (re-exec-from-temp in
-        // UninstallInstaller means our own exe is NOT the one in installDir, so the delete is clean).
-        RemoveUninstallEntry();
-        TryDeleteRegistryKeyTree(@"SOFTWARE\SuavoAgent");
-
-        result.ServicesRemaining = CountRemainingServices();
-        return result;
-    }
-
-    internal const string UninstallExeName = "SuavoAgent.Uninstall.exe";
-    private const string ArpKeyPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SuavoAgent";
-
-    /// <summary>
-    /// Registers SuavoAgent in Windows Add/Remove Programs so a pharmacy can uninstall from
-    /// Settings → Apps, not just the CLI. Stages a copy of the running setup exe inside the
-    /// (ACL-locked, admin-writable) install dir as a stable uninstaller — ARP runs the
-    /// UninstallString long after the Downloads copy is gone. Best-effort: a failure is logged but
-    /// NEVER fails the install (the agent runs fine; only the Settings entry would be missing).
-    /// </summary>
-    public static void RegisterUninstallEntry(string installDir, string version)
-    {
-        if (!OperatingSystem.IsWindows()) return;
-        try
-        {
-            var selfExe = Environment.ProcessPath;
-            var uninstallExe = Path.Combine(installDir, UninstallExeName);
-            if (!string.IsNullOrEmpty(selfExe) && File.Exists(selfExe))
-            {
-                try { File.Copy(selfExe, uninstallExe, overwrite: true); }
-                catch (Exception ex) { ConsoleUI.WriteWarn($"Could not stage uninstaller exe: {ex.Message}"); }
-            }
-            var uninstallString = $"\"{uninstallExe}\" --uninstall";
-
-            long sizeKb = 0;
-            try { sizeKb = new DirectoryInfo(installDir).EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length) / 1024; }
-            catch { /* EstimatedSize is cosmetic */ }
-            var (major, minor) = ParseVersion(version);
-
-            using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
-            using var key = baseKey.CreateSubKey(ArpKeyPath);
-            key.SetValue("DisplayName", "SuavoAgent");
-            key.SetValue("DisplayVersion", version);
-            key.SetValue("Publisher", "MKM Technologies LLC");
-            key.SetValue("InstallLocation", installDir);
-            key.SetValue("DisplayIcon", uninstallExe);
-            key.SetValue("UninstallString", uninstallString);
-            key.SetValue("QuietUninstallString", uninstallString + " --silent");
-            key.SetValue("NoModify", 1, RegistryValueKind.DWord);
-            key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
-            key.SetValue("EstimatedSize", (int)Math.Min(sizeKb, int.MaxValue), RegistryValueKind.DWord);
-            key.SetValue("InstallDate", DateTime.Now.ToString("yyyyMMdd"));
-            key.SetValue("URLInfoAbout", "https://suavollc.com");
-            key.SetValue("HelpLink", "mailto:support@suavollc.com");
-            key.SetValue("VersionMajor", major, RegistryValueKind.DWord);
-            key.SetValue("VersionMinor", minor, RegistryValueKind.DWord);
-            ConsoleUI.WriteOk("Registered in Add/Remove Programs (uninstall from Settings → Apps)");
-        }
-        catch (Exception ex)
-        {
-            ConsoleUI.WriteWarn($"Could not register Add/Remove Programs entry: {ex.Message}");
-        }
-    }
-
-    /// <summary>Removes the Add/Remove Programs entry. Best-effort; tolerates a missing key.</summary>
-    private static void RemoveUninstallEntry()
-    {
-        if (!OperatingSystem.IsWindows()) return;
-        try
-        {
-            using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
-            baseKey.DeleteSubKeyTree(ArpKeyPath, throwOnMissingSubKey: false);
-        }
-        catch { /* absent or insufficient rights — services + dirs already removed */ }
-    }
-
-    // "3.77.0" / "v3.77.0-rc1" -> (3, 77) for ARP VersionMajor/Minor (cosmetic DWORDs).
-    internal static (int Major, int Minor) ParseVersion(string version)
-    {
-        var parts = (version ?? "").TrimStart('v').Split('.', '-');
-        int.TryParse(parts.ElementAtOrDefault(0), out var major);
-        int.TryParse(parts.ElementAtOrDefault(1), out var minor);
-        return (major, minor);
-    }
-
-    /// <summary>Outcome of <see cref="Uninstall"/>, used for zero-residue verification.</summary>
-    public sealed class UninstallResult
-    {
-        public bool ServicesRemoved { get; set; }
-        public bool DataDirRemoved { get; set; }
-        public bool InstallDirRemoved { get; set; }
-        public int ServicesRemaining { get; set; }
-        public bool FullyClean => ServicesRemaining == 0 && DataDirRemoved && InstallDirRemoved;
-    }
-
-    // Recursive delete that tolerates a briefly-held handle from a just-killed process.
-    private static bool SafeDeleteDirectory(string path)
-    {
-        for (var attempt = 0; attempt < 5; attempt++)
-        {
-            try
-            {
-                Directory.Delete(path, recursive: true);
-                return true;
-            }
-            catch (DirectoryNotFoundException) { return true; }
-            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
-            {
-                try { ClearReadOnlyRecursive(path); } catch { /* best effort */ }
-                Thread.Sleep(1000);
-            }
-            catch { break; }
-        }
-        return !Directory.Exists(path);
-    }
-
-    private static void ClearReadOnlyRecursive(string path)
-    {
-        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
-        {
-            try { var fi = new FileInfo(file); if (fi.IsReadOnly) fi.IsReadOnly = false; } catch { }
-        }
-    }
-
-    private static int CountRemainingServices()
-    {
-        var remaining = 0;
-        foreach (var name in new[] { CoreServiceName, BrokerServiceName, WatchdogServiceName })
-            if (IsServicePresent(name)) remaining++;
-        return remaining;
-    }
-
-    // Present = sc.exe query did NOT return "FAILED 1060" (the service-does-not-exist code).
-    private static bool IsServicePresent(string serviceName)
-    {
-        try
-        {
-            var outp = RunSc($"query {serviceName}", expectSuccess: false);
-            return !outp.Contains("FAILED 1060", StringComparison.OrdinalIgnoreCase);
-        }
-        catch { return false; }
-    }
-
-    private static void TryDeleteRegistryKeyTree(string subKey)
-    {
-        if (!OperatingSystem.IsWindows()) return;
-        try { Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree(subKey, throwOnMissingSubKey: false); }
-        catch { /* absent or insufficient rights — services already removed by StopServices */ }
-    }
-
-    /// <summary>
-    /// Kills any lingering SuavoAgent.* process (Helper especially) that survives a service stop,
-    /// so the binaries can be overwritten. Best-effort: a process that already exited or that we
-    /// can't touch is skipped. Waits briefly for the OS to release the file handles afterward.
-    /// </summary>
-    private static void KillOrphanProcesses()
+    internal static bool KillCohortProcessesExceptCurrent()
     {
         var killedAny = false;
+        var allStopped = true;
         Process[] all;
         try { all = Process.GetProcesses(); }
-        catch { return; }
+        catch { return false; }
+        var installedDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "Suavo",
+            "Agent");
 
         foreach (var p in all)
         {
@@ -372,9 +228,27 @@ internal static class ServiceInstaller
             try { name = p.ProcessName; }
             catch { p.Dispose(); continue; }
 
-            // Process names have no ".exe" suffix; match "SuavoAgent.*" (Helper/Core/Broker/Watchdog).
-            if (name.StartsWith("SuavoAgent.", StringComparison.OrdinalIgnoreCase))
+            if (p.Id != Environment.ProcessId && IsRuntimeProcessName(name))
             {
+                string? executablePath;
+                try { executablePath = p.MainModule?.FileName; }
+                catch
+                {
+                    // Elevated maintenance should be able to classify its own
+                    // cohort. If it cannot, do not kill by name and do not claim
+                    // the quiescence proof passed.
+                    allStopped = false;
+                    p.Dispose();
+                    continue;
+                }
+                if (!IsOwnedInstalledCohortProcess(
+                        name,
+                        executablePath,
+                        installedDirectory))
+                {
+                    p.Dispose();
+                    continue;
+                }
                 try
                 {
                     ConsoleUI.WriteInfo($"Killing lingering process {name} (PID {p.Id}) holding a binary lock...");
@@ -385,6 +259,8 @@ internal static class ServiceInstaller
                 catch
                 {
                     // Already gone, or insufficient rights — the download retry/verify will surface it.
+                    try { if (!p.HasExited) allStopped = false; }
+                    catch { }
                 }
             }
             p.Dispose();
@@ -392,7 +268,37 @@ internal static class ServiceInstaller
 
         // Give the OS a beat to release the file handles before we overwrite the EXEs.
         if (killedAny) Thread.Sleep(1500);
+        return allStopped;
     }
+
+    internal static bool IsOwnedInstalledCohortProcess(
+        string? processName,
+        string? executablePath,
+        string? installDirectory)
+    {
+        if (!IsRuntimeProcessName(processName) ||
+            string.IsNullOrWhiteSpace(executablePath) ||
+            string.IsNullOrWhiteSpace(installDirectory) ||
+            executablePath.Any(char.IsControl) ||
+            installDirectory.Any(char.IsControl))
+            return false;
+        var normalizedPath = executablePath.Trim().Trim('"').Replace('/', '\\');
+        var normalizedDirectory = installDirectory.Trim().Trim('"')
+            .Replace('/', '\\').TrimEnd('\\');
+        if (normalizedPath.Split('\\').Any(segment => segment is "." or "..") ||
+            normalizedDirectory.Split('\\').Any(segment => segment is "." or ".."))
+            return false;
+        return string.Equals(
+            normalizedPath,
+            normalizedDirectory + "\\" + processName + ".exe",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRuntimeProcessName(string? processName) =>
+        string.Equals(processName, "SuavoAgent.Core", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(processName, "SuavoAgent.Broker", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(processName, "SuavoAgent.Watchdog", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(processName, "SuavoAgent.Helper", StringComparison.OrdinalIgnoreCase);
 
     private static void StopAndRemove(string serviceName)
     {
@@ -419,123 +325,6 @@ internal static class ServiceInstaller
             // Service may not exist — that's fine
         }
     }
-
-    /// <summary>
-    /// Lock down directory with ACL: Admin + SYSTEM full, LocalService modify.
-    /// Uses icacls.exe instead of .NET ACL API for simpler cross-compile compatibility.
-    /// Public so Program.cs can call it before writing config (C-4: ACL-first).
-    /// </summary>
-    public static void LockdownDirectoryAcl(string path)
-    {
-        try
-        {
-            // Reset inheritance, remove all existing ACEs. throwOnFailure: a non-zero icacls exit must
-            // ABORT the install — proceeding would leave the dir world-readable while the DPAPI seal
-            // writes the API key + SQL password into it (QA W2-C1, HIPAA).
-            RunCmd("icacls", $"\"{path}\" /inheritance:r /grant:r \"BUILTIN\\Administrators:(OI)(CI)F\" /grant:r \"NT AUTHORITY\\SYSTEM:(OI)(CI)F\" /grant:r \"NT AUTHORITY\\LOCAL SERVICE:(OI)(CI)M\"",
-                throwOnFailure: true);
-            ConsoleUI.WriteOk($"ACL locked down: {path}");
-        }
-        catch (Exception ex)
-        {
-            // HARD FAIL (QA W2-C1): never write secrets to an unprotected directory.
-            ConsoleUI.WriteFail($"ACL lockdown FAILED for {path}: {ex.Message}");
-            throw new InvalidOperationException(
-                $"Directory ACL lockdown failed for {path} — refusing to write credentials to an unprotected directory.", ex);
-        }
-    }
-
-    // The de-privileged Helper runs as the interactive user (CreateProcessAsUser). Its token is
-    // ALWAYS a member of BUILTIN\Users (S-1-5-32-545) regardless of UAC token-filtering or logon
-    // type — unlike the INTERACTIVE group (S-1-5-4), which a filtered/edge-case token can lack.
-    // bootstrap.ps1 (the proven install path) grants Users:RX for exactly this reason, so we use
-    // the same principal. SID form (*S-1-5-32-545) = locale-independent (icacls won't mis-resolve
-    // "Users" on a non-English box).
-    // BUILTIN\Users — single source of truth lives in SuavoAgent.Diagnostics so the installer
-    // (install-time grant) and the LocalSystem Watchdog (post-OTA re-grant) can never diverge.
-    private const string HelperPrincipal = SuavoAgent.Diagnostics.HelperExeAclGrant.HelperPrincipal;
-
-    /// <summary>
-    /// Install-dir read carve-out, applied AFTER LockdownDirectoryAcl pins the install dir to
-    /// Admins/SYSTEM/LocalService. SuavoAgent.Helper.exe is a COMPRESSED single-file
-    /// self-extracting apphost (publish: --self-contained PublishSingleFile + EnableCompression);
-    /// at startup it RE-OPENS and self-extracts its OWN exe as the running (de-privileged) user.
-    /// Without read access that open is denied → the Helper dies BEFORE its first log line and the
-    /// Broker churns a fresh PID ~every 5s (helper_attached=false forever; root cause 2026-06-10,
-    /// confirmed on box; bootstrap.ps1 already grants this, the GUI/console installers did not).
-    /// Scoped to traverse-on-dir + RX-on-Helper.exe so appsettings.json (ApiKey + SQL creds) and
-    /// the other service binaries stay UNREADABLE by local users.
-    /// </summary>
-    public static void GrantInteractiveHelperExeAccess(string installDir)
-    {
-        try
-        {
-            // Delegate to the shared, idempotent grant so the install-time path and the LocalSystem
-            // Watchdog's post-OTA re-grant are LITERALLY the same code (traverse-on-dir + RX-on-Helper.exe).
-            if (SuavoAgent.Diagnostics.HelperExeAclGrant.Apply(installDir, ConsoleUI.WriteInfo))
-                ConsoleUI.WriteOk("Helper apphost readable by the interactive user (single-file self-extract); appsettings stays protected");
-            else
-                ConsoleUI.WriteWarn("Helper apphost read-grant did NOT fully succeed — the Helper may churn (cannot self-extract)");
-        }
-        catch (Exception ex)
-        {
-            ConsoleUI.WriteWarn($"Helper apphost read-grant FAILED: {ex.Message} — the Helper will churn (cannot self-extract)");
-        }
-    }
-
-    // The Helper's DATA-dir least-privilege carve-out, applied AFTER LockdownDirectoryAcl.
-    // Deliberately NOT an inherited read on the data-dir root: state.db is plaintext
-    // SQLite (PHI on a PMS box) and state.key is machine-scope DPAPI (any local
-    // reader could decrypt), and SQLite recreates -wal/-shm constantly so even a
-    // strip-after-grant would reopen a read window on every checkpoint. So:
-    //   root            -> Users (RX), THIS DIR ONLY (traverse + list, no file reads)
-    //   logs\helper\, diagnostics\helper\ -> Users (OI)(CI)M — the ONLY
-    //     user-writable log/journal dirs. The logs\ and diagnostics\ roots stay
-    //     service-only (traverse) so a local user can never plant junctions or
-    //     links where SYSTEM (Broker/Watchdog) appends — log-dir EoP class
-    //     (Codex review 2026-06-10 Q2).
-    //   honeytokens\    -> Users (OI)(CI)M (decoy bait — user-touchable by design)
-    //   vision.json / actuation.json / pioneerrx.json / honeytoken-attribution.json
-    //     -> Users (R) per-file when present (flows that create or atomically
-    //     rewrite these later must re-grant — replace drops per-file ACEs).
-    public static void GrantInteractiveHelperAccess(string dataDir)
-    {
-        try
-        {
-            foreach (var args in BuildInteractiveGrantArgs(dataDir))
-            {
-                var (target, grant, ensureDir) = args;
-                if (ensureDir)
-                    Directory.CreateDirectory(target);
-                else if (!File.Exists(target))
-                    continue;
-                RunCmd("icacls", $"\"{target}\" /grant \"{grant}\"");
-            }
-            ConsoleUI.WriteOk("Helper (interactive user) data-dir carve-out applied: traverse + logs/diagnostics write + config reads");
-        }
-        catch (Exception ex)
-        {
-            ConsoleUI.WriteWarn($"Helper data-dir carve-out failed: {ex.Message} — the Helper cannot log or read configs until this is fixed");
-        }
-    }
-
-    /// <summary>Pure builder so the exact icacls grants are unit-testable.
-    /// Tuple: (target path, grant spec, target-is-directory-to-create).</summary>
-    internal static IReadOnlyList<(string Target, string Grant, bool EnsureDir)> BuildInteractiveGrantArgs(string dataDir) =>
-    [
-        (dataDir, $"{HelperPrincipal}:(RX)", true),
-        (Path.Combine(dataDir, "logs"), $"{HelperPrincipal}:(RX)", true),
-        (Path.Combine(dataDir, "logs", "helper"), $"{HelperPrincipal}:(OI)(CI)(M)", true),
-        (Path.Combine(dataDir, "diagnostics"), $"{HelperPrincipal}:(RX)", true),
-        (Path.Combine(dataDir, "diagnostics", "helper"), $"{HelperPrincipal}:(OI)(CI)(M)", true),
-        // Honeytokens are decoy bait the Helper plants and watches — user-touchable
-        // is their entire purpose; no SYSTEM process writes files here.
-        (Path.Combine(dataDir, "honeytokens"), $"{HelperPrincipal}:(OI)(CI)(M)", true),
-        (Path.Combine(dataDir, "vision.json"), $"{HelperPrincipal}:(R)", false),
-        (Path.Combine(dataDir, "actuation.json"), $"{HelperPrincipal}:(R)", false),
-        (Path.Combine(dataDir, "pioneerrx.json"), $"{HelperPrincipal}:(R)", false),
-        (Path.Combine(dataDir, "honeytoken-attribution.json"), $"{HelperPrincipal}:(R)", false),
-    ];
 
     /// <summary>Polls for the Helper process appearing in the interactive session.</summary>
     private static bool WaitForHelperProcess(TimeSpan timeout)
@@ -576,13 +365,13 @@ internal static class ServiceInstaller
     }
 
     // expectSuccess=true logs a non-zero exit. throwOnFailure=true makes a non-zero exit (or a
-    // failed launch) THROW — use it for steps where silently proceeding is unsafe (QA W2-C1: a failed
-    // icacls lockdown that's only logged lets the DPAPI seal write secrets to a world-readable dir).
+    // failed launch) THROW — use it for steps where silently proceeding is unsafe. Privileged ACL
+    // work is intentionally absent here; it uses the native handle-bound security boundary.
     private static string RunCmd(string exe, string args, bool expectSuccess = true, bool throwOnFailure = false)
     {
         var psi = new ProcessStartInfo
         {
-            FileName = exe,
+            FileName = TrustedWindowsSystemBinary.Resolve(exe),
             Arguments = args,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -598,15 +387,34 @@ internal static class ServiceInstaller
             return "";
         }
 
-        var output = proc.StandardOutput.ReadToEnd();
-        var error = proc.StandardError.ReadToEnd();
-        proc.WaitForExit(30000);
+        // Start both drains before waiting. Reading either redirected stream to EOF
+        // synchronously first can deadlock when the child fills the other pipe buffer,
+        // which also makes the nominal timeout ineffective.
+        var outputTask = proc.StandardOutput.ReadToEndAsync();
+        var errorTask = proc.StandardError.ReadToEndAsync();
+        if (!proc.WaitForExit(30000))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            try { proc.WaitForExit(5000); } catch { }
+            _ = Task.WhenAll(outputTask, errorTask).Wait(TimeSpan.FromSeconds(5));
+            throw new TimeoutException($"{exe} did not exit within 30 seconds");
+        }
+
+        Task.WhenAll(outputTask, errorTask).GetAwaiter().GetResult();
+        var output = outputTask.Result;
+        var error = errorTask.Result;
 
         if ((expectSuccess || throwOnFailure) && proc.ExitCode != 0)
         {
-            ConsoleUI.WriteInfo($"{exe} {args} -> exit {proc.ExitCode}: {error.Trim()}");
+            // Never forward native stderr or arguments into the GUI, console, or
+            // setup log. Windows tools can echo paths and account names supplied
+            // by the environment. Exit code + fixed support code is sufficient.
+            ConsoleUI.WriteInfo(
+                $"A protected Windows maintenance command exited with code {proc.ExitCode}. " +
+                "Support code: SETUP-NATIVE-COMMAND");
             if (throwOnFailure)
-                throw new InvalidOperationException($"{exe} exited {proc.ExitCode}: {error.Trim()}");
+                throw new InvalidOperationException(
+                    $"Protected Windows maintenance command exited with code {proc.ExitCode}.");
         }
 
         return output + error;
@@ -614,21 +422,23 @@ internal static class ServiceInstaller
 
     /// <summary>
     /// Pure classification logic — testable without real service probes.
-    /// Core/Broker absent → Fail; Helper/Watchdog absent → Warn; all present → Ok.
+    /// Core/Broker/Watchdog absent → Fail; Helper absent → Warn; all present → Ok.
     /// Helper is Warn (not Fail): a headless / locked / RDP-disconnected session legitimately has no
     /// interactive Session 1 for the Broker to spawn the Helper into — which is exactly where the
-    /// console fleet-deploy installer runs. InstallAndStart takes the same stance (returns success on
-    /// coreRunning alone). Failing here would brick an otherwise-healthy headless install. Pipe-gate
-    /// liveness still covers the Core-is-serving signal.
+    /// console fleet-deploy installer runs. The Watchdog is not optional: without it the machine
+    /// cannot satisfy the self-healing product contract and must never report installation success.
     /// </summary>
     public static GateResult ClassifyServices(bool core, bool broker, bool watchdog, bool helper)
     {
         if (!core) return new GateResult("Services", GateState.Fail, "Core service not running");
         if (!broker) return new GateResult("Services", GateState.Fail, "Broker service not running");
+        if (!watchdog) return new GateResult("Services", GateState.Fail, "Watchdog service not running");
         if (!helper) return new GateResult("Services", GateState.Warn, "Helper not running yet (normal on headless/locked sessions)");
-        if (!watchdog) return new GateResult("Services", GateState.Warn, "Watchdog not running yet");
         return new GateResult("Services", GateState.Ok, "All services running");
     }
+
+    internal static bool RequiredServicesRunning(bool core, bool broker, bool watchdog)
+        => core && broker && watchdog;
 
     /// <summary>
     /// Live gate: probes real services and the Helper process, then delegates to ClassifyServices.

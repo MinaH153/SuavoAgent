@@ -71,7 +71,7 @@ public sealed class IntentCursorClient : IIntentCursorClient
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "IntentCursorClient received malformed response");
+            _logger.LogSafeWarning(ex);
             return new IntentCursorClientResult(false, "malformed_response", null);
         }
     }

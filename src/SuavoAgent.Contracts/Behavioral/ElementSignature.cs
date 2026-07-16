@@ -4,8 +4,10 @@ namespace SuavoAgent.Contracts.Behavioral;
 
 /// <summary>
 /// Cross-installation UIA match atom — the unit of the v3.12 structural
-/// fingerprint. All three fields come from the GREEN tier of
-/// <see cref="UiaPropertyScrubber"/>, so no PHI can leak through this type.
+/// fingerprint. These strings are intended to come from the GREEN tier of
+/// <see cref="UiaPropertyScrubber"/>, but the CLR type alone cannot prove that
+/// they are PHI-free. Every persistence or network boundary must independently
+/// enforce the structural-token allowlist and PHI scan.
 ///
 /// Matching rules (see <see cref="MatchesStructurally"/>):
 ///   - ControlType: exact, case-sensitive.

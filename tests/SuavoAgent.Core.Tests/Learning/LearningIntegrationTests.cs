@@ -61,7 +61,8 @@ public class LearningIntegrationTests : IDisposable
 
         _db.UpdateLearningPhase("sess-1", "pattern");
         session = _db.GetLearningSession("sess-1");
-        Assert.Equal("pattern", session.Value.Phase);
+        Assert.True(session.HasValue);
+        Assert.Equal("pattern", session.GetValueOrDefault().Phase);
     }
 
     [Fact]

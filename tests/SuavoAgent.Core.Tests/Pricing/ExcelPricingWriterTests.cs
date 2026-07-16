@@ -140,6 +140,110 @@ public class ExcelPricingWriterTests : IDisposable
     }
 
     [Fact]
+    public void Write_AmbiguousLegacyCostHeaderIsUpgradedToPerUnit()
+    {
+        var path = CreateExcel();
+
+        var result = _writer.Write(
+            path,
+            [new("job1", 2, "55111064501", true, "McKesson", 0.0316m, null)],
+            costColumnHeader: PricingJobDefaults.AmbiguousLegacyCostColumn);
+
+        Assert.True(result.Success, result.Error);
+        using var workbook = new XLWorkbook(result.OutputPath!);
+        var headers = GetHeaders(workbook.Worksheet(1));
+        Assert.Contains(PricingJobDefaults.CostColumn, headers.Keys);
+        Assert.DoesNotContain(PricingJobDefaults.AmbiguousLegacyCostColumn, headers.Keys);
+        Assert.Equal(
+            0.0316,
+            workbook.Worksheet(1).Cell(2, headers[PricingJobDefaults.CostColumn]).GetDouble(),
+            4);
+    }
+
+    [Fact]
+    public void Write_PackageCost_CreatesExactSixColumnReviewWorkbook()
+    {
+        var path = CreatePackageExcel();
+        var results = new[]
+        {
+            new SupplierPriceResult(
+                "job1", 2, "00093505698", true, "ParMed", null, null,
+                PackageCost: 2.6000m,
+                CostBasis: PricingApprovalContract.PackageCostBasis),
+            new SupplierPriceResult(
+                "job1", 3, "55111064501", false, null, null,
+                "No eligible package-cost supplier rows",
+                CostBasis: PricingApprovalContract.PackageCostBasis),
+        };
+
+        var result = _writer.Write(
+            path,
+            results,
+            costBasis: PricingApprovalContract.PackageCostBasis);
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(1, result.OkRows);
+        Assert.Equal(1, result.FailRows);
+        using var workbook = new XLWorkbook(result.OutputPath!);
+        var sheet = workbook.Worksheet(1);
+        Assert.Equal(
+            new[] { "Rank", "Drug", "Strength", "NDC", "Cheapest Supplier", "Cost" },
+            Enumerable.Range(1, 6).Select(column => sheet.Cell(1, column).GetString()));
+        Assert.Equal(6, sheet.LastColumnUsed()!.ColumnNumber());
+        Assert.Equal(1, sheet.Cell(2, 1).GetValue<int>());
+        Assert.Equal(2, sheet.Cell(3, 1).GetValue<int>());
+        Assert.Equal(XLDataType.Number, sheet.Cell(2, 1).DataType);
+        Assert.Equal("00093505698", sheet.Cell(2, 4).GetString());
+        Assert.Equal("ParMed", sheet.Cell(2, 5).GetString());
+        Assert.Equal(2.6000m, sheet.Cell(2, 6).GetValue<decimal>());
+        Assert.Equal("Needs review", sheet.Cell(3, 5).GetString());
+        Assert.True(sheet.Cell(3, 6).IsEmpty());
+        Assert.True(sheet.AutoFilter.IsEnabled);
+        Assert.Equal(XLColor.FromHtml("#1D4ED8"), sheet.Cell(1, 1).Style.Fill.BackgroundColor);
+        Assert.Equal(XLColor.White, sheet.Cell(1, 1).Style.Font.FontColor);
+        Assert.True(sheet.Cell(1, 1).Style.Font.Bold);
+        Assert.Equal(XLColor.FromHtml("#FFF7ED"), sheet.Cell(3, 1).Style.Fill.BackgroundColor);
+        Assert.Equal("$0.0000", sheet.Cell(2, 6).Style.NumberFormat.Format);
+    }
+
+    [Fact]
+    public void Write_PackageCost_PreservesExactSchemaForFiveHundredRows()
+    {
+        var path = CreatePackageExcel(500);
+        var results = Enumerable.Range(0, 500)
+            .Select(index => new SupplierPriceResult(
+                "job-500",
+                index + 2,
+                index switch
+                {
+                    0 => "00093505698",
+                    1 => "55111064501",
+                    _ => (10_000_000_000L + index).ToString("D11"),
+                },
+                true,
+                "Eligible Supplier",
+                null,
+                null,
+                PackageCost: 3.16m,
+                CostBasis: PricingApprovalContract.PackageCostBasis))
+            .ToArray();
+
+        var result = _writer.Write(
+            path,
+            results,
+            costBasis: PricingApprovalContract.PackageCostBasis);
+
+        Assert.True(result.Success, result.Error);
+        using var workbook = new XLWorkbook(result.OutputPath!);
+        var sheet = workbook.Worksheet(1);
+        Assert.Equal(501, sheet.LastRowUsed()!.RowNumber());
+        Assert.Equal(6, sheet.LastColumnUsed()!.ColumnNumber());
+        Assert.Equal(500, sheet.Cell(501, 1).GetValue<int>());
+        Assert.Equal(XLDataType.Number, sheet.Cell(501, 1).DataType);
+        Assert.Equal(XLDataType.Text, sheet.Cell(501, 4).DataType);
+    }
+
+    [Fact]
     public void Write_MissingFile_Fails()
     {
         var result = _writer.Write(Path.Combine(_tempDir, "Patient Jane Doe Top500.xlsx"), []);
@@ -182,6 +286,57 @@ public class ExcelPricingWriterTests : IDisposable
         Assert.Equal("McKesson", ws.Cell(2, headers[PricingJobDefaults.SupplierColumn]).GetString());
     }
 
+    [Fact]
+    public async Task Write_Sibling_ConcurrentIdentityCollision_PublishesExactlyOnceWithoutOverwrite()
+    {
+        var source = CreateExcel();
+        var sourceBytes = File.ReadAllBytes(source);
+        SupplierPriceResult[] firstRows =
+        [
+            new("job1", 2, "55111064501", true, "McKesson", 0.0316m, null),
+        ];
+        SupplierPriceResult[] secondRows =
+        [
+            new("job2", 2, "55111064501", true, "Cardinal", 0.0412m, null),
+        ];
+
+        for (var iteration = 0; iteration < 8; iteration++)
+        {
+            var destination = Path.Combine(
+                _tempDir,
+                $"fixed-priced-identity-{iteration}.xlsx");
+            using var publicationBarrier = new Barrier(participantCount: 2);
+            void Rendezvous()
+            {
+                if (!publicationBarrier.SignalAndWait(TimeSpan.FromSeconds(10)))
+                    throw new TimeoutException("Concurrent publication rendezvous timed out.");
+            }
+
+            var first = new ExcelPricingWriter(
+                NullLogger<ExcelPricingWriter>.Instance,
+                _ => destination,
+                Rendezvous);
+            var second = new ExcelPricingWriter(
+                NullLogger<ExcelPricingWriter>.Instance,
+                _ => destination,
+                Rendezvous);
+
+            var attempts = await Task.WhenAll(
+                Task.Run(() => first.Write(source, firstRows)),
+                Task.Run(() => second.Write(source, secondRows)));
+
+            Assert.Single(attempts, result => result.Success);
+            var rejected = Assert.Single(attempts, result => !result.Success);
+            Assert.Equal("pricing_output_collision", rejected.Error);
+            var expectedSupplier = attempts[0].Success ? "McKesson" : "Cardinal";
+            using var published = new XLWorkbook(destination);
+            Assert.Equal(expectedSupplier, published.Worksheet(1).Cell(2, 3).GetString());
+        }
+
+        Assert.Equal(sourceBytes, File.ReadAllBytes(source));
+        Assert.Empty(Directory.EnumerateFiles(_tempDir, ".suavo-priced-*"));
+    }
+
     private static Dictionary<string, int> GetHeaders(IXLWorksheet ws)
     {
         var lastCol = ws.LastColumnUsed()?.ColumnNumber() ?? 0;
@@ -216,6 +371,31 @@ public class ExcelPricingWriterTests : IDisposable
         ws.Cell(3, 1).Value = "00093-5124-01";
         ws.Cell(3, 2).Value = "Metformin 500mg";
         wb.SaveAs(path);
+        return path;
+    }
+
+    private string CreatePackageExcel(int rowCount = 2)
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using var workbook = new XLWorkbook();
+        var sheet = workbook.AddWorksheet("Top 500");
+        var headers = new[] { "Rank", "Drug", "Strength", "NDC", "Report Junk" };
+        for (var index = 0; index < headers.Length; index++)
+            sheet.Cell(1, index + 1).Value = headers[index];
+        for (var index = 0; index < rowCount; index++)
+        {
+            var row = index + 2;
+            sheet.Cell(row, 1).SetValue((index + 1).ToString());
+            sheet.Cell(row, 2).Value = index == 1 ? "Omeprazole" : $"Example Drug {index + 1}";
+            sheet.Cell(row, 3).Value = index == 1 ? "40 mg" : "10 mg";
+            sheet.Cell(row, 4).SetValue(index switch
+            {
+                0 => "00093505698",
+                1 => "55111064501",
+                _ => (10_000_000_000L + index).ToString("D11"),
+            });
+        }
+        workbook.SaveAs(path);
         return path;
     }
 

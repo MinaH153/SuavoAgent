@@ -145,7 +145,7 @@ public sealed class HelperSelfHealCoordinator
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Helper self-heal sentinel write failed — will retry next probe cycle");
+                _logger.LogSafeError(ex);
                 return SelfHealDecision.No("sentinel_write_failed");
             }
         }

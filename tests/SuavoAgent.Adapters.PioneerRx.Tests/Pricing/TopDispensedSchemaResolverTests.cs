@@ -13,7 +13,7 @@ public class TopDispensedSchemaResolverTests
         ItemIdColumnInCatalog: "ItemID", ItemIdColumnInItem: "ItemID", NdcColumnInItem: "NDC");
 
     private static InventoryColumnInfo Col(string col, string table = "Item", string schema = "Inventory")
-        => new(schema, table, col, "nvarchar", true);
+        => new(schema, table, col, "nvarchar", true, MaxLength: 128, Precision: 0, Scale: 0);
 
     private static List<InventoryColumnInfo> FullItemColumns() => new()
     {
@@ -42,6 +42,8 @@ public class TopDispensedSchemaResolverTests
         Assert.Equal("Rx", spec.RxValue);
         Assert.Equal("DeaSchedule", spec.ScheduleColumn);
         Assert.Equal("0", spec.NoScheduleValue);
+        Assert.Equal("nvarchar", spec.BrandGenericColumnShape!.DataType);
+        Assert.Equal(128, spec.RxOtcColumnShape!.MaxLength);
     }
 
     [Fact]

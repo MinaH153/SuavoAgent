@@ -134,4 +134,32 @@ public class UiaPropertyScrubberTests
 
         Assert.Equal(h1, h2);
     }
+
+    [Theory]
+    [InlineData("patient_123456789")]
+    [InlineData("rx_550e8400-e29b-41d4-a716-446655440000")]
+    [InlineData("member@example.com")]
+    [InlineData("customer_5551234567")]
+    public void Scrub_DropsDynamicVendorIdentifiers(string value)
+    {
+        var raw = DefaultRaw(automationId: value, className: value);
+
+        var scrubbed = UiaPropertyScrubber.Scrub(raw, "salt");
+
+        Assert.Null(scrubbed.AutomationId);
+        Assert.Null(scrubbed.ClassName);
+        Assert.Null(UiaPropertyScrubber.BuildElementId(raw));
+        Assert.Null(UiaPropertyScrubber.TryScrub(raw, "salt"));
+    }
+
+    [Fact]
+    public void GeneratedAnonymousIdentity_AllowsDigestDigitRuns()
+    {
+        var identity = "anon:path:unavailable:rid:" +
+            "72230967" + new string('a', 56) +
+            ":shape:" + new string('b', 64);
+
+        Assert.True(StructuralIdentifierSanitizer.IsAllowedElementIdentity(identity));
+        Assert.False(StructuralIdentifierSanitizer.IsAllowed(identity));
+    }
 }

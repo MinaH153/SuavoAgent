@@ -12,18 +12,18 @@ namespace SuavoAgent.Helper.Tests.Actuation;
 public class SandboxWindowResolverTests
 {
     [Theory]
-    [InlineData("notepad")]      // built-in default (key + launcher base name)
     [InlineData("calculator")]   // built-in default key
     [InlineData("calc")]         // calc.exe launcher base name
     [InlineData("Calculator")]   // packaged alias of calc
     [InlineData("CalculatorApp")]// real Win11 UWP process behind the AFH frame
-    public void IsAllowlistedSandboxProcess_AllowsSandboxAppsAndUwpAliases(string name)
+    public void IsAllowlistedSandboxProcess_AllowsCalculatorAndUwpAliases(string name)
     {
         Assert.True(SandboxWindowResolver.IsAllowlistedSandboxProcess(name));
     }
 
     [Theory]
     [InlineData("ApplicationFrameHost")] // the UWP FRAME host — must NOT be allowlisted (the whole reason we drill)
+    [InlineData("notepad")]              // reusable document surface can contain PHI — explicitly protected
     [InlineData("PioneerPharmacy")]      // the PMS — never allowlisted
     [InlineData("svchost")]              // arbitrary system process — never a sandbox app
     [InlineData("")]

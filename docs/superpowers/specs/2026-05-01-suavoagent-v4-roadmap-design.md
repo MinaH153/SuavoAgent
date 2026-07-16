@@ -61,7 +61,7 @@ What's already shipped per track. Future sessions read this to skip re-derivatio
 **Shipped:**
 - `bootstrap.ps1` hardened, +588 LOC in latest tranche (commit `6cd1250`)
 - `src/SuavoAgent.Core/Health/RuntimeHealthEvidence.cs` (314 LOC)
-- `src/SuavoAgent.Core/Cloud/AgentCredentialRecoveryClient.cs` (330 LOC) — credential recovery path
+- `src/SuavoAgent.Core/Cloud/AgentCredentialRecoveryClient.cs` — retired public-recovery compatibility boundary; now fails closed with `device_repair_required`
 - `src/SuavoAgent.Core/Cloud/ConfigOverrideStore.cs` — cloud-driven config repair
 - `scripts/Test-SuavoAgentReleaseProbe.ps1` (526 LOC)
 - `scripts/vm-validate.ps1`

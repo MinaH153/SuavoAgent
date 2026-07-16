@@ -38,7 +38,7 @@ public class WireOrderingTests
     public void EntryPoint_invokes_Wire_AttachUnhandledHooks(string component, string relPath, string expectedComponent)
     {
         var path = Path.Combine(RepoRoot, relPath);
-        Assert.True(File.Exists(path), $"Entry-point source not found: {path}");
+        Assert.True(File.Exists(path), $"{component} entry-point source not found: {path}");
         var source = File.ReadAllText(path);
         Assert.Contains("Wire.AttachUnhandledHooks(" + expectedComponent, source);
     }

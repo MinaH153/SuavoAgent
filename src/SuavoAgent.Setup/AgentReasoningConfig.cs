@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json.Serialization;
+using SuavoAgent.Contracts.Reasoning;
 
 namespace SuavoAgent.Setup;
 
@@ -23,36 +24,94 @@ public sealed record AgentReasoningConfig(
     [property: JsonPropertyName("nativeLibsSha256")] string NativeLibsSha256,
     [property: JsonPropertyName("nativeLibsSizeBytes")] long? NativeLibsSizeBytes,
     [property: JsonPropertyName("contextSize")] int ContextSize,
-    [property: JsonPropertyName("maxOutputTokens")] int MaxOutputTokens)
+    [property: JsonPropertyName("maxOutputTokens")] int MaxOutputTokens,
+    [property: JsonPropertyName("schemaVersion")] int SchemaVersion = 0,
+    [property: JsonPropertyName("cohortId")] string CohortId = "",
+    [property: JsonPropertyName("issuedAtUtc")] string IssuedAtUtc = "",
+    [property: JsonPropertyName("expiresAtUtc")] string ExpiresAtUtc = "",
+    [property: JsonPropertyName("keyId")] string KeyId = "",
+    [property: JsonPropertyName("signature")] string Signature = "",
+    [property: JsonPropertyName("modelKeyId")] string ModelKeyId = "",
+    [property: JsonPropertyName("modelSignature")] string ModelSignature = "",
+    [property: JsonPropertyName("nativeKeyId")] string NativeKeyId = "",
+    [property: JsonPropertyName("nativeSignature")] string NativeSignature = "",
+    [property: JsonPropertyName("nativePackageKind")] string NativePackageKind = "")
 {
-    /// <summary>True only when enabled AND both assets have a URL + SHA to provision from.</summary>
+    /// <summary>
+    /// Shape-only gate. Cryptographic authorization is independently checked by
+    /// <see cref="ValidatePublisher"/> immediately before any filesystem or
+    /// network mutation.
+    /// </summary>
     public bool IsProvisionable =>
         Enabled
         && !string.IsNullOrWhiteSpace(ModelUrl) && !string.IsNullOrWhiteSpace(ModelSha256)
-        && !string.IsNullOrWhiteSpace(NativeLibsUrl) && !string.IsNullOrWhiteSpace(NativeLibsSha256);
+        && ModelSizeBytes is > 0
+        && !string.IsNullOrWhiteSpace(NativeLibsUrl) && !string.IsNullOrWhiteSpace(NativeLibsSha256)
+        && NativeLibsSizeBytes is > 0
+        && SchemaVersion == BrainCohortContract.SchemaVersion
+        && NativePackageKind == BrainNativePackageExtractor.OfficialNuGetPackageKind
+        && !string.IsNullOrWhiteSpace(CohortId)
+        && !string.IsNullOrWhiteSpace(IssuedAtUtc)
+        && !string.IsNullOrWhiteSpace(ExpiresAtUtc)
+        && string.IsNullOrEmpty(KeyId)
+        && string.IsNullOrEmpty(Signature)
+        && !string.IsNullOrWhiteSpace(ModelKeyId)
+        && !string.IsNullOrWhiteSpace(ModelSignature)
+        && !string.IsNullOrWhiteSpace(NativeKeyId)
+        && !string.IsNullOrWhiteSpace(NativeSignature);
 
-    /// <summary>On-box model file path — SINGLE source of truth shared by the appsettings
-    /// bake and the installer's brain phase so they can never disagree.</summary>
+    public BrainCohortPublisherManifest PublisherManifest() => new(
+        SchemaVersion,
+        CohortId,
+        ModelId,
+        ModelUrl,
+        ModelSha256,
+        ModelSizeBytes ?? 0,
+        NativeLibsUrl,
+        NativeLibsSha256,
+        NativeLibsSizeBytes ?? 0,
+        ContextSize,
+        MaxOutputTokens,
+        IssuedAtUtc,
+        ExpiresAtUtc,
+        KeyId,
+        Signature,
+        ModelKeyId,
+        ModelSignature,
+        NativeKeyId,
+        NativeSignature,
+        NativePackageKind);
+
+    public BrainCohortValidationResult ValidatePublisher(DateTimeOffset now) =>
+        BrainCohortContract.Validate(PublisherManifest(), now);
+
+    internal BrainCohortValidationResult ValidatePublisher(
+        IReadOnlyDictionary<string, string> trustedPublisherKeys,
+        DateTimeOffset now) =>
+        BrainCohortContract.Validate(PublisherManifest(), trustedPublisherKeys, now);
+
+    /// <summary>
+    /// On-box model path inside an immutable content-addressed cohort. A newly
+    /// downloaded model/native pair can therefore be prepared while the prior
+    /// Core remains online without overwriting files loaded by that Core.
+    /// </summary>
     public string GetModelPath(string dataDir) =>
-        Path.Combine(dataDir, "models", SafeFileNameFromUrl(ModelUrl, "model.gguf"));
+        Path.Combine(
+            GetBrainCohortRoot(dataDir),
+            "model",
+            SafeFileNameFromUrl(ModelUrl, "model.gguf"));
 
-    /// <summary>On-box native-libs dir (llama.cpp DLLs extract here).</summary>
-    public string GetNativeLibsDir(string dataDir) => Path.Combine(dataDir, "native");
+    /// <summary>Content-addressed native-libs directory for this exact brain pair.</summary>
+    public string GetNativeLibsDir(string dataDir) =>
+        Path.Combine(GetBrainCohortRoot(dataDir), "native");
+
+    internal string GetBrainCohortRoot(string dataDir)
+        => BrainCohortContract.GetCohortRoot(dataDir, BrainCohortId());
+
+    internal string BrainCohortId()
+        => BrainCohortContract.ComputeCohortId(PublisherManifest());
 
     /// <summary>Last path segment of a URL, sanitized to a safe filename; fallback on anything odd.</summary>
     internal static string SafeFileNameFromUrl(string url, string fallback)
-    {
-        try
-        {
-            var path = new Uri(url).AbsolutePath;
-            var name = Path.GetFileName(path);
-            if (string.IsNullOrWhiteSpace(name)) return fallback;
-            foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
-            return name;
-        }
-        catch
-        {
-            return fallback;
-        }
-    }
+        => BrainCohortContract.SafeFileNameFromUrl(url, fallback);
 }

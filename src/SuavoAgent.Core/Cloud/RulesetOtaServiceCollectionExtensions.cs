@@ -61,6 +61,7 @@ public static class RulesetOtaServiceCollectionExtensions
         var rulesetHandler = new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            AllowAutoRedirect = false,
         };
         var rulesetHttp = new HttpClient(rulesetHandler, disposeHandler: true)
         {

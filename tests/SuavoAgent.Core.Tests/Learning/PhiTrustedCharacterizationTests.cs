@@ -1,6 +1,5 @@
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 using SuavoAgent.Core.Learning;
 using Xunit;
@@ -22,7 +21,8 @@ namespace SuavoAgent.Core.Tests.Learning;
 /// engine and is the immovable baseline.
 ///
 /// Regenerate ONLY against known-good pre-merge code:
-///   PHI_GOLDEN_REGEN=1 dotnet test --filter FullyQualifiedName~PhiTrustedCharacterization
+///   PHI_GOLDEN_REGEN=1 PHI_GOLDEN_REGEN_OUTPUT=/absolute/path/to/phi-golden-trusted.json
+///     dotnet test --filter FullyQualifiedName~PhiTrustedCharacterization
 /// </summary>
 public sealed class PhiTrustedCharacterizationTests
 {
@@ -170,8 +170,17 @@ public sealed class PhiTrustedCharacterizationTests
         public bool Contains { get; set; }
     }
 
-    private static string GoldenPath([CallerFilePath] string thisFile = "")
-        => Path.Combine(Path.GetDirectoryName(thisFile)!, "phi-golden-trusted.json");
+    private static string GoldenPath()
+        => Path.Combine(AppContext.BaseDirectory, "Learning", "phi-golden-trusted.json");
+
+    private static string RegenerationPath()
+    {
+        var path = Environment.GetEnvironmentVariable("PHI_GOLDEN_REGEN_OUTPUT");
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidOperationException(
+                "PHI_GOLDEN_REGEN_OUTPUT must be an absolute reviewed fixture path.");
+        return Path.GetFullPath(path);
+    }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -195,7 +204,7 @@ public sealed class PhiTrustedCharacterizationTests
                     Contains = PhiScrubber.ContainsPhi(input),
                 });
             }
-            File.WriteAllText(GoldenPath(), JsonSerializer.Serialize(regen, JsonOpts));
+            File.WriteAllText(RegenerationPath(), JsonSerializer.Serialize(regen, JsonOpts));
             return;
         }
 

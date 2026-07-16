@@ -9,13 +9,19 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.2" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- Keep the test project's dependency graph identical on every CI host so
+         packages.lock.json can be restored in locked mode on Linux and Windows.
+         The real-model tests still no-op unless their explicit Windows CI asset is present. -->
+    <PackageReference Include="LLamaSharp.Backend.Cpu" Version="0.24.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SuavoAgent.Helper\SuavoAgent.Helper.csproj" />
+    <ProjectReference Include="..\..\tools\PioneerRxSim\Shared\PioneerRxSim.Shared.csproj" />
   </ItemGroup>
 
   <!-- FlaUI.UIA2 needs UIAutomationClient (Microsoft.WindowsDesktop.App) at runtime. Pull it in ONLY
@@ -23,11 +29,6 @@
        the Linux build-and-test gate is unaffected (condition false → cross-platform build stays clean). -->
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
-    <!-- Native llama.cpp CPU backend so the real-LLM smoke (LocalLlmSmokeTests / NavigateLlmReasoningTests)
-         can load a GGUF on the windows-uia-smoke runner. Windows-only + the tests no-op without a model, so
-         the ubuntu gate is unaffected. MUST equal Core's LLamaSharp managed binding exactly (0.24.0 = first
-         Qwen3-capable; this backend nupkg provides the 5-DLL native set automatically in CI). -->
-    <PackageReference Include="LLamaSharp.Backend.Cpu" Version="0.24.0" />
   </ItemGroup>
 
 </Project>

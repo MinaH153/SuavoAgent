@@ -35,7 +35,7 @@ public static class PricingSchemaResolver
 
     private static readonly string[] StatusColumnPriority =
     {
-        "Status", "SupplierStatus", "AvailabilityStatus", "IsActive", "IsAvailable",
+        "Status", "SupplierStatus", "AvailabilityStatus",
     };
 
     /// <summary>
@@ -45,7 +45,7 @@ public static class PricingSchemaResolver
     /// </summary>
     public static readonly IReadOnlyList<string> DefaultAvailableStatusValues = new[]
     {
-        "Available", "Active", "AVAIL", "A",
+        "Available", "Active",
     };
 
     /// <summary>
@@ -92,15 +92,16 @@ public static class PricingSchemaResolver
             var tableSchema = kv.Key.Schema;
             var tableName = kv.Key.Table;
 
-            var costCol = Pick(cols, CostColumnPriority);
-            if (costCol == null) continue;
+            var costInfo = PickInfo(cols, CostColumnPriority, IsExactNumeric);
+            if (costInfo == null) continue;
+            var costCol = costInfo.ColumnName;
 
-            var costPerUnit = Pick(cols, CostPerUnitColumnPriority);
-            var ndc = Pick(cols, NdcColumnPriority);
+            var costPerUnit = PickInfo(cols, CostPerUnitColumnPriority, IsExactNumeric)?.ColumnName;
+            var ndc = PickInfo(cols, NdcColumnPriority, IsBoundedText)?.ColumnName;
             var itemId = Pick(cols, ItemIdColumnPriority);
-            var supplierName = Pick(cols, SupplierNameOnCatalogPriority);
+            var supplierName = PickInfo(cols, SupplierNameOnCatalogPriority, IsBoundedText)?.ColumnName;
             var supplierId = Pick(cols, SupplierIdColumnPriority);
-            var status = Pick(cols, StatusColumnPriority);
+            var status = PickInfo(cols, StatusColumnPriority, IsBoundedText)?.ColumnName;
 
             double score = 0.25;                                       // has Cost
             if (ndc != null) score += 0.30;
@@ -193,7 +194,11 @@ public static class PricingSchemaResolver
             StatusColumn: best.StatusColumn,
             AvailableStatusValues: DefaultAvailableStatusValues,
             ConfidenceScore: best.Score,
-            DiagnosticNotes: notes);
+            DiagnosticNotes: notes,
+            CostColumnShape: ShapeFor(byTable[best.Key], best.CostColumn),
+            CostPerUnitColumnShape: ShapeFor(byTable[best.Key], best.CostPerUnitColumn),
+            NdcColumnShape: ShapeFor(byTable[best.Key], best.NdcColumn),
+            StatusColumnShape: ShapeFor(byTable[best.Key], best.StatusColumn));
 
         return new PricingDiscoveryOutcome(true, schema, null, notes);
     }
@@ -210,7 +215,7 @@ public static class PricingSchemaResolver
             if (!looksLikeSupplier) continue;
 
             var id = Pick(kv.Value, SupplierIdColumnPriority);
-            var name = Pick(kv.Value, SupplierNameOnCatalogPriority);
+            var name = PickInfo(kv.Value, SupplierNameOnCatalogPriority, IsBoundedText)?.ColumnName;
             if (id == null || name == null) continue;
 
             return new CatalogSupplierSource(
@@ -234,7 +239,8 @@ public static class PricingSchemaResolver
         {
             if (!kv.Key.Table.Equals("Item", StringComparison.OrdinalIgnoreCase)) continue;
             var itemId = Pick(kv.Value, ItemIdColumnPriority);
-            var ndc = Pick(kv.Value, NdcColumnPriority);
+            var ndcInfo = PickInfo(kv.Value, NdcColumnPriority, IsBoundedText);
+            var ndc = ndcInfo?.ColumnName;
             if (itemId == null || ndc == null) continue;
 
             return new CatalogItemJoin(
@@ -242,20 +248,58 @@ public static class PricingSchemaResolver
                 ItemTable: kv.Key.Table,
                 ItemIdColumnInCatalog: catalogItemIdColumn,
                 ItemIdColumnInItem: itemId,
-                NdcColumnInItem: ndc);
+                NdcColumnInItem: ndc,
+                NdcColumnShape: ToShape(ndcInfo!));
         }
         return null;
     }
 
     private static string? Pick(IEnumerable<InventoryColumnInfo> cols, IReadOnlyList<string> priority)
+        => PickInfo(cols, priority)?.ColumnName;
+
+    private static InventoryColumnInfo? PickInfo(
+        IEnumerable<InventoryColumnInfo> cols,
+        IReadOnlyList<string> priority,
+        Func<InventoryColumnInfo, bool>? policy = null)
     {
-        var names = cols.Select(c => c.ColumnName).ToList();
+        var candidates = cols.ToList();
         foreach (var p in priority)
         {
-            var match = names.FirstOrDefault(n => string.Equals(n, p, StringComparison.OrdinalIgnoreCase));
+            var match = candidates.FirstOrDefault(column =>
+                string.Equals(column.ColumnName, p, StringComparison.OrdinalIgnoreCase) &&
+                (policy is null || policy(column)));
             if (match != null) return match;
         }
         return null;
+    }
+
+    private static PricingSqlColumnShape? ShapeFor(
+        IEnumerable<InventoryColumnInfo> columns,
+        string? columnName)
+    {
+        if (string.IsNullOrWhiteSpace(columnName)) return null;
+        var column = columns.FirstOrDefault(candidate =>
+            string.Equals(candidate.ColumnName, columnName, StringComparison.OrdinalIgnoreCase));
+        return column is null ? null : ToShape(column);
+    }
+
+    private static PricingSqlColumnShape ToShape(InventoryColumnInfo column) =>
+        new(column.DataType, column.MaxLength, column.Precision, column.Scale, column.IsNullable);
+
+    private static bool IsExactNumeric(InventoryColumnInfo column) =>
+        column.DataType.Equals("decimal", StringComparison.OrdinalIgnoreCase) ||
+        column.DataType.Equals("numeric", StringComparison.OrdinalIgnoreCase) ||
+        column.DataType.Equals("money", StringComparison.OrdinalIgnoreCase) ||
+        column.DataType.Equals("smallmoney", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsBoundedText(InventoryColumnInfo column)
+    {
+        if (!(column.DataType.Equals("varchar", StringComparison.OrdinalIgnoreCase) ||
+              column.DataType.Equals("nvarchar", StringComparison.OrdinalIgnoreCase) ||
+              column.DataType.Equals("char", StringComparison.OrdinalIgnoreCase) ||
+              column.DataType.Equals("nchar", StringComparison.OrdinalIgnoreCase)))
+            return false;
+        return column.MaxLength is null or > 0;
     }
 
     private sealed class SchemaTableComparer : IEqualityComparer<(string Schema, string Table)>

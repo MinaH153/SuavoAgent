@@ -29,11 +29,20 @@ namespace SuavoAgent.Helper.Actuation;
 /// the gate. That separation is what lets the kill switch be authoritative.
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class SendInputDriver
+public sealed partial class SendInputDriver
 {
+    public enum TargetTrustKind
+    {
+        Unspecified = 0,
+        Sandbox = 1,
+        PioneerRx = 2,
+    }
+
     private readonly ActuationGate _gate;
     private readonly ActuationConfig _config;
     private readonly ILogger _logger;
+    private readonly PioneerRxProcessTrustVerifier? _pioneerRxTrust;
+    private readonly Func<string?>? _focusedValueReader;
     // Visual-only "agent is acting here" glow. Fired (fire-and-forget) at every real cursor move so the
     // operator can WATCH the agent work — the click point AND the type focus-click both flow through
     // MoveAndClick, so one call covers both. Null when the intent-cursor overlay isn't available; a
@@ -53,7 +62,7 @@ public sealed class SendInputDriver
     // launch command thread, read on a later type/press command thread.
     private volatile TargetWindow? _activeTarget;
 
-    private sealed record TargetWindow(int Pid, IntPtr Hwnd, string Label);
+    private sealed record TargetWindow(int Pid, IntPtr Hwnd, string Label, TargetTrustKind TrustKind);
 
     /// <summary>
     /// PID of the window the last launch_sandbox_app established, or 0 if none / unresolved.
@@ -82,13 +91,17 @@ public sealed class SendInputDriver
         ActuationConfig config,
         ILogger logger,
         SuavoAgent.Helper.IntentCursor.IntentCursorController? intentCursor = null,
-        SuavoAgent.Helper.Presence.PresenceController? presence = null)
+        SuavoAgent.Helper.Presence.PresenceController? presence = null,
+        PioneerRxProcessTrustVerifier? pioneerRxTrust = null,
+        Func<string?>? focusedValueReader = null)
     {
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = (logger ?? throw new ArgumentNullException(nameof(logger))).ForContext<SendInputDriver>();
         _intentCursor = intentCursor;
         _presence = presence;
+        _pioneerRxTrust = pioneerRxTrust;
+        _focusedValueReader = focusedValueReader;
     }
 
     /// <summary>
@@ -125,7 +138,10 @@ public sealed class SendInputDriver
         catch { /* visual-only — a glow must never break actuation */ }
     }
 
-    public async Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct)
+    public async Task<ActuationResult> TypeTextAsync(
+        TypeTextRequest req,
+        CancellationToken ct,
+        TargetTrustKind requiredTargetKind = TargetTrustKind.Unspecified)
     {
         ArgumentNullException.ThrowIfNull(req);
         // Bug 21 effective-OR: either flag forces dry-run. Real input only fires
@@ -133,12 +149,12 @@ public sealed class SendInputDriver
         var effectiveDryRun = req.DryRun || _gate.IsDryRun;
         if (req.Text is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "text is null", effectiveDryRun);
 
-        if (PhiPatternGuard.ContainsPotentialPhi(req.Text, out var matched))
+        if (PhiPatternGuard.ContainsPotentialPhi(req.Text, out _))
         {
-            _logger.Warning("TypeText rejected: PHI pattern matched={Pattern}", matched);
+            _logger.Warning("TypeText rejected by local PHI pattern policy");
             return ActuationResult.Reject(
                 ActuationRejectionCodes.PhiPatternDetected,
-                $"input matched PHI pattern '{matched}' — sandbox actuation must not type PHI",
+                "input rejected by local PHI pattern policy",
                 effectiveDryRun);
         }
 
@@ -161,14 +177,23 @@ public sealed class SendInputDriver
             // Fail-closed focus guard: confirm the launch-established target owns the foreground
             // BEFORE any keystroke (including ClearFirst's Ctrl+A/Delete), else refuse — never leak.
             // focusClick: type needs a focused edit control, so click the client area to set it.
-            var fgReject = await EnsureTargetForegroundOrRejectAsync("type", focusClick: true, ct).ConfigureAwait(false);
+            var fgReject = await EnsureTargetForegroundOrRejectAsync(
+                "type", focusClick: true, requiredTargetKind, req.ProcessName, ct).ConfigureAwait(false);
             if (fgReject is not null) return fgReject;
 
             if (req.ClearFirst)
             {
-                SendChord(new[] { VirtualKey.Control }, VirtualKey.A);
+                var clearSelectReject = ExecuteTargetBoundMutationOrReject(
+                    () => SendChord(new[] { VirtualKey.Control }, VirtualKey.A),
+                    requiredTargetKind,
+                    req.ProcessName);
+                if (clearSelectReject is not null) return clearSelectReject;
                 await DelayWithCancel(_config.DefaultPerKeyDelayMs, ct).ConfigureAwait(false);
-                SendChord(Array.Empty<VirtualKey>(), VirtualKey.Delete);
+                var clearDeleteReject = ExecuteTargetBoundMutationOrReject(
+                    () => SendChord(Array.Empty<VirtualKey>(), VirtualKey.Delete),
+                    requiredTargetKind,
+                    req.ProcessName);
+                if (clearDeleteReject is not null) return clearDeleteReject;
                 await DelayWithCancel(_config.DefaultPerKeyDelayMs, ct).ConfigureAwait(false);
             }
 
@@ -176,28 +201,43 @@ public sealed class SendInputDriver
             foreach (var ch in req.Text)
             {
                 ct.ThrowIfCancellationRequested();
-                if (_gate.CheckOrReject() is not null)
-                {
-                    return ActuationResult.Reject(
-                        ActuationRejectionCodes.GatePaused,
-                        "gate closed mid-type",
-                        dryRun: false);
-                }
-                SendUnicodeChar(ch);
+                var characterReject = ExecuteTargetBoundMutationOrReject(
+                    () => SendUnicodeChar(ch),
+                    requiredTargetKind,
+                    req.ProcessName);
+                if (characterReject is not null) return characterReject;
                 await DelayWithCancel(perKeyDelay, ct).ConfigureAwait(false);
+            }
+
+            if (requiredTargetKind != TargetTrustKind.Unspecified)
+            {
+                var verification = await VerifyTypedTextAsync(
+                    req.Text,
+                    requiredTargetKind,
+                    req.ProcessName,
+                    ct).ConfigureAwait(false);
+                if (verification is not null) return verification;
             }
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "TypeText failed mid-execution");
-            return ActuationResult.Reject(ActuationRejectionCodes.ExecutionException, ex.Message, dryRun: false);
+            _logger.Warning(
+                "TypeText failed mid-execution ({ErrorType})",
+                ex.GetType().Name);
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ExecutionException,
+                "text input failed locally",
+                dryRun: false);
         }
 
         return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: false, evidence);
     }
 
-    public async Task<ActuationResult> PressKeysAsync(PressKeysRequest req, CancellationToken ct)
+    public async Task<ActuationResult> PressKeysAsync(
+        PressKeysRequest req,
+        CancellationToken ct,
+        TargetTrustKind requiredTargetKind = TargetTrustKind.Unspecified)
     {
         ArgumentNullException.ThrowIfNull(req);
         var effectiveDryRun = req.DryRun || _gate.IsDryRun;
@@ -211,7 +251,7 @@ public sealed class SendInputDriver
             {
                 return ActuationResult.Reject(
                     ActuationRejectionCodes.ChordParseFailure,
-                    $"could not parse chord '{chordRaw}'",
+                    "one or more key chords were invalid",
                     effectiveDryRun);
             }
             parsed.Add(chord);
@@ -226,8 +266,8 @@ public sealed class SendInputDriver
         if (effectiveDryRun)
         {
             _logger.Information(
-                "PressKeys DRY-RUN: chords=[{Chords}] evidence={Evidence} requestDryRun={ReqDR} gateDryRun={GateDR}",
-                string.Join(",", req.Chords), evidence, req.DryRun, _gate.IsDryRun);
+                "PressKeys DRY-RUN: chordCount={ChordCount} evidence={Evidence} requestDryRun={ReqDR} gateDryRun={GateDR}",
+                req.Chords.Count, evidence, req.DryRun, _gate.IsDryRun);
             return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: true, evidence);
         }
 
@@ -237,31 +277,45 @@ public sealed class SendInputDriver
             // before sending any chord, else refuse so keystrokes can't land in the wrong window.
             // No focus-click: chords route to the foreground window, and a content click could trip a
             // control (e.g. a Calculator button).
-            var fgReject = await EnsureTargetForegroundOrRejectAsync("press_keys", focusClick: false, ct).ConfigureAwait(false);
+            var fgReject = await EnsureTargetForegroundOrRejectAsync(
+                "press_keys", focusClick: false, requiredTargetKind, req.ProcessName, ct).ConfigureAwait(false);
             if (fgReject is not null) return fgReject;
 
             var interDelay = req.InterChordDelayMs > 0 ? req.InterChordDelayMs : _config.DefaultInterChordDelayMs;
             for (var i = 0; i < parsed.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
-                if (_gate.CheckOrReject() is not null)
-                    return ActuationResult.Reject(ActuationRejectionCodes.GatePaused, "gate closed mid-chord", false);
-
-                SendChord(parsed[i].Modifiers, parsed[i].MainKey);
+                var chordReject = ExecuteTargetBoundMutationOrReject(
+                    () => SendChord(parsed[i].Modifiers, parsed[i].MainKey),
+                    requiredTargetKind,
+                    req.ProcessName);
+                if (chordReject is not null) return chordReject;
                 if (i < parsed.Count - 1) await DelayWithCancel(interDelay, ct).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "PressKeys failed mid-execution");
-            return ActuationResult.Reject(ActuationRejectionCodes.ExecutionException, ex.Message, dryRun: false);
+            _logger.Warning(
+                "PressKeys failed mid-execution ({ErrorType})",
+                ex.GetType().Name);
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ExecutionException,
+                "key input failed locally",
+                dryRun: false);
         }
 
         return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: false, evidence);
     }
 
-    public Task<ActuationResult> ClickAtAsync(int x, int y, bool dryRun, CancellationToken ct, int expectedPid = 0)
+    public Task<ActuationResult> ClickAtAsync(
+        int x,
+        int y,
+        bool dryRun,
+        CancellationToken ct,
+        int expectedPid = 0,
+        string? expectedProcess = null,
+        TargetTrustKind targetTrustKind = TargetTrustKind.Unspecified)
     {
         var effectiveDryRun = dryRun || _gate.IsDryRun;
         var rejection = _gate.CheckOrReject();
@@ -289,11 +343,31 @@ public sealed class SendInputDriver
         // false-reject a legitimate Calculator click. EffectiveAppPid drills AFH→CoreWindow and returns
         // the frame PID for classic Win32 (PioneerRx, Notepad), so this matches the resolver's proc.Id
         // for both UWP and classic apps.
+        if (expectedPid > 0 && targetTrustKind == TargetTrustKind.Sandbox)
+        {
+            var trust = SandboxProcessTrustVerifier.VerifyResolvedProcess(expectedPid, expectedProcess ?? string.Empty);
+            if (!trust.Trusted)
+            {
+                return Task.FromResult(ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "resolved process failed sandbox path/publisher identity verification",
+                    dryRun: false));
+            }
+        }
+
+        if (expectedPid > 0 && targetTrustKind == TargetTrustKind.PioneerRx &&
+            (_pioneerRxTrust is null || !_pioneerRxTrust.VerifyResolvedProcess(expectedPid).Trusted))
+        {
+            return Task.FromResult(ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessIdentityUntrusted,
+                "resolved PMS process failed local approval identity verification",
+                dryRun: false));
+        }
+
         if (expectedPid > 0 && !SandboxWindowResolver.IsSandboxAppForeground(expectedPid))
         {
             _logger.Warning(
-                "ClickAt refused: resolved process (pid={Pid}) no longer owns the foreground at click time — failing closed (TOCTOU). {ForegroundOwner}",
-                expectedPid, WindowFocusManager.DescribeForegroundWindow());
+                "ClickAt refused because the approved target no longer owns the foreground");
             return Task.FromResult(ActuationResult.Reject(
                 ActuationRejectionCodes.ForegroundNotTarget,
                 "target window lost foreground between resolve and click; refusing to click stale coordinates",
@@ -302,9 +376,41 @@ public sealed class SendInputDriver
 
         try
         {
-            TryGlow(x, y); // glide the presence cursor in + land the reticle at the click point
-            MoveAndClick(x, y);
+            var targetTrustedAtMutation = true;
+            var targetForegroundAtMutation = true;
+            var mutationReject = _gate.ExecuteLiveMutationOrReject(() =>
+            {
+                targetTrustedAtMutation = TargetStillTrusted(expectedPid, expectedProcess, targetTrustKind);
+                targetForegroundAtMutation = expectedPid <= 0 || SandboxWindowResolver.IsSandboxAppForeground(expectedPid);
+                if (!targetTrustedAtMutation || !targetForegroundAtMutation) return;
+                TryGlow(x, y); // glide the presence cursor in + land the reticle at the click point
+                MoveAndClick(x, y);
+            });
+            if (mutationReject is not null) return Task.FromResult(mutationReject);
+            if (!targetTrustedAtMutation)
+            {
+                return Task.FromResult(ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "approved target identity changed before pointer input",
+                    dryRun: false));
+            }
+            if (!targetForegroundAtMutation)
+            {
+                return Task.FromResult(ActuationResult.Reject(
+                    ActuationRejectionCodes.ForegroundNotTarget,
+                    "approved target lost foreground before pointer input",
+                    dryRun: false));
+            }
             try { _presence?.Click(x, y); } catch { /* visual-only — never break actuation */ }
+            if (expectedPid > 0 && targetTrustKind != TargetTrustKind.Unspecified)
+            {
+                var hwnd = SandboxWindowResolver.ForegroundWindowForProcess(expectedPid);
+                _activeTarget = new TargetWindow(
+                    expectedPid,
+                    hwnd,
+                    expectedProcess ?? "target",
+                    targetTrustKind);
+            }
             // Record the click so a TYPE arriving shortly after (the click_by_label → type field-entry
             // flow) does NOT re-focus the window centre and undo the focus this click just set.
             System.Threading.Interlocked.Exchange(ref _lastClickUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
@@ -312,8 +418,11 @@ public sealed class SendInputDriver
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "ClickAt failed");
-            return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.ExecutionException, ex.Message, dryRun: false));
+            _logger.Warning("ClickAt failed ({ErrorType})", ex.GetType().Name);
+            return Task.FromResult(ActuationResult.Reject(
+                ActuationRejectionCodes.ExecutionException,
+                "pointer input failed locally",
+                dryRun: false));
         }
     }
 
@@ -328,7 +437,7 @@ public sealed class SendInputDriver
         {
             return ActuationResult.Reject(
                 ActuationRejectionCodes.AppNotInAllowlist,
-                $"appKey '{req.AppKey}' is not in the sandbox allowlist (notepad, calculator)",
+                "requested app is not in the immutable sandbox allowlist",
                 effectiveDryRun);
         }
 
@@ -352,17 +461,50 @@ public sealed class SendInputDriver
             // apart from pre-existing ones (resolution fallback #3).
             var preLaunch = WindowFocusManager.CaptureVisibleTopLevelWindows();
 
-            // Resolve to an absolute path under a trusted system location (System32, then Windows)
-            // before launching. A bare process name is resolved by Win32 against the app dir + CWD
-            // FIRST, so a planted "notepad.exe" could hijack the launch; pinning the real system path
-            // closes that. Falls back to the bare name (PATH resolution) only if not found there.
-            using var p = Process.Start(new ProcessStartInfo
+            // Resolve to an absolute path under a trusted machine location before launching. A bare
+            // process name is resolved by Win32 against the app dir + CWD first, so a planted
+            // "notepad.exe" could hijack the launch. Failure to resolve is terminal; PATH is never used.
+            var launchPath = ResolveTrustedSystemPath(processName);
+            if (launchPath is null)
             {
-                FileName = ResolveTrustedSystemPath(processName),
-                UseShellExecute = false,
-                CreateNoWindow = false,
-                WorkingDirectory = Environment.SystemDirectory,
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "sandbox executable could not be resolved to a trusted system location",
+                    dryRun: false);
+            }
+            var launchTrust = SandboxProcessTrustVerifier.VerifyExecutablePath(launchPath, processName);
+            if (!launchTrust.Trusted)
+            {
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "sandbox executable failed path/publisher identity verification",
+                    dryRun: false);
+            }
+
+            Process? startedProcess = null;
+            var launchIdentityTrusted = true;
+            var launchReject = _gate.ExecuteLiveMutationOrReject(() =>
+            {
+                launchIdentityTrusted = SandboxProcessTrustVerifier
+                    .VerifyExecutablePath(launchPath, processName).Trusted;
+                if (!launchIdentityTrusted) return;
+                startedProcess = Process.Start(new ProcessStartInfo
+                {
+                    FileName = launchPath,
+                    UseShellExecute = false,
+                    CreateNoWindow = false,
+                    WorkingDirectory = Environment.SystemDirectory,
+                });
             });
+            if (launchReject is not null) return launchReject;
+            if (!launchIdentityTrusted)
+            {
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "sandbox executable identity changed before launch",
+                    dryRun: false);
+            }
+            using var p = startedProcess;
 
             // WINDOW-FOCUS: Process.Start returns before the app's window exists, and for Windows 11
             // packaged apps (Notepad/Calculator) the started exe is a launcher STUB whose own
@@ -385,30 +527,56 @@ public sealed class SendInputDriver
             System.Threading.Interlocked.Exchange(ref _lastClickUtcTicks, 0);
             if (resolved is { } rw && rw.Hwnd != IntPtr.Zero)
             {
-                WindowFocusManager.ForceForeground(rw.Hwnd, _logger);
-                _activeTarget = new TargetWindow(rw.Pid, rw.Hwnd, processName);
+                var resolvedTrust = SandboxProcessTrustVerifier.VerifyResolvedProcess(rw.Pid, processName);
+                if (!resolvedTrust.Trusted)
+                {
+                    _activeTarget = new TargetWindow(
+                        0, IntPtr.Zero, processName, TargetTrustKind.Sandbox);
+                    return ActuationResult.Reject(
+                        ActuationRejectionCodes.ProcessIdentityUntrusted,
+                        "launched window failed sandbox path/publisher identity verification",
+                        dryRun: false);
+                }
+                var resolvedTrustedAtFocus = true;
+                var focusReject = _gate.ExecuteLiveMutationOrReject(() =>
+                {
+                    resolvedTrustedAtFocus = SandboxProcessTrustVerifier
+                        .VerifyResolvedProcess(rw.Pid, processName).Trusted;
+                    if (resolvedTrustedAtFocus)
+                        WindowFocusManager.ForceForeground(rw.Hwnd, _logger);
+                });
+                if (focusReject is not null) return focusReject;
+                if (!resolvedTrustedAtFocus)
+                {
+                    return ActuationResult.Reject(
+                        ActuationRejectionCodes.ProcessIdentityUntrusted,
+                        "sandbox target identity changed before focus",
+                        dryRun: false);
+                }
+                _activeTarget = new TargetWindow(rw.Pid, rw.Hwnd, processName, TargetTrustKind.Sandbox);
                 if (WindowFocusManager.GetClientCenterScreen(rw.Hwnd) is { } c)
                     TryGlow(c.X, c.Y); // glow on the freshly-launched window so the operator sees the open
-                _logger.Information(
-                    "LaunchSandboxApp: {Process} resolved + foregrounded (pid={Pid} hwnd=0x{Hwnd:X})",
-                    processName, rw.Pid, rw.Hwnd.ToInt64());
+                _logger.Information("LaunchSandboxApp resolved and foregrounded an approved sandbox target");
             }
             else
             {
                 // Unresolved target sentinel: the launch may have succeeded, but we cannot prove which
                 // window is the app's. The next type/press will fail closed rather than risk a leak.
-                _activeTarget = new TargetWindow(0, IntPtr.Zero, processName);
-                _logger.Warning(
-                    "LaunchSandboxApp: {Process} started but its window could not be resolved — subsequent type/press will fail closed to avoid keystroke leak",
-                    processName);
+                _activeTarget = new TargetWindow(0, IntPtr.Zero, processName, TargetTrustKind.Sandbox);
+                _logger.Warning("LaunchSandboxApp started but its approved window could not be resolved");
             }
 
             return ActuationResult.Success(sw.ElapsedMilliseconds, dryRun: false, evidence);
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "LaunchSandboxApp failed for {Process}", processName);
-            return ActuationResult.Reject(ActuationRejectionCodes.ExecutionException, ex.Message, dryRun: false);
+            _logger.Warning(
+                "LaunchSandboxApp failed locally ({ErrorType})",
+                ex.GetType().Name);
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ExecutionException,
+                "sandbox launch failed locally",
+                dryRun: false);
         }
     }
 
@@ -420,21 +588,70 @@ public sealed class SendInputDriver
     /// session: legacy behaviour (type into the current foreground) is preserved with a warning,
     /// since the sandbox workflow always launches first and that is the only live actuation path.
     /// </summary>
-    private async Task<ActuationResult?> EnsureTargetForegroundOrRejectAsync(string verb, bool focusClick, CancellationToken ct)
+    private async Task<ActuationResult?> EnsureTargetForegroundOrRejectAsync(
+        string verb,
+        bool focusClick,
+        TargetTrustKind requiredTargetKind,
+        string? expectedProcess,
+        CancellationToken ct)
     {
         var target = _activeTarget;
         if (target is null)
         {
+            if (requiredTargetKind != TargetTrustKind.Unspecified)
+            {
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ForegroundNotTarget,
+                    $"no {requiredTargetKind} target was established before {verb}",
+                    dryRun: false);
+            }
             _logger.Warning("{Verb}: no actuation target established (no preceding launch) — using current foreground window", verb);
             return null;
         }
 
+        if (requiredTargetKind != TargetTrustKind.Unspecified && target.TrustKind != requiredTargetKind)
+        {
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessIdentityUntrusted,
+                $"active target class does not match required {requiredTargetKind} scope",
+                dryRun: false);
+        }
+
+        if (!string.IsNullOrWhiteSpace(expectedProcess) &&
+            !TargetIdentityMatches(expectedProcess, target.Label))
+        {
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessIdentityUntrusted,
+                $"active target does not match the process bound to {verb}",
+                dryRun: false);
+        }
+
         if (target.Pid <= 0 || target.Hwnd == IntPtr.Zero)
         {
-            _logger.Warning("{Verb} refused: launch could not resolve a target window for '{Label}'", verb, target.Label);
+            _logger.Warning("{Verb} refused: launch could not resolve the approved target window", verb);
             return ActuationResult.Reject(
                 ActuationRejectionCodes.ForegroundNotTarget,
-                $"launch could not resolve a target window for '{target.Label}'; refusing to {verb} to avoid keystroke leak",
+                $"launch could not resolve the approved target window; refusing to {verb} to avoid keystroke leak",
+                dryRun: false);
+        }
+
+        if (target.TrustKind == TargetTrustKind.Sandbox)
+        {
+            var trust = SandboxProcessTrustVerifier.VerifyResolvedProcess(target.Pid, target.Label);
+            if (!trust.Trusted)
+            {
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "active sandbox target no longer satisfies path/publisher identity policy",
+                    dryRun: false);
+            }
+        }
+        else if (target.TrustKind == TargetTrustKind.PioneerRx &&
+                 (_pioneerRxTrust is null || !_pioneerRxTrust.VerifyResolvedProcess(target.Pid).Trusted))
+        {
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessIdentityUntrusted,
+                "active PMS target no longer satisfies local approval identity policy",
                 dryRun: false);
         }
 
@@ -454,8 +671,25 @@ public sealed class SendInputDriver
                 _logger.Information("{Verb} aborted mid-foreground-acquire: gate closed (user activity / kill)", verb);
                 return pausedReject;
             }
-            if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) { acquired = true; break; }
-            WindowFocusManager.ForceForeground(target.Hwnd, _logger);
+            if (TargetOwnsForeground(target)) { acquired = true; break; }
+            var trustedAtFocus = true;
+            var focusReject = _gate.ExecuteLiveMutationOrReject(() =>
+            {
+                trustedAtFocus = TargetStillTrusted(
+                    target.Pid,
+                    target.Label,
+                    target.TrustKind);
+                if (trustedAtFocus)
+                    WindowFocusManager.ForceForeground(target.Hwnd, _logger);
+            });
+            if (focusReject is not null) return focusReject;
+            if (!trustedAtFocus)
+            {
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "approved target identity changed before focus",
+                    dryRun: false);
+            }
             await DelayWithCancel(150, ct).ConfigureAwait(false);
         }
 
@@ -464,13 +698,10 @@ public sealed class SendInputDriver
             // PID stays in the LOCAL log for diagnosis but NOT in the cloud-facing reason: a 5-digit
             // PID trips the cloud's ZIP-code PHI filter, which would null the result and mask this
             // legitimate operational failure as an opaque "result_rejected_phi_validation".
-            _logger.Warning(
-                "{Verb} refused: target '{Label}' (pid={Pid}) not brought to foreground within {Timeout}ms — failing closed; {ForegroundOwner}",
-                verb, target.Label, target.Pid, ForegroundAcquireTimeoutMs,
-                WindowFocusManager.DescribeForegroundWindow());
+            _logger.Warning("{Verb} refused because the approved target could not be foregrounded", verb);
             return ActuationResult.Reject(
                 ActuationRejectionCodes.ForegroundNotTarget,
-                $"target '{target.Label}' could not be brought to the foreground within {ForegroundAcquireTimeoutMs}ms; refusing to {verb} to avoid keystroke leak into the wrong window",
+                "approved target could not be brought to the foreground",
                 dryRun: false);
         }
 
@@ -498,12 +729,12 @@ public sealed class SendInputDriver
             // Re-confirm the target STILL owns the foreground FIRST, then read its client-area coords and
             // click adjacently — so the coordinates are the freshest possible read right before the
             // physical click and a window that moved/closed since STEP 1 can't catch a stray click.
-            if (!SystemObservers.ForegroundGuard.IsPidForeground(target.Pid))
+            if (!TargetOwnsForeground(target))
             {
-                _logger.Warning("{Verb} refused: '{Label}' lost foreground before focus-click — failing closed", verb, target.Label);
+                _logger.Warning("{Verb} refused because the approved target lost foreground", verb);
                 return ActuationResult.Reject(
                     ActuationRejectionCodes.ForegroundNotTarget,
-                    $"target '{target.Label}' lost the foreground before focus-click; refusing to {verb} to avoid a stray click",
+                    "approved target lost foreground before focus input",
                     dryRun: false);
             }
 
@@ -513,31 +744,42 @@ public sealed class SendInputDriver
                 // A focusClick verb (type) NEEDS a focused edit control. If we can't locate the target's
                 // client area we can't guarantee that, so fail closed rather than type blind — a dropped
                 // or partial value is worse than none ("one line of truth must be real").
-                _logger.Warning("{Verb} refused: could not locate client area of '{Label}' to set input focus — failing closed", verb, target.Label);
+                _logger.Warning("{Verb} refused because the approved target client area was unavailable", verb);
                 return ActuationResult.Reject(
                     ActuationRejectionCodes.ForegroundNotTarget,
-                    $"could not locate target '{target.Label}' client area to set input focus; refusing to {verb}",
+                    "approved target client area was unavailable",
                     dryRun: false);
             }
 
-            TryGlow(pt.X, pt.Y); // glow at the focus-click point (TYPE flow) so typing is watchable too
-            try { MoveAndClick(pt.X, pt.Y); }
-            catch (Exception ex) { _logger.Warning(ex, "{Verb}: focus-click failed for '{Label}'", verb, target.Label); }
+            var trustedAtFocus = true;
+            var focusClickReject = _gate.ExecuteLiveMutationOrReject(() =>
+            {
+                trustedAtFocus = TargetStillTrusted(target.Pid, target.Label, target.TrustKind);
+                if (!trustedAtFocus || !TargetOwnsForeground(target)) return;
+                TryGlow(pt.X, pt.Y);
+                MoveAndClick(pt.X, pt.Y);
+            });
+            if (focusClickReject is not null) return focusClickReject;
+            if (!trustedAtFocus)
+            {
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "approved target identity changed before focus input",
+                    dryRun: false);
+            }
             await DelayWithCancel(FocusSettleMs, ct).ConfigureAwait(false);
         }
 
         // STEP 3 — final re-confirm the target is still foreground after the focus-click (a click can't
         // change which window is foreground here, but verify rather than assume). Fail closed otherwise.
-        if (SystemObservers.ForegroundGuard.IsPidForeground(target.Pid)) return null;
+        if (TargetOwnsForeground(target)) return null;
 
         // PID stays in the LOCAL log only (see note above) — the cloud-facing reason omits it so it
         // doesn't trip the ZIP-code PHI filter and mask this operational failure.
-        _logger.Warning(
-            "{Verb} refused: target '{Label}' (pid={Pid}) lost foreground after focus-click — failing closed; {ForegroundOwner}",
-            verb, target.Label, target.Pid, WindowFocusManager.DescribeForegroundWindow());
+        _logger.Warning("{Verb} refused because the approved target did not retain foreground", verb);
         return ActuationResult.Reject(
             ActuationRejectionCodes.ForegroundNotTarget,
-            $"target '{target.Label}' did not hold the foreground; refusing to {verb} to avoid keystroke leak into the wrong window",
+            "approved target did not retain foreground",
             dryRun: false);
     }
 
@@ -547,248 +789,4 @@ public sealed class SendInputDriver
     private const int FocusSettleMs = 250;
     private const int ForegroundAcquireTimeoutMs = 6000;
 
-    /// <summary>
-    /// True if a real click (click_by_label/click_by_signature → ClickAtAsync) landed within the last
-    /// <see cref="ClickFocusFreshWindow"/>. When so, a TYPE skips its centre focus-click so it doesn't
-    /// move focus off the control the click just targeted (the click→type field-entry flow).
-    /// </summary>
-    private bool ClickRecentlyEstablishedFocus()
-    {
-        var ticks = System.Threading.Interlocked.Read(ref _lastClickUtcTicks);
-        if (ticks == 0) return false;
-        var since = DateTimeOffset.UtcNow - new DateTimeOffset(ticks, TimeSpan.Zero);
-        return since >= TimeSpan.Zero && since <= ClickFocusFreshWindow;
-    }
-
-    /// <summary>
-    /// Resolve a bare process file name (e.g. "notepad.exe", "msedge.exe") to its absolute path,
-    /// defeating the app-dir/CWD launch-hijack a bare name is subject to. Resolution order, each
-    /// step trusted (admin-write-only) so none reopens the hijack hole a CWD/PATH lookup would:
-    ///   1. System32, then the Windows dir — where in-box system apps (notepad, calc, explorer) live.
-    ///   2. HKLM <c>App Paths\&lt;exe&gt;</c> (64- then 32-bit view) — the canonical Windows registry for
-    ///      "where is this exe" that per-machine installers (Edge, Chrome) write. HKLM is
-    ///      admin-write-only, so resolving from it preserves the anti-hijack guarantee while letting
-    ///      non-System32 apps launch. The path is File.Exists-verified before it is trusted.
-    /// Returns the bare name unchanged if none resolve (best-effort PATH resolution).
-    /// </summary>
-    private string ResolveTrustedSystemPath(string processName)
-    {
-        try
-        {
-            var sys32 = System.IO.Path.Combine(Environment.SystemDirectory, processName);
-            if (System.IO.File.Exists(sys32)) return sys32;
-            var win = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Windows), processName);
-            if (System.IO.File.Exists(win)) return win;
-
-            var appPaths = ResolveViaAppPaths(processName);
-            if (appPaths is not null)
-            {
-                _logger.Information(
-                    "ResolveTrustedSystemPath: {Process} resolved via HKLM App Paths -> {Path}",
-                    processName, appPaths);
-                return appPaths;
-            }
-        }
-        catch { /* fall through to bare name → PATH resolution */ }
-        return processName;
-    }
-
-    /// <summary>
-    /// Look up an exe's absolute path from HKLM <c>SOFTWARE\Microsoft\Windows\CurrentVersion\App
-    /// Paths\&lt;exe&gt;</c> (default value), checking both the 64-bit and 32-bit registry views (Edge
-    /// is a 32-bit-view per-machine install). Only HKLM is consulted — never HKCU — because HKCU is
-    /// user-writable and would reopen the launch-hijack vector this whole method exists to close.
-    /// Returns null if the key is absent or the recorded path no longer exists on disk.
-    /// </summary>
-    private static string? ResolveViaAppPaths(string processName)
-    {
-        const string subKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\";
-        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
-        {
-            try
-            {
-                using var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
-                using var key = hklm.OpenSubKey(subKey + processName);
-                if (key?.GetValue(null) is string path)
-                {
-                    var trimmed = path.Trim().Trim('"');
-                    if (trimmed.Length > 0 && System.IO.File.Exists(trimmed)) return trimmed;
-                }
-            }
-            catch { /* try the other view */ }
-        }
-        return null;
-    }
-
-    public static string ComputeEvidenceHash(string verb, string payload)
-    {
-        var bytes = Encoding.UTF8.GetBytes($"{verb}|{payload}");
-        return Convert.ToHexString(SHA256.HashData(bytes))[..16].ToLowerInvariant();
-    }
-
-    private static async Task DelayWithCancel(int ms, CancellationToken ct)
-    {
-        if (ms <= 0) return;
-        await Task.Delay(ms, ct).ConfigureAwait(false);
-    }
-
-    // ── Win32 surface ───────────────────────────────────────────────────────
-
-    private const uint INPUT_MOUSE = 0;
-    private const uint INPUT_KEYBOARD = 1;
-    private const uint KEYEVENTF_KEYUP = 0x0002;
-    private const uint KEYEVENTF_UNICODE = 0x0004;
-    private const uint KEYEVENTF_SCANCODE = 0x0008;
-
-    private const uint MOUSEEVENTF_MOVE = 0x0001;
-    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    private const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct INPUT
-    {
-        public uint Type;
-        public InputUnion U;
-    }
-
-    [StructLayout(LayoutKind.Explicit)]
-    private struct InputUnion
-    {
-        [FieldOffset(0)] public MOUSEINPUT Mouse;
-        [FieldOffset(0)] public KEYBDINPUT Keyboard;
-        [FieldOffset(0)] public HARDWAREINPUT Hardware;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MOUSEINPUT
-    {
-        public int Dx;
-        public int Dy;
-        public uint MouseData;
-        public uint Flags;
-        public uint Time;
-        public IntPtr ExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct KEYBDINPUT
-    {
-        public ushort VirtualKeyCode;
-        public ushort ScanCode;
-        public uint Flags;
-        public uint Time;
-        public IntPtr ExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct HARDWAREINPUT
-    {
-        public uint Msg;
-        public ushort ParamL;
-        public ushort ParamH;
-    }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-    [DllImport("user32.dll")]
-    private static extern bool SetCursorPos(int X, int Y);
-
-    [DllImport("user32.dll")]
-    private static extern int GetSystemMetrics(int nIndex);
-
-    private static int InputSize => Marshal.SizeOf<INPUT>();
-
-    // Wrap every SendInput call so a partial/blocked injection becomes a thrown
-    // Win32Exception instead of silent acceptance — Codex adversarial review of
-    // SuavoAgent#65 (Bug 22) flagged that swallowing the return value was the
-    // diagnostic gap that hid the Identification-vs-Impersonation token bug for
-    // weeks. Exceptions bubble into the existing try/catch in the public verbs.
-    private static void SendInputOrThrow(string verb, INPUT[] inputs)
-    {
-        var sent = SendInput((uint)inputs.Length, inputs, InputSize);
-        SendInputValidator.EnsureFullyInjected(verb, sent, inputs.Length, Marshal.GetLastWin32Error());
-    }
-
-    private static void SendUnicodeChar(char ch)
-    {
-        var down = new INPUT
-        {
-            Type = INPUT_KEYBOARD,
-            U = new InputUnion { Keyboard = new KEYBDINPUT { ScanCode = ch, Flags = KEYEVENTF_UNICODE } },
-        };
-        var up = down;
-        up.U.Keyboard.Flags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-        var inputs = new[] { down, up };
-        SendInputOrThrow("type_text_char", inputs);
-    }
-
-    private static void SendChord(IReadOnlyList<VirtualKey> modifiers, VirtualKey mainKey)
-    {
-        var total = (modifiers.Count * 2) + 2;
-        var buffer = new INPUT[total];
-        var idx = 0;
-        for (var i = 0; i < modifiers.Count; i++)
-        {
-            buffer[idx++] = KeyDown(modifiers[i]);
-        }
-        buffer[idx++] = KeyDown(mainKey);
-        buffer[idx++] = KeyUp(mainKey);
-        for (var i = modifiers.Count - 1; i >= 0; i--)
-        {
-            buffer[idx++] = KeyUp(modifiers[i]);
-        }
-        SendInputOrThrow("send_chord", buffer);
-    }
-
-    private static INPUT KeyDown(VirtualKey vk) => new()
-    {
-        Type = INPUT_KEYBOARD,
-        U = new InputUnion { Keyboard = new KEYBDINPUT { VirtualKeyCode = (ushort)vk } },
-    };
-
-    private static INPUT KeyUp(VirtualKey vk) => new()
-    {
-        Type = INPUT_KEYBOARD,
-        U = new InputUnion { Keyboard = new KEYBDINPUT { VirtualKeyCode = (ushort)vk, Flags = KEYEVENTF_KEYUP } },
-    };
-
-    private static void MoveAndClick(int x, int y)
-    {
-        // Use absolute virtual-screen coordinates so the click lands on the
-        // exact requested point regardless of DPI / multimon configuration.
-        const int SM_XVIRTUALSCREEN = 76;
-        const int SM_YVIRTUALSCREEN = 77;
-        const int SM_CXVIRTUALSCREEN = 78;
-        const int SM_CYVIRTUALSCREEN = 79;
-
-        var vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        var vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        var vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        var vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-        var dx = (int)(((double)(x - vx) / Math.Max(1, vw)) * 65535);
-        var dy = (int)(((double)(y - vy) / Math.Max(1, vh)) * 65535);
-
-        var move = new INPUT
-        {
-            Type = INPUT_MOUSE,
-            U = new InputUnion { Mouse = new MOUSEINPUT { Dx = dx, Dy = dy, Flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE } },
-        };
-        var down = new INPUT
-        {
-            Type = INPUT_MOUSE,
-            U = new InputUnion { Mouse = new MOUSEINPUT { Flags = MOUSEEVENTF_LEFTDOWN } },
-        };
-        var up = new INPUT
-        {
-            Type = INPUT_MOUSE,
-            U = new InputUnion { Mouse = new MOUSEINPUT { Flags = MOUSEEVENTF_LEFTUP } },
-        };
-
-        var inputs = new[] { move, down, up };
-        SendInputOrThrow("move_and_click", inputs);
-    }
 }

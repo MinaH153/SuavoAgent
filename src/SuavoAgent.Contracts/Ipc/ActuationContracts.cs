@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Text.Json.Serialization;
 
 namespace SuavoAgent.Contracts.Ipc;
@@ -29,12 +30,12 @@ public static class ActuationIpcCommands
     /// <summary>Press a sequence of virtual-key chords (e.g. Ctrl+S, Enter). LOW-tier verb.</summary>
     public const string PressKeys = "actuation.press_keys";
 
-    /// <summary>Launch an allowlisted sandbox app (Notepad / Calc only). LOW-tier verb.</summary>
+    /// <summary>Launch an allowlisted sandbox app (Calculator by default). LOW-tier verb.</summary>
     public const string LaunchSandboxApp = "actuation.launch_sandbox_app";
 
     /// <summary>Re-read %PROGRAMDATA%\SuavoAgent\actuation.json AllowedApps and re-apply the app
-    /// allowlist in THIS process (no restart). Operator-pushed; Core persists the file first, then
-    /// sends this so the Helper's authoritative static agrees with Core's.</summary>
+    /// allowlist in THIS process (no restart). The file must originate from an authorized local
+    /// installation/configuration flow; remote signed commands cannot widen it.</summary>
     public const string ReloadAllowlist = "actuation.reload_allowlist";
 
     /// <summary>Read a UIA element's value and assert it matches an expected string. READ-ONLY,
@@ -58,7 +59,7 @@ public sealed record ActuationGateState(
     // Honeytoken immune reflex — the Helper stamps a corroborated compromise here; Core reads it via the
     // existing actuation.get_state IPC and emits the PHI-free self-compromise heartbeat signal (and, on
     // apoptosis, flushes its own Tier-2 LLM). Nullable defaults keep this backward-compatible on the wire.
-    // CompromiseReasonLabel is already PHI-safe (≤32-char safe charset from HoneytokenCorroborator).
+    // CompromiseReasonLabel is one HoneytokenReasonLabels fixed category.
     [property: JsonPropertyName("compromiseDetected")] bool CompromiseDetected = false,
     [property: JsonPropertyName("compromiseLevel")] string? CompromiseLevel = null,
     [property: JsonPropertyName("compromiseReasonLabel")] string? CompromiseReasonLabel = null,
@@ -98,13 +99,15 @@ public sealed record TypeTextRequest(
     [property: JsonPropertyName("text")] string Text,
     [property: JsonPropertyName("clearFirst")] bool ClearFirst,
     [property: JsonPropertyName("perKeyDelayMs")] int PerKeyDelayMs,
-    [property: JsonPropertyName("dryRun")] bool DryRun = false
+    [property: JsonPropertyName("dryRun")] bool DryRun = false,
+    [property: JsonPropertyName("processName")] string? ProcessName = null
 );
 
 public sealed record PressKeysRequest(
     [property: JsonPropertyName("chords")] IReadOnlyList<string> Chords,
     [property: JsonPropertyName("interChordDelayMs")] int InterChordDelayMs,
-    [property: JsonPropertyName("dryRun")] bool DryRun = false
+    [property: JsonPropertyName("dryRun")] bool DryRun = false,
+    [property: JsonPropertyName("processName")] string? ProcessName = null
 );
 
 public sealed record LaunchSandboxAppRequest(
@@ -168,12 +171,16 @@ public sealed record ActuationResult(
 
 public static class ActuationRejectionCodes
 {
+    public const string GateStateUnavailable = "gate_state_unavailable";
     public const string GateDisabled = "gate_disabled";
     public const string GatePaused = "gate_paused";
+    public const string GateDryRun = "gate_dry_run";
     public const string KillSwitchTripped = "kill_switch_tripped";
+    public const string CompromiseDetected = "compromise_detected";
     public const string PhiPatternDetected = "phi_pattern_detected";
     public const string LabelNotFound = "label_not_found";
     public const string ProcessNotAllowed = "process_not_allowed";
+    public const string ProcessIdentityUntrusted = "process_identity_untrusted";
     // type/press refused because the launched target window could not be confirmed in the foreground —
     // fail-closed so keystrokes never leak into an unintended window (e.g. a shell or another app).
     public const string ForegroundNotTarget = "foreground_not_target";
@@ -184,6 +191,8 @@ public static class ActuationRejectionCodes
     public const string MalformedRequest = "malformed_request";
     public const string ChordParseFailure = "chord_parse_failure";
     public const string ExecutionException = "execution_exception";
+    public const string CapabilityUnavailable = "capability_unavailable";
+    public const string RemotePolicyMutationDenied = "remote_policy_mutation_denied";
     // assert_element: the located UIA element could not be found within the timeout.
     public const string ElementNotFound = "element_not_found";
     // assert_element: the element was read but its value did NOT match expected (carries a
@@ -191,93 +200,84 @@ public static class ActuationRejectionCodes
     public const string AssertMismatch = "assert_mismatch";
 }
 
+/// <summary>
+/// One cross-process definition of a fully open live-actuation gate. Core uses
+/// it before dispatch and Helper uses it at the exact mutation boundary, so a
+/// new gate axis cannot accidentally be enforced on only one side of IPC.
+/// </summary>
+public static class LiveActuationGatePolicy
+{
+    public static string? RejectionCode(ActuationGateState? state, DateTimeOffset now)
+    {
+        if (state is null) return ActuationRejectionCodes.GateStateUnavailable;
+        if (state.KillSwitchTrippedUtc is not null) return ActuationRejectionCodes.KillSwitchTripped;
+        if (state.CompromiseDetected) return ActuationRejectionCodes.CompromiseDetected;
+        if (!state.Enabled) return ActuationRejectionCodes.GateDisabled;
+        if (state.PausedUntilUtc is { } until && until > now) return ActuationRejectionCodes.GatePaused;
+        if (state.DryRun) return ActuationRejectionCodes.GateDryRun;
+        return null;
+    }
+}
+
 public static class ActuationAllowlistedSandboxApps
 {
+    // Legacy identifier retained for wire compatibility only. Windows 11 Notepad
+    // is tabbed/single-instance and can reopen or attach to an existing document,
+    // including one containing PHI, so it is intentionally protected and can no
+    // longer be a sandbox target.
     public const string Notepad = "notepad";
     public const string Calculator = "calculator";
 
-    // Built-in safe defaults — ALWAYS present and never removable. A PMS/PHI box gets ONLY these
-    // (it never configures additions). The canary/non-PHI box extends this set via local actuation
-    // config (operator-authorized apps only).
-    private static readonly IReadOnlyDictionary<string, string> Defaults =
+    // Built-in safe defaults — ALWAYS present and never removable. Calculator
+    // has no general document surface and is the only in-box default. A future
+    // purpose-built Suavo sandbox may be added here after its window isolation is
+    // proven. Notepad is deliberately absent (single-instance document reuse).
+    private static readonly FrozenDictionary<string, string> Defaults =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            [Notepad] = "notepad.exe",
             [Calculator] = "calc.exe",
-        };
+        }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
-    // Volatile reference so a single startup Configure call is visible to the command threads that
-    // follow. Defaults until ExtendAllowlist runs.
-    private static volatile IReadOnlyDictionary<string, string> _current =
-        new Dictionary<string, string>(Defaults, StringComparer.OrdinalIgnoreCase);
-
-    /// <summary>app_key → process file name (e.g. "notepad" → "notepad.exe"). Defaults plus any
-    /// operator-authorized additions. Enforced by every actuation verb + the Helper driver.</summary>
-    public static IReadOnlyDictionary<string, string> ProcessNames => _current;
+    /// <summary>app_key → process file name (e.g. "calculator" → "calc.exe"). Defaults plus any
+    /// locally approved additions once that receipt protocol exists. Today this is
+    /// intentionally the immutable defaults-only set.</summary>
+    public static IReadOnlyDictionary<string, string> ProcessNames => Defaults;
 
     /// <summary>
-    /// Extend the allowlist with operator-authorized apps (canary/non-PHI boxes only — driven by
-    /// local <c>actuation.json</c>, never by a PMS box). The built-in Notepad/Calculator defaults are
-    /// always retained and cannot be removed or overridden away. Each value must be a bare process
-    /// file name ending in <c>.exe</c> (no path) so a malformed entry can't smuggle an arbitrary
-    /// executable path. Call once at process startup, in BOTH Core and Helper, before commands flow.
+    /// Core/Helper shared declaration check.  The immutable protected-process
+    /// classifier runs before the mutable allowlist so even a corrupt/legacy
+    /// config cannot turn a PMS, browser, Office app, or shell into a sandbox.
     /// </summary>
-    public static void ExtendAllowlist(IReadOnlyDictionary<string, string>? additions)
+    public static bool IsDeclaredSandboxProcess(string? processName)
     {
-        var next = new Dictionary<string, string>(Defaults, StringComparer.OrdinalIgnoreCase);
-        if (additions is not null)
+        if (string.IsNullOrWhiteSpace(processName) ||
+            ProtectedDesktopProcessClassifier.IsProtectedIdentity(processName))
         {
-            foreach (var kv in additions)
-            {
-                if (string.IsNullOrWhiteSpace(kv.Key) || string.IsNullOrWhiteSpace(kv.Value)) continue;
-                var appKey = kv.Key.Trim();
-                // The app_key is ALSO used by the click verbs as a process-name match token, so restrict
-                // it to a plain identifier — a config key can't introduce a surprising process target or
-                // smuggle path/format chars.
-                if (!System.Text.RegularExpressions.Regex.IsMatch(appKey, "^[a-zA-Z0-9_-]{1,64}$")) continue;
-                var proc = kv.Value.Trim();
-                // Bare process file name only — reject paths/separators/wildcards.
-                if (!proc.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
-                if (proc.IndexOfAny(new[] { '\\', '/', ':', '*', '?', '"', '<', '>', '|' }) >= 0) continue;
-                if (Defaults.ContainsKey(appKey)) continue; // never override a default
-                next[appKey] = proc;
-            }
+            return false;
         }
-        _current = next;
+
+        return Defaults.Keys.Concat(Defaults.Values)
+            .Any(allowed => string.Equals(allowed, processName, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
-    /// Read operator-authorized app additions from <c>%PROGRAMDATA%\SuavoAgent\actuation.json</c>
-    /// (object key <c>AllowedApps</c>: <c>{ "app_key": "process.exe" }</c>) and apply them via
-    /// <see cref="ExtendAllowlist"/>. Safe no-op when the file or section is absent/malformed — the
-    /// built-in Notepad/Calculator defaults always remain. MUST be called once at process startup in
-    /// BOTH Core and Helper so the verb pre-check (Core) and the driver's authoritative check (Helper)
-    /// agree; if only one applies it, a launch fails closed in the other. A PMS/PHI box simply has no
-    /// <c>AllowedApps</c> in its config, so it stays defaults-only.
+    /// Legacy compatibility entry point. Additions are ignored until SuavoAgent has
+    /// a workstation-local, cryptographically bound physical-approval receipt. A
+    /// signed cloud command or a pre-upgrade <c>actuation.json</c> is not proof that
+    /// a human approved a process on this exact workstation.
+    /// </summary>
+    public static void ExtendAllowlist(IReadOnlyDictionary<string, string>? additions)
+    {
+        _ = additions;
+    }
+
+    /// <summary>
+    /// Legacy startup hook. Deliberately ignores every <c>AllowedApps</c> entry,
+    /// including a valid-looking file left by an older remotely-writable release.
+    /// Defaults-only remains in force until a physical-approval receipt is built.
     /// </summary>
     public static void LoadAndExtendFromConfig(string? programDataDir = null)
     {
-        try
-        {
-            var dir = programDataDir
-                ?? System.Environment.GetFolderPath(System.Environment.SpecialFolder.CommonApplicationData);
-            var path = System.IO.Path.Combine(dir, "SuavoAgent", "actuation.json");
-            if (!System.IO.File.Exists(path)) return;
-
-            using var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(path));
-            if (!doc.RootElement.TryGetProperty("AllowedApps", out var apps)
-                || apps.ValueKind != System.Text.Json.JsonValueKind.Object) return;
-
-            var additions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var p in apps.EnumerateObject())
-                if (p.Value.ValueKind == System.Text.Json.JsonValueKind.String)
-                    additions[p.Name] = p.Value.GetString()!;
-            ExtendAllowlist(additions);
-        }
-        catch
-        {
-            // Best-effort: a malformed config must never widen the allowlist nor crash startup —
-            // the built-in defaults remain in force.
-        }
+        _ = programDataDir;
     }
 }

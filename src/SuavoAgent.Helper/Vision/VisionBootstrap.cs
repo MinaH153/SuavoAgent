@@ -1,111 +1,172 @@
-using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Serilog;
+using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Vision;
+using SuavoAgent.Helper.Workflows;
 
 namespace SuavoAgent.Helper.Vision;
 
 /// <summary>
-/// Builds the vision pipeline from an operator-placed config file. Mirrors
-/// the Tier-2 pattern: vision is OFF by default, and enabling it is a
-/// conscious two-part opt-in (config file + acknowledgement of the HIPAA
-/// surface it adds).
-///
-/// Config file location: %ProgramData%\SuavoAgent\vision.json
-/// Contents: JSON-serialized VisionOptions. Missing or unreadable = disabled.
+/// Builds both vision consumers from the same strict machine-registry state.
+/// A missing state is explicit default-disabled. Invalid state is a startup
+/// error and is never converted into a silent disabled fallback.
 ///
 /// Returns null (no vision) on:
 ///   - non-Windows platform
-///   - config missing / unparseable
 ///   - Enabled=false
 ///   - any construction error
 /// </summary>
+public sealed record VisionBootstrapResult(
+    ScreenCaptureController? CaptureController,
+    VisionPricingGridReader? PricingReader,
+    VisionRuntimeStatusTracker RuntimeStatus);
+
 public static class VisionBootstrap
 {
-    public static ScreenCaptureController? TryBuild(ILogger logger)
+    public static VisionConfigurationLoadResult LoadConfiguration(
+        ILogger logger,
+        IVisionConfigurationStore? store = null,
+        string? dataDirectory = null)
     {
+        ArgumentNullException.ThrowIfNull(logger);
+        var root = dataDirectory ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "SuavoAgent");
+        var loaded = VisionConfigurationRegistry.Load(
+            store ?? new WindowsVisionConfigurationStore(),
+            root);
+        if (!loaded.IsValid)
+        {
+            logger.Error(
+                "Vision registry state INVALID code={Code}; Helper startup refused",
+                loaded.Code);
+            throw new InvalidDataException(
+                $"Vision registry state is invalid ({loaded.Code}).");
+        }
+        if (loaded.IsMissing)
+        {
+            logger.Information(
+                "Vision registry state missing — explicit default-disabled posture code={Code}",
+                loaded.Code);
+        }
+        else
+        {
+            logger.Information(
+                "Vision registry state loaded generation={Generation}",
+                loaded.EffectiveGeneration);
+        }
+        return loaded;
+    }
+
+    public static VisionBootstrapResult BuildRuntime(ILogger logger) =>
+        BuildRuntime(logger, LoadConfiguration(logger));
+
+    public static VisionBootstrapResult BuildRuntime(
+        ILogger logger,
+        VisionConfigurationLoadResult configuration) =>
+        BuildRuntime(logger, configuration, OperatingSystem.IsWindows());
+
+    internal static VisionBootstrapResult BuildRuntime(
+        ILogger logger,
+        VisionConfigurationLoadResult configuration,
+        bool isWindows)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(configuration);
+        var runtime = new VisionRuntimeStatusTracker(configuration);
+        var opts = configuration.EffectiveOptions.ToOptions();
+
+        if (!opts.Enabled)
+        {
+            logger.Information(
+                "Vision disabled by machine registry state generation={Generation}",
+                configuration.EffectiveGeneration);
+            return new(null, null, runtime);
+        }
+
+        if (!isWindows)
+        {
+            runtime.RecordPlatformUnsupported();
+            logger.Warning("Vision enabled on unsupported platform");
+            return new(null, null, runtime);
+        }
+
         try
         {
-            var opts = LoadOptions(logger);
-            if (!opts.Enabled)
-            {
-                logger.Information("Vision disabled (Enabled=false). To enable, drop vision.json at %ProgramData%\\SuavoAgent\\");
-                return null;
-            }
-
-            if (!OperatingSystem.IsWindows())
-            {
-                logger.Information("Vision disabled (non-Windows platform)");
-                return null;
-            }
-
-            // Wrap options into an IOptions<AgentOptions> for the pipeline
-            // services that expect that shape.
             var agentOpts = Options.Create(new AgentOptions { Vision = opts });
-
-            IScreenCapture capture = OperatingSystem.IsWindows()
-                ? new GdiScreenCapture(agentOpts, logger)
-                : new NullScreenCapture();
-            // EncryptedScreenStore is Windows-only (C-3 — no plaintext fallback).
-            // Constructor throws on non-Windows hosts, ACL failures, bad paths.
+            // Build/warm OCR first. If the Setup-provisioned cohort or native
+            // engine is unavailable, this throws a static-code failure and we
+            // never create a controller that can return UIA-only false success.
+            IScreenExtractor extractor = ScrubbedExtractorFactory.Create(
+                agentOpts,
+                logger,
+                runtime);
+            IScreenCapture capture = BuildLivePmsCapture(agentOpts, logger);
             IScreenStore store = new EncryptedScreenStore(agentOpts, logger);
-            IScreenExtractor extractor = ScrubbedExtractorFactory.Create(agentOpts, logger);
+            var controller = new ScreenCaptureController(capture, store, extractor, logger);
+            var pricing = opts.Tesseract.Enabled
+                ? new VisionPricingGridReader(extractor, agentOpts, logger)
+                : null;
+            runtime.RecordReady(opts.Tesseract.Enabled);
 
             logger.Information(
                 "Vision ENABLED — capture={CaptureAvailable}, retention={RetHours}h, cap={Max}, extractor={Ext}",
                 capture.IsAvailable, opts.RetentionHours, opts.MaxStoredScreens, extractor.ExtractorId);
-
-            return new ScreenCaptureController(capture, store, extractor, logger);
+            return new(controller, pricing, runtime);
+        }
+        catch (VisionRuntimeUnavailableException ex)
+        {
+            runtime.RecordFailure(ex.Code);
+            logger.Error(
+                "Vision runtime unavailable code={Code}; machine vision fails closed",
+                ex.Code);
+            return new(null, null, runtime);
         }
         catch (Exception ex)
         {
-            logger.Warning(ex, "VisionBootstrap: failed to build pipeline — continuing without vision");
-            return null;
+            if (runtime.Snapshot().Code == VisionRuntimeCodes.VisionStarting)
+                runtime.RecordFailure(VisionRuntimeCodes.VisionPipelineInitializationFailed);
+            logger.Error(
+                "Vision pipeline initialization failed ({ErrorType}); machine vision fails closed",
+                ex.GetType().Name);
+            return new(null, null, runtime);
         }
     }
+
+    public static ScreenCaptureController? TryBuild(ILogger logger) =>
+        BuildRuntime(logger).CaptureController;
+
+    public static ScreenCaptureController? TryBuild(
+        ILogger logger,
+        VisionConfigurationLoadResult configuration) =>
+        BuildRuntime(logger, configuration).CaptureController;
 
     /// <summary>
     /// Builds the vision-based pricing reader for the PMS box. Unlike the sandbox bootstrap, this IS
     /// allowed on a PioneerRx box — it captures ONLY the Edit-Rx-Item/Supplier-Catalog window (per
     /// lookup, HWND-scoped) to read the cheapest supplier by sight, PHI-scrubbed, on-device. Gated on
-    /// the same vision.json opt-in (+ Tesseract enabled) as the observation pipeline. Returns null when
+    /// the same registry-state opt-in (+ Tesseract enabled) as the observation pipeline. Returns null when
     /// vision is off, OCR is off, non-Windows, or on any construction error → caller stays UIA-only.
     /// </summary>
-    public static SuavoAgent.Helper.Workflows.VisionPricingGridReader? TryBuildPricingReader(ILogger logger)
-    {
-        try
-        {
-            var opts = LoadOptions(logger);
-            if (!opts.Enabled || !opts.Tesseract.Enabled || !OperatingSystem.IsWindows())
-            {
-                logger.Information(
-                    "Vision pricing reader disabled (visionEnabled={V}, ocrEnabled={O}) — pricing stays UIA-only",
-                    opts.Enabled, opts.Tesseract.Enabled);
-                return null;
-            }
+    public static SuavoAgent.Helper.Workflows.VisionPricingGridReader? TryBuildPricingReader(
+        ILogger logger) => BuildRuntime(logger).PricingReader;
 
-            var agentOpts = Options.Create(new AgentOptions { Vision = opts });
-            IScreenExtractor extractor = ScrubbedExtractorFactory.Create(agentOpts, logger);
-            logger.Information("Vision pricing reader ENABLED — extractor={Ext} (reads the Pricing grid by sight)", extractor.ExtractorId);
-            return new SuavoAgent.Helper.Workflows.VisionPricingGridReader(extractor, agentOpts, logger);
-        }
-        catch (Exception ex)
-        {
-            logger.Warning(ex, "VisionBootstrap.TryBuildPricingReader: failed — pricing stays UIA-only");
-            return null;
-        }
-    }
+    public static SuavoAgent.Helper.Workflows.VisionPricingGridReader? TryBuildPricingReader(
+        ILogger logger,
+        VisionConfigurationLoadResult configuration) =>
+        BuildRuntime(logger, configuration).PricingReader;
 
     /// <summary>
     /// Sandbox-only bootstrap for WINDOW-SCOPED PrintWindow capture on a NON-PHI box.
-    /// Unlike <see cref="TryBuild"/>, this does NOT require vision.json — sandbox capture is
+    /// Unlike <see cref="TryBuild"/>, this does NOT require machine vision state — sandbox capture is
     /// opt-in per explore_sandbox command, not via an operator config file — but it captures
     /// ONLY the single allowlisted-sandbox window identified by <paramref name="targetHwnd"/>
     /// (PrintWindow is HWND-scoped, so no other window's pixels can leak).
     ///
     /// HIPAA build-time gate: REFUSES construction (returns null) if PioneerRx is installed on
     /// this host. A PMS box must NEVER receive this opt-in-free pipeline — it uses <see cref="TryBuild"/>
-    /// (vision.json, default off) instead. Also returns null on non-Windows, a zero HWND, or any error.
+    /// (registry state, default off) instead. Also returns null on non-Windows, a zero HWND, or any error.
     /// </summary>
     public static ScreenCaptureController? TryBuildWindowSandbox(IntPtr targetHwnd, int expectedPid, ILogger logger)
     {
@@ -151,30 +212,15 @@ public static class VisionBootstrap
         }
         catch (Exception ex)
         {
-            logger.Warning(ex, "VisionBootstrap.TryBuildWindowSandbox: failed to build pipeline");
+            logger.Warning(
+                "VisionBootstrap.TryBuildWindowSandbox: failed to build pipeline ({ErrorType})",
+                ex.GetType().Name);
             return null;
         }
     }
 
-    private static VisionOptions LoadOptions(ILogger logger)
-    {
-        var path = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "SuavoAgent", "vision.json");
+    internal static IScreenCapture BuildLivePmsCapture(
+        IOptions<AgentOptions> options,
+        ILogger logger) => new ApprovedPmsForegroundWindowCapture(options, logger);
 
-        if (!File.Exists(path)) return new VisionOptions();
-
-        try
-        {
-            var json = File.ReadAllText(path);
-            var opts = JsonSerializer.Deserialize<VisionOptions>(json,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            return opts ?? new VisionOptions();
-        }
-        catch (Exception ex)
-        {
-            logger.Warning(ex, "VisionBootstrap: failed to parse {Path} — disabling vision", path);
-            return new VisionOptions();
-        }
-    }
 }

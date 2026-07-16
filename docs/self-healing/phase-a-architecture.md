@@ -1,5 +1,10 @@
 # Phase A — Observability Substrate (v0.1)
 
+> **ARCHIVED SCRIPT-ERA PLAN / DO NOT IMPLEMENT THE LIFECYCLE FROM THIS FILE.**
+> Bootstrap and local probe script references below are historical. The current
+> native recovery contract is `docs/watchdog.md`; the customer path is
+> `docs/sales/windows-agent-lifecycle.md`.
+
 > Phase A is the nervous system of the self-healing architecture. Every later
 > phase (L1 dispatch, L2 verbs, L3 plans, Mission Loop) consumes events Phase
 > A produces. If Phase A is wrong, everything downstream inherits the defect.

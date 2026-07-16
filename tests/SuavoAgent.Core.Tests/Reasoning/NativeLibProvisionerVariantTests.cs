@@ -1,6 +1,7 @@
-using System.Runtime.Intrinsics.X86;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Reflection;
+using System.Security.Cryptography;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Reasoning;
 using Xunit;
@@ -78,21 +79,61 @@ public sealed class NativeLibProvisionerVariantTests : IDisposable
     }
 
     [Fact]
-    public void Avx2_desired_needs_explicit_avx2_marker()
+    public void Unsigned_avx2_variant_can_never_be_selected()
     {
-        // The avx2 branch only engages where the test CPU actually supports AVX2.
-        if (!Avx2.IsSupported) return;
         var p = Make(withAvx2: true);
-        Assert.Equal("avx2", p.DesiredVariant);
+        Assert.Equal("noavx", p.DesiredVariant);
+    }
 
-        WriteDlls(); // unmarked → presumed legacy noavx → needs the upgrade
-        Assert.False(p.CorrectVariantPresent());
+    [Theory]
+    [InlineData("noavx", "https://example/noavx.zip", 'a')]
+    [InlineData("avx2", "https://example/avx2.zip", 'b')]
+    public void VariantResolverReturnsOnlyTheRequestedConfiguredTuple(
+        string variant,
+        string expectedUrl,
+        char expectedHashCharacter)
+    {
+        var provisioner = Make(withAvx2: true);
+        var method = typeof(NativeLibProvisioner).GetMethod(
+            "ResolveVariant", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("ResolveVariant missing.");
+        var result = method.Invoke(provisioner, [variant])!;
 
-        WriteMarker("noavx"); // explicitly noavx → still needs the upgrade
-        Assert.False(p.CorrectVariantPresent());
+        Assert.Equal(expectedUrl, result.GetType().GetField("Item1")!.GetValue(result));
+        Assert.Equal(new string(expectedHashCharacter, 64),
+            result.GetType().GetField("Item2")!.GetValue(result));
+    }
 
-        WriteMarker("avx2"); // matches desired → done
-        Assert.True(p.CorrectVariantPresent());
+    [Fact]
+    public async Task DownloadEntryRejectsUnsignedPublisherBeforeNetworkOrExtraction()
+    {
+        var provisioner = Make(withAvx2: false);
+        var method = typeof(NativeLibProvisioner).GetMethod(
+            "TryDownloadAndExtractAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("TryDownloadAndExtractAsync missing.");
+
+        await Assert.IsAssignableFrom<Task>(method.Invoke(provisioner, [
+            "noavx", "https://example.invalid/native.package", new string('a', 64),
+            CancellationToken.None]));
+
+        Assert.False(Directory.Exists(_dir));
+    }
+
+    [Fact]
+    public async Task NativePackageHashHelperStreamsExactFileBytes()
+    {
+        Directory.CreateDirectory(_dir);
+        var path = Path.Combine(_dir, "native.package");
+        var bytes = new byte[] { 1, 3, 5, 7, 9 };
+        await File.WriteAllBytesAsync(path, bytes);
+        var method = typeof(NativeLibProvisioner).GetMethod(
+            "ComputeSha256Async", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("ComputeSha256Async missing.");
+
+        var actual = await Assert.IsAssignableFrom<Task<string>>(
+            method.Invoke(null, [path, CancellationToken.None]));
+
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(), actual);
     }
 
     public void Dispose()

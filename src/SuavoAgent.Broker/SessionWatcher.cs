@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Maintenance;
+using SuavoAgent.Contracts.Security;
 
 namespace SuavoAgent.Broker;
 
@@ -10,6 +12,7 @@ public sealed class SessionWatcher : BackgroundService
     private readonly ILogger<SessionWatcher> _logger;
     private readonly IWatchdogServiceProbe _watchdogProbe;
     private readonly Func<string, bool> _fileExists;
+    private readonly Func<ObservationActivationSnapshot> _refreshObservationAuthority;
     private readonly Dictionary<uint, HelperInfo> _helpers = new();
     private DateTimeOffset _lastAttestationWrite = DateTimeOffset.MinValue;
 
@@ -17,14 +20,15 @@ public sealed class SessionWatcher : BackgroundService
     // lacks SeTcbPrivilege, e.g. mis-registered as NetworkService), the old code logged CRITICAL and
     // returned — but CheckActiveSessions re-runs every 5s, so it retried FOREVER, spammed CRITICAL,
     // and never triggered repair. Now: count consecutive launch failures and, past the threshold,
-    // escalate a bootstrap repair (the real fix — re-register the Broker as LocalSystem) exactly once.
+    // escalate a native maintenance repair (the real fix — re-register the Broker as LocalSystem)
+    // exactly once.
     // The counter moves ONLY on a launch failure, never on a Helper crash, so a persistent privilege
     // problem ("never launched") is distinguished from a Helper that launched then exited ("crashed").
     private int _consecutiveLaunchFailures;
     private bool _launchFailureEscalated;
     internal const int MaxConsecutiveLaunchFailuresBeforeEscalation = 3;
 
-    // Fire the SYSTEM self-uninstall cleaner at most once (the Broker is gone seconds later anyway).
+    // Fire the native SYSTEM self-uninstall host at most once (the Broker is gone seconds later anyway).
     private bool _selfUninstallLaunched;
 
     // Helper-restart sentinel (restart_helper command / Core self-heal): Broker-side anti-thrash —
@@ -32,28 +36,64 @@ public sealed class SessionWatcher : BackgroundService
     private DateTimeOffset _lastHelperRestartAt = DateTimeOffset.MinValue;
     internal static readonly TimeSpan MinHelperRestartSpacing = TimeSpan.FromMinutes(1);
 
-    private record HelperInfo(int ProcessId, uint SessionId, DateTimeOffset LaunchedAt, string HelperSha256);
+    private record HelperInfo(
+        int ProcessId,
+        uint SessionId,
+        DateTimeOffset LaunchedAt,
+        DateTimeOffset? ProcessStartedAtUtc,
+        string HelperSha256);
 
     public SessionWatcher(ILogger<SessionWatcher> logger)
-        : this(logger, new ScWatchdogServiceProbe(), File.Exists) { }
+        : this(
+            logger,
+            new ScWatchdogServiceProbe(),
+            File.Exists,
+            CreateProductionObservationAuthority()) { }
 
     // Test seam: inject a fake Watchdog probe + file-existence check so the launch-failure escalation
-    // is unit-testable without a live Windows session or a real bootstrap.ps1.
+    // is unit-testable without a live Windows session or a real maintenance host.
     internal SessionWatcher(
         ILogger<SessionWatcher> logger, IWatchdogServiceProbe watchdogProbe, Func<string, bool> fileExists)
+        : this(logger, watchdogProbe, fileExists, () => new(
+            true,
+            ObservationActivationCodes.Active,
+            1,
+            "test-lease",
+            "test-nonce",
+            DateTimeOffset.MaxValue,
+            "test",
+            ObservationActivationIdentityStore.PolicyDigest))
+    { }
+
+    internal SessionWatcher(
+        ILogger<SessionWatcher> logger,
+        IWatchdogServiceProbe watchdogProbe,
+        Func<string, bool> fileExists,
+        Func<ObservationActivationSnapshot> refreshObservationAuthority)
     {
         _logger = logger;
         _watchdogProbe = watchdogProbe;
         _fileExists = fileExists;
+        _refreshObservationAuthority = refreshObservationAuthority;
+    }
+
+    private static Func<ObservationActivationSnapshot> CreateProductionObservationAuthority()
+    {
+        var authority = new ObservationActivationAuthority(
+            identity: ObservationActivationIdentityStore.LoadProduction());
+        return authority.Refresh;
     }
 
     internal int ConsecutiveLaunchFailures => _consecutiveLaunchFailures;
     internal bool LaunchFailureEscalated => _launchFailureEscalated;
 
     /// <summary>Past this many consecutive privileged-launch failures, stop silently retrying and
-    /// escalate a bootstrap repair once. Pure so the threshold decision is unit-testable.</summary>
+    /// escalate a native maintenance repair once. Pure so the threshold decision is unit-testable.</summary>
     internal static bool ShouldEscalateLaunchFailure(int consecutiveFailures, bool alreadyEscalated) =>
         !alreadyEscalated && consecutiveFailures >= MaxConsecutiveLaunchFailuresBeforeEscalation;
+
+    internal static bool IsHelperLaunchAuthorized(ObservationActivationSnapshot snapshot) =>
+        snapshot.ObservationEnabled;
 
     internal void RegisterLaunchSuccess()
     {
@@ -62,7 +102,7 @@ public sealed class SessionWatcher : BackgroundService
     }
 
     /// <summary>Record a privileged-launch failure. Returns true exactly once — on the failure that
-    /// first crosses the escalation threshold — so the caller invokes the bootstrap repair a single time.</summary>
+    /// first crosses the escalation threshold — so the caller invokes native repair a single time.</summary>
     internal bool RegisterLaunchFailure()
     {
         _consecutiveLaunchFailures++;
@@ -74,33 +114,38 @@ public sealed class SessionWatcher : BackgroundService
         return false;
     }
 
-    // Escalation: re-run bootstrap.ps1 --repair (the installer logic that re-registers the Broker as
-    // LocalSystem). Internal + probe/fileExists-injected so the invocation is unit-testable.
-    internal bool TryInvokeBootstrapRepair()
+    // Escalation: start the signed maintenance host beside the Broker to re-register it as
+    // LocalSystem. The launch is detached because maintenance must stop Broker; synchronously
+    // waiting here would create a parent/child service-stop deadlock. Internal +
+    // probe/fileExists-injected so process-creation acceptance is unit-testable.
+    internal bool TryStartMaintenanceRepair()
     {
-        var bootstrap = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "SuavoAgent", "bootstrap.ps1");
-        if (!_fileExists(bootstrap))
+        var maintenanceExecutable = _watchdogProbe.MaintenanceExecutablePath;
+        if (!_fileExists(maintenanceExecutable))
         {
             _logger.LogError(
-                "Cannot escalate repeated Helper-launch failure: bootstrap.ps1 not found at {Path} (dev box or broken install)",
-                bootstrap);
+                "Cannot escalate repeated Helper-launch failure: native maintenance host not found at {Path}",
+                maintenanceExecutable);
             return false;
         }
-        return _watchdogProbe.InvokeBootstrapRepair(bootstrap, TimeSpan.FromMinutes(2));
+
+        var launchAccepted = _watchdogProbe.TryStartMaintenanceRepair(
+            MaintenanceReason.HelperLaunchFailed);
+        _logger.LogWarning(
+            "Helper-launch native maintenance repair launch {Result}",
+            launchAccepted ? "accepted" : "failed");
+        return launchAccepted;
     }
 
-    // Dashboard self-uninstall: Core (LocalService) drops a sentinel it CAN write but cannot act on;
-    // the Broker (LocalSystem) is the privileged, OTA-updated component that launches the SYSTEM
-    // cleaner. Fire-once. Uses the injected _fileExists seam so the trigger is unit-testable.
+    // Dashboard self-uninstall: Core persists the exact signed command plus a signed archive receipt;
+    // Broker independently verifies and atomically claims it before any SYSTEM launch. A bare file,
+    // malformed JSON, stale/replayed identity, or untrusted maintenance host is inert.
     private void CheckSelfUninstall()
     {
         if (_selfUninstallLaunched) return;
-        if (!_fileExists(SelfUninstall.SentinelPath())) return;
-        _logger.LogWarning("Self-uninstall sentinel detected — launching SYSTEM cleaner (agent removing itself)");
         var installDir = Path.GetDirectoryName(Environment.ProcessPath) ?? string.Empty;
-        if (SelfUninstall.TryLaunchCleaner(installDir, _logger))
+        var status = SelfUninstall.TryClaimAuthenticatedRequestAndLaunch(installDir, _logger);
+        if (status == SelfUninstallLaunchStatus.LaunchAccepted)
             _selfUninstallLaunched = true;
     }
 
@@ -133,7 +178,7 @@ public sealed class SessionWatcher : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Session check error");
+                _logger.LogSafeWarning(ex);
             }
 
             await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
@@ -150,21 +195,13 @@ public sealed class SessionWatcher : BackgroundService
 
             var installDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
             var watchdogBinary = Path.Combine(installDir, "SuavoAgent.Watchdog.exe");
-            // Fixed canonical path only — deliberately NOT honoring a SUAVO_BOOTSTRAP_PS1 override:
-            // the Broker is LocalSystem and runs this script with -ExecutionPolicy Bypass, so an
-            // env-pointed path would be a privileged-exec surface. The installer always persists
-            // bootstrap.ps1 here (ProgramData\SuavoAgent), so the fixed path is correct.
-            var bootstrap = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "SuavoAgent", "bootstrap.ps1");
-
             new WatchdogServiceGuard(
-                _watchdogProbe, _logger, enabled, watchdogBinary, bootstrap)
+                _watchdogProbe, _logger, enabled, watchdogBinary)
                 .EnsureWatchdogRegistered();
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "WatchdogServiceGuard failed (non-fatal)");
+            _logger.LogSafeWarning(ex);
         }
     }
 
@@ -230,7 +267,7 @@ public sealed class SessionWatcher : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Helper-restart receipt write failed (non-fatal)");
+            _logger.LogSafeDebug(ex);
         }
     }
 
@@ -262,7 +299,7 @@ public sealed class SessionWatcher : BackgroundService
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Failed to kill Helper PID {Pid} ({Reason})", proc.Id, reason);
+                        _logger.LogSafeWarning(ex);
                     }
                 }
             }
@@ -276,7 +313,7 @@ public sealed class SessionWatcher : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "KillAllHelperProcesses failed (non-fatal)");
+            _logger.LogSafeWarning(ex);
         }
         return killed;
     }
@@ -309,7 +346,7 @@ public sealed class SessionWatcher : BackgroundService
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Failed to kill orphan Helper PID {Pid}", proc.Id);
+                        _logger.LogSafeWarning(ex);
                     }
                 }
             }
@@ -320,7 +357,7 @@ public sealed class SessionWatcher : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Orphan Helper reconciliation failed (non-fatal)");
+            _logger.LogSafeWarning(ex);
         }
     }
 
@@ -377,7 +414,7 @@ public sealed class SessionWatcher : BackgroundService
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Failed to kill stale-session Helper PID {Pid}", proc.Id);
+                        _logger.LogSafeWarning(ex);
                     }
                 }
 
@@ -393,12 +430,28 @@ public sealed class SessionWatcher : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Stale-session Helper reconciliation failed (non-fatal)");
+            _logger.LogSafeWarning(ex);
         }
     }
 
     private void CheckActiveSessions()
     {
+        ObservationActivationSnapshot activation;
+        try
+        {
+            activation = _refreshObservationAuthority();
+        }
+        catch
+        {
+            activation = ObservationActivationSnapshot.Dormant(
+                ObservationActivationCodes.StateInvalid);
+        }
+        if (!IsHelperLaunchAuthorized(activation))
+        {
+            _ = KillAllHelperProcesses("observation_authority_unavailable");
+            return;
+        }
+
         var activeSessionId = GetActiveConsoleSessionId();
         if (activeSessionId == 0xFFFFFFFF)
         {
@@ -443,28 +496,40 @@ public sealed class SessionWatcher : BackgroundService
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 "SuavoAgent"),
-            _logger);
+            _logger,
+            installedServiceMode:
+                Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService());
 
     // H-8 tamper guard, extracted + path-injectable so the decision is unit-testable (the live
     // caller passes the real %ProgramData%\SuavoAgent dir). The on-disk Helper hash must equal the
     // binaries.manifest entry or the Broker refuses to launch the Helper.
-    internal static bool VerifyHelperIntegrityAt(string helperPath, string programDataDir, ILogger logger)
+    internal static bool VerifyHelperIntegrityAt(
+        string helperPath,
+        string programDataDir,
+        ILogger logger,
+        bool installedServiceMode = false)
     {
         var manifestPath = Path.Combine(programDataDir, "binaries.manifest");
         if (!File.Exists(manifestPath))
         {
             // #11: a missing manifest is the integrity ROOT being absent. Failing open here both
             // defeats the tamper guard (delete the manifest → the Helper launches unverified) and
-            // hides it (the box looks green). On a MANAGED install the installer always persists
-            // bootstrap.ps1 in this same dir, so a missing manifest is anomalous → fail-CLOSED
-            // (refuse; the resulting helper-down state is the degraded signal the cloud reads).
-            // Only a genuine pre-install/dev box (no bootstrap.ps1) keeps the fail-open so a first
-            // boot isn't bricked before install.ps1 has written the manifest.
-            var managed = File.Exists(Path.Combine(programDataDir, "bootstrap.ps1"));
+            // hides it (the box looks green). A native managed install persists install-state.json;
+            // running as the installed Windows service is independently authoritative during migration
+            // from older installs. Either signal makes a missing integrity root fail CLOSED. Only a
+            // genuine console/dev run with neither signal retains the first-boot fail-open.
+            var installDir = Path.GetDirectoryName(helperPath) ?? string.Empty;
+            var installStatePath = Path.Combine(
+                installDir,
+                MaintenanceContract.InstallStateFileName);
+            var installStatePresent = File.Exists(installStatePath);
+            var managed = installedServiceMode || installStatePresent;
             if (managed)
             {
                 logger.LogError(
-                    "binaries.manifest missing on a managed install (bootstrap.ps1 present) — refusing to launch Helper (fail-closed; integrity unverifiable)");
+                    "binaries.manifest missing on a managed install — refusing to launch Helper (fail-closed; integrity unverifiable; serviceMode={InstalledServiceMode}, installStatePresent={InstallStatePresent})",
+                    installedServiceMode,
+                    installStatePresent);
                 return false;
             }
             logger.LogWarning(
@@ -494,7 +559,7 @@ public sealed class SessionWatcher : BackgroundService
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Helper integrity check error — refusing to launch (fail-closed)");
+            logger.LogSafeError(ex);
             return false;
         }
     }
@@ -516,10 +581,12 @@ public sealed class SessionWatcher : BackgroundService
         try
         {
             var helpers = _helpers.Values
+                .Where(h => h.ProcessStartedAtUtc.HasValue)
                 .Select(h => new IpcPeerAttestationEntry(
                     ProcessId: h.ProcessId,
                     SessionId: h.SessionId,
                     LaunchedAt: h.LaunchedAt,
+                    ProcessStartedAtUtc: h.ProcessStartedAtUtc!.Value,
                     HelperSha256: h.HelperSha256))
                 .ToArray();
 
@@ -532,7 +599,7 @@ public sealed class SessionWatcher : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to persist Helper IPC attestation");
+            _logger.LogSafeWarning(ex);
         }
     }
 
@@ -612,10 +679,9 @@ public sealed class SessionWatcher : BackgroundService
                 if (escalateNow)
                 {
                     _logger.LogCritical(
-                        "Helper launch has failed {Attempt} consecutive times — escalating a bootstrap repair to re-register " +
+                        "Helper launch has failed {Attempt} consecutive times — escalating native maintenance repair to re-register " +
                         "the Broker as LocalSystem (root cause: missing SeTcbPrivilege).", _consecutiveLaunchFailures);
-                    var repaired = TryInvokeBootstrapRepair();
-                    _logger.LogWarning("Bootstrap repair escalation invoked (launched={Launched})", repaired);
+                    _ = TryStartMaintenanceRepair();
                 }
                 return;
             }
@@ -641,17 +707,30 @@ public sealed class SessionWatcher : BackgroundService
             if (pid != null)
             {
                 RegisterLaunchSuccess(); // a real launch clears the privileged-launch failure counter
+                DateTimeOffset? processStartedAtUtc = null;
+                try
+                {
+                    processStartedAtUtc = new DateTimeOffset(
+                        Process.GetProcessById(pid.Value).StartTime.ToUniversalTime());
+                }
+                catch (Exception ex)
+                {
+                    // Normal image-path verification can still admit this Helper,
+                    // but the locked-down fallback must remain unavailable.
+                    _logger.LogSafeWarning(ex);
+                }
                 _helpers[sessionId] = new HelperInfo(
                     pid.Value,
                     sessionId,
                     DateTimeOffset.UtcNow,
+                    processStartedAtUtc,
                     helperSha256);
                 PersistHelperAttestations(nonce);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to launch Helper for session {Session}", sessionId);
+            _logger.LogSafeError(ex);
         }
     }
 

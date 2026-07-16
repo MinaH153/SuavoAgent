@@ -49,12 +49,14 @@ public sealed class WorklistReportWriter
             ws.Columns().AdjustToContents();
             wb.SaveAs(outputPath);
 
-            _logger.LogInformation("WorklistReportWriter: wrote {Rows} rows to {Stem}", cellsRows.Count, stem);
+            _logger.LogInformation("core.worklist.written rows={Rows}", cellsRows.Count);
             return WorklistWriteResult.Ok(outputPath, cellsRows.Count, 0);
         }
         catch (Exception ex)
         {
-            _logger.LogError("WorklistReportWriter failed for {Stem} ({ErrorType})", stem, ex.GetType().Name);
+            _logger.LogError(
+                "core.worklist.write_failed exception_type={ExceptionType}",
+                ex.GetType().Name);
             return WorklistWriteResult.Fail("Worklist write failed");
         }
     }

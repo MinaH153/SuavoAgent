@@ -79,7 +79,7 @@ public sealed class PioneerRxVerbScaffoldTests
     }
 
     [Fact]
-    public async Task QueryVerb_AllowedWhenCharterHasMatchingBaaConstraint()
+    public async Task QueryVerb_IsExplicitlyUnavailable_NotSuccessfulNoOp()
     {
         var harness = BuildHarness();
         var verb = new PioneerRxQueryVerb();
@@ -90,9 +90,28 @@ public sealed class PioneerRxVerbScaffoldTests
         });
 
         var result = await harness.Dispatcher.DispatchAsync(verb, ctx, CancellationToken.None);
-        // PioneerRxQueryVerb is LOW + AgentBaa so charter doesn't need an
-        // amendment constraint, only the standard BAA path.
-        Assert.Equal(VerbDispatchOutcome.Success, result.Outcome);
+        Assert.NotEqual(VerbDispatchOutcome.Success, result.Outcome);
+        Assert.Contains("capability_unavailable", result.FailureReason);
+    }
+
+    [Fact]
+    public async Task AllPioneerRxVerbExecuteAndPostconditionPathsFailClosed()
+    {
+        var harness = BuildHarness();
+        foreach (var verb in new IVerb[]
+        {
+            new PioneerRxClickVerb(),
+            new PioneerRxQueryVerb(),
+            new PioneerRxWritebackRxDeliveryVerb(),
+        })
+        {
+            var ctx = harness.Context(verb, new Dictionary<string, object?>());
+            var execution = await verb.ExecuteAsync(ctx, CancellationToken.None);
+            var postcondition = await verb.VerifyPostconditionsAsync(ctx, execution, CancellationToken.None);
+            Assert.False(execution.Succeeded);
+            Assert.Equal("capability_unavailable", execution.FailureReason);
+            Assert.False(postcondition.Satisfied);
+        }
     }
 
     private static Harness BuildHarness()

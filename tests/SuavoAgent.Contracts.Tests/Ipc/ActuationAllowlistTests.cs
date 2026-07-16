@@ -6,10 +6,8 @@ using Xunit;
 namespace SuavoAgent.Contracts.Tests.Ipc;
 
 /// <summary>
-/// The actuation app-allowlist is operator-extensible (canary/non-PHI boxes add apps via
-/// actuation.json's AllowedApps) but the built-in Notepad/Calculator defaults are always retained
-/// and never overridable — and malformed/path/wildcard entries are rejected so config can't smuggle
-/// an arbitrary executable. Resets to defaults after each test (shared static registry).
+/// The sandbox policy is immutable at runtime. Calculator is the only default; Notepad is protected
+/// because modern Windows can route launches into an existing tabbed process containing PHI.
 /// </summary>
 public sealed class ActuationAllowlistTests : IDisposable
 {
@@ -20,23 +18,38 @@ public sealed class ActuationAllowlistTests : IDisposable
     {
         ActuationAllowlistedSandboxApps.ExtendAllowlist(null);
         var apps = ActuationAllowlistedSandboxApps.ProcessNames;
-        Assert.Equal("notepad.exe", apps["notepad"]);
         Assert.Equal("calc.exe", apps["calculator"]);
+        Assert.False(apps.ContainsKey("notepad"));
     }
 
     [Fact]
-    public void ExtendAllowlist_AddsOperatorAuthorizedApps_KeepingDefaults()
+    public void ExtendAllowlist_IgnoresAllRuntimeAdditions()
     {
         ActuationAllowlistedSandboxApps.ExtendAllowlist(new Dictionary<string, string>
         {
             ["mspaint"] = "mspaint.exe",
-            ["explorer"] = "explorer.exe",
         });
         var apps = ActuationAllowlistedSandboxApps.ProcessNames;
-        Assert.Equal("mspaint.exe", apps["mspaint"]);
-        Assert.Equal("explorer.exe", apps["explorer"]);
-        Assert.True(apps.ContainsKey("notepad"));     // defaults retained
+        Assert.False(apps.ContainsKey("mspaint"));
+        Assert.False(apps.ContainsKey("notepad"));
         Assert.True(apps.ContainsKey("calculator"));
+    }
+
+    [Theory]
+    [InlineData("pioneer", "PioneerPharmacy.exe")]
+    [InlineData("PIONEERRX", "renamed.exe")]
+    [InlineData("browser", "chrome.exe")]
+    [InlineData("office", "EXCEL.EXE")]
+    [InlineData("shell", "powershell.exe")]
+    public void ExtendAllowlist_ImmutableProtectedProcessesCannotBeAdded(string key, string process)
+    {
+        ActuationAllowlistedSandboxApps.ExtendAllowlist(new Dictionary<string, string>
+        {
+            [key] = process,
+        });
+
+        Assert.False(ActuationAllowlistedSandboxApps.ProcessNames.ContainsKey(key));
+        Assert.False(ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(process));
     }
 
     [Fact]
@@ -63,8 +76,8 @@ public sealed class ActuationAllowlistTests : IDisposable
     {
         ActuationAllowlistedSandboxApps.ExtendAllowlist(new Dictionary<string, string>
         {
-            ["notepad"] = "evil.exe", // attempt to repoint the notepad default → ignored
+            ["calculator"] = "evil.exe",
         });
-        Assert.Equal("notepad.exe", ActuationAllowlistedSandboxApps.ProcessNames["notepad"]);
+        Assert.Equal("calc.exe", ActuationAllowlistedSandboxApps.ProcessNames["calculator"]);
     }
 }

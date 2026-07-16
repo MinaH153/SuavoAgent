@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using SuavoAgent.Core.Config;
 using Xunit;
 
@@ -17,9 +18,11 @@ public sealed class CredentialStoreTests
 
         store.Set("AuthKey", "sagent_xyz"); // overwrite
         Assert.Equal("sagent_xyz", store.Get("AuthKey"));
+        store.Set("DeviceKeyId", "device-key");
 
-        store.Delete("AuthKey");
+        store.DeleteMany(["AuthKey", "DeviceKeyId"]);
         Assert.Null(store.Get("AuthKey"));
+        Assert.Null(store.Get("DeviceKeyId"));
 
         // Delete of an absent key is a no-op (does not throw).
         store.Delete("AuthKey");
@@ -52,6 +55,35 @@ public sealed class CredentialStoreTests
         finally
         {
             if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Dpapi_TamperFailsClosedAndIsNeverOverwrittenBySet()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        AssertDpapiTamperFailsClosedAndIsNeverOverwrittenBySet();
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertDpapiTamperFailsClosedAndIsNeverOverwrittenBySet()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"suavo_creds_{Guid.NewGuid():N}.dat");
+        try
+        {
+            var store = new DpapiCredentialStore(path);
+            store.Set(CredentialKeys.AuthKey, "sagent_original");
+            File.WriteAllText(path, "{not-valid-json");
+
+            Assert.Throws<InvalidDataException>(() => store.Get(CredentialKeys.AuthKey));
+            Assert.Throws<InvalidDataException>(() => store.Set(CredentialKeys.AuthKey, "sagent_attacker"));
+            Assert.Equal("{not-valid-json", File.ReadAllText(path));
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
         }
     }
 

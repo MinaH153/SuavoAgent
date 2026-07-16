@@ -6,7 +6,7 @@ namespace SuavoAgent.Helper.Actuation;
 
 /// <summary>
 /// Centralised guard every actuation primitive consults BEFORE touching Win32.
-/// Three independent state axes:
+/// Five independent state axes:
 ///
 ///   1. Enabled — master gate. Set false by config OR HotkeyKillSwitch
 ///      (Ctrl+Shift+Esc). Once tripped locally it stays tripped until the
@@ -16,6 +16,9 @@ namespace SuavoAgent.Helper.Actuation;
 ///   3. PausedUntilUtc — bumped by UserInputObserver every time the
 ///      pharmacist touches the keyboard or mouse. Defaults to NOW+5 min on
 ///      any input. WorkflowExecutor checks this between every step.
+///   4. CompromiseDetected — latched by the honeytoken reflex.
+///   5. DryRun — permitted for simulated sandbox commands, but never for a
+///      workflow that claims to mutate a live PMS.
 ///
 /// All methods are thread-safe. Read paths take the read lock; mutators
 /// take the write lock briefly. The state is intentionally simple (no
@@ -64,16 +67,7 @@ public sealed class ActuationGate
         _lock.EnterReadLock();
         try
         {
-            return new ActuationGateState(
-                Enabled: _enabled,
-                DryRun: _dryRun,
-                PausedUntilUtc: _pausedUntilUtc,
-                PauseReason: _pauseReason,
-                KillSwitchTrippedUtc: _killSwitchTrippedUtc,
-                CompromiseDetected: _compromiseDetected,
-                CompromiseLevel: _compromiseLevel,
-                CompromiseReasonLabel: _compromiseReasonLabel,
-                CompromiseAtUtc: _compromiseAtUtc);
+            return SnapshotUnsafe();
         }
         finally
         {
@@ -100,6 +94,13 @@ public sealed class ActuationGate
                     $"local kill switch tripped at {_killSwitchTrippedUtc:o}",
                     _dryRun);
             }
+            if (_compromiseDetected)
+            {
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.CompromiseDetected,
+                    "local compromise reflex is active",
+                    _dryRun);
+            }
             if (!_enabled)
             {
                 return ActuationResult.Reject(
@@ -120,6 +121,82 @@ public sealed class ActuationGate
         {
             _lock.ExitReadLock();
         }
+    }
+
+    /// <summary>
+    /// Atomic live-actuation check. Unlike <see cref="CheckOrReject"/>, this also
+    /// rejects forced dry-run and a latched compromise. UIA workflows that cannot
+    /// truthfully simulate their effects (notably PricingWorkflow) must call this
+    /// immediately before every mutating UIA operation.
+    /// </summary>
+    public ActuationResult? CheckLiveOrReject()
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            return LiveRejectionUnsafe(DateTimeOffset.UtcNow);
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+    }
+
+    /// <summary>
+    /// Linearizable live-mutation boundary. The read lock is held from the
+    /// five-axis decision through the one short UIA/keyboard mutation. A pause,
+    /// kill, disable, dry-run transition, or compromise obtains the write lock,
+    /// so it is ordered either wholly before this mutation (which is rejected)
+    /// or wholly after it. There is no check-then-act window where a mutation can
+    /// begin after the gate has closed.
+    /// </summary>
+    public ActuationResult? ExecuteLiveMutationOrReject(Action mutation)
+    {
+        ArgumentNullException.ThrowIfNull(mutation);
+        _lock.EnterReadLock();
+        try
+        {
+            var rejection = LiveRejectionUnsafe(DateTimeOffset.UtcNow);
+            if (rejection is not null) return rejection;
+            mutation();
+            return null;
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+    }
+
+    private ActuationGateState SnapshotUnsafe() => new(
+        Enabled: _enabled,
+        DryRun: _dryRun,
+        PausedUntilUtc: _pausedUntilUtc,
+        PauseReason: _pauseReason,
+        KillSwitchTrippedUtc: _killSwitchTrippedUtc,
+        CompromiseDetected: _compromiseDetected,
+        CompromiseLevel: _compromiseLevel,
+        CompromiseReasonLabel: _compromiseReasonLabel,
+        CompromiseAtUtc: _compromiseAtUtc);
+
+    private ActuationResult? LiveRejectionUnsafe(DateTimeOffset now)
+    {
+        var code = LiveActuationGatePolicy.RejectionCode(SnapshotUnsafe(), now);
+        if (code is null) return null;
+
+        var reason = code switch
+        {
+            ActuationRejectionCodes.KillSwitchTripped =>
+                $"local kill switch tripped at {_killSwitchTrippedUtc:o}",
+            ActuationRejectionCodes.CompromiseDetected => "local compromise reflex is active",
+            ActuationRejectionCodes.GateDisabled =>
+                "actuation gate is disabled (config or operator action)",
+            ActuationRejectionCodes.GatePaused =>
+                $"paused until {_pausedUntilUtc:o} ({_pauseReason ?? "user_input_detected"})",
+            ActuationRejectionCodes.GateDryRun =>
+                "actuation gate requires dry-run; this workflow cannot simulate live UIA mutations",
+            _ => "live actuation gate state is unavailable",
+        };
+        return ActuationResult.Reject(code, reason, _dryRun);
     }
 
     public bool IsDryRun
@@ -187,9 +264,9 @@ public sealed class ActuationGate
     /// <summary>
     /// Stamp a honeytoken-corroborated compromise for the heartbeat self-compromise signal. This does NOT
     /// change the gate (the ApoptosisOrchestrator applies SetDryRun/SetEnabled/TripKillSwitch separately) —
-    /// it only records the level + PHI-safe reason label that Core reads via Snapshot()/IPC. Latches "up":
+    /// it only records the level + fixed reason category that Core reads via Snapshot()/IPC. Latches "up":
     /// never overwrites a higher recorded level (a late degrade can't mask an apoptosis); the trip time is
-    /// stamped once. <paramref name="reasonLabel"/> MUST already be PHI-safe (HoneytokenCorroborator output).
+    /// stamped once. Unknown labels normalize to <c>unknown_process</c>.
     /// </summary>
     public void RecordHoneytokenCompromise(string level, string reasonLabel)
     {
@@ -199,7 +276,9 @@ public sealed class ActuationGate
             if (Rank(level) >= Rank(_compromiseLevel))
             {
                 _compromiseLevel = level;
-                _compromiseReasonLabel = reasonLabel;
+                _compromiseReasonLabel =
+                    SuavoAgent.Contracts.Models.HoneytokenReasonLabels.Normalize(
+                        reasonLabel);
             }
             _compromiseDetected = true;
             _compromiseAtUtc ??= DateTimeOffset.UtcNow;
@@ -229,6 +308,27 @@ public sealed class ActuationGate
                 _pausedUntilUtc = pausedUntil;
             }
             _pauseReason = $"user_input:{source}";
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
+    /// Pause actuation until a local operator explicitly resumes it. Observation
+    /// stays active. This is the companion UI's reversible control and is kept
+    /// separate from <see cref="TripKillSwitch"/>, which intentionally cannot be
+    /// reversed inside the running Helper process.
+    /// </summary>
+    public void PauseUntilResumed()
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            _pausedUntilUtc = DateTimeOffset.MaxValue;
+            _pauseReason = "operator:companion_control";
+            _logger.Warning("ActuationGate paused until local operator resume");
         }
         finally
         {

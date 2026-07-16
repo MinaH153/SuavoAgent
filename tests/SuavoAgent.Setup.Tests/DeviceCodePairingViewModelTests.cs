@@ -1,5 +1,6 @@
 using SuavoAgent.Setup;
 using SuavoAgent.Setup.Gui.ViewModels;
+using System.Text.Json;
 using Xunit;
 
 namespace SuavoAgent.Setup.Tests;
@@ -28,12 +29,21 @@ public sealed class DeviceCodePairingViewModelTests
         public Task<DeviceCodeCreateResult> CreateAsync(string fingerprint, string version, CancellationToken ct)
             => Task.FromResult(_create);
 
-        public Task<DeviceCodePollResult> PollAsync(string deviceCode, CancellationToken ct)
+        public Task<DeviceCodePollResult> PollAsync(
+            string deviceCode, string deviceSecret, CancellationToken ct)
             => Task.FromResult(_polls.Count > 0 ? _polls.Dequeue() : new DeviceCodePollResult("pending"));
     }
 
     private static DeviceCodeCreateResult Created() =>
-        new("ABCD-2345", "https://suavollc.com/pharmacy/agent/pair?code=ABCD-2345", 900, 5);
+        new(
+            "ABCD-2345",
+            "https://suavollc.com/pharmacy/agent/pair?code=ABCD-2345",
+            900,
+            5,
+            "agent-only-secret",
+            "device-key-id",
+            "device-key-name",
+            new string('A', 43));
 
     private static DeviceCodePairingViewModel NewVm(
         IDeviceCodeService service,
@@ -50,6 +60,32 @@ public sealed class DeviceCodePairingViewModelTests
             delay: NoDelay,
             openUrl: openUrl);
 
+    private static DeviceCodePollResult Authorized(
+        string apiKey,
+        string agentId,
+        string pharmacyId,
+        string pharmacyName)
+    {
+        var dto = new VerticalConfigDto(
+            "pharmacy",
+            "hipaa",
+            "pioneerrx",
+            "PioneerRx",
+            "phi-v1",
+            new VerticalFraming("SuavoAgent", "PioneerRx", "pharmacy", "NPI"),
+            new VerticalCompliance(true, "hipaa-ba-v1"));
+        return new DeviceCodePollResult(
+            "authorized",
+            apiKey,
+            agentId,
+            pharmacyId,
+            pharmacyName,
+            VerticalConfigRaw: JsonSerializer.Serialize(dto),
+            VerticalConfig: dto,
+            VerticalConfigSignature: "signed-envelope",
+            VerticalConfigKeyId: "vertical-v1");
+    }
+
     [Fact]
     public async Task Authorized_surfaces_code_and_returns_config()
     {
@@ -57,7 +93,7 @@ public sealed class DeviceCodePairingViewModelTests
         var svc = new FakeService(
             Created(),
             new DeviceCodePollResult("pending"),
-            new DeviceCodePollResult("authorized", "sagent_live", "agent-uuid", "pharm-uuid", "Better Life"));
+            Authorized("sagent_live", "agent-uuid", "pharm-uuid", "Better Life"));
         var vm = NewVm(svc, onPaired: c => paired = c);
 
         await vm.StartAsync();
@@ -74,7 +110,15 @@ public sealed class DeviceCodePairingViewModelTests
     {
         var paired = false;
         var svc = new FakeService(
-            new DeviceCodeCreateResult("ABCD-2345", "https://suavollc.com/x", 0, 5),
+            new DeviceCodeCreateResult(
+                "ABCD-2345",
+                "https://suavollc.com/x",
+                0,
+                5,
+                "agent-only-secret",
+                "device-key-id",
+                "device-key-name",
+                new string('A', 43)),
             new DeviceCodePollResult("expired"));
         var vm = NewVm(svc, onPaired: _ => paired = true);
 
@@ -113,6 +157,23 @@ public sealed class DeviceCodePairingViewModelTests
         vm.OpenBrowserCommand.Execute(null);
 
         Assert.Equal("https://suavollc.com/pharmacy/agent/pair?code=ABCD-2345", opened);
+    }
+
+    [Fact]
+    public async Task Browser_launch_failure_keeps_copyable_url_and_surfaces_remediation()
+    {
+        var svc = new FakeService(
+            Created(),
+            new DeviceCodePollResult("authorized", "k", "a", "p", "Q"));
+        var vm = NewVm(svc, openUrl: _ => throw new InvalidOperationException("blocked"));
+
+        await vm.StartAsync();
+        vm.OpenBrowserCommand.Execute(null);
+
+        Assert.Equal(
+            "https://suavollc.com/pharmacy/agent/pair?code=ABCD-2345",
+            vm.VerificationUrl);
+        Assert.Contains("copy", vm.StatusText, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

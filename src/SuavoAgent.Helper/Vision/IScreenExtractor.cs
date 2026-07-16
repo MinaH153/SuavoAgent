@@ -30,3 +30,15 @@ public interface IScreenExtractor
     /// </summary>
     Task<ScreenFrame?> ExtractAsync(ScreenBytes screen, CancellationToken ct);
 }
+
+/// <summary>
+/// Dedicated pricing OCR shape. General observation remains line-based so PHI
+/// scrubbing keeps phrase context; pricing requests word geometry so the money
+/// parser can prove exact column membership.
+/// </summary>
+internal interface IPricingScreenExtractor : IScreenExtractor
+{
+    Task<ScreenFrame?> ExtractPricingAsync(
+        ScreenBytes screen,
+        CancellationToken ct);
+}

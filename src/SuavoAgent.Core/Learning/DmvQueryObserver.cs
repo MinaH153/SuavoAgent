@@ -67,16 +67,13 @@ public sealed class DmvQueryObserver : ILearningObserver
         // One-shot DMV access check — if it fails we go dormant forever
         if (!await CheckDmvAccessAsync())
         {
-            _logger.LogInformation(
-                "DmvQueryObserver: DMV access unavailable for session {Session} — going dormant",
-                sessionId);
+            _logger.LogInformation("core.learning.dmv_observer_dormant");
             HasDmvAccess = false;
             return;
         }
 
         HasDmvAccess = true;
-        _logger.LogInformation(
-            "DmvQueryObserver started for session {Session}", sessionId);
+        _logger.LogInformation("core.learning.dmv_observer_started");
 
         await CalibrateClockAsync();
         _lastClockCalibration = DateTimeOffset.UtcNow;
@@ -162,7 +159,7 @@ public sealed class DmvQueryObserver : ILearningObserver
         }
         catch (Exception ex) when (!IsTransient(ex))
         {
-            _logger.LogWarning(ex, "DmvQueryObserver: DMV poll failed for session {Session}", sessionId);
+            _logger.LogSafeWarning(ex);
             return false;
         }
     }
@@ -187,15 +184,14 @@ public sealed class DmvQueryObserver : ILearningObserver
                 var roundTrip = (after - before).TotalMilliseconds / 2;
                 var sqlOffset = (sqlUtc - before.UtcDateTime).TotalMilliseconds;
                 ClockOffsetMs = (int)(sqlOffset - roundTrip);
-                _logger.LogDebug(
-                    "DmvQueryObserver: clock offset = {OffsetMs}ms", ClockOffsetMs);
+                _logger.LogDebug("core.learning.dmv_clock_calibrated");
                 ClockCalibratedChanged?.Invoke(true);
             }
         }
         catch (Exception ex)
         {
             // Non-fatal — fall back to offset = 0
-            _logger.LogWarning(ex, "DmvQueryObserver: clock calibration failed, using offset=0");
+            _logger.LogSafeWarning(ex);
             ClockOffsetMs = 0;
             ClockCalibratedChanged?.Invoke(false);
         }

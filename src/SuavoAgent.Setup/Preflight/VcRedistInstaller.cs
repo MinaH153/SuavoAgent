@@ -3,6 +3,7 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using SuavoAgent.Diagnostics.Maintenance;
 
 namespace SuavoAgent.Setup.Preflight;
 
@@ -12,17 +13,36 @@ public sealed class VcRedistInstaller
     private static readonly int[] SuccessExitCodes = { 0, 3010, 1638 };
     private readonly Func<string, string, CancellationToken, Task<int>> _runProcess;
     private readonly VcRedistChecker _checker;
+    private readonly Func<string, bool> _verifyBeforeLaunch;
 
     public VcRedistInstaller(
         Func<string, string, CancellationToken, Task<int>>? runProcess = null,
-        VcRedistChecker? checker = null)
+        VcRedistChecker? checker = null,
+        Func<string, bool>? verifyBeforeLaunch = null)
     {
         _runProcess = runProcess ?? RunProcessAsync;
         _checker = checker ?? new VcRedistChecker();
+        _verifyBeforeLaunch = verifyBeforeLaunch ?? (path =>
+            PrivilegedExecutableStaging.VerifyMicrosoftExecutable(
+                path,
+                VcRedistPreflight.Sha256));
     }
 
     public async Task<VcRedistInstallResult> InstallAsync(string installerPath, CancellationToken ct)
     {
+        // Keep the trust check adjacent to process creation. The protected DACL
+        // prevents the unelevated same-SID user from replacing the closed file
+        // between this check and Process.Start.
+        bool trusted;
+        try { trusted = _verifyBeforeLaunch(installerPath); }
+        catch { trusted = false; }
+        if (!trusted)
+            return new VcRedistInstallResult(
+                Success: false,
+                ExitCode: -1,
+                RebootPending: false,
+                VerifiedAfter: false);
+
         var exit = await _runProcess(installerPath, "/install /quiet /norestart", ct);
         var codeOk = Array.IndexOf(SuccessExitCodes, exit) >= 0;
         var verified = _checker.Check().Installed;

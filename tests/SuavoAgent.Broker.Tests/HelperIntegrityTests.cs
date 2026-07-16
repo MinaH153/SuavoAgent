@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Broker;
+using SuavoAgent.Contracts.Maintenance;
 using Xunit;
 
 namespace SuavoAgent.Broker.Tests;
@@ -10,10 +11,10 @@ namespace SuavoAgent.Broker.Tests;
 // #11: a MISSING binaries.manifest used to fail-OPEN silently (return true), which both
 //   (a) defeats the tamper guard — delete the manifest and any Helper launches unverified — and
 //   (b) hides the failure (the box looks healthy / "green").
-// On a MANAGED install the installer always persists bootstrap.ps1 alongside the manifest, so a
+// On a MANAGED install the native installer persists install-state.json alongside the manifest, so a
 // missing manifest there is anomalous → fail-CLOSED (refuse; the resulting helper-down state is the
-// degraded signal the cloud sees). Only a genuine pre-install/dev box (no bootstrap.ps1) keeps the
-// fail-open so a first boot isn't bricked.
+// degraded signal the cloud sees). Installed-service mode independently fails closed so migrated boxes
+// are protected before the native marker is present. Only a genuine console/dev run keeps fail-open.
 public class HelperIntegrityTests
 {
     private static string MakeTempDir()
@@ -32,7 +33,7 @@ public class HelperIntegrityTests
     [Fact]
     public void ManagedInstall_MissingManifest_RefusesFailClosed()
     {
-        // bootstrap.ps1 present (managed install) but binaries.manifest absent — the integrity
+        // install-state.json present (managed install) but binaries.manifest absent — the integrity
         // root is gone on a box that should have it. Refuse rather than silently launch unverified.
         var installDir = MakeTempDir();
         var programData = MakeTempDir();
@@ -40,7 +41,9 @@ public class HelperIntegrityTests
         {
             var helper = Path.Combine(installDir, "SuavoAgent.Helper.exe");
             File.WriteAllText(helper, "helper-bytes");
-            File.WriteAllText(Path.Combine(programData, "bootstrap.ps1"), "# managed install marker");
+            File.WriteAllText(
+                Path.Combine(installDir, MaintenanceContract.InstallStateFileName),
+                "{}");
             // No binaries.manifest in programData.
 
             var ok = SessionWatcher.VerifyHelperIntegrityAt(helper, programData, NullLogger.Instance);
@@ -57,7 +60,7 @@ public class HelperIntegrityTests
     [Fact]
     public void FirstBoot_MissingManifestAndNoMarker_FailsOpen()
     {
-        // No bootstrap.ps1 and no manifest = genuine pre-install/dev box. Don't brick the Helper.
+        // No install-state marker, no service mode, and no manifest = genuine pre-install/dev run.
         var installDir = MakeTempDir();
         var programData = MakeTempDir();
         try
@@ -68,6 +71,31 @@ public class HelperIntegrityTests
             var ok = SessionWatcher.VerifyHelperIntegrityAt(helper, programData, NullLogger.Instance);
 
             Assert.True(ok);
+        }
+        finally
+        {
+            Directory.Delete(installDir, recursive: true);
+            Directory.Delete(programData, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void InstalledServiceMode_MissingManifestAndMarker_RefusesFailClosed()
+    {
+        var installDir = MakeTempDir();
+        var programData = MakeTempDir();
+        try
+        {
+            var helper = Path.Combine(installDir, "SuavoAgent.Helper.exe");
+            File.WriteAllText(helper, "helper-bytes");
+
+            var ok = SessionWatcher.VerifyHelperIntegrityAt(
+                helper,
+                programData,
+                NullLogger.Instance,
+                installedServiceMode: true);
+
+            Assert.False(ok);
         }
         finally
         {

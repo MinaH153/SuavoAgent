@@ -24,6 +24,38 @@ public sealed record TaskAutonomyState(
     AutonomyLevel Level,
     string? LastOutcome);
 
+public enum AutonomySemanticResult
+{
+    Completed,
+    Failed,
+    Partial,
+    Cancelled,
+}
+
+/// <summary>
+/// Authority mode bound into the signed cloud command. Missing or unknown wire
+/// values are interpreted as <see cref="Supervised"/> by the command parser.
+/// </summary>
+public enum AutonomyExecutionMode
+{
+    Supervised,
+    Auto,
+}
+
+public sealed record AutonomyRunEvidence(
+    string RunId,
+    AutonomyEvidenceScope Scope,
+    bool Supervised,
+    int WorkItemCount,
+    AutonomySemanticResult SemanticResult,
+    bool PostconditionSatisfied,
+    string PostconditionDigest,
+    DateTimeOffset CompletedAt)
+{
+    public bool Clean => WorkItemCount > 0 &&
+        SemanticResult == AutonomySemanticResult.Completed && PostconditionSatisfied;
+}
+
 /// <summary>
 /// Pure, fail-closed policy for "earn unsupervised autonomy after N clean verified runs" — the M3
 /// graduation rung of the FSD ladder. Kept separate from persistence so the safety-critical rules

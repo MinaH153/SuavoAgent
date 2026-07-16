@@ -19,11 +19,11 @@
                            FontSize="40" FontWeight="Bold"
                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
-            <TextBlock Text="SuavoAgent is installed"
+            <TextBlock Text="{Binding Headline}"
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="34" FontWeight="Light"
                        HorizontalAlignment="Center"/>
-            <TextBlock Text="The agent now runs quietly in the background, observing and automating your workflows."
+            <TextBlock Text="{Binding Detail}"
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"
                        HorizontalAlignment="Center"/>

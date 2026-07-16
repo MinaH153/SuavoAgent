@@ -50,17 +50,29 @@ public static class NavigateReasoning
             ? new HashSet<string>(els, StringComparer.OrdinalIgnoreCase)
             : new HashSet<string>();
 
-        var flags = new Dictionary<string, string>();
+        // Cloud-visible flags are a closed, PHI-negative vocabulary. The
+        // dynamic prior-action transcript remains local-only; it must never be
+        // smuggled through the structural flags object.
+        var flags = new Dictionary<string, string>
+        {
+            ["workflowPhase"] = "locate",
+        };
         var transcript = BuildPriorActionsTranscript(memory);
-        if (transcript.Length > 0)
-            flags["prior_actions"] = transcript;
 
         return new RuleContext
         {
             SkillId = NavigateSkillId,
+            ProcessName = screen?.ProcessName ?? "",
             WindowTitle = screen?.WindowTitle ?? "",
             VisibleElements = visible,
             Flags = flags,
+            LocalReasoningTranscript = transcript.Length == 0 ? null : transcript,
+            ElementFingerprints = screen?.ElementFingerprints ??
+                Array.Empty<SuavoAgent.Contracts.Behavioral.ElementSignature>(),
+            StructuralElementStates = screen?.StructuralElementStates ??
+                Array.Empty<StructuralElementObservation>(),
+            CloudStructuralStateEligible =
+                screen?.CloudStructuralStateEligible ?? false,
             UserObjective = $"{objective.Goal}\n{CompletionInstruction}",
         };
     }
@@ -86,10 +98,17 @@ public static class NavigateReasoning
     public static NextAction MapDecision(
         BrainDecision decision, PerceivedScreen? screen = null, string? processName = null)
     {
-        if (decision.Actions.Any(IsCompletionSignal))
+        if (decision.Outcome != MatchOutcome.Matched)
+            return NextAction.Escalate("brain_decision_not_authorized");
+
+        if (decision.Tier == DecisionTier.Rules &&
+            decision.Actions.Any(IsCompletionSignal))
             return NextAction.Done;
 
         var actuating = decision.Actions.Where(a => IsActuating(a.Type)).ToList();
+
+        if (decision.Tier == DecisionTier.CloudInference && actuating.Count > 0)
+            return NextAction.Escalate("cloud_actuation_not_authorized");
 
         if (actuating.Count == 1)
         {
@@ -109,6 +128,14 @@ public static class NavigateReasoning
             }
 
             var parameters = a.Parameters.ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
+            // Keyboard actions have no element locator of their own, but they still
+            // need an app identity. Bind them to the factory-resolved target process;
+            // never trust a model-supplied process_name over the run's target.
+            if (a.Type is RuleActionType.Type or RuleActionType.PressKey &&
+                !string.IsNullOrWhiteSpace(processName))
+            {
+                parameters["process_name"] = processName;
+            }
             return NextAction.Act(VerbByActionType[a.Type], parameters, a.Description);
         }
 

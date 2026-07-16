@@ -1,5 +1,6 @@
 using Serilog;
 using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Models;
 using SuavoAgent.Helper.Actuation;
 using SuavoAgent.Helper.Security;
 using Xunit;
@@ -8,8 +9,9 @@ namespace SuavoAgent.Helper.Tests.Security;
 
 /// <summary>
 /// The orchestrator is the on-box actuation half: it maps the corroboration verdict onto the REAL
-/// ActuationGate primitives. Asserts the never-brick contract — Degrade is reversible (GateDisabled, not a
-/// latch), Apoptosis latches the kill switch (with dry-run set first), and the recorded compromise level
+/// ActuationGate primitives. Asserts the never-brick contract — Degrade blocks through the recorded
+/// compromise without latching the kill switch, Apoptosis latches the kill switch (with dry-run set first),
+/// and the recorded compromise level
 /// only ever latches UP so a late degrade can't mask an apoptosis.
 /// </summary>
 public sealed class ApoptosisOrchestratorTests
@@ -22,7 +24,11 @@ public sealed class ApoptosisOrchestratorTests
         return (gate, new ApoptosisOrchestrator(gate));
     }
 
-    private static CorroborationResult R(CorroborationLevel level) => new(level, $"{level}.test");
+    private static CorroborationResult R(CorroborationLevel level) => new(
+        level,
+        level == CorroborationLevel.Apoptosis
+            ? HoneytokenReasonLabels.SensitiveShell
+            : HoneytokenReasonLabels.UnexpectedProcess);
 
     [Fact]
     public void Observe_LeavesGateOpen_NoCompromiseSignal()
@@ -35,17 +41,20 @@ public sealed class ApoptosisOrchestratorTests
     }
 
     [Fact]
-    public void Degrade_IsReversible_DisabledNotLatched_SignalsDegrade()
+    public void Degrade_RecordsCompromiseWithoutLatchingKillSwitch()
     {
         var (gate, orch) = Build();
         orch.OnCompromise(R(CorroborationLevel.Degrade));
 
         Assert.True(gate.IsDryRun);
         var rej = gate.CheckOrReject();
-        // GateDisabled (reversible by restart), NOT KillSwitchTripped — a misjudged backup tool recovers.
-        Assert.Equal(ActuationRejectionCodes.GateDisabled, rej!.RejectionCode);
+        // The compromise receipt is now the highest-priority rejection. This is
+        // still NOT KillSwitchTripped: a Helper restart can recover a false alarm.
+        Assert.Equal(ActuationRejectionCodes.CompromiseDetected, rej!.RejectionCode);
 
         var s = gate.Snapshot();
+        Assert.False(s.Enabled);
+        Assert.Null(s.KillSwitchTrippedUtc);
         Assert.True(s.CompromiseDetected);
         Assert.Equal("degrade", s.CompromiseLevel);
         Assert.NotNull(s.CompromiseAtUtc);
@@ -65,7 +74,7 @@ public sealed class ApoptosisOrchestratorTests
         var s = gate.Snapshot();
         Assert.True(s.CompromiseDetected);
         Assert.Equal("apoptosis", s.CompromiseLevel);
-        Assert.Equal("Apoptosis.test", s.CompromiseReasonLabel);
+        Assert.Equal(HoneytokenReasonLabels.SensitiveShell, s.CompromiseReasonLabel);
     }
 
     [Fact]
@@ -80,5 +89,19 @@ public sealed class ApoptosisOrchestratorTests
         // a late degrade must NOT downgrade the recorded apoptosis
         orch.OnCompromise(R(CorroborationLevel.Degrade));
         Assert.Equal("apoptosis", gate.Snapshot().CompromiseLevel);
+    }
+
+    [Fact]
+    public void DynamicReasonLabel_IsNormalizedBeforeGateAuditOrLogState()
+    {
+        var (gate, orch) = Build();
+
+        orch.OnCompromise(new CorroborationResult(
+            CorroborationLevel.Degrade,
+            "Jane_Doe_01-15-1990"));
+
+        Assert.Equal(
+            HoneytokenReasonLabels.UnknownProcess,
+            gate.Snapshot().CompromiseReasonLabel);
     }
 }

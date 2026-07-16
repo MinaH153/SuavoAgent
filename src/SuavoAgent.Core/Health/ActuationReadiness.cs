@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using SuavoAgent.Contracts.Ipc;
 
 namespace SuavoAgent.Core.Health;
 
@@ -43,7 +44,8 @@ public sealed record ActuationReadinessSnapshot(
     DateTimeOffset? LastConclusiveCheckAtUtc,
     DateTimeOffset LastProbeAttemptAtUtc,
     string? SkippedReason,
-    int ConsecutiveStrandFailures)
+    int ConsecutiveStrandFailures,
+    VisionRuntimeReadiness? VisionRuntime = null)
 {
     /// <summary>The single bit the cockpit renders: the agent can actuate right now.</summary>
     public bool Ready => CommandPipeResponsive && IsConsoleInteractive;

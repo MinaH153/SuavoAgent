@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Suavo Pharmacy Work Observer",
+  "version": "0.1.0",
+  "description": "Observes only the hostname of the active pharmacy-work browser tab after local Suavo consent.",
+  "permissions": [
+    "nativeMessaging",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  }
+}

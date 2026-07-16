@@ -38,7 +38,9 @@ internal sealed class WindowsIntentCursorRenderer : IIntentCursorRenderer
             }
             catch (Exception ex)
             {
-                _logger.Warning(ex, "Intent cursor overlay failed");
+                _logger.Warning(
+                    "Intent cursor overlay failed ({ExceptionType})",
+                    ex.GetType().Name);
             }
         });
         thread.IsBackground = true;

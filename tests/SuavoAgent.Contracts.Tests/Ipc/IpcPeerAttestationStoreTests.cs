@@ -17,6 +17,8 @@ public sealed class IpcPeerAttestationStoreTests : IDisposable
     [Fact]
     public void WriteAndContainsHelper_BindsPidToPipeNonce()
     {
+        var startedAt = DateTimeOffset.UtcNow.AddSeconds(-1);
+        var helperSha256 = new string('a', 64);
         IpcPeerAttestationStore.Write(
             _path,
             pipeNonce: "abc123",
@@ -25,8 +27,9 @@ public sealed class IpcPeerAttestationStoreTests : IDisposable
                 new IpcPeerAttestationEntry(
                     ProcessId: 15512,
                     SessionId: 1,
-                    LaunchedAt: DateTimeOffset.UtcNow,
-                    HelperSha256: "abc")
+                    LaunchedAt: startedAt,
+                    ProcessStartedAtUtc: startedAt,
+                    HelperSha256: helperSha256)
             ],
             now: DateTimeOffset.UtcNow);
 
@@ -34,6 +37,9 @@ public sealed class IpcPeerAttestationStoreTests : IDisposable
             _path,
             pipeNonce: "abc123",
             processId: 15512,
+            sessionId: 1,
+            processStartedAtUtc: startedAt,
+            currentHelperSha256: helperSha256,
             now: DateTimeOffset.UtcNow,
             maxAge: TimeSpan.FromDays(7)));
 
@@ -41,6 +47,39 @@ public sealed class IpcPeerAttestationStoreTests : IDisposable
             _path,
             pipeNonce: "other",
             processId: 15512,
+            sessionId: 1,
+            processStartedAtUtc: startedAt,
+            currentHelperSha256: helperSha256,
+            now: DateTimeOffset.UtcNow,
+            maxAge: TimeSpan.FromDays(7)));
+
+        Assert.False(IpcPeerAttestationStore.ContainsHelper(
+            _path,
+            pipeNonce: "abc123",
+            processId: 15512,
+            sessionId: 2,
+            processStartedAtUtc: startedAt,
+            currentHelperSha256: helperSha256,
+            now: DateTimeOffset.UtcNow,
+            maxAge: TimeSpan.FromDays(7)));
+
+        Assert.False(IpcPeerAttestationStore.ContainsHelper(
+            _path,
+            pipeNonce: "abc123",
+            processId: 15512,
+            sessionId: 1,
+            processStartedAtUtc: startedAt,
+            currentHelperSha256: new string('c', 64),
+            now: DateTimeOffset.UtcNow,
+            maxAge: TimeSpan.FromDays(7)));
+
+        Assert.False(IpcPeerAttestationStore.ContainsHelper(
+            _path,
+            pipeNonce: "abc123",
+            processId: 15512,
+            sessionId: 1,
+            processStartedAtUtc: startedAt.AddSeconds(1),
+            currentHelperSha256: helperSha256,
             now: DateTimeOffset.UtcNow,
             maxAge: TimeSpan.FromDays(7)));
     }
@@ -49,6 +88,7 @@ public sealed class IpcPeerAttestationStoreTests : IDisposable
     public void ContainsHelper_RejectsStaleAttestation()
     {
         var writtenAt = DateTimeOffset.UtcNow.AddDays(-8);
+        var helperSha256 = new string('b', 64);
         IpcPeerAttestationStore.Write(
             _path,
             pipeNonce: "abc123",
@@ -58,7 +98,8 @@ public sealed class IpcPeerAttestationStoreTests : IDisposable
                     ProcessId: 15512,
                     SessionId: 1,
                     LaunchedAt: writtenAt,
-                    HelperSha256: "abc")
+                    ProcessStartedAtUtc: writtenAt,
+                    HelperSha256: helperSha256)
             ],
             now: writtenAt);
 
@@ -66,6 +107,9 @@ public sealed class IpcPeerAttestationStoreTests : IDisposable
             _path,
             pipeNonce: "abc123",
             processId: 15512,
+            sessionId: 1,
+            processStartedAtUtc: writtenAt,
+            currentHelperSha256: helperSha256,
             now: DateTimeOffset.UtcNow,
             maxAge: TimeSpan.FromDays(7)));
     }

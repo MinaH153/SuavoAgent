@@ -1,9 +1,15 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using SuavoAgent.Adapters.PioneerRx;
 using SuavoAgent.Adapters.PioneerRx.Pricing;
+using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Maintenance;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation;
 using SuavoAgent.Core.Adapters;
+using SuavoAgent.Core.Autonomy;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.State;
@@ -14,11 +20,26 @@ public sealed record PricingJobExecutionResult(
     PricingJobProgress Progress,
     string Mode,
     bool Ok,
-    string? Error);
+    string? Error,
+    [property: JsonIgnore] string? DeliverablePath = null);
 
 public interface IPricingJobExecutor
 {
     Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct);
+}
+
+public interface IProgressReportingPricingJobExecutor : IPricingJobExecutor
+{
+    Task<PricingJobExecutionResult> RunAsync(
+        PricingJobSpec spec,
+        Func<PricingJobLocalProgress, CancellationToken, ValueTask> reportProgress,
+        CancellationToken ct);
+}
+
+public interface IRecoverablePricingJobExecutor
+{
+    PricingJobSpec? GetRecoverableSpec(PricingJobSpec proposed, string? commandId);
+    PricingJobSpec? GetRecoverableSpecForCommand(string commandId);
 }
 
 public sealed record PricingLookupFactoryResult(
@@ -31,15 +52,19 @@ public sealed record PricingLookupFactoryResult(
     // True only when the sourced costPerUnit is a genuine PER-UNIT value (the catalog has a
     // dedicated per-unit cost column). When false the sourced cost is a pack cost, so subtracting a
     // per-unit baseline would be unit-unsafe — savings enrichment must be suppressed (Codex blocker).
-    bool SavingsUnitSafe = false)
+    bool SavingsUnitSafe = false,
+    PricingObservationContract? ObservationContract = null,
+    PricingCostBasisAuthority? Authority = null)
 {
     public static PricingLookupFactoryResult Success(
         ISupplierPriceLookup lookup,
         string mode,
         IAsyncDisposable? lease,
         IPharmacyBaselineVolumeProvider? provider = null,
-        bool savingsUnitSafe = false) =>
-        new(true, lookup, mode, null, lease, provider, savingsUnitSafe);
+        bool savingsUnitSafe = false,
+        PricingObservationContract? observationContract = null,
+        PricingCostBasisAuthority? authority = null) =>
+        new(true, lookup, mode, null, lease, provider, savingsUnitSafe, observationContract, authority);
 
     public static PricingLookupFactoryResult Fail(string error, string mode = "sql") =>
         new(false, null, mode, error, null);
@@ -48,6 +73,11 @@ public sealed record PricingLookupFactoryResult(
 public interface IPricingLookupFactory
 {
     Task<PricingLookupFactoryResult> TryCreateAsync(CancellationToken ct);
+
+    Task<PricingLookupFactoryResult> TryCreateAsync(
+        string? expectedApprovalId,
+        string? expectedGrantDigest,
+        CancellationToken ct) => TryCreateAsync(ct);
 }
 
 /// <summary>
@@ -55,7 +85,7 @@ public interface IPricingLookupFactory
 /// SQL-first and fail-closed: the default signed command must not drive the
 /// pharmacist desktop through UIA just because SQL pricing is unavailable.
 /// </summary>
-public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
+public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor, IRecoverablePricingJobExecutor
 {
     private readonly ExcelPricingReader _reader;
     private readonly ExcelPricingWriter _writer;
@@ -64,6 +94,7 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SqlFirstPricingJobExecutor> _logger;
     private readonly AgentOptions _options;
+    private readonly IReadOnlyDictionary<string, string> _trustedApprovalKeys;
 
     public SqlFirstPricingJobExecutor(
         ExcelPricingReader reader,
@@ -72,6 +103,25 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
         IPricingLookupFactory lookupFactory,
         ILoggerFactory loggerFactory,
         IOptions<AgentOptions> options)
+        : this(
+            reader,
+            writer,
+            db,
+            lookupFactory,
+            loggerFactory,
+            options,
+            RemoteCommandTrust.CreateProductionKeyRegistry())
+    {
+    }
+
+    internal SqlFirstPricingJobExecutor(
+        ExcelPricingReader reader,
+        ExcelPricingWriter writer,
+        AgentStateDb db,
+        IPricingLookupFactory lookupFactory,
+        ILoggerFactory loggerFactory,
+        IOptions<AgentOptions> options,
+        IReadOnlyDictionary<string, string> trustedApprovalKeys)
     {
         _reader = reader;
         _writer = writer;
@@ -80,14 +130,24 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SqlFirstPricingJobExecutor>();
         _options = options.Value;
+        _trustedApprovalKeys = trustedApprovalKeys ??
+            throw new ArgumentNullException(nameof(trustedApprovalKeys));
     }
 
     public async Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
     {
+        if (spec.CostBasis != PricingApprovalContract.CostPerUnitBasis)
+        {
+            _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+            return Failed(spec, "sql pricing requires cost_per_unit");
+        }
         PricingLookupFactoryResult lookupResult;
         try
         {
-            lookupResult = await _lookupFactory.TryCreateAsync(ct);
+            lookupResult = await _lookupFactory.TryCreateAsync(
+                spec.ApprovalId,
+                spec.GrantDigest,
+                ct);
         }
         catch (OperationCanceledException)
         {
@@ -95,17 +155,18 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "SQL pricing lookup factory failed");
+            _logger.LogSafeWarning(ex);
             _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
             return Failed(spec, "sql pricing lookup unavailable");
         }
 
-        if (!lookupResult.Ok || lookupResult.Lookup is null)
+        if (!lookupResult.Ok || lookupResult.Lookup is null ||
+            lookupResult.ObservationContract is null || lookupResult.Authority is null)
         {
             var error = string.IsNullOrWhiteSpace(lookupResult.Error)
                 ? "sql pricing lookup unavailable"
                 : lookupResult.Error!;
-            _logger.LogWarning("SQL pricing job {JobId} rejected before run: {Reason}", spec.JobId, error);
+            _logger.LogWarning("core.sql_pricing.preflight_rejected");
             _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
             return Failed(spec, error, lookupResult.Mode);
         }
@@ -120,6 +181,8 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
             _db,
             lookupResult.Lookup,
             _loggerFactory.CreateLogger<SqlPricingJobRunner>(),
+            lookupResult.ObservationContract,
+            lookupResult.Authority,
             lookupResult.Provider,
             savingsEnabled
                 ? new PricingSavingsOptions(
@@ -128,7 +191,8 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
                     _options.PricingMaxPlausibleUnitCost,
                     _options.PricingMaxPlausibleQuantity,
                     _options.PricingSuspiciousSavingsFraction)
-                : null);
+                : null,
+            trustedApprovalKeys: _trustedApprovalKeys);
 
         var progress = await runner.RunAsync(spec, ct);
         var ok = progress.Status == PricingJobStatus.Completed;
@@ -136,8 +200,33 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
             progress,
             lookupResult.Mode,
             ok,
-            ok ? null : "pricing job failed - see agent logs");
+            ok
+                ? null
+                : progress.HaltReason ?? "pricing job failed - see agent logs");
     }
+
+    public PricingJobSpec? GetRecoverableSpec(PricingJobSpec proposed, string? commandId) =>
+        _db.GetRecoverablePricingJob(
+            "sql",
+            _options.PharmacyId ?? "",
+            _options.AgentId ?? "",
+            _options.MachineFingerprint ?? "",
+            DateTimeOffset.UtcNow,
+            commandId,
+            proposed.ExcelPath,
+            _trustedApprovalKeys,
+            PricingApprovalContract.CostPerUnitBasis);
+
+    public PricingJobSpec? GetRecoverableSpecForCommand(string commandId) =>
+        _db.GetRecoverablePricingJob(
+            "sql",
+            _options.PharmacyId ?? "",
+            _options.AgentId ?? "",
+            _options.MachineFingerprint ?? "",
+            DateTimeOffset.UtcNow,
+            commandId,
+            trustedApprovalKeys: _trustedApprovalKeys,
+            expectedCostBasis: PricingApprovalContract.CostPerUnitBasis);
 
     private static PricingJobExecutionResult Failed(
         PricingJobSpec spec,
@@ -157,19 +246,44 @@ public sealed class SqlFirstPricingJobExecutor : IPricingJobExecutor
 public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
 {
     private readonly AgentOptions _options;
+    private readonly AgentStateDb _db;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<PioneerRxSqlPricingLookupFactory> _logger;
+    private readonly IReadOnlyDictionary<string, string> _trustedApprovalKeys;
 
     public PioneerRxSqlPricingLookupFactory(
         IOptions<AgentOptions> options,
+        AgentStateDb db,
         ILoggerFactory loggerFactory)
+        : this(
+            options,
+            db,
+            loggerFactory,
+            RemoteCommandTrust.CreateProductionKeyRegistry())
+    {
+    }
+
+    internal PioneerRxSqlPricingLookupFactory(
+        IOptions<AgentOptions> options,
+        AgentStateDb db,
+        ILoggerFactory loggerFactory,
+        IReadOnlyDictionary<string, string> trustedApprovalKeys)
     {
         _options = options.Value;
+        _db = db ?? throw new ArgumentNullException(nameof(db));
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<PioneerRxSqlPricingLookupFactory>();
+        _trustedApprovalKeys = trustedApprovalKeys ??
+            throw new ArgumentNullException(nameof(trustedApprovalKeys));
     }
 
     public async Task<PricingLookupFactoryResult> TryCreateAsync(CancellationToken ct)
+        => await TryCreateAsync(null, null, ct).ConfigureAwait(false);
+
+    public async Task<PricingLookupFactoryResult> TryCreateAsync(
+        string? expectedApprovalId,
+        string? expectedGrantDigest,
+        CancellationToken ct)
     {
         var pharmacy = SelectPharmacy();
         if (pharmacy is null || string.IsNullOrWhiteSpace(pharmacy.SqlServer))
@@ -190,22 +304,48 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
                     $"SQL pricing schema unavailable: {outcome.Reason ?? "schema discovery failed"}");
             }
 
+            // Feature A promises a per-unit comparison. Never admit a catalog
+            // that exposes only pack cost: downstream code and the workbook
+            // header must not relabel a pack amount as CostPerUnit.
+            if (string.IsNullOrWhiteSpace(outcome.Schema.CostPerUnitColumn))
+            {
+                await connection.DisposeAsync();
+                _logger.LogWarning(
+                    "core.sql_pricing.cost_basis_unresolved");
+                return PricingLookupFactoryResult.Fail(
+                    "SQL pricing unavailable: catalog has no dedicated per-unit cost column");
+            }
+
+            var observationContract = PricingObservationPolicy.CreateSql(outcome.Schema);
+            var authority = PricingApprovalAuthorityResolver.ResolveOrStageProposal(
+                _db,
+                pharmacy.PharmacyId,
+                _options.AgentId ?? "",
+                _options.MachineFingerprint ?? "",
+                observationContract,
+                DateTimeOffset.UtcNow,
+                _trustedApprovalKeys,
+                expectedApprovalId,
+                expectedGrantDigest,
+                out var authorityCode);
+            if (authority is null)
+            {
+                await connection.DisposeAsync();
+                _logger.LogWarning(
+                    "core.sql_pricing.cost_basis_authority_blocked code={Code}",
+                    authorityCode);
+                return PricingLookupFactoryResult.Fail(authorityCode);
+            }
+
             var lookup = new SqlSupplierPriceLookup(
                 outcome.Schema,
                 _ => Task.FromResult(connection),
                 _loggerFactory.CreateLogger<SqlSupplierPriceLookup>());
 
-            // M1 savings enrichment — OFF by default (fail-closed): a savings dollar figure must be
-            // verified against the live box before it is trusted. Additionally unit-gated: the
-            // sourced costPerUnit is only a true PER-UNIT value when the catalog has a dedicated
-            // per-unit column; otherwise it is a pack cost and (per-unit baseline − pack sourced)
-            // would be garbage, so enrichment is suppressed (Codex blocker — never emit a
-            // unit-unsafe number).
-            var savingsUnitSafe = outcome.Schema.CostPerUnitColumn is not null;
-            var savingsEnabled = _options.EnablePricingSavingsEnrichment && savingsUnitSafe;
-            if (_options.EnablePricingSavingsEnrichment && !savingsUnitSafe)
-                _logger.LogWarning(
-                    "Pricing savings enrichment suppressed: catalog has no per-unit cost column, so sourced cost is per-pack (unit-unsafe).");
+            // M1 savings enrichment remains OFF by default. The admission gate
+            // above proves that any admitted sourced cost is genuinely per-unit.
+            const bool savingsUnitSafe = true;
+            var savingsEnabled = _options.EnablePricingSavingsEnrichment;
 
             IPharmacyBaselineVolumeProvider? provider = savingsEnabled
                 ? new SqlDispensedVolumeProvider(
@@ -221,7 +361,9 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
                 "sql",
                 new SqlConnectionLease(connection),
                 provider,
-                savingsUnitSafe);
+                savingsUnitSafe,
+                observationContract,
+                authority);
         }
         catch (OperationCanceledException)
         {
@@ -231,7 +373,7 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
         catch (Exception ex)
         {
             await connection.DisposeAsync();
-            _logger.LogWarning(ex, "SQL pricing lookup unavailable");
+            _logger.LogSafeWarning(ex);
             return PricingLookupFactoryResult.Fail("SQL pricing unavailable - see agent logs");
         }
     }
@@ -264,8 +406,7 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
             MaxPoolSize = 1,
             MinPoolSize = 0,
         };
-        csb["Encrypt"] = "true";
-        csb["TrustServerCertificate"] = _options.SqlTrustServerCertificate.ToString();
+        SqlConnectionSecurity.Apply(csb, _options);
 
         if (!string.IsNullOrWhiteSpace(pharmacy.SqlUser))
         {
@@ -309,27 +450,123 @@ public sealed class PioneerRxSqlPricingLookupFactory : IPricingLookupFactory
 /// <see cref="AgentOptions.PricingThrottleMs"/>; recommended 1500 ms for UIA to stay below
 /// any anti-automation heuristic the vendor may apply.
 /// </summary>
-public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor
+public sealed partial class UiaFirstPricingJobExecutor :
+    IProgressReportingPricingJobExecutor,
+    IRecoverablePricingJobExecutor
 {
     private readonly PricingJobRunner _runner;
     private readonly IIpcCommandClient _commandClient;
     private readonly AgentStateDb _db;
+    private readonly IActuationGateway _actuationGateway;
     private readonly ILogger<UiaFirstPricingJobExecutor> _logger;
+    private readonly AgentOptions _options;
+    private readonly IReadOnlyDictionary<string, string> _trustedApprovalKeys;
+    private readonly IPioneerRxAutonomyIdentityProvider? _pmsIdentityProvider;
+    private readonly PricingUiaActivityGate? _activityGate;
 
     public UiaFirstPricingJobExecutor(
         PricingJobRunner runner,
         IIpcCommandClient commandClient,
         AgentStateDb db,
-        ILogger<UiaFirstPricingJobExecutor> logger)
+        IActuationGateway actuationGateway,
+        ILogger<UiaFirstPricingJobExecutor> logger,
+        IOptions<AgentOptions> options)
+        : this(
+            runner,
+            commandClient,
+            db,
+            actuationGateway,
+            logger,
+            options,
+            pmsIdentityProvider: null,
+            RemoteCommandTrust.CreateProductionKeyRegistry())
+    {
+    }
+
+    internal UiaFirstPricingJobExecutor(
+        PricingJobRunner runner,
+        IIpcCommandClient commandClient,
+        AgentStateDb db,
+        IActuationGateway actuationGateway,
+        ILogger<UiaFirstPricingJobExecutor> logger,
+        IOptions<AgentOptions> options,
+        IPioneerRxAutonomyIdentityProvider? pmsIdentityProvider,
+        IReadOnlyDictionary<string, string> trustedApprovalKeys,
+        PricingUiaActivityGate? activityGate = null)
     {
         _runner = runner;
         _commandClient = commandClient;
         _db = db;
+        _actuationGateway = actuationGateway ?? throw new ArgumentNullException(nameof(actuationGateway));
         _logger = logger;
+        _options = options.Value;
+        _pmsIdentityProvider = pmsIdentityProvider;
+        _trustedApprovalKeys = trustedApprovalKeys ??
+            throw new ArgumentNullException(nameof(trustedApprovalKeys));
+        _activityGate = activityGate;
     }
 
-    public async Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
+    public Task<PricingJobExecutionResult> RunAsync(
+        PricingJobSpec spec,
+        CancellationToken ct) => RunCoreAsync(spec, null, ct);
+
+    public Task<PricingJobExecutionResult> RunAsync(
+        PricingJobSpec spec,
+        Func<PricingJobLocalProgress, CancellationToken, ValueTask> reportProgress,
+        CancellationToken ct) => RunCoreAsync(
+            spec,
+            reportProgress ?? throw new ArgumentNullException(nameof(reportProgress)),
+            ct);
+
+    private async Task<PricingJobExecutionResult> RunCoreAsync(
+        PricingJobSpec spec,
+        Func<PricingJobLocalProgress, CancellationToken, ValueTask>? reportProgress,
+        CancellationToken ct)
     {
+        using var activityLease = _activityGate is null
+            ? null
+            : await _activityGate.EnterExecutionAsync(ct).ConfigureAwait(false);
+        string? deliverablePath = null;
+        // Package Cost is a distinct UIA-only signed contract. A global
+        // VisionFirst preference may still enrich CPU pricing, but it can
+        // never relabel the package lane's modality or bypass exact UIA reads.
+        var modality = spec.CostBasis == PricingApprovalContract.PackageCostBasis
+            ? "uia"
+            : _options.PricingExecutor == PricingExecutorMode.VisionFirst
+                ? "vision"
+                : "uia";
+
+        // Authoritative live-actuation preflight. Pricing has no simulation path:
+        // dry-run therefore blocks rather than pretending the PMS was navigated.
+        ActuationGateState? gateState = null;
+        try
+        {
+            using var gateCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            gateCts.CancelAfter(TimeSpan.FromSeconds(5));
+            gateState = await _actuationGateway.GetStateAsync(gateCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Timeout is an unavailable safety state and therefore a rejection.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogSafeWarning(ex);
+        }
+
+        var gateReject = PricingActuationPreflight.RejectionCode(gateState, DateTimeOffset.UtcNow);
+        if (gateReject is not null)
+        {
+            _logger.LogError(
+                "core.uia_pricing.actuation_gate_blocked");
+            _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+            return new PricingJobExecutionResult(
+                new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed),
+                Mode: modality,
+                Ok: false,
+                Error: PricingSafetyErrors.ActuationGateClosed(gateReject));
+        }
+
         // BLIND-RUN GATE (executor invariant, fail-closed). Reaching this method means we are
         // about to drive the LIVE PMS screen via UIA. The Helper must be reachable, answering,
         // and in the interactive console session (SI=1, re-derived in Core from raw session ids
@@ -342,30 +579,117 @@ public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor
         if (!preflight.Ok)
         {
             _logger.LogError(
-                "UiaFirstPricingJobExecutor: blind-run gate BLOCKED job {JobId} — {Error}",
-                spec.JobId, preflight.Error);
+                "core.uia_pricing.interactive_preflight_blocked");
             _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
             return new PricingJobExecutionResult(
                 new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed),
-                Mode: "uia",
+                Mode: modality,
                 Ok: false,
                 Error: preflight.Error
                     ?? "Helper interactive pre-flight failed — refusing to drive the live screen");
         }
 
+        var livePmsIdentity = _pmsIdentityProvider?.Current(DateTimeOffset.UtcNow);
+        if (livePmsIdentity is null)
+        {
+            _logger.LogError("core.uia_pricing.pms_identity_unavailable");
+            _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+            return new PricingJobExecutionResult(
+                new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed),
+                Mode: modality,
+                Ok: false,
+                Error: "pricing_live_pms_identity_unavailable");
+        }
+
+        var screenContext = await CaptureScreenContextAsync(ct).ConfigureAwait(false);
+        if (screenContext is null)
+        {
+            _logger.LogError("core.uia_pricing.screen_identity_unavailable");
+            _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+            return new PricingJobExecutionResult(
+                new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed),
+                Mode: modality,
+                Ok: false,
+                Error: "pricing_live_screen_identity_unavailable");
+        }
+
+        var pmsFingerprint = PricingObservationPolicy.Digest(
+            "pioneerrx_live_process_identity_v1",
+            livePmsIdentity.FileVersion,
+            livePmsIdentity.ExecutableSha256,
+            livePmsIdentity.SignerCertificateSha256,
+            livePmsIdentity.ApprovalReceiptDigest,
+            livePmsIdentity.AuthorityDigest,
+            livePmsIdentity.ApprovalCounter.ToString(
+                System.Globalization.CultureInfo.InvariantCulture));
+        var activePatches = _db.GetActiveSelectorPatches().ToArray();
+        PricingObservationContract observationContract;
+        try
+        {
+            observationContract = PricingObservationPolicy.CreateUia(
+                modality,
+                pmsFingerprint,
+                screenContext.ScreenSignatureV1,
+                activePatches,
+                spec.CostBasis);
+        }
+        catch (ArgumentException)
+        {
+            _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+            return new PricingJobExecutionResult(
+                new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed),
+                Mode: modality,
+                Ok: false,
+                Error: "pricing_live_screen_identity_invalid");
+        }
+
+        var authority = PricingApprovalAuthorityResolver.ResolveOrStageProposal(
+            _db,
+            _options.PharmacyId ?? "",
+            _options.AgentId ?? "",
+            _options.MachineFingerprint ?? "",
+            observationContract,
+            DateTimeOffset.UtcNow,
+            _trustedApprovalKeys,
+            spec.ApprovalId,
+            spec.GrantDigest,
+            out var authorityCode);
+        if (authority is null)
+        {
+            _logger.LogError(
+                "core.uia_pricing.cost_basis_authority_blocked code={Code}",
+                authorityCode);
+            _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
+            return new PricingJobExecutionResult(
+                new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed),
+                Mode: modality,
+                Ok: false,
+                Error: authorityCode);
+        }
+
         _logger.LogInformation(
-            "UiaFirstPricingJobExecutor: starting job {JobId} (UIA-via-IPC path; Excel={Path}; Helper session {Session})",
-            spec.JobId, spec.ExcelPath, preflight.HelperSessionId);
+            "core.uia_pricing.run_started");
 
         try
         {
-            var progress = await _runner.RunAsync(spec, _commandClient, ct);
+            var progress = await _runner.RunAsync(
+                spec,
+                _commandClient,
+                observationContract,
+                authority,
+                activePatches,
+                pmsFingerprint,
+                screenContext.ScreenSignatureV1,
+                ct,
+                reportProgress,
+                path => deliverablePath = path);
             var ok = progress.Status == PricingJobStatus.Completed;
             return new PricingJobExecutionResult(
                 progress,
-                Mode: "uia",
+                Mode: modality,
                 Ok: ok,
-                Error: ok ? null : $"pricing job ended with status {progress.Status} - see agent logs");
+                Error: ok ? null : $"pricing job ended with status {progress.Status} - see agent logs",
+                DeliverablePath: ok ? deliverablePath : null);
         }
         catch (OperationCanceledException)
         {
@@ -377,13 +701,20 @@ public sealed class UiaFirstPricingJobExecutor : IPricingJobExecutor
             // failure result, mirroring SqlFirstPricingJobExecutor's behavior. The runner
             // itself already swallows per-row exceptions; this catches only the orchestration
             // boundary (Excel read, DB write).
-            _logger.LogError(ex, "UiaFirstPricingJobExecutor: job {JobId} threw at orchestration boundary", spec.JobId);
+            _logger.LogSafeError(ex);
             _db.UpsertPricingJob(spec, PricingJobStatus.Failed, 0, 0, 0);
             return new PricingJobExecutionResult(
                 new PricingJobProgress(spec.JobId, 0, 0, 0, PricingJobStatus.Failed),
-                Mode: "uia",
+                Mode: modality,
                 Ok: false,
                 Error: "pricing job failed - see agent logs");
         }
     }
+
+}
+
+internal static class PricingActuationPreflight
+{
+    public static string? RejectionCode(ActuationGateState? state, DateTimeOffset now)
+        => LiveActuationGatePolicy.RejectionCode(state, now);
 }

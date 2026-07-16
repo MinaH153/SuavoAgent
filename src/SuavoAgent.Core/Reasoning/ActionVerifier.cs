@@ -88,7 +88,7 @@ public sealed class ActionVerifier
         // --- 1. Whitelist check -------------------------------------------------
         if (!request.AllowedActions.Contains(proposal.Action.Type))
         {
-            failures.Add($"action {proposal.Action.Type} not allowed for skill {request.Context.SkillId}");
+            failures.Add("action_not_allowed");
         }
 
         // --- 2. Click must name a unique visible target (Codex C-3) ------------
@@ -99,19 +99,18 @@ public sealed class ActionVerifier
         {
             if (!TryGetNameParam(proposal.Action, out var targetName))
             {
-                failures.Add("Click requires a 'name' parameter — " +
-                             "controlType-only clicks are never autonomous");
+                failures.Add("click_target_missing");
             }
             else if (!request.Context.VisibleElements.Contains(targetName))
             {
-                failures.Add($"target element '{targetName}' not visible in current state");
+                failures.Add("target_not_visible");
             }
         }
         else if (TryGetNameParam(proposal.Action, out var targetName))
         {
             // Other actions (VerifyElement, WaitForElement) may name a target.
             if (!request.Context.VisibleElements.Contains(targetName))
-                failures.Add($"target element '{targetName}' not visible in current state");
+                failures.Add("target_not_visible");
         }
 
         // --- 3. Parameter structural validation --------------------------------
@@ -123,7 +122,7 @@ public sealed class ActionVerifier
             return new VerificationResult
             {
                 Outcome = VerificationOutcome.Rejected,
-                Reason = $"Proposal rejected: {string.Join("; ", failures)}",
+                Reason = "proposal_rejected",
                 FailedChecks = failures,
             };
         }
@@ -135,8 +134,7 @@ public sealed class ActionVerifier
             return new VerificationResult
             {
                 Outcome = VerificationOutcome.OperatorApprovalRequired,
-                Reason = $"Confidence {proposal.Confidence:F2} below threshold "
-                         + $"{threshold:F2} for {proposal.Action.Type}",
+                Reason = "confidence_below_threshold",
             };
         }
 
@@ -148,7 +146,7 @@ public sealed class ActionVerifier
                 return new VerificationResult
                 {
                     Outcome = VerificationOutcome.OperatorApprovalRequired,
-                    Reason = "Agent.AutoExecution.Enabled=false",
+                    Reason = "auto_execution_disabled",
                 };
             }
 
@@ -157,7 +155,7 @@ public sealed class ActionVerifier
                 return new VerificationResult
                 {
                     Outcome = VerificationOutcome.OperatorApprovalRequired,
-                    Reason = "Agent.AutoExecution.RequireConfirmation=true",
+                    Reason = "operator_confirmation_required",
                 };
             }
         }
@@ -171,15 +169,14 @@ public sealed class ActionVerifier
             return new VerificationResult
             {
                 Outcome = VerificationOutcome.OperatorApprovalRequired,
-                Reason = $"Destructive actions from Tier-2 always require operator approval " +
-                         $"(AutoExecuteTier2Destructive=false)",
+                Reason = "model_destructive_action_requires_approval",
             };
         }
 
         return new VerificationResult
         {
             Outcome = VerificationOutcome.Approved,
-            Reason = $"Proposal approved (confidence {proposal.Confidence:F2} ≥ {threshold:F2})",
+            Reason = "proposal_approved",
         };
     }
 
@@ -218,6 +215,22 @@ public sealed class ActionVerifier
     /// <summary>Per-action-type structural validation.</summary>
     private static string? ValidateParameters(RuleActionSpec action)
     {
+        var allowed = action.Type switch
+        {
+            RuleActionType.Click => new[] { "name", "controlType" },
+            RuleActionType.Type => new[] { "text", "source" },
+            RuleActionType.PressKey => new[] { "key" },
+            RuleActionType.WaitForElement => new[] { "controlType", "name" },
+            RuleActionType.VerifyElement =>
+                new[] { "name", "controlType", "containsFromContext" },
+            RuleActionType.Escalate or RuleActionType.AskOperator or
+                RuleActionType.Log => Array.Empty<string>(),
+            _ => null,
+        };
+        if (allowed is null) return "unknown_action_type";
+        if (action.Parameters.Keys.Any(key => !allowed.Contains(key, StringComparer.Ordinal)))
+            return "unexpected_parameter";
+
         return action.Type switch
         {
             RuleActionType.Click           => RequireAny(action, "name", "controlType"),
@@ -228,7 +241,7 @@ public sealed class ActionVerifier
             RuleActionType.Escalate        => null,
             RuleActionType.AskOperator     => null,
             RuleActionType.Log             => null,
-            _                              => $"unknown action type {action.Type}",
+            _                              => "unknown_action_type",
         };
     }
 
@@ -239,6 +252,6 @@ public sealed class ActionVerifier
             if (action.Parameters.TryGetValue(k, out var v) && !string.IsNullOrWhiteSpace(v))
                 return null;
         }
-        return $"{action.Type} missing required parameter (one of: {string.Join(", ", keys)})";
+        return "required_parameter_missing";
     }
 }

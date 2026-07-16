@@ -90,11 +90,13 @@ public sealed class TemplateRuleGenerator
 
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(yamlText)))
             .ToLowerInvariant();
-        _db.UpsertAutoRuleApproval(ruleId, template.TemplateId, hash);
+        _db.UpsertAutoRuleApproval(
+            ruleId,
+            template.TemplateId,
+            hash,
+            hasWriteback: template.HasWriteback);
 
-        _logger.LogInformation(
-            "TemplateRuleGenerator: emitted {RuleId} for template {TemplateId} at {Path}",
-            ruleId, template.TemplateId, path);
+        _logger.LogInformation("core.learning.template_rule_emitted");
         return path;
     }
 
@@ -115,21 +117,15 @@ public sealed class TemplateRuleGenerator
             }
             catch (InvalidOperationException ex)
             {
-                _logger.LogWarning(ex,
-                    "TemplateRuleGenerator: validation failed for template {TemplateId} — skipping. Reason: {Reason}",
-                    row.TemplateId, ex.Message);
+                _logger.LogSafeWarning(ex);
             }
             catch (System.Text.Json.JsonException ex)
             {
-                _logger.LogWarning(ex,
-                    "TemplateRuleGenerator: could not rehydrate template {TemplateId} — skipping. Reason: {Reason}",
-                    row.TemplateId, ex.Message);
+                _logger.LogSafeWarning(ex);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex,
-                    "TemplateRuleGenerator: unexpected failure for template {TemplateId}: {Type}:{Reason}",
-                    row.TemplateId, ex.GetType().Name, ex.Message);
+                _logger.LogSafeWarning(ex);
             }
         }
         return count;

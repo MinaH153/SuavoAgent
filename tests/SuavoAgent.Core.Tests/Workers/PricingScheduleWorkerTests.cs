@@ -2,10 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Contracts.Maintenance;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Pricing;
@@ -48,6 +52,10 @@ public sealed class PricingScheduleWorkerTests : IDisposable
 
     private sealed class FakeExecutor : IPricingJobExecutor
     {
+        private readonly AgentStateDb? _db;
+
+        public FakeExecutor(AgentStateDb? db = null) => _db = db;
+
         public int Calls;
         public PricingJobSpec? LastSpec;
         public bool Ok = true;
@@ -60,6 +68,22 @@ public sealed class PricingScheduleWorkerTests : IDisposable
             var progress = new PricingJobProgress(
                 spec.JobId, TotalItems: 3, CompletedItems: Ok ? 3 : 1, FailedItems: Ok ? 0 : 2,
                 Status: Ok ? PricingJobStatus.Completed : PricingJobStatus.Failed);
+            if (Ok && _db is not null)
+            {
+                _db.UpsertPricingJob(spec, PricingJobStatus.Running, 3, 0, 0);
+                for (var index = 0; index < 3; index++)
+                {
+                    _db.SavePricingResult(new SupplierPriceResult(
+                        spec.JobId,
+                        index + 2,
+                        $"55111064{index + 5:D3}",
+                        true,
+                        "McKesson",
+                        1.25m,
+                        null));
+                }
+                _db.UpsertPricingJob(spec, PricingJobStatus.Completed, 3, 3, 0);
+            }
             return Task.FromResult(new PricingJobExecutionResult(progress, "sql", Ok, Error));
         }
     }
@@ -81,6 +105,31 @@ public sealed class PricingScheduleWorkerTests : IDisposable
         public Task<JsonElement?> PostSignedVerifiedAsync(
             string path, object payload, string publicKeyDer, CancellationToken ct) =>
             PostSignedAsync(path, payload, ct);
+
+        public Task<VerifiedCloudPostResponse?> PostSignedResponseVerifiedAsync(
+            string path,
+            object payload,
+            CancellationToken ct)
+        {
+            Calls++;
+            LastPath = path;
+            LastPayload = JsonSerializer.SerializeToElement(payload);
+            var jobId = path.Split('/', StringSplitOptions.RemoveEmptyEntries)[3];
+            var recorded = LastPayload.GetProperty("items").GetArrayLength();
+            var body = JsonSerializer.Serialize(new
+            {
+                accepted = true,
+                jobId,
+                recorded,
+            });
+            return Task.FromResult<VerifiedCloudPostResponse?>(new(
+                200,
+                body,
+                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body)))
+                    .ToLowerInvariant(),
+                RemoteCommandTrust.CommandV1KeyId,
+                Convert.ToBase64String(new byte[64])));
+        }
     }
 
     private AgentStateDb NewDb()
@@ -99,6 +148,19 @@ public sealed class PricingScheduleWorkerTests : IDisposable
             StaticOptionsMonitor<AgentOptions>.Create(opts),
             executor,
             uploader);
+
+    private sealed class CaptureLogger<T> : ILogger<T>
+    {
+        public List<string> Messages { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) => Messages.Add(formatter(state, exception));
+    }
 
     private static AgentOptions Enabled(string? workbookPath) => new()
     {
@@ -176,6 +238,30 @@ public sealed class PricingScheduleWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task RunOnce_LogsOnlyTokenAndExtension_NeverPhiLikeWorkbookNameOrPath()
+    {
+        var exec = new FakeExecutor();
+        var logger = new CaptureLogger<PricingScheduleWorker>();
+        var missing = Path.Combine(
+            Path.GetTempPath(),
+            "Patient Jane Doe RX 3710 - HIV Medication.xlsx");
+        var worker = new PricingScheduleWorker(
+            logger,
+            StaticOptionsMonitor<AgentOptions>.Create(Enabled(missing)),
+            exec);
+
+        var outcome = await worker.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal("workbook_missing", outcome.Reason);
+        var text = string.Join('\n', logger.Messages);
+        Assert.Contains("core.pricing_schedule.workbook_missing", text);
+        Assert.Contains("extension=xlsx", text);
+        Assert.DoesNotContain("Jane", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("HIV", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(Path.GetTempPath(), text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task RunOnce_WhenAllGatesPass_RunsExactlyOneJob_WithConfiguredSpec()
     {
         var exec = new FakeExecutor();
@@ -188,7 +274,7 @@ public sealed class PricingScheduleWorkerTests : IDisposable
         var outcome = await Build(opts, exec).RunOnceAsync(CancellationToken.None);
 
         Assert.Equal(PricingScheduleRunStatus.Completed, outcome.Status);
-        Assert.Equal("ok", outcome.Reason);
+        Assert.Equal("observation_only", outcome.Reason);
         Assert.Equal(1, exec.Calls);
 
         Assert.NotNull(exec.LastSpec);
@@ -216,21 +302,22 @@ public sealed class PricingScheduleWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task RunOnce_WhenRunSucceeds_SurfacesInCockpit_WithNullCommandId()
+    public async Task RunOnce_WhenRunSucceeds_RemainsLocalObservationWithoutCloudAuthority()
     {
-        // "Surface every operational entry": an autonomous run must reach the cloud (savings ledger +
-        // downloadable price list) exactly like a cockpit-triggered run — keyed by the job id, with a
-        // null commandId because no operator command exists.
-        var exec = new FakeExecutor();
+        // A local schedule has no signed cloud command. It may execute the
+        // read-only SQL observation, but it must not stage or publish a success
+        // receipt and it must never invent command authority.
+        var db = NewDb();
+        var exec = new FakeExecutor(db);
         var signer = new RecordingPostSigner();
-        var uploader = new PricingJobCloudUploader(signer, NewDb(), NullLogger<PricingJobCloudUploader>.Instance);
+        var uploader = new PricingJobCloudUploader(signer, db, NullLogger<PricingJobCloudUploader>.Instance);
 
         var outcome = await Build(Enabled(ExistingWorkbook()), exec, uploader).RunOnceAsync(CancellationToken.None);
 
         Assert.Equal(PricingScheduleRunStatus.Completed, outcome.Status);
-        Assert.Equal(1, signer.Calls);
-        Assert.Contains($"/api/agent/pricing-jobs/{exec.LastSpec!.JobId}/results", signer.LastPath);
-        Assert.Equal(JsonValueKind.Null, signer.LastPayload.GetProperty("commandId").ValueKind);
+        Assert.Equal("observation_only", outcome.Reason);
+        Assert.Equal(0, signer.Calls);
+        Assert.Null(db.GetPricingResultOutbox(exec.LastSpec!.JobId));
     }
 
     [Fact]

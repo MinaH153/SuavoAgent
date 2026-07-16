@@ -25,7 +25,7 @@ public sealed class NavigateSafetyTests
     [Fact]
     public void Preflight_NullGateState_DeniesFailClosed()
     {
-        var v = NavigateSafety.EvaluatePreflight(null, Now, livePms: false, PricingExecutorMode.SqlFirst, allowLiveActuation: false);
+        var v = NavigateSafety.EvaluatePreflight(null, Now);
         Assert.Equal(SafetyDecision.Deny, v.Decision);
         Assert.Equal("gate_state_unavailable", v.Reason);
     }
@@ -33,7 +33,7 @@ public sealed class NavigateSafetyTests
     [Fact]
     public void Preflight_KillSwitchTripped_Denies()
     {
-        var v = NavigateSafety.EvaluatePreflight(Gate(killTripped: Now), Now, false, PricingExecutorMode.SqlFirst, false);
+        var v = NavigateSafety.EvaluatePreflight(Gate(killTripped: Now), Now);
         Assert.Equal(SafetyDecision.Deny, v.Decision);
         Assert.Equal("kill_switch", v.Reason);
     }
@@ -41,14 +41,14 @@ public sealed class NavigateSafetyTests
     [Fact]
     public void Preflight_GateDisabled_Denies()
     {
-        var v = NavigateSafety.EvaluatePreflight(Gate(enabled: false), Now, false, PricingExecutorMode.SqlFirst, false);
+        var v = NavigateSafety.EvaluatePreflight(Gate(enabled: false), Now);
         Assert.Equal(SafetyDecision.Deny, v.Decision);
     }
 
     [Fact]
     public void Preflight_PausedInFuture_Denies_UserActive()
     {
-        var v = NavigateSafety.EvaluatePreflight(Gate(pausedUntil: Now.AddMinutes(2)), Now, false, PricingExecutorMode.SqlFirst, false);
+        var v = NavigateSafety.EvaluatePreflight(Gate(pausedUntil: Now.AddMinutes(2)), Now);
         Assert.Equal(SafetyDecision.Deny, v.Decision);
         Assert.Equal("paused_user_active", v.Reason);
     }
@@ -56,30 +56,49 @@ public sealed class NavigateSafetyTests
     [Fact]
     public void Preflight_PauseExpired_Allows()
     {
-        var v = NavigateSafety.EvaluatePreflight(Gate(pausedUntil: Now.AddMinutes(-1)), Now, false, PricingExecutorMode.SqlFirst, false);
+        var v = NavigateSafety.EvaluatePreflight(Gate(pausedUntil: Now.AddMinutes(-1)), Now);
         Assert.Equal(SafetyDecision.Allow, v.Decision);
     }
 
     [Fact]
     public void Preflight_LivePms_UiaFirst_NotAllowed_DeniesNeverBlind()
     {
-        var v = NavigateSafety.EvaluatePreflight(Gate(), Now, livePms: true, PricingExecutorMode.UiaFirst, allowLiveActuation: false);
+        var v = NavigateSafety.EvaluateTarget(
+            Gate(), Now, @"C:\Program Files\PioneerRx\PIONEERPHARMACY.EXE",
+            PricingExecutorMode.UiaFirst, allowLiveActuation: false);
         Assert.Equal(SafetyDecision.Deny, v.Decision);
         Assert.Equal("never_blind_live_pms", v.Reason);
     }
 
     [Fact]
-    public void Preflight_LivePms_SqlFirst_Allows_ReadOnlyIsSafe()
+    public void Target_LivePms_UiAction_DeniesEvenWhenPricingExecutorIsSqlFirst()
     {
-        var v = NavigateSafety.EvaluatePreflight(Gate(), Now, livePms: true, PricingExecutorMode.SqlFirst, allowLiveActuation: false);
-        Assert.Equal(SafetyDecision.Allow, v.Decision);
+        var v = NavigateSafety.EvaluateTarget(
+            Gate(), Now, "PioneerPharmacy.exe", PricingExecutorMode.SqlFirst, allowLiveActuation: false);
+        Assert.Equal(SafetyDecision.Deny, v.Decision);
+        Assert.Equal("never_blind_live_pms", v.Reason);
     }
 
     [Fact]
     public void Preflight_LivePms_UiaFirst_ExplicitlyAllowed_Allows()
     {
-        var v = NavigateSafety.EvaluatePreflight(Gate(), Now, livePms: true, PricingExecutorMode.UiaFirst, allowLiveActuation: true);
+        var v = NavigateSafety.EvaluateTarget(
+            Gate(), Now, "PioneerPharmacy.exe", PricingExecutorMode.UiaFirst, allowLiveActuation: true);
         Assert.Equal(SafetyDecision.Allow, v.Decision);
+    }
+
+    [Fact]
+    public void TargetProcess_DerivesLivePmsFromAction_NotCallerPosture()
+    {
+        var action = NextAction.Act("click_by_signature", new Dictionary<string, object?>
+        {
+            ["process_name"] = "PioneerPharmacyHost.exe",
+        });
+
+        Assert.Equal("PioneerPharmacyHost.exe", NavigateSafety.TargetProcess(action));
+        var verdict = NavigateSafety.EvaluateTarget(
+            Gate(), Now, NavigateSafety.TargetProcess(action), PricingExecutorMode.VisionFirst, false);
+        Assert.Equal(SafetyDecision.Deny, verdict.Decision);
     }
 
     // --- GateAction ----------------------------------------------------------

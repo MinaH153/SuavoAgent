@@ -42,9 +42,8 @@ public sealed class SandboxExploreSafetyGate : ISafetyGate
         _now = now ?? (() => DateTimeOffset.UtcNow);
     }
 
-    /// <summary>Fail-closed on kill-switch / pause / unreadable gate state. No LivePms branch: explore is
-    /// sandbox-only by construction (the allowlist below admits no PMS process), and the command sets
-    /// LivePms=false — a live-PMS posture should never reach this gate at all.</summary>
+    /// <summary>Fail-closed on kill-switch / pause / unreadable gate state. Explore is sandbox-only by
+    /// construction: every action is bound to the allowlist below, which admits no PMS process.</summary>
     public SafetyVerdict Preflight(AgentObjective objective)
     {
         var gs = _gateState();
@@ -52,6 +51,8 @@ public sealed class SandboxExploreSafetyGate : ISafetyGate
             return SafetyVerdict.Denied("gate_state_unavailable");
         if (!gs.Enabled || gs.KillSwitchTrippedUtc is not null)
             return SafetyVerdict.Denied("kill_switch");
+        if (gs.CompromiseDetected)
+            return SafetyVerdict.Denied("compromise_detected");
         if (gs.PausedUntilUtc is { } until && until > _now())
             return SafetyVerdict.Denied("paused_user_active");
         return SafetyVerdict.Allow;
@@ -65,6 +66,10 @@ public sealed class SandboxExploreSafetyGate : ISafetyGate
 
         if (!AllowedExploreVerbs.Contains(verb))
             return SafetyVerdict.Denied($"verb_not_allowed_in_explore:{verb}");
+
+        if (TryTarget(action, out var target) &&
+            ProtectedDesktopProcessClassifier.IsProtectedIdentity(target))
+            return SafetyVerdict.Denied("protected_process_not_sandbox");
 
         if (!TargetIsAllowlisted(action))
             return SafetyVerdict.Denied("process_not_allowlisted");
@@ -80,19 +85,24 @@ public sealed class SandboxExploreSafetyGate : ISafetyGate
     /// <c>process_name</c> (e.g. "notepad" / "notepad.exe"). Matches either keys or values, case-insensitive.</summary>
     private static bool TargetIsAllowlisted(NextAction action)
     {
-        var paramKey = string.Equals(action.Verb, "launch_sandbox_app", StringComparison.OrdinalIgnoreCase)
-            ? "app_key"
-            : "process_name";
-
-        if (action.Parameters is null ||
-            !action.Parameters.TryGetValue(paramKey, out var raw) ||
-            raw is not string target ||
-            string.IsNullOrWhiteSpace(target))
-        {
-            return false;
-        }
+        if (!TryTarget(action, out var target)) return false;
 
         var allow = ActuationAllowlistedSandboxApps.ProcessNames;
         return allow.Keys.Concat(allow.Values).Any(a => string.Equals(a, target, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool TryTarget(NextAction action, out string target)
+    {
+        target = string.Empty;
+        var paramKey = string.Equals(action.Verb, "launch_sandbox_app", StringComparison.OrdinalIgnoreCase)
+            ? "app_key"
+            : "process_name";
+        if (action.Parameters is null ||
+            !action.Parameters.TryGetValue(paramKey, out var raw) ||
+            raw is not string value ||
+            string.IsNullOrWhiteSpace(value))
+            return false;
+        target = value;
+        return true;
     }
 }

@@ -17,7 +17,8 @@ public sealed record HelperPingInfo(
     int Pid,
     uint HelperSessionId,
     uint ActiveConsoleSessionId,
-    bool IsInteractive)
+    bool IsInteractive,
+    VisionRuntimeReadiness? VisionRuntime = null)
 {
     /// <summary>
     /// The authoritative interactivity verdict, recomputed from the raw session ids rather
@@ -42,7 +43,39 @@ public sealed record HelperPingInfo(
             return null;
         try
         {
-            return JsonSerializer.Deserialize<HelperPingInfo>(data.Value.GetRawText(), ParseOptions);
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in data.Value.EnumerateObject())
+            {
+                if (!names.Add(property.Name) || property.Name is not (
+                        "Pid" or "pid" or
+                        "HelperSessionId" or "helperSessionId" or
+                        "ActiveConsoleSessionId" or "activeConsoleSessionId" or
+                        "IsInteractive" or "isInteractive" or
+                        "IsConsoleInteractive" or "isConsoleInteractive" or
+                        "VisionRuntime" or "visionRuntime"))
+                    return null;
+            }
+
+            var parsed = JsonSerializer.Deserialize<HelperPingInfo>(
+                data.Value.GetRawText(), ParseOptions);
+            if (parsed is null || parsed.Pid <= 0)
+                return null;
+
+            var runtimeProperty = data.Value.EnumerateObject()
+                .FirstOrDefault(property => string.Equals(
+                    property.Name,
+                    "VisionRuntime",
+                    StringComparison.OrdinalIgnoreCase));
+            if (runtimeProperty.Name is not null &&
+                runtimeProperty.Value.ValueKind != JsonValueKind.Null)
+            {
+                var runtime = VisionRuntimeReadiness.TryParse(runtimeProperty.Value);
+                if (runtime is null)
+                    return null;
+                parsed = parsed with { VisionRuntime = runtime };
+            }
+
+            return parsed;
         }
         catch
         {

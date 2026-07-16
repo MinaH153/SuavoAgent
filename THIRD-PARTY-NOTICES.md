@@ -1,29 +1,22 @@
 # Third-Party Notices
 
-## SQLCipher (Community Edition)
+The complete, generated Windows runtime notice bundle is checked in at
+[`src/SuavoAgent.Setup/Legal/THIRD-PARTY-NOTICES.txt`](src/SuavoAgent.Setup/Legal/THIRD-PARTY-NOTICES.txt).
+It is embedded in `SuavoSetup.exe`, available through the setup footer, and
+packaged beside release binaries.
 
-Copyright (c) 2008-2024 Zetetic LLC
-All rights reserved.
+Exact package versions, declared licenses, retained license-file hashes, the
+.NET runtime legal bundle, and external-asset provenance are recorded in
+[`legal/THIRD-PARTY-PROVENANCE.json`](legal/THIRD-PARTY-PROVENANCE.json).
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
+Regenerate after any dependency or external-asset change:
 
-* Redistributions of source code must retain the above copyright notice,
-  this list of conditions and the following disclaimer.
-* Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-* Neither the name of the ZETETIC LLC nor the names of its contributors
-  may be used to endorse or promote products derived from this software
-  without specific prior written permission.
+```sh
+python3 scripts/generate-release-legal-bundle.py
+python3 scripts/generate-release-legal-bundle.py --check
+```
 
-THIS SOFTWARE IS PROVIDED BY ZETETIC LLC ''AS IS'' AND ANY EXPRESS OR
-IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
-OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
-IN NO EVENT SHALL ZETETIC LLC BE LIABLE FOR ANY DIRECT, INDIRECT,
-INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
-NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
-THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+Production release validation additionally uses `--require-release-eligible`.
+That gate intentionally fails while any dependency license is unknown or any
+external model/native/OCR cohort lacks immutable source, license bundle, SBOM,
+and provenance attestation.

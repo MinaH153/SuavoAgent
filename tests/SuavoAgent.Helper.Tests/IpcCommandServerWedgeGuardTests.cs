@@ -4,12 +4,12 @@ using Xunit;
 namespace SuavoAgent.Helper.Tests;
 
 /// <summary>
-/// The dispatch wedge watchdog: the command server is a single pipe instance with one
-/// sequential handler, and a hung synchronous UIA/COM dispatch (hung PMS, torn-down session)
-/// would strand the whole pipe FOREVER while the process looks alive — the "agent says healthy
-/// but the cursor never moves" failure. Past the ceiling the Helper self-terminates and the
-/// Broker relaunches it clean. These tests pin the guard mechanism with an injected (non-
-/// exiting) wedge action.
+/// The dispatch wedge watchdog: the command server has one active pipe plus one pending listener
+/// but only one sequential handler. A hung synchronous UIA/COM dispatch (hung PMS, torn-down
+/// session) would strand the whole pipe FOREVER while the process looks alive — the "agent says
+/// healthy but the cursor never moves" failure. Past the ceiling the Helper self-terminates and
+/// the Broker relaunches it clean. These tests pin the guard mechanism with an injected
+/// (non-exiting) wedge action.
 /// </summary>
 public class IpcCommandServerWedgeGuardTests
 {

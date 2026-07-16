@@ -28,8 +28,8 @@ public sealed class WorkflowExecutorTests
             Tier: "sandbox",
             Steps: new[]
             {
-                new WorkflowStepDto("launch_sandbox_app", "1.0.0", null, JsonDocument.Parse("{\"app_key\":\"notepad\"}").RootElement, null),
-                new WorkflowStepDto("press_keys", "1.0.0", null, JsonDocument.Parse("{\"chords\":[\"Enter\"]}").RootElement, null),
+                new WorkflowStepDto("launch_sandbox_app", "1.0.0", null, JsonDocument.Parse("{\"app_key\":\"calculator\"}").RootElement, null),
+                new WorkflowStepDto("press_keys", "1.0.0", null, JsonDocument.Parse("{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}").RootElement, null),
             });
 
         var result = await harness.Executor.ExecuteAsync(def, harness.Provider, harness.Audit, harness.Charter, "ph-1", "test", CancellationToken.None);
@@ -44,7 +44,7 @@ public sealed class WorkflowExecutorTests
         var harness = new ExecutorHarness();
         harness.Gateway.GateState = new ActuationGateState(Enabled: false, DryRun: true, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null);
 
-        var def = SimpleDef("run-2", new[] { Step("press_keys", "{\"chords\":[\"Enter\"]}") });
+        var def = SimpleDef("run-2", new[] { Step("press_keys", "{\"chords\":[\"Enter\"],\"process_name\":\"notepad\"}") });
         var result = await harness.Executor.ExecuteAsync(def, harness.Provider, harness.Audit, harness.Charter, "ph-1", "test", CancellationToken.None);
 
         Assert.Equal(WorkflowRunOutcome.Aborted, result.Outcome);
@@ -59,7 +59,7 @@ public sealed class WorkflowExecutorTests
         var harness = new ExecutorHarness();
         harness.Gateway.GateState = new ActuationGateState(Enabled: false, DryRun: true, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: DateTimeOffset.UtcNow);
 
-        var def = SimpleDef("run-3", new[] { Step("press_keys", "{\"chords\":[\"Enter\"]}") });
+        var def = SimpleDef("run-3", new[] { Step("press_keys", "{\"chords\":[\"Enter\"],\"process_name\":\"notepad\"}") });
         var result = await harness.Executor.ExecuteAsync(def, harness.Provider, harness.Audit, harness.Charter, "ph-1", "test", CancellationToken.None);
 
         Assert.Equal(WorkflowRunOutcome.Aborted, result.Outcome);
@@ -84,7 +84,7 @@ public sealed class WorkflowExecutorTests
         var harness = new ExecutorHarness();
         harness.Gateway.NextResult = ActuationResult.Reject("gate_paused", "user_input_detected", dryRun: false);
 
-        var def = SimpleDef("run-5", new[] { Step("press_keys", "{\"chords\":[\"Ctrl+S\"]}") });
+        var def = SimpleDef("run-5", new[] { Step("press_keys", "{\"chords\":[\"Ctrl+S\"],\"process_name\":\"calc.exe\"}") });
         var result = await harness.Executor.ExecuteAsync(def, harness.Provider, harness.Audit, harness.Charter, "ph-1", "test", CancellationToken.None);
 
         Assert.Equal(WorkflowRunOutcome.Failed, result.Outcome);

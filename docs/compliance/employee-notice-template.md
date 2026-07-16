@@ -9,29 +9,34 @@ In accordance with applicable state and federal law, this notice informs you
 that [BUSINESS NAME] uses SuavoAgent software on company workstations to
 optimize business workflows and delivery operations.
 
-## What SuavoAgent Monitors
+## What SuavoAgent Observes
 
-SuavoAgent is installed on company-owned workstations and collects the
-following types of data:
+SuavoAgent is installed on company-owned workstations. Depending on the
+features approved for this workstation, it may collect the following data:
 
 ### Collected Data
-- **Application usage:** Which business applications are used and for how long
-  (e.g., "pharmacy management system used for 4 hours today")
+- **Approved application activity:** Which approved business application and
+  window are active, the controls used, and workflow timing
 - **Workstation profile:** Hardware configuration (monitor count, memory, operating system)
 - **Session timing:** When you log in, log out, lock, or unlock the workstation
-- **Website categories:** Categories of websites visited during work
-  (e.g., "insurance portal," "supplier site" — NOT specific page content or URLs)
-- **Print activity:** Number of print jobs (NOT document names or content)
+- **Interaction categories:** Counts and timing for navigation, text-entry,
+  shortcut, and pointer actions. Literal keys and typed text are discarded.
+- **Window-scoped images:** When vision is explicitly enabled, SuavoAgent may
+  capture the approved pharmacy-management window while that exact window is
+  active. It does not capture the full desktop or a different application.
+- **Derived screen structure:** Visible control roles, bounds, and scrubbed
+  labels derived from the approved window. Optional cloud sharing is limited
+  to this scrubbed structure; raw pixels are not uploaded.
 
 ### Data NOT Collected
 SuavoAgent does **NOT** collect or record:
-- Keystrokes, passwords, or any text you type
-- Screen captures, screenshots, or screen recordings
+- Passwords, literal keystrokes, or a transcript of text you type
+- Full-desktop screenshots or continuous screen recordings
 - Email content, messages, or chat conversations
-- Personal browsing history or specific URLs visited
+- Personal browsing history or activity in non-approved applications
 - File contents, document text, or spreadsheet data
-- Personal identification information
 - Audio or video recordings
+- Biometric identifiers
 
 ## How Data Is Used
 
@@ -52,7 +57,15 @@ All data collected by SuavoAgent is:
 - Encrypted at rest and in transit
 - Stored in compliance with applicable regulations (including HIPAA where applicable)
 - Accessible only to authorized personnel
-- Retained for a limited period and then securely deleted
+- Subject to a documented retention schedule
+
+For this deployment:
+
+- Encrypted local window captures are retained for: **[RETENTION PERIOD — the
+  standard configuration is 24 hours, with a maximum of 500 captures]**
+- Scrubbed operational and audit records are retained for: **[RETENTION PERIOD]**
+- Data is sold or shared for cross-context behavioral advertising: **No**
+- Privacy policy / notice-at-collection location: **[URL OR PHYSICAL LOCATION]**
 
 ## Your Rights
 
@@ -81,6 +94,7 @@ regarding electronic workplace monitoring.
 
 ---
 
-*This notice is provided in compliance with Connecticut General Statutes § 31-48d,
-Delaware Code Title 19 § 705, New York Civil Rights Law § 52-c, and applicable
-state laws regarding electronic workplace monitoring.*
+*This template describes SuavoAgent's technical behavior; it is not legal
+advice. The employer must have counsel approve the completed notice and any
+state-specific posting, acknowledgment, language, accessibility, privacy-policy,
+and notice-at-collection requirements before observation is enabled.*

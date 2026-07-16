@@ -1,0 +1,184 @@
+name: Protected production signing boundary
+
+on:
+  workflow_call:
+    inputs:
+      stage_run_id:
+        description: Completed successful v1 bridge stage run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  sign-reviewed-v1-handoff:
+    runs-on: ubuntu-latest
+    environment: suavoagent-production-signing
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Resolve one completed protected-main stage and its exact request artifact
+        id: stage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGE_RUN_ID: ${{ inputs.stage_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "MinaH153/SuavoAgent" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$RUNNER_ENVIRONMENT" == "github-hosted" ]]
+          [[ "$STAGE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN_ID" > stage-run.json
+          STAGE_WORKFLOW_ID="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/v1-bridge-stage.yml" --jq '.id | select(type == "number" and . > 0)')"
+          SOURCE_SHA="$(jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))' stage-run.json)"
+          RUN_ATTEMPT="$(jq -er '.run_attempt | select(type == "number" and . > 0)' stage-run.json)"
+          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]
+          python3 scripts/v1_bridge_run_metadata.py validate-stage-metadata \
+            --metadata stage-run.json --expected-sha "$SOURCE_SHA" \
+            --expected-run-id "$STAGE_RUN_ID" --expected-run-attempt "$RUN_ATTEMPT" \
+            --expected-workflow-id "$STAGE_WORKFLOW_ID"
+          ARTIFACT_NAME="suavoagent-v1-bridge-request-$STAGE_RUN_ID-$RUN_ATTEMPT"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN_ID/artifacts?per_page=100" \
+            > stage-artifacts.json
+          ARTIFACT_DIGEST="$(jq -er --arg name "$ARTIFACT_NAME" \
+            '[.[] | .artifacts[] | select(.name == $name and .expired == false)] | select(length == 1) | .[0].digest | select(test("^(sha256:)?[0-9a-f]{64}$"))' \
+            stage-artifacts.json)"
+          ARTIFACT_ID="$(jq -er --arg name "$ARTIFACT_NAME" \
+            '[.[] | .artifacts[] | select(.name == $name and .expired == false)] | select(length == 1) | .[0].id | select(type == "number" and . > 0)' \
+            stage-artifacts.json)"
+          printf 'source_sha=%s\nrun_attempt=%s\nworkflow_id=%s\nartifact_name=%s\nartifact_digest=%s\nartifact_id=%s\n' \
+            "$SOURCE_SHA" "$RUN_ATTEMPT" "$STAGE_WORKFLOW_ID" "$ARTIFACT_NAME" "$ARTIFACT_DIGEST" "$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+      - name: Download only the exact completed-stage request artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ steps.stage.outputs.artifact_id }}
+          path: request
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.stage_run_id }}
+      - name: Recompute the complete request and Authenticode-tested cohort binding
+        env:
+          STAGE_RUN_ID: ${{ inputs.stage_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_WORKFLOW_REF" == "MinaH153/SuavoAgent/.github/workflows/v1-bridge-authorize.yml@refs/heads/main" ]]
+          mkdir descriptor
+          python3 scripts/v1_bridge_run_metadata.py write-descriptor \
+            --output descriptor/bridge-handoff-descriptor.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-sha "${{ steps.stage.outputs.source_sha }}" \
+            --stage-workflow .github/workflows/v1-bridge-stage.yml \
+            --stage-run-id "$STAGE_RUN_ID" \
+            --stage-run-attempt "${{ steps.stage.outputs.run_attempt }}" \
+            --artifact-name "${{ steps.stage.outputs.artifact_name }}" \
+            --artifact-digest "${{ steps.stage.outputs.artifact_digest }}" \
+            --authorization-run-id "$GITHUB_RUN_ID" \
+            --authorization-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --artifacts stage-artifacts.json \
+            --request request/bridge-signing-request.json \
+            --release-dir request/release
+      - name: Validate exact non-exportable v2 signing authority
+        env:
+          AWS_SIGNING_ROLE_ARN: ${{ vars.AWS_SIGNING_ROLE_ARN }}
+          AWS_SIGNING_REGION: ${{ vars.AWS_SIGNING_REGION }}
+          OTA_KMS_KEY_ID: ${{ vars.OTA_KMS_KEY_ID }}
+          OTA_KMS_PUBLIC_KEY_DER_BASE64: ${{ vars.OTA_KMS_PUBLIC_KEY_DER_BASE64 }}
+        run: |
+          set -euo pipefail
+          [[ "$AWS_SIGNING_ROLE_ARN" == "arn:aws:iam::855763870758:role/github-actions/SuavoAgentProductionOtaSigningV2" ]]
+          [[ "$AWS_SIGNING_REGION" == "us-east-1" ]]
+          [[ "$OTA_KMS_KEY_ID" == "arn:aws:kms:us-east-1:855763870758:key/44bd84dc-8f6d-4692-b8ba-40a026db0331" ]]
+          python3 scripts/ota_update_trust_roots.py \
+            assert-signing-public-key "$OTA_KMS_PUBLIC_KEY_DER_BASE64" --key-id ota-update-v2
+      - name: Revalidate protected main and completed stage immediately before role assumption
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGE_RUN_ID: ${{ inputs.stage_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_WORKFLOW_REF" == "MinaH153/SuavoAgent/.github/workflows/v1-bridge-authorize.yml@refs/heads/main" ]]
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN_ID" > stage-run-before-role.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN_ID/attempts/${{ steps.stage.outputs.run_attempt }}" \
+            > stage-attempt-before-role.json
+          for metadata in stage-run-before-role.json stage-attempt-before-role.json; do
+            python3 scripts/v1_bridge_run_metadata.py validate-stage-metadata \
+              --metadata "$metadata" --expected-sha "$GITHUB_SHA" \
+              --expected-run-id "$STAGE_RUN_ID" \
+              --expected-run-attempt "${{ steps.stage.outputs.run_attempt }}" \
+              --expected-workflow-id "${{ steps.stage.outputs.workflow_id }}"
+          done
+      - name: Assume exact OIDC-bound production signer role
+        id: aws
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
+        with:
+          role-to-assume: ${{ vars.AWS_SIGNING_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_SIGNING_REGION }}
+          role-duration-seconds: 900
+          output-credentials: true
+          output-env-credentials: false
+      - name: Sign descriptor specifically with reviewed ota-update-v2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+          AWS_REGION: ${{ vars.AWS_SIGNING_REGION }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_SIGNING_REGION }}
+          GH_TOKEN: ${{ github.token }}
+          OTA_KMS_KEY_ID: ${{ vars.OTA_KMS_KEY_ID }}
+          OTA_KMS_PUBLIC_KEY_DER_BASE64: ${{ vars.OTA_KMS_PUBLIC_KEY_DER_BASE64 }}
+          OTA_KMS_EXPECTED_KEY_ID: ota-update-v2
+          STAGE_RUN_ID: ${{ inputs.stage_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_WORKFLOW_REF" == "MinaH153/SuavoAgent/.github/workflows/v1-bridge-authorize.yml@refs/heads/main" ]]
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$RUNNER_ENVIRONMENT" == "github-hosted" ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN_ID" > stage-run-before-sign.json
+          python3 scripts/v1_bridge_run_metadata.py validate-stage-metadata \
+            --metadata stage-run-before-sign.json --expected-sha "$GITHUB_SHA" \
+            --expected-run-id "$STAGE_RUN_ID" \
+            --expected-run-attempt "${{ steps.stage.outputs.run_attempt }}" \
+            --expected-workflow-id "${{ steps.stage.outputs.workflow_id }}"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN_ID/artifacts?per_page=100" \
+            > stage-artifacts-before-sign.json
+          ACTUAL_ID="$(jq -er --arg name "${{ steps.stage.outputs.artifact_name }}" \
+            '[.[] | .artifacts[] | select(.name == $name)] | select(length == 1 and .[0].expired == false) | .[0].id' \
+            stage-artifacts-before-sign.json)"
+          ACTUAL_DIGEST="$(jq -er --arg name "${{ steps.stage.outputs.artifact_name }}" \
+            '[.[] | .artifacts[] | select(.name == $name)] | select(length == 1 and .[0].expired == false) | .[0].digest' \
+            stage-artifacts-before-sign.json)"
+          [[ "$ACTUAL_ID" == "${{ steps.stage.outputs.artifact_id }}" ]]
+          [[ "$ACTUAL_DIGEST" == "${{ steps.stage.outputs.artifact_digest }}" ]]
+          bash scripts/aws-kms-sign-ecdsa-p256.sh \
+            descriptor/bridge-handoff-descriptor.json \
+            descriptor/bridge-handoff-descriptor.sig der
+          python3 scripts/v1_bridge_run_metadata.py verify-v2 \
+            --input descriptor/bridge-handoff-descriptor.json \
+            --signature descriptor/bridge-handoff-descriptor.sig --format der
+      - name: Upload separate authenticated handoff descriptor
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: suavoagent-v1-bridge-descriptor-${{ inputs.stage_run_id }}-${{ steps.stage.outputs.run_attempt }}-authorization-${{ github.run_id }}-${{ github.run_attempt }}
+          path: descriptor/
+          retention-days: 7
+          if-no-files-found: error

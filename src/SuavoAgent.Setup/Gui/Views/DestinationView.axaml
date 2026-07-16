@@ -10,10 +10,10 @@
     <Grid RowDefinitions="Auto,*,Auto" Margin="80,32,80,32">
 
         <StackPanel Grid.Row="0" Spacing="6">
-            <TextBlock Text="Install destination"
+            <TextBlock Text="{Binding PageTitle}"
                        Foreground="{DynamicResource SuavoTextBrush}"
                        FontSize="28" FontWeight="Light"/>
-            <TextBlock Text="Confirm where SuavoAgent installs. SQL is detected automatically — set it manually only if you already have the values."
+            <TextBlock Text="{Binding PageDetail}"
                        Foreground="{DynamicResource SuavoTextMutedBrush}"
                        FontSize="14"
                        TextWrapping="Wrap"/>
@@ -32,6 +32,7 @@
                                Foreground="{DynamicResource SuavoAccentTextBrush}"
                                FontWeight="SemiBold" FontSize="12"/>
                     <TextBox Text="{Binding InstallPath, Mode=TwoWay}"
+                             IsReadOnly="{Binding IsInstallPathLocked}"
                              Background="{DynamicResource SuavoSurfaceBrush}"
                              Foreground="{DynamicResource SuavoTextBrush}"
                              BorderBrush="{DynamicResource SuavoBorderBrush}"/>
@@ -62,19 +63,19 @@
                                Foreground="{DynamicResource SuavoTextSubtleBrush}"
                                FontSize="11"/>
 
-                    <Border IsVisible="{Binding IsSqlDeferred}"
+                    <Border IsVisible="{Binding IsSqlMissing}"
                             Background="{DynamicResource SuavoSurfaceElevatedBrush}"
-                            BorderBrush="{DynamicResource SuavoDeferredBrush}"
+                            BorderBrush="{DynamicResource SuavoDangerBrush}"
                             BorderThickness="1" CornerRadius="10" Padding="12,10" Margin="0,4,0,0">
                         <Grid ColumnDefinitions="Auto,*">
-                            <TextBlock Grid.Column="0" Text="↻" FontSize="16" FontWeight="Bold"
+                            <TextBlock Grid.Column="0" Text="!" FontSize="16" FontWeight="Bold"
                                        VerticalAlignment="Top" Margin="0,1,10,0"
-                                       Foreground="{DynamicResource SuavoDeferredBrush}"/>
+                                       Foreground="{DynamicResource SuavoDangerBrush}"/>
                             <StackPanel Grid.Column="1" Spacing="2">
-                                <TextBlock Text="SQL will self-configure"
+                                <TextBlock Text="PioneerRx SQL is required"
                                            Foreground="{DynamicResource SuavoTextBrush}"
                                            FontSize="12.5" FontWeight="SemiBold"/>
-                                <TextBlock Text="No supported system on this PC yet? Leave this blank. SuavoAgent installs now, comes online, and connects automatically the moment one is detected."
+                                <TextBlock Text="Setup cannot activate, rotate device authority, or report this pharmacy workstation ready until the detected SQL connection is complete. Return to System Check or enter the verified values."
                                            Foreground="{DynamicResource SuavoTextMutedBrush}"
                                            FontSize="11.5" TextWrapping="Wrap"/>
                             </StackPanel>
@@ -103,17 +104,44 @@
                     </Grid>
                 </StackPanel>
 
+                <StackPanel Spacing="6">
+                    <TextBlock Text="SQL server certificate (optional)"
+                               Foreground="{DynamicResource SuavoAccentTextBrush}"
+                               FontWeight="SemiBold" FontSize="12"/>
+                    <Grid ColumnDefinitions="*,Auto,Auto">
+                        <TextBox Grid.Column="0" Margin="0,0,8,0"
+                                 Text="{Binding SqlCertificatePath}"
+                                 Watermark="Needed only when SQL Server uses a self-signed certificate"
+                                 IsReadOnly="True"
+                                 Background="{DynamicResource SuavoSurfaceBrush}"
+                                 Foreground="{DynamicResource SuavoTextBrush}"
+                                 BorderBrush="{DynamicResource SuavoBorderBrush}"/>
+                        <Button Grid.Column="1" Margin="0,0,8,0"
+                                Content="Choose certificate…"
+                                Command="{Binding SelectSqlCertificateCommand}"
+                                Padding="14,8"/>
+                        <Button Grid.Column="2"
+                                Content="Clear"
+                                Command="{Binding ClearSqlCertificateCommand}"
+                                IsVisible="{Binding HasSqlCertificate}"
+                                Padding="12,8"/>
+                    </Grid>
+                    <TextBlock Text="{Binding SqlCertificateStatus}"
+                               Foreground="{DynamicResource SuavoTextSubtleBrush}"
+                               FontSize="11" TextWrapping="Wrap"/>
+                </StackPanel>
+
             </StackPanel>
         </Border>
 
         <DockPanel Grid.Row="2" LastChildFill="False">
             <TextBlock DockPanel.Dock="Left"
-                       Text="Install starts when you click Install. It takes about 60 seconds."
+                       Text="{Binding ActionHint}"
                        Foreground="{DynamicResource SuavoTextSubtleBrush}"
                        FontSize="11"
                        VerticalAlignment="Center"/>
             <Button DockPanel.Dock="Right"
-                    Content="Install"
+                    Content="{Binding ActionLabel}"
                     Command="{Binding InstallCommand}"
                     Padding="28,12"
                     Background="{DynamicResource SuavoAccentBrush}"

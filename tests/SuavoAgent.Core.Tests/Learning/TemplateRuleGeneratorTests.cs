@@ -260,8 +260,21 @@ public class TemplateRuleGeneratorTests : IDisposable
         var approval = _db.GetAutoRuleApproval(ruleId);
         Assert.NotNull(approval);
         Assert.Equal(tmpl.TemplateId, approval!.TemplateId);
+        Assert.False(approval.HasWriteback);
         Assert.Equal(AgentStateDb.AutoRuleStatus.Pending, approval.Status);
         Assert.Equal(0, approval.ShadowRuns);
+    }
+
+    [Fact]
+    public void Emit_Writeback_PersistsApprovalSafetyFlag()
+    {
+        var gen = new TemplateRuleGenerator(_db, _rulesRoot, NullLogger<TemplateRuleGenerator>.Instance);
+        var tmpl = BuildTemplate(writeback: true);
+
+        gen.EmitTemplateRule(tmpl);
+
+        var ruleId = $"auto.learned.{tmpl.TemplateId[..12]}";
+        Assert.True(_db.GetAutoRuleApproval(ruleId)!.HasWriteback);
     }
 
     [Fact]

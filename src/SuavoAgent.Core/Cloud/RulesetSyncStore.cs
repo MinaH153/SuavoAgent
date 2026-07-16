@@ -79,7 +79,7 @@ public sealed class RulesetSyncStore
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "RulesetSyncStore: InitializeAsync failed at {Dir}", _directory);
+            _logger?.LogSafeWarning(ex);
         }
     }
 
@@ -103,7 +103,7 @@ public sealed class RulesetSyncStore
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {
-            _logger?.LogWarning(ex, "RulesetSyncStore: TryLoadCurrent failed at {Path}", CurrentPath);
+            _logger?.LogSafeWarning(ex);
             return null;
         }
     }
@@ -212,7 +212,7 @@ public sealed class RulesetSyncStore
             catch (Exception ex)
                 when (ex is IOException or UnauthorizedAccessException or FileNotFoundException)
             {
-                _logger?.LogWarning(ex, "RulesetSyncStore: orphan-temp delete failed for {Path}", path);
+                _logger?.LogSafeWarning(ex);
             }
         }
         if (deleted > 0)

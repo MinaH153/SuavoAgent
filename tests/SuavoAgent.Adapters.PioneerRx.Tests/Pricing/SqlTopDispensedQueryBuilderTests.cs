@@ -1,3 +1,5 @@
+using System.Data;
+using Microsoft.Data.SqlClient;
 using SuavoAgent.Adapters.PioneerRx.Pricing;
 using SuavoAgent.Contracts.Pricing;
 using Xunit;
@@ -26,7 +28,10 @@ public class SqlTopDispensedQueryBuilderTests
         RxOtcColumn: "RxOtcType",
         RxValue: "Rx",
         ScheduleColumn: "DeaSchedule",
-        NoScheduleValue: "0");
+        NoScheduleValue: "0",
+        BrandGenericColumnShape: TextShape("nvarchar", 24),
+        RxOtcColumnShape: TextShape("varchar", 12),
+        ScheduleColumnShape: new PricingSqlColumnShape("tinyint", 1, 3, 0, false));
 
     [Fact]
     public void Build_encodes_Nadims_full_recipe()
@@ -56,15 +61,47 @@ public class SqlTopDispensedQueryBuilderTests
     }
 
     [Fact]
-    public void Build_omits_optional_gates_when_columns_unresolved()
+    public void Build_fails_closed_when_rx_gate_column_is_unresolved()
     {
-        var spec = FullSpec() with { RxOtcColumn = null, ScheduleColumn = null };
-        var sql = SqlTopDispensedQueryBuilder.BuildTopDispensedQuery(spec, Dispensed);
+        var spec = FullSpec() with { RxOtcColumn = null };
 
-        Assert.NotNull(sql);
-        Assert.Contains("it.[BrandGeneric] = @generic", sql!); // generics gate always present
-        Assert.DoesNotContain("@rxOtc", sql);
-        Assert.DoesNotContain("@noSchedule", sql);
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlTopDispensedQueryBuilder.BuildTopDispensedQuery(spec, Dispensed));
+
+        Assert.Equal(SqlTopDispensedQueryBuilder.RxFilterUnresolvedCode, error.Message);
+    }
+
+    [Fact]
+    public void Build_fails_closed_when_rx_gate_value_is_unresolved()
+    {
+        var spec = FullSpec() with { RxValue = "" };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlTopDispensedQueryBuilder.BuildTopDispensedQuery(spec, Dispensed));
+
+        Assert.Equal(SqlTopDispensedQueryBuilder.RxFilterUnresolvedCode, error.Message);
+    }
+
+    [Fact]
+    public void Build_fails_closed_when_schedule_gate_column_is_unresolved()
+    {
+        var spec = FullSpec() with { ScheduleColumn = null };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlTopDispensedQueryBuilder.BuildTopDispensedQuery(spec, Dispensed));
+
+        Assert.Equal(SqlTopDispensedQueryBuilder.ScheduleFilterUnresolvedCode, error.Message);
+    }
+
+    [Fact]
+    public void Build_fails_closed_when_schedule_gate_value_is_unresolved()
+    {
+        var spec = FullSpec() with { NoScheduleValue = " " };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlTopDispensedQueryBuilder.BuildTopDispensedQuery(spec, Dispensed));
+
+        Assert.Equal(SqlTopDispensedQueryBuilder.ScheduleFilterUnresolvedCode, error.Message);
     }
 
     [Fact]
@@ -95,4 +132,43 @@ public class SqlTopDispensedQueryBuilderTests
         var spec = FullSpec() with { NdcColumnInItem = "" };
         Assert.Null(SqlTopDispensedQueryBuilder.BuildTopDispensedQuery(spec, Dispensed));
     }
+
+    [Fact]
+    public void Build_rejects_bit_classification_column_without_typed_mapping()
+    {
+        var spec = FullSpec() with
+        {
+            RxOtcColumnShape = new PricingSqlColumnShape("bit", 1, 1, 0, false),
+        };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlTopDispensedQueryBuilder.BuildTopDispensedQuery(spec, Dispensed));
+
+        Assert.Equal(SqlTopDispensedQueryBuilder.FilterTypeUnresolvedCode, error.Message);
+    }
+
+    [Fact]
+    public void BindParameters_UsesExactNvarcharVarcharAndIntegerTypes()
+    {
+        using var command = new SqlCommand();
+
+        SqlTopDispensedGenerator.BindParameters(
+            command,
+            FullSpec(),
+            500,
+            new DateTime(2026, 1, 1),
+            Dispensed);
+
+        Assert.Equal(SqlDbType.NVarChar, command.Parameters["@generic"].SqlDbType);
+        Assert.Equal(24, command.Parameters["@generic"].Size);
+        Assert.Equal(SqlDbType.VarChar, command.Parameters["@rxOtc"].SqlDbType);
+        Assert.Equal(12, command.Parameters["@rxOtc"].Size);
+        Assert.Equal(SqlDbType.TinyInt, command.Parameters["@noSchedule"].SqlDbType);
+        Assert.IsType<byte>(command.Parameters["@noSchedule"].Value);
+        Assert.Equal(SqlDbType.NVarChar, command.Parameters["@tdstatus0"].SqlDbType);
+        Assert.Equal(128, command.Parameters["@tdstatus0"].Size);
+    }
+
+    private static PricingSqlColumnShape TextShape(string type, int characters) =>
+        new(type, type.StartsWith('n') ? characters * 2 : characters, null, null, false);
 }

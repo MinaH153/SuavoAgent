@@ -1,6 +1,5 @@
 using System.Net;
 using System.Text;
-using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Core.Cloud;
@@ -13,18 +12,10 @@ namespace SuavoAgent.Core.Tests.Cloud;
 public sealed class AgentCredentialRecoveryTests
 {
     [Fact]
-    public async Task RecoverAsync_RotatesCloudKeyAndPersistsItWithoutLeakingTheRawKey()
+    public async Task RecoverAsync_RequiresApprovedDeviceRepairWithoutCallingPublicRecovery()
     {
-        var appSettingsPath = Path.Combine(Path.GetTempPath(), $"suavo_agent_recover_{Guid.NewGuid():N}.json");
-        await File.WriteAllTextAsync(appSettingsPath, """
-            {
-              "Agent": {
-                "AgentId": "2a492d97-9b8c-4217-a5b1-142f8fa36602",
-                "ApiKey": "stale-key",
-                "MachineFingerprint": "fp-test"
-              }
-            }
-            """);
+        var store = new InMemoryCredentialStore();
+        store.Set(CredentialKeys.AuthKey, "sagent_stale_key");
         var handler = new CapturingHandler(new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(
@@ -33,44 +24,28 @@ public sealed class AgentCredentialRecoveryTests
                 "application/json"),
         });
 
-        try
-        {
-            var client = new AgentCredentialRecoveryClient(
-                new AgentOptions
-                {
-                    CloudUrl = "https://suavollc.com",
-                    AgentId = "2a492d97-9b8c-4217-a5b1-142f8fa36602",
-                    MachineFingerprint = "fp-test",
-                },
-                appSettingsPath,
-                NullLogger<AgentCredentialRecoveryClient>.Instance,
-                handler);
+        var client = new AgentCredentialRecoveryClient(
+            new AgentOptions
+            {
+                CloudUrl = "https://suavollc.com",
+                AgentId = "2a492d97-9b8c-4217-a5b1-142f8fa36602",
+                MachineFingerprint = "fp-test",
+            },
+            store,
+            NullLogger<AgentCredentialRecoveryClient>.Instance,
+            handler);
 
-            var result = await client.TryRecoverAsync(CancellationToken.None);
+        var result = await client.TryRecoverAsync(CancellationToken.None);
 
-            Assert.True(result.Success);
-            Assert.Equal("key_rotated", result.Outcome);
-            Assert.Equal("/api/agent/recover-key", handler.RequestPath);
-            Assert.DoesNotContain("sagent_new_secret_key", result.ToString(), StringComparison.Ordinal);
-
-            using var requestDoc = JsonDocument.Parse(handler.RequestBody!);
-            Assert.Equal("2a492d97-9b8c-4217-a5b1-142f8fa36602",
-                requestDoc.RootElement.GetProperty("agentId").GetString());
-            Assert.Equal("fp-test", requestDoc.RootElement.GetProperty("machineFingerprint").GetString());
-
-            using var savedDoc = JsonDocument.Parse(await File.ReadAllTextAsync(appSettingsPath));
-            Assert.Equal(
-                "sagent_new_secret_key",
-                savedDoc.RootElement.GetProperty("Agent").GetProperty("ApiKey").GetString());
-        }
-        finally
-        {
-            try { File.Delete(appSettingsPath); } catch { }
-        }
+        Assert.False(result.Success);
+        Assert.Equal("device_repair_required", result.Outcome);
+        Assert.False(result.RestartRequired);
+        Assert.Equal(0, handler.Calls);
+        Assert.Equal("sagent_stale_key", store.Get(CredentialKeys.AuthKey));
     }
 
     [Fact]
-    public async Task RecoverAsync_RejectsNonUuidAgentIdBeforeCallingCloud()
+    public async Task RecoverAsync_RequiresDeviceRepairEvenForLegacyAgentIdentity()
     {
         var handler = new CapturingHandler(new HttpResponseMessage(HttpStatusCode.OK));
         var client = new AgentCredentialRecoveryClient(
@@ -80,23 +55,20 @@ public sealed class AgentCredentialRecoveryTests
                 AgentId = "agent-friendly-id",
                 MachineFingerprint = "fp-test",
             },
-            Path.Combine(Path.GetTempPath(), $"suavo_agent_recover_{Guid.NewGuid():N}.json"),
+            new InMemoryCredentialStore(),
             NullLogger<AgentCredentialRecoveryClient>.Instance,
             handler);
 
         var result = await client.TryRecoverAsync(CancellationToken.None);
 
         Assert.False(result.Success);
-        Assert.Equal("agent_id_not_recoverable", result.Outcome);
+        Assert.Equal("device_repair_required", result.Outcome);
         Assert.Equal(0, handler.Calls);
     }
 
     [Fact]
-    public async Task RecoverAsync_ReturnsConfigWriteFailureInsteadOfGenericRecoveryException()
+    public async Task RecoverAsync_NeverTouchesCredentialStore()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"suavo_agent_recover_dir_{Guid.NewGuid():N}");
-        var appSettingsPath = Path.Combine(root, "appsettings.json");
-        Directory.CreateDirectory(appSettingsPath);
         var handler = new CapturingHandler(new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(
@@ -105,30 +77,23 @@ public sealed class AgentCredentialRecoveryTests
                 "application/json"),
         });
 
-        try
-        {
-            var client = new AgentCredentialRecoveryClient(
-                new AgentOptions
-                {
-                    CloudUrl = "https://suavollc.com",
-                    AgentId = "2a492d97-9b8c-4217-a5b1-142f8fa36602",
-                    MachineFingerprint = "fp-test",
-                },
-                appSettingsPath,
-                NullLogger<AgentCredentialRecoveryClient>.Instance,
-                handler);
+        var client = new AgentCredentialRecoveryClient(
+            new AgentOptions
+            {
+                CloudUrl = "https://suavollc.com",
+                AgentId = "2a492d97-9b8c-4217-a5b1-142f8fa36602",
+                MachineFingerprint = "fp-test",
+            },
+            new FailingCredentialStore(),
+            NullLogger<AgentCredentialRecoveryClient>.Instance,
+            handler);
 
-            var result = await client.TryRecoverAsync(CancellationToken.None);
+        var result = await client.TryRecoverAsync(CancellationToken.None);
 
-            Assert.False(result.Success);
-            Assert.Equal("appsettings_write_failed", result.Outcome);
-            Assert.Equal(1, handler.Calls);
-            Assert.DoesNotContain("sagent_new_secret_key", result.ToString(), StringComparison.Ordinal);
-        }
-        finally
-        {
-            try { Directory.Delete(root, recursive: true); } catch { }
-        }
+        Assert.False(result.Success);
+        Assert.Equal("device_repair_required", result.Outcome);
+        Assert.Equal(0, handler.Calls);
+        Assert.DoesNotContain("sagent_new_secret_key", result.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -246,5 +211,14 @@ public sealed class AgentCredentialRecoveryTests
         {
             StopCalls++;
         }
+    }
+
+    private sealed class FailingCredentialStore : IEncryptedCredentialStore
+    {
+        public string? Get(string key) => null;
+        public void Set(string key, string value) => throw new IOException("write denied");
+        public void SetMany(IReadOnlyDictionary<string, string> values) => throw new IOException("write denied");
+        public void Delete(string key) => throw new IOException("write denied");
+        public void DeleteMany(IReadOnlyCollection<string> keys) => throw new IOException("write denied");
     }
 }

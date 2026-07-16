@@ -24,7 +24,7 @@
 "Zero. The delivery service is how we make money. The software is free — it just makes our drivers show up at the right time."
 
 **"What about HIPAA?"**
-"Great question. We're a Business Associate — we sign a BAA. The software is HIPAA compliant, encrypted, and has been through a full security audit. It never captures patient names, SSNs, or any personal information. We can walk through the compliance docs whenever you're ready."
+"Great question. We sign a BAA and designed SuavoAgent for HIPAA-regulated pharmacy workflows with minimum-necessary access, encryption, and audit controls. Most observation and learning stays on the pharmacy workstation; any authorized PHI transfer is purpose-limited and audited. We can walk through the current evidence and open readiness items with you."
 
 **"I need to think about it"**
 "Of course. Can I drop off a one-pager and the compliance docs? That way you have everything in front of you. I'll follow up [day] — what time works best?"

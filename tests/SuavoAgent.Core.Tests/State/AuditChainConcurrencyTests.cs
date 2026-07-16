@@ -28,7 +28,7 @@ public class AuditChainConcurrencyTests : IDisposable
     }
 
     [Fact]
-    public void ConcurrentAppends_ProduceVerifiableChain()
+    public async Task ConcurrentAppends_ProduceVerifiableChain()
     {
         const int writerCount = 16;
         const int writesPerWriter = 25;
@@ -54,7 +54,7 @@ public class AuditChainConcurrencyTests : IDisposable
         }
 
         startGate.Set();
-        Task.WaitAll(tasks.ToArray());
+        await Task.WhenAll(tasks);
 
         Assert.Equal(writerCount * writesPerWriter, _db.GetAuditEntryCount());
         Assert.True(_db.VerifyAuditChain(),
@@ -62,7 +62,7 @@ public class AuditChainConcurrencyTests : IDisposable
     }
 
     [Fact]
-    public void ConcurrentAppends_AllReturnUniqueHashes()
+    public async Task ConcurrentAppends_AllReturnUniqueHashes()
     {
         const int writerCount = 8;
         const int writesPerWriter = 10;
@@ -90,7 +90,7 @@ public class AuditChainConcurrencyTests : IDisposable
         }
 
         startGate.Set();
-        Task.WaitAll(tasks.ToArray());
+        await Task.WhenAll(tasks);
 
         Assert.Equal(writerCount * writesPerWriter, hashes.Count);
         // Even with identical payloads (same task-id pattern), every entry's hash
@@ -100,7 +100,7 @@ public class AuditChainConcurrencyTests : IDisposable
     }
 
     [Fact]
-    public void VerifyAuditChain_DuringConcurrentWrites_NeverFalseFails()
+    public async Task VerifyAuditChain_DuringConcurrentWrites_NeverFalseFails()
     {
         // Codex CRITICAL: VerifyAuditChain runs unlocked on the shared connection
         // while writers mutate the chain. The verifier must never observe a
@@ -148,7 +148,7 @@ public class AuditChainConcurrencyTests : IDisposable
         }
 
         startGate.Set();
-        Task.WaitAll(tasks.ToArray());
+        await Task.WhenAll(tasks);
 
         Assert.Equal(0, verifierFailures);
     }

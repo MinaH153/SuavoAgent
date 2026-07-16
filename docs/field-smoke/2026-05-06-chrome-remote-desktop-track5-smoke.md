@@ -1,5 +1,10 @@
 # Chrome Remote Desktop Track 5 Smoke - 2026-05-06
 
+> **ARCHIVED / DO NOT USE — historical field evidence only.** This report records
+> what existed on the Windows box on 2026-05-06, including retired script and
+> terminal paths. Do not repeat those steps on a customer workstation. Use
+> `docs/sales/windows-agent-lifecycle.md` and the current release gate.
+
 Scope: real Windows workstation reached through Chrome Remote Desktop. No PHI
 screens, secrets, patient records, or PioneerRx mutations were opened during
 this pass.

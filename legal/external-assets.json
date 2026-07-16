@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "id": "pharmacist-panda",
+      "kind": "embedded-artwork",
+      "path": "src/SuavoAgent.Helper/Assets/pharmacist-panda-v2.png",
+      "sha256": "3ec67eef55a7f106d4c4afb171b056b0f639898cca01c4e873fc72c417e54128",
+      "license": "MKM proprietary; OpenAI-generated original asset",
+      "provenance": "src/SuavoAgent.Helper/Assets/README.md",
+      "requiredForBaseRelease": true,
+      "releaseEligible": true
+    },
+    {
+      "id": "qwen3-1.7b-q4-k-m",
+      "kind": "brain-model",
+      "upstream": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF",
+      "license": "Apache-2.0",
+      "sourceRevision": "e8e713d99f327fd01e47f1992a910a9e4cacf312",
+      "artifactUpstream": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF",
+      "artifactRevision": "e8e713d99f327fd01e47f1992a910a9e4cacf312",
+      "artifactPath": "Qwen3-1.7B-Q4_K_M.gguf",
+      "artifactUrl": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/e8e713d99f327fd01e47f1992a910a9e4cacf312/Qwen3-1.7B-Q4_K_M.gguf",
+      "artifactSha256": "228fb5627f7510b8b3516cdb6435e4b0d2a2bf330fe5b0ab19284a3570a8bb1f",
+      "artifactSizeBytes": 1107408544,
+      "licenseBundleSha256": "8f10c66b475de2809a92847d38807c34f137f0cf2135a27bea64142595681bc3",
+      "provenanceEvidence": {
+        "path": "legal/evidence/qwen3-1.7b-q4-k-m.json",
+        "sha256": "d87c6787d03efed60a4e9fd5720c7629281d566191bd03accdf72286f8414db6"
+      },
+      "distributionMode": "official-upstream-lfs",
+      "licenseFiles": [
+        {
+          "path": "legal/license-texts/Apache-2.0.txt",
+          "sha256": "8f10c66b475de2809a92847d38807c34f137f0cf2135a27bea64142595681bc3",
+          "source": "SPDX Apache-2.0 license text"
+        }
+      ],
+      "requiredForBaseRelease": true,
+      "releaseEligible": true
+    },
+    {
+      "id": "llamasharp-backend-cpu-0.24.0",
+      "kind": "brain-native-runtime",
+      "upstream": "https://github.com/SciSharp/LLamaSharp",
+      "license": "MIT",
+      "sourceRevision": "ce8eeb4c3d6937defc1dc38aaac4ad8bd282e8a5",
+      "llamaCppRevision": "ceda28ef8e310a8dee60bf275077a3eedae8e36c",
+      "artifactUpstream": "https://api.nuget.org/v3-flatcontainer/llamasharp.backend.cpu/0.24.0/llamasharp.backend.cpu.0.24.0.nupkg",
+      "artifactRevision": "ce8eeb4c3d6937defc1dc38aaac4ad8bd282e8a5",
+      "artifactPath": "llamasharp.backend.cpu.0.24.0.nupkg",
+      "artifactUrl": "https://api.nuget.org/v3-flatcontainer/llamasharp.backend.cpu/0.24.0/llamasharp.backend.cpu.0.24.0.nupkg",
+      "artifactSha256": "47120fed200482ab364b9d225271172ccbf2ac7713ad388e4e7fe7d89fdedb0a",
+      "artifactSizeBytes": 21485108,
+      "licenseBundleSha256": "25f33fe9230ca2392c6c9d08511b60e157b47558d2152081e6212eef795b9c3c",
+      "provenanceEvidence": {
+        "path": "legal/evidence/llamasharp-backend-cpu-0.24.0.json",
+        "sha256": "20ea8ca8f86ab83d6f44ccc5bf96dadacd492f637429264279ccdffc3af3ba6f"
+      },
+      "distributionMode": "nuget-repository-signed",
+      "licenseFiles": [
+        {
+          "path": "legal/package-license-texts/SciSharp-LLamaSharp-0.24.0-LICENSE.txt",
+          "sha256": "52e74038a69e948314106225360faee6159dae61f96a3a76fd0f3c2c3066c4f4",
+          "source": "https://raw.githubusercontent.com/SciSharp/LLamaSharp/ce8eeb4c3d6937defc1dc38aaac4ad8bd282e8a5/LICENSE",
+          "sourceRevision": "ce8eeb4c3d6937defc1dc38aaac4ad8bd282e8a5"
+        },
+        {
+          "path": "legal/license-texts/llama.cpp-0.24.0-MIT.txt",
+          "sha256": "e562a2ddfaf8280537795ac5ecd34e3012b6582a147ef69ba6a6a5c08c84757d",
+          "source": "https://raw.githubusercontent.com/ggml-org/llama.cpp/ceda28ef8e310a8dee60bf275077a3eedae8e36c/LICENSE",
+          "sourceRevision": "ceda28ef8e310a8dee60bf275077a3eedae8e36c"
+        }
+      ],
+      "requiredForBaseRelease": true,
+      "releaseEligible": true
+    },
+    {
+      "id": "tesseract-native-5.2.0-eng",
+      "kind": "optional-ocr-native-runtime",
+      "upstream": "https://github.com/charlesw/tesseract",
+      "license": "Apache-2.0 AND BSD-2-Clause",
+      "sourceRevision": "2c993543f7fa66576a8890a6c4ab053c4598aaed",
+      "artifactUpstream": "https://api.nuget.org/v3-flatcontainer/tesseract/5.2.0/tesseract.5.2.0.nupkg",
+      "artifactRevision": "2c993543f7fa66576a8890a6c4ab053c4598aaed",
+      "artifactPath": "tesseract.5.2.0.nupkg",
+      "artifactUrl": "https://api.nuget.org/v3-flatcontainer/tesseract/5.2.0/tesseract.5.2.0.nupkg",
+      "artifactSha256": "202d82fc7c7d8384df7da57206d5e1f456ccdabd648c46e67cdfaa3a911d4795",
+      "artifactSizeBytes": 5697774,
+      "licenseBundleSha256": "e3ad0717ba98848ddb6fb4b7b12bcb54b64640dd561eed6a84620e7ac4c122fb",
+      "provenanceEvidence": {
+        "path": "legal/evidence/tesseract-native-5.2.0-eng.json",
+        "sha256": "69c4bcdf07af270373868bb8728916c404d7a444a4dc07a85d89ccd6ebc005c1"
+      },
+      "distributionMode": "nuget-repository-signed-plus-pinned-upstream-data",
+      "runtimeFiles": [
+        {
+          "path": "x64/leptonica-1.82.0.dll",
+          "sha256": "dfcb3e6ed0b16bc55bfdbcf53543cfe42a354b87c3e35bd3a95eebf005d73e76",
+          "sizeBytes": 4168192
+        },
+        {
+          "path": "x64/tesseract50.dll",
+          "sha256": "de4d04ec75095374d98f5dd7a60d14d7e2e0f76589db693eccf7ae658be8cb2b",
+          "sizeBytes": 2788352
+        },
+        {
+          "path": "tessdata/eng.traineddata",
+          "sourceRevision": "65727574dfcd264acbb0c3e07860e4e9e9b22185",
+          "sourceUrl": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/65727574dfcd264acbb0c3e07860e4e9e9b22185/eng.traineddata",
+          "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+          "sizeBytes": 4113088
+        }
+      ],
+      "licenseFiles": [
+        {
+          "path": "legal/package-license-texts/Tesseract-5.2.0-LICENSE.txt",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source": "https://raw.githubusercontent.com/charlesw/tesseract/2c993543f7fa66576a8890a6c4ab053c4598aaed/LICENSE.txt",
+          "sourceRevision": "2c993543f7fa66576a8890a6c4ab053c4598aaed"
+        },
+        {
+          "path": "legal/license-texts/Leptonica-BSD-2-Clause.txt",
+          "sha256": "4d3065116f182e29760af0c901d5dbb2e1e16c42765dfc24e69b26805e2acb1e",
+          "source": "https://raw.githubusercontent.com/DanBloomberg/leptonica/f4138265b390f1921b9891d6669674d3157887d8/leptonica-license.txt",
+          "sourceRevision": "f4138265b390f1921b9891d6669674d3157887d8"
+        }
+      ],
+      "requiredForBaseRelease": true,
+      "releaseEligible": true
+    }
+  ]
+}

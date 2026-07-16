@@ -38,7 +38,7 @@ public sealed class MockCloudReasoning : ICloudReasoning
             Action = new RuleActionSpec { Type = type, Parameters = dict },
             Confidence = confidence,
             ModelId = "mock-cloud",
-            Rationale = "test-cloud",
+            RationaleCode = InferenceRationaleCode.TargetPresent,
             LatencyMs = 42,
         });
     }

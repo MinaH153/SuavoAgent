@@ -9,10 +9,33 @@ public sealed class AgentOptions
     public string? AgentId { get; set; }
     public string? PharmacyId { get; set; }
     public string? MachineFingerprint { get; set; }
+    /// <summary>
+    /// Exact versioned TPM key enrolled for this install. During install
+    /// probation it may still be the local pending slot; after health cutover
+    /// the same key becomes the active slot without changing this identity.
+    /// </summary>
+    public string? DeviceAttestationKeyName { get; set; }
+    public string? DeviceAttestationKeyId { get; set; }
+    /// <summary>Public ID of the SYSTEM-only TPM maintenance authority. Core cannot sign with it.</summary>
+    public string? MaintenanceAttestationKeyId { get; set; }
     public int HeartbeatIntervalSeconds { get; set; } = 30;
     public int HeartbeatJitterSeconds { get; set; } = 5;
     public string? WatchdogRepairRequestPath { get; set; }
+    /// <summary>
+    /// Test/deployment override for the authenticated Core-to-Broker self-uninstall handoff.
+    /// Production leaves this unset and uses ProgramData\SuavoAgent\uninstall.request.
+    /// </summary>
+    public string? SelfUninstallRequestPath { get; set; }
     public string Version { get; set; } = "3.9.2";
+    /// <summary>
+    /// Runtime-only nonce for a staged install credential. It is loaded from
+    /// the DPAPI store, never from appsettings or cloud config, and binds local
+    /// readiness evidence to this exact install probation transaction.
+    /// </summary>
+    public string? InstallProvisioningId { get; set; }
+    /// <summary>Runtime-only pending pairing proof fields; never appsettings.</summary>
+    public string? InstallDeviceCode { get; set; }
+    public string? InstallDeviceChallenge { get; set; }
     public string UpdateChannel { get; set; } = "stable";
     public string? SqlServer { get; set; }
     public string? SqlDatabase { get; set; }
@@ -20,16 +43,23 @@ public sealed class AgentOptions
     public string? SqlPassword { get; set; }
 
     /// <summary>
-    /// When true, SQL connections accept a self-signed/internal server certificate (Encrypt
-    /// stays ON — only chain validation is skipped). Defaults TRUE because PioneerRx is always
-    /// deployed as a LOCAL SQL Server instance with a self-signed cert (no CA chain to validate),
-    /// so the prior false default made the agent unable to connect to ANY real pharmacy DB
-    /// ("certificate chain ... not trusted"). The residual LAN-MITM concern is covered by the
-    /// RequiredTables anti-impostor check (the agent proves it reached PioneerRx's actual schema,
-    /// not a LAN impostor). Operators on a CA-issued SQL cert can set this false via the
-    /// Agent.SqlTrustServerCertificate cloud override.
+    /// Legacy compatibility setting. Production SQL activation rejects <c>true</c>: encryption must
+    /// validate the server certificate chain and hostname. A schema fingerprint is not authentication.
     /// </summary>
-    public bool SqlTrustServerCertificate { get; set; } = true;
+    public bool SqlTrustServerCertificate { get; set; } = false;
+
+    /// <summary>
+    /// Lowercase SHA-256 of the exact SQL Server public certificate RawData. For self-signed
+    /// PioneerRx deployments this value must also be bound into the active, dual-signed local
+    /// PioneerRx approval receipt. Remote config cannot change it.
+    /// </summary>
+    public string? SqlServerCertificateSha256 { get; set; }
+
+    /// <summary>
+    /// Runtime-only fixed ProgramData path after certificate bytes, ACLs, workstation approval,
+    /// authority counter, and digest have all been verified. Configuration cannot set this field.
+    /// </summary>
+    internal string? ValidatedSqlServerCertificatePath { get; set; }
 
     /// <summary>
     /// Per-agent HMAC salt for hashing PHI (Rx numbers, etc.) in audit logs and cloud sync.
@@ -49,34 +79,21 @@ public sealed class AgentOptions
     public int MaxDetectionBatchSize { get; set; } = 100;
 
     /// <summary>
-    /// Opt-in gate for the legacy <c>rxDeliveryQueue</c> shape on the sync
-    /// payload. Default false. Track 2 field proof uses
-    /// <c>rxOrderCandidates</c> exclusively; this shape exists only for
-    /// legacy cloud routes that haven't migrated yet.
-    /// <para>
-    /// Track 3 invariant (Codex CRITICAL #15, closed 2026-05-12): even when
-    /// this is <c>true</c>, the queue ships ONLY operational metadata —
-    /// hashed Rx number, drug name, NDC, fill date, quantity, status GUID,
-    /// detection timestamp. Patient name / phone / address are intentionally
-    /// excluded by <c>RxDetectionWorker.SerializeRxBatch</c>; they flow
-    /// exclusively through the typed signed-command path
-    /// <c>SuavoCloudClient.SendPatientDetailsAsync</c>.
-    /// </para>
+    /// Retained only so old signed configuration documents still deserialize. The legacy
+    /// <c>rxDeliveryQueue</c> wire shape has been permanently removed: setting this value cannot
+    /// enable it, and <c>/api/agent/sync</c> never receives a PHI exemption.
     /// </summary>
     public bool EnableLegacyPhiDeliveryQueueSync { get; set; } = false;
 
     /// <summary>
     /// Fail-closed gate for outbound patient-detail PHI egress
-    /// (<c>SuavoCloudClient.SendPatientDetailsAsync</c> →
+    /// (<c>SuavoCloudClient.SendApprovedPatientDetailsAsync</c> →
     /// <c>/api/agent/patient-details</c>). Default <c>false</c>.
     /// <para>
-    /// Closed 2026-06-04 (precedence-1): the cloud
-    /// <c>/api/agent/patient-details</c> route does NOT exist in the canonical
-    /// tree and <c>OutboundPhiGuard</c> unconditionally exempts the path, so an
-    /// enabled egress shipped unscrubbed PHI (driver name/address) over the wire
-    /// to a 404 — leaking into edge/proxy logs. Until the audited route + typed
-    /// positive-allowlist contract + <c>phi_egress_audit</c> land (plan Stage A1),
-    /// this stays <c>false</c> and the agent never POSTs patient PHI.
+    /// The only caller is the typed, signed-command-driven closed loop. Generic
+    /// <c>PostSignedAsync</c> calls receive no path exemption and cannot use this flag to
+    /// bypass the outbound PHI guard. Enable only after the audited cloud route and
+    /// staging migration are deployed together.
     /// </para>
     /// </summary>
     public bool EnableAuditedPatientDetailsEgress { get; set; } = false;
@@ -197,6 +214,13 @@ public sealed class AgentOptions
     /// pharmacy via the Agent.PricingExecutor cloud override once the pharmacy has authorized SQL access.
     /// </summary>
     public PricingExecutorMode PricingExecutor { get; set; } = PricingExecutorMode.UiaFirst;
+
+    /// <summary>
+    /// Explicit tenant pharmacist-in-charge approval for the exact pricing policy digest. Default
+    /// denied. A schema, status policy, modality, cost-basis, tenant, role, or expiry change blocks
+    /// pricing until a new signed configuration approval is installed.
+    /// </summary>
+    public PricingCostBasisApprovalOptions PricingCostBasisApproval { get; set; } = new();
 
     /// <summary>
     /// M3 autonomy: master enable for UNSUPERVISED execution of EARNED tasks. OFF by default
@@ -332,6 +356,23 @@ public sealed class AgentOptions
     }
 }
 
+public sealed class PricingCostBasisApprovalOptions
+{
+    /// <summary>Legacy field retained only for strict backwards deserialization. It grants no authority.</summary>
+    public bool Approved { get; set; } = false;
+    public int SchemaVersion { get; set; }
+    public string ApprovalId { get; set; } = "";
+    public string PharmacyId { get; set; } = "";
+    public string ApproverId { get; set; } = "";
+    public string ApprovedByRole { get; set; } = "";
+    public string CostBasis { get; set; } = "";
+    public string PolicyDigest { get; set; } = "";
+    public DateTimeOffset IssuedAtUtc { get; set; } = DateTimeOffset.MinValue;
+    public DateTimeOffset ExpiresAtUtc { get; set; } = DateTimeOffset.MinValue;
+    public string KeyId { get; set; } = "";
+    public string Signature { get; set; } = "";
+}
+
 public enum PricingExecutorMode
 {
     /// <summary>SQL-first, fail-closed (default). See <c>AgentOptions.PricingExecutor</c>.</summary>
@@ -340,7 +381,7 @@ public enum PricingExecutorMode
     UiaFirst,
     /// <summary>Vision-first via Helper: reads the Pricing grid BY SIGHT (screen capture + on-device
     /// OCR) with a UIA exact-verify so a misread never writes a wrong cost. Drives the screen exactly
-    /// like <see cref="UiaFirst"/>; the sighted read activates when vision.json enables it on the box.</summary>
+    /// like <see cref="UiaFirst"/>; the sighted read activates when protected registry state enables it on the box.</summary>
     VisionFirst,
 }
 

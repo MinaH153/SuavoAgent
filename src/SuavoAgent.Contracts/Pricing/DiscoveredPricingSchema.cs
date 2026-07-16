@@ -20,7 +20,11 @@ public sealed record DiscoveredPricingSchema(
     string? StatusColumn,
     IReadOnlyList<string> AvailableStatusValues,
     double ConfidenceScore,
-    IReadOnlyList<string> DiagnosticNotes);
+    IReadOnlyList<string> DiagnosticNotes,
+    PricingSqlColumnShape? CostColumnShape = null,
+    PricingSqlColumnShape? CostPerUnitColumnShape = null,
+    PricingSqlColumnShape? NdcColumnShape = null,
+    PricingSqlColumnShape? StatusColumnShape = null);
 
 /// <summary>
 /// Describes how to get from the catalog row to an NDC when the catalog table doesn't carry NDC
@@ -31,7 +35,8 @@ public sealed record CatalogItemJoin(
     string ItemTable,
     string ItemIdColumnInCatalog,
     string ItemIdColumnInItem,
-    string NdcColumnInItem);
+    string NdcColumnInItem,
+    PricingSqlColumnShape? NdcColumnShape = null);
 
 /// <summary>
 /// Describes how to resolve the supplier display name. Two shapes observed in the field:
@@ -64,6 +69,21 @@ public sealed record InventoryColumnInfo(
     string TableName,
     string ColumnName,
     string DataType,
+    bool IsNullable,
+    int? MaxLength = null,
+    int? Precision = null,
+    int? Scale = null);
+
+/// <summary>
+/// Exact SQL Server column shape observed from sys.columns. max_length is SQL Server's byte count
+/// (therefore two bytes per nchar/nvarchar character); -1 means MAX and is rejected for pricing
+/// identity/filter parameters.
+/// </summary>
+public sealed record PricingSqlColumnShape(
+    string DataType,
+    int? MaxLength,
+    int? Precision,
+    int? Scale,
     bool IsNullable);
 
 /// <summary>Entry-point result shape for PricingSchemaDiscovery.</summary>

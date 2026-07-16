@@ -51,10 +51,10 @@ public sealed class WindowsGlowRenderer : IGlowRenderer, IDisposable
             ShowWindow(_hwnd, SW_HIDE);
             foreach (var cmd in _commands.GetConsumingEnumerable())
             {
-                try { cmd(); } catch (Exception ex) { _logger.Debug(ex, "glow cmd failed"); }
+                try { cmd(); } catch (Exception ex) { _logger.Debug("glow cmd failed ({ExceptionType})", ex.GetType().Name); }
             }
         }
-        catch (Exception ex) { _logger.Warning(ex, "glow renderer loop ended"); }
+        catch (Exception ex) { _logger.Warning("glow renderer loop ended ({ExceptionType})", ex.GetType().Name); }
         finally { ReleaseBitmap(); if (_hwnd != IntPtr.Zero) DestroyWindow(_hwnd); }
     }
 

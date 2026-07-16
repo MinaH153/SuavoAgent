@@ -50,6 +50,17 @@ public enum RuleActionType
 }
 
 /// <summary>
+/// One PHI-negative structural UIA identity plus its complete observed state.
+/// State bits MSB to LSB: enabled, visible, keyboard-focusable,
+/// has-keyboard-focus, control-element, content-element, password,
+/// required-for-form. Missing UIA truth is represented by absence, never by a
+/// fabricated zero byte.
+/// </summary>
+public sealed record StructuralElementObservation(
+    ElementSignature Signature,
+    byte StateByte);
+
+/// <summary>
 /// The preconditions that must hold for a rule to fire.
 /// Every field is optional; omitted fields don't constrain the match.
 /// </summary>
@@ -224,6 +235,12 @@ public sealed record RuleContext
         new Dictionary<string, string>();
 
     /// <summary>
+    /// Local-model-only prior-action transcript. Never serialized into the
+    /// cloud structural state or its hash.
+    /// </summary>
+    public string? LocalReasoningTranscript { get; init; }
+
+    /// <summary>
     /// Structural UIA fingerprints captured alongside <see cref="VisibleElements"/>.
     /// Populated by the caller from live UIA before Evaluate is called; used by
     /// the rule engine's fingerprint gate (see
@@ -231,6 +248,20 @@ public sealed record RuleContext
     /// </summary>
     public IReadOnlyList<ElementSignature> ElementFingerprints { get; init; } =
         Array.Empty<ElementSignature>();
+
+    /// <summary>
+    /// Bounded, deterministically selected state-bearing UIA identities for
+    /// cloud reasoning. These are structural only; human-visible labels remain
+    /// local.
+    /// </summary>
+    public IReadOnlyList<StructuralElementObservation> StructuralElementStates
+        { get; init; } = Array.Empty<StructuralElementObservation>();
+
+    /// <summary>
+    /// True only when the producer verified process identity and complete UIA
+    /// state for every structurally identified source element.
+    /// </summary>
+    public bool CloudStructuralStateEligible { get; init; }
 
     /// <summary>
     /// PHI-scrubbed OCR text regions from the current screen (from a captured

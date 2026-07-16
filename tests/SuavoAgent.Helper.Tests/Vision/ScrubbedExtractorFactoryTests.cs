@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Options;
 using Serilog;
+using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Vision;
 using SuavoAgent.Helper.Vision;
 using Xunit;
 
@@ -17,7 +19,7 @@ public class ScrubbedExtractorFactoryTests
         // Returned type is PhiScrubbingExtractor (internal). We can only check
         // behavior via the public interface.
         Assert.Equal("null", extractor.ExtractorId);
-        Assert.True(extractor.IsReady);
+        Assert.False(extractor.IsReady);
     }
 
     [Fact]
@@ -36,7 +38,7 @@ public class ScrubbedExtractorFactoryTests
     }
 
     [Fact]
-    public void Create_TesseractEnabledButMissingPath_FallsBackToNull()
+    public void Create_TesseractEnabledButMissingPath_FailsClosed()
     {
         var opts = Options.Create(new AgentOptions
         {
@@ -51,12 +53,13 @@ public class ScrubbedExtractorFactoryTests
             },
         });
 
-        var extractor = ScrubbedExtractorFactory.Create(opts, Log);
-        Assert.Equal("null", extractor.ExtractorId);
+        var error = Assert.Throws<VisionRuntimeUnavailableException>(() =>
+            ScrubbedExtractorFactory.Create(opts, Log));
+        Assert.Equal(VisionRuntimeCodes.OcrCohortVerificationFailed, error.Code);
     }
 
     [Fact]
-    public void Create_TesseractEnabledWithTrainedData_SelectsTesseract()
+    public void Create_TesseractEnabledWithUnapprovedNativeCohort_FailsClosed()
     {
         // Fake the minimum filesystem state Tesseract needs to be "reachable":
         // a directory containing {lang}.traineddata.
@@ -80,8 +83,10 @@ public class ScrubbedExtractorFactoryTests
                 },
             });
 
-            var extractor = ScrubbedExtractorFactory.Create(opts, Log);
-            Assert.Equal("tesseract-eng", extractor.ExtractorId);
+            var error = Assert.Throws<VisionRuntimeUnavailableException>(() =>
+                ScrubbedExtractorFactory.Create(opts, Log));
+            Assert.Equal(VisionRuntimeCodes.OcrCohortVerificationFailed, error.Code);
+            Assert.True(TesseractNativeCohortPolicy.HasReleaseApprovedCohorts);
         }
         finally
         {
@@ -90,7 +95,7 @@ public class ScrubbedExtractorFactoryTests
     }
 
     [Fact]
-    public void Create_TesseractWrongLanguage_FallsBackToNull()
+    public void Create_TesseractWrongLanguage_FailsClosed()
     {
         var dir = Path.Combine(Path.GetTempPath(),
             "suavo-fact-test-" + Guid.NewGuid().ToString("N"));
@@ -112,8 +117,9 @@ public class ScrubbedExtractorFactoryTests
                 },
             });
 
-            var extractor = ScrubbedExtractorFactory.Create(opts, Log);
-            Assert.Equal("null", extractor.ExtractorId);
+            var error = Assert.Throws<VisionRuntimeUnavailableException>(() =>
+                ScrubbedExtractorFactory.Create(opts, Log));
+            Assert.Equal(VisionRuntimeCodes.OcrCohortVerificationFailed, error.Code);
         }
         finally
         {

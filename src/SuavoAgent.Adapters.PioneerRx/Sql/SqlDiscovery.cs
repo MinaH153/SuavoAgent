@@ -64,13 +64,13 @@ public static class SqlDiscovery
                 return null;
             }
             var responseStr = Encoding.ASCII.GetString(result.Buffer, 3, result.Buffer.Length - 3);
-            logger.LogDebug("SQL Browser response from {Ip}: {Response}", targetIp, responseStr);
+            logger.LogDebug("SQL Browser returned a bounded discovery response");
 
             return ParseBrowserResponse(responseStr);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            logger.LogDebug("SQL Browser probe failed for {Ip}: {Error}", targetIp, ex.Message);
+            logger.LogDebug("SQL Browser probe failed");
             return null;
         }
     }

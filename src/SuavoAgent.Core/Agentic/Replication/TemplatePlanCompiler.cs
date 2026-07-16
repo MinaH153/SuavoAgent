@@ -59,8 +59,8 @@ public static class TemplatePlanCompiler
         NextAction? action = step.Kind switch
         {
             TemplateStepKind.Click => NextAction.Act(ClickBySignatureVerb, SignatureParams(step.Target, processName), "replay:click"),
-            TemplateStepKind.Type => NextAction.Act(TypeIntoFieldVerb, TypeParams(step.Hint), "replay:type"),
-            TemplateStepKind.PressKey => NextAction.Act(PressKeysVerb, PressParams(step.Hint), "replay:key"),
+            TemplateStepKind.Type => NextAction.Act(TypeIntoFieldVerb, TypeParams(step.Hint, processName), "replay:type"),
+            TemplateStepKind.PressKey => NextAction.Act(PressKeysVerb, PressParams(step.Hint, processName), "replay:key"),
             _ => null, // WaitForElement / VerifyElement are perceive-and-assert checks, not actuation
         };
 
@@ -91,9 +91,26 @@ public static class TemplatePlanCompiler
 
     // Type carries only a whitelisted placeholder token (resolved to a non-PHI value at execution),
     // never plaintext — the extractor guarantees this and the compiler must not invent text.
-    private static IReadOnlyDictionary<string, object?> TypeParams(KeyHint? hint) =>
-        new Dictionary<string, object?> { ["placeholder"] = hint?.Placeholder?.ToString() };
+    private static IReadOnlyDictionary<string, object?> TypeParams(KeyHint? hint, string? processName)
+    {
+        var parameters = new Dictionary<string, object?>
+        {
+            ["placeholder"] = hint?.Placeholder?.ToString(),
+        };
+        AddProcess(parameters, processName);
+        return parameters;
+    }
 
-    private static IReadOnlyDictionary<string, object?> PressParams(KeyHint? hint) =>
-        new Dictionary<string, object?> { ["chords"] = hint?.KeyName };
+    private static IReadOnlyDictionary<string, object?> PressParams(KeyHint? hint, string? processName)
+    {
+        var parameters = new Dictionary<string, object?> { ["chords"] = hint?.KeyName };
+        AddProcess(parameters, processName);
+        return parameters;
+    }
+
+    private static void AddProcess(IDictionary<string, object?> parameters, string? processName)
+    {
+        if (!string.IsNullOrWhiteSpace(processName))
+            parameters["process_name"] = processName;
+    }
 }

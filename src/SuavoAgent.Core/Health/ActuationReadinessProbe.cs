@@ -118,7 +118,7 @@ public sealed class ActuationReadinessProbe
             {
                 // Unknown failure: report not-ready (fail-closed) but do NOT count it toward
                 // the self-heal streak — restarting the Helper must never thrash on a Core bug.
-                _logger.LogWarning(ex, "Actuation readiness probe failed unexpectedly");
+                _logger.LogSafeWarning(ex);
                 snapshot = ConclusiveFailure(
                     prev, now, CodeProbeError,
                     "Actuation probe errored — readiness unknown, reported not-ready", strandClass: false);
@@ -147,7 +147,8 @@ public sealed class ActuationReadinessProbe
                 LastConclusiveCheckAtUtc: now,
                 LastProbeAttemptAtUtc: now,
                 SkippedReason: null,
-                ConsecutiveStrandFailures: 0);
+                ConsecutiveStrandFailures: 0,
+                VisionRuntime: result.Info?.VisionRuntime);
         }
 
         if (result.Code == HelperPreflightCodes.NotInteractive)
@@ -166,7 +167,8 @@ public sealed class ActuationReadinessProbe
                 LastConclusiveCheckAtUtc: now,
                 LastProbeAttemptAtUtc: now,
                 SkippedReason: null,
-                ConsecutiveStrandFailures: 0);
+                ConsecutiveStrandFailures: 0,
+                VisionRuntime: result.Info?.VisionRuntime);
         }
 
         var strandClass = result.Code is HelperPreflightCodes.PingUnanswered
@@ -189,7 +191,8 @@ public sealed class ActuationReadinessProbe
             LastConclusiveCheckAtUtc: now,
             LastProbeAttemptAtUtc: now,
             SkippedReason: null,
-            ConsecutiveStrandFailures: strandClass ? (prev?.ConsecutiveStrandFailures ?? 0) + 1 : 0);
+            ConsecutiveStrandFailures: strandClass ? (prev?.ConsecutiveStrandFailures ?? 0) + 1 : 0,
+            VisionRuntime: null);
 
     private static ActuationReadinessSnapshot Skip(
         ActuationReadinessSnapshot? prev, DateTimeOffset now, string skipReason) =>
@@ -206,7 +209,8 @@ public sealed class ActuationReadinessProbe
                 LastConclusiveCheckAtUtc: null,
                 LastProbeAttemptAtUtc: now,
                 SkippedReason: skipReason,
-                ConsecutiveStrandFailures: 0)
+                ConsecutiveStrandFailures: 0,
+                VisionRuntime: null)
             // Both skip reasons (SkipPipeBusy / SkipProbeTimeoutBusy) mean the pipe is BUSY — i.e.
             // a live round-trip is holding it, so it is demonstrably WORKING. Reset the strand streak
             // (same rationale the conclusive path uses): carrying it through busy skips lets the

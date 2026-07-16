@@ -30,7 +30,20 @@ public class VisionExactReconcilerTests
         var d = R.Reconcile(new R.Reading("Parmed", 6.60m, 0.9), new R.Reading("McKesson", 0.0099m, 1.0));
 
         Assert.False(d.Accept);
-        Assert.Contains("mismatch", d.RejectReason!);
+        Assert.Equal("vision_exact_mismatch", d.RejectReason);
+    }
+
+    [Fact]
+    public void Mismatch_reason_never_echoes_untrusted_screen_text()
+    {
+        var d = R.Reconcile(
+            new R.Reading("Patient John Doe", 6.60m, 0.9),
+            new R.Reading("McKesson", 0.0099m, 1.0));
+
+        Assert.False(d.Accept);
+        Assert.Equal("vision_exact_mismatch", d.RejectReason);
+        Assert.DoesNotContain("John", d.RejectReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("McKesson", d.RejectReason, StringComparison.Ordinal);
     }
 
     [Fact]

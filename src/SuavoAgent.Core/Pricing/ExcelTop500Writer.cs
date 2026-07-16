@@ -30,7 +30,8 @@ public sealed class ExcelTop500Writer
         try
         {
             using var wb = new XLWorkbook();
-            var ws = wb.Worksheets.Add("Top Dispensed");
+            // Must remain inside the native workbook policy's approved sheet-name contract.
+            var ws = wb.Worksheets.Add("Top 500");
 
             ws.Cell(1, 1).Value = DrugHeader;
             ws.Cell(1, 2).Value = StrengthHeader;
@@ -57,8 +58,61 @@ public sealed class ExcelTop500Writer
         }
         catch (Exception ex)
         {
-            _logger.LogError("ExcelTop500Writer failed ({ErrorType})", ex.GetType().Name);
+            _logger.LogError(
+                "core.excel_top500_writer.failed exception_type={ExceptionType}",
+                ex.GetType().Name);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Publishes a new generated input in one same-directory move. Existing command output is
+    /// never overwritten; recovery must validate and reuse it instead of silently replacing it.
+    /// </summary>
+    public bool WriteAtomically(string path, IReadOnlyList<TopDispensedRow> rows)
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(directory)) return false;
+        var tempPath = Path.Combine(
+            directory,
+            $".{Path.GetFileNameWithoutExtension(path)}.{Guid.NewGuid():N}.tmp.xlsx");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            if (File.Exists(path)) return false;
+            if (!Write(tempPath, rows)) return false;
+            using (var stream = new FileStream(
+                       tempPath,
+                       FileMode.Open,
+                       FileAccess.Write,
+                       FileShare.None,
+                       bufferSize: 4096,
+                       FileOptions.WriteThrough))
+            {
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(tempPath, path, overwrite: false);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                "core.excel_top500_writer.atomic_publish_failed exception_type={ExceptionType}",
+                exception.GetType().Name);
+            return false;
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tempPath)) File.Delete(tempPath);
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(
+                    "core.excel_top500_writer.temp_cleanup_failed exception_type={ExceptionType}",
+                    exception.GetType().Name);
+            }
         }
     }
 }

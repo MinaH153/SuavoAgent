@@ -1,16 +1,21 @@
 using System.Reflection;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SuavoAgent.Contracts.Ipc;
+using SuavoAgent.Contracts.Maintenance;
 using SuavoAgent.Contracts.Pricing;
+using SuavoAgent.Contracts.Security;
 using SuavoAgent.Core.Behavioral;
 using SuavoAgent.Core.Cloud;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.Autonomy;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.Pricing;
@@ -25,36 +30,87 @@ namespace SuavoAgent.Core.Tests.Workers;
 /// and feedback command handling. Uses reflection to invoke ProcessSignedCommandAsync
 /// since HeartbeatWorker's handlers are private.
 /// </summary>
-public class HeartbeatWorkerTests : IDisposable
+public partial class HeartbeatWorkerTests : IDisposable
 {
     private readonly string _dbPath;
     private readonly string _repairRequestPath;
+    private readonly string _observationDirectory;
     private readonly AgentStateDb _db;
     private readonly HeartbeatWorker _worker;
     private readonly FakeIntentCursorClient _intentCursorClient = new();
     private readonly FakePricingJobExecutor _pricingJobExecutor = new();
+    private readonly FakeHeartbeatIpcCommandClient _ipcCommandClient = new();
+    private readonly FakeTopDispensedWorklistBuilder _worklistBuilder = new();
+    private readonly AutopilotRunCoordinator _autopilotRuns = new();
+    private readonly PricingTerminalAckOutbox _pricingTerminalAckOutbox;
     private readonly ECDsa _signingKey;
+    private readonly ObservationActivationAuthority _observationAuthority;
+    private readonly MutableObservationTimeProvider _observationClock;
     private readonly string _pubKeyDer;
     private readonly MethodInfo _processMethod;
     private readonly MethodInfo _runPricingMethod;
-    private const string TestAgentId = "agent-hb-test";
+    private const string TestAgentId = "11111111-1111-4111-8111-111111111111";
     private const string TestFingerprint = "fp-hb-test";
-    private const string TestPharmacyId = "pharm-hb-test";
+    private const string TestPharmacyId = "22222222-2222-4222-8222-222222222222";
     private const string TestKeyId = "suavo-cmd-v1";
 
     public HeartbeatWorkerTests()
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"suavo_hb_{Guid.NewGuid():N}.db");
         _repairRequestPath = Path.Combine(Path.GetTempPath(), $"suavo_watchdog_repair_{Guid.NewGuid():N}.json");
+        _observationDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"suavo_hb_observation_{Guid.NewGuid():N}");
         _db = new AgentStateDb(_dbPath);
 
         _signingKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         _pubKeyDer = Convert.ToBase64String(_signingKey.ExportSubjectPublicKeyInfo());
 
+        Directory.CreateDirectory(_observationDirectory);
+        var observationIdentity = new ObservationActivationIdentity(
+            TestAgentId,
+            TestAgentId,
+            TestPharmacyId,
+            TestFingerprint,
+            new string('a', 64),
+            "pharmacy-field-rc",
+            ObservationActivationIdentityStore.PolicyDigest);
+        _observationClock = new MutableObservationTimeProvider(
+            DateTimeOffset.UtcNow);
+        var observationStatePath = Path.Combine(_observationDirectory, "current.json");
+        var observationHighWaterPath = Path.Combine(_observationDirectory, "highwater.json");
+        var observationControlPath = Path.Combine(
+            _observationDirectory,
+            ObservationControlStateStore.FileName);
+        Assert.True(ObservationControlStateStore.TryInitialize(
+            observationControlPath,
+            observationIdentity,
+            _observationClock.GetUtcNow()));
+        _observationAuthority = new ObservationActivationAuthority(
+            observationStatePath,
+            observationHighWaterPath,
+            observationIdentity,
+            new Dictionary<string, string> { [TestKeyId] = _pubKeyDer },
+            _observationClock,
+            observationControlPath);
+        Assert.True(_observationAuthority.TryInstall(
+            SignedObservationState(observationIdentity)).Succeeded);
+
         var services = new ServiceCollection();
         services.AddSingleton(_db);
         services.AddSingleton<IIntentCursorClient>(_intentCursorClient);
         services.AddSingleton<IPricingJobExecutor>(_pricingJobExecutor);
+        services.AddSingleton<IIpcCommandClient>(_ipcCommandClient);
+        services.AddSingleton<ITopDispensedWorklistBuilder>(_worklistBuilder);
+        services.AddSingleton(_autopilotRuns);
+        services.AddSingleton(_observationAuthority);
+        _pricingTerminalAckOutbox = new PricingTerminalAckOutbox(
+            _db,
+            (_, _, _, _, _) => Task.FromResult(true),
+            NullLogger<PricingTerminalAckOutbox>.Instance,
+            new Dictionary<string, string> { [TestKeyId] = _pubKeyDer });
+        services.AddSingleton(_pricingTerminalAckOutbox);
+        services.AddSingleton<IActivePmsAdapterRegistry>(new FakePomRegistry());
         services.AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
         var sp = services.BuildServiceProvider();
@@ -95,6 +151,7 @@ public class HeartbeatWorkerTests : IDisposable
         _db.Dispose();
         try { File.Delete(_dbPath); } catch { }
         try { File.Delete(_repairRequestPath); } catch { }
+        try { Directory.Delete(_observationDirectory, recursive: true); } catch { }
     }
 
     // ── Helpers ──
@@ -110,14 +167,84 @@ public class HeartbeatWorkerTests : IDisposable
         return new SignedCommand(command, TestAgentId, TestFingerprint, ts, nonce, TestKeyId, sig, dataHash);
     }
 
+    private ObservationActivationState SignedObservationState(
+        ObservationActivationIdentity identity)
+    {
+        var issuedAt = _observationClock.GetUtcNow().AddSeconds(-1);
+        var data = new ObservationActivationLeaseData(
+            1,
+            "33333333-3333-4333-8333-333333333333",
+            "44444444-4444-4444-8444-444444444444",
+            new string('b', 64),
+            identity.PharmacyId,
+            identity.WorkstationId,
+            identity.DeviceKeyId,
+            identity.ReleaseCohort,
+            1,
+            identity.PolicyDigest,
+            issuedAt,
+            issuedAt,
+            issuedAt.AddSeconds(120),
+            "55555555-5555-4555-8555-555555555555");
+        var dataJson = JsonSerializer.Serialize(data, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        });
+        var dataHash = RemoteCommandTrust.ComputeSha256Hex(dataJson);
+        var timestamp = issuedAt.ToString("O");
+        var nonce = "66666666-6666-4666-8666-666666666666";
+        var canonical = RemoteCommandTrust.BuildCommandCanonical(
+            ObservationActivationAuthority.CommandName,
+            identity.AgentId,
+            identity.MachineFingerprint,
+            timestamp,
+            nonce,
+            dataHash);
+        var signature = Convert.ToBase64String(_signingKey.SignData(
+            Encoding.UTF8.GetBytes(canonical),
+            HashAlgorithmName.SHA256,
+            DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
+        return new ObservationActivationState(1, new ObservationActivationSignedLease(
+            ObservationActivationAuthority.CommandName,
+            identity.AgentId,
+            identity.MachineFingerprint,
+            timestamp,
+            nonce,
+            TestKeyId,
+            signature,
+            dataHash,
+            dataJson));
+    }
+
+    private sealed class MutableObservationTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now = now;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        internal void Advance(TimeSpan interval) => _now += interval;
+    }
+
     /// <summary>
     /// Builds a heartbeat response JSON containing a signedCommand envelope
     /// in the shape the worker expects: { data: { signedCommand: { ... } } }
     /// </summary>
     private JsonElement BuildResponseJson(string command, object? data = null)
     {
-        var cmd = Sign(command, data != null ? JsonSerializer.Serialize(data) : null);
-        return BuildResponseJson(cmd, data);
+        var boundData = BindLiveCommandExpiry(command, data);
+        var cmd = Sign(command, boundData != null ? JsonSerializer.Serialize(boundData) : null);
+        return BuildResponseJson(cmd, boundData);
+    }
+
+    private static object? BindLiveCommandExpiry(string command, object? data)
+    {
+        if (!SignedCommandVerifier.RequiresLiveExpiry(command))
+            return data;
+        var payload = JsonSerializer.SerializeToNode(data ?? new { })?.AsObject()
+            ?? new JsonObject();
+        if (!payload.ContainsKey("expiresAt"))
+            payload["expiresAt"] = DateTimeOffset.UtcNow.AddMinutes(4).ToString("o");
+        return payload;
     }
 
     private static JsonElement BuildResponseJson(SignedCommand cmd, object? data = null)
@@ -150,1402 +277,68 @@ public class HeartbeatWorkerTests : IDisposable
 
     private async Task InvokeRunPricingAsync(JsonElement signedCommand)
     {
+        RegisterPricingCommandForDirectInvocation(
+            _pricingTerminalAckOutbox,
+            signedCommand);
         var task = (Task)_runPricingMethod.Invoke(_worker, new object[] { signedCommand, CancellationToken.None })!;
         await task;
     }
 
-    // ── Nonce Replay Protection (DB Layer) ──
-
-    [Fact]
-    public void DbNonce_FirstUse_Succeeds()
+    private static void RegisterPricingCommandForDirectInvocation(
+        PricingTerminalAckOutbox outbox,
+        JsonElement signedCommand)
     {
-        Assert.True(_db.TryRecordNonce("nonce-fresh-1"));
+        var data = signedCommand.GetProperty("data");
+        var commandId = data.TryGetProperty("commandId", out var commandIdElement)
+            ? commandIdElement.GetString()
+            : null;
+        if (!PricingTerminalAck.IsCanonicalCommandId(commandId))
+            return;
+
+        var dataHash = SignedCommandVerifier.ComputeDataHash(data.GetRawText());
+        var expiresAt = data.TryGetProperty("expiresAt", out var expiresAtElement) &&
+            expiresAtElement.ValueKind == JsonValueKind.String
+                ? expiresAtElement.GetString()
+                : null;
+        var approvalId = data.TryGetProperty("approvalId", out var approvalIdElement) &&
+            approvalIdElement.ValueKind == JsonValueKind.String
+                ? approvalIdElement.GetString()
+                : null;
+        var grantDigest = data.TryGetProperty("grantDigest", out var grantDigestElement) &&
+            grantDigestElement.ValueKind == JsonValueKind.String
+                ? grantDigestElement.GetString()
+                : null;
+        var command = new SignedCommand(
+            signedCommand.GetProperty("command").GetString() ?? string.Empty,
+            signedCommand.GetProperty("agentId").GetString() ?? string.Empty,
+            signedCommand.GetProperty("machineFingerprint").GetString() ?? string.Empty,
+            signedCommand.GetProperty("timestamp").GetString() ?? string.Empty,
+            signedCommand.GetProperty("nonce").GetString() ?? string.Empty,
+            signedCommand.GetProperty("keyId").GetString() ?? string.Empty,
+            signedCommand.GetProperty("signature").GetString() ?? string.Empty,
+            dataHash,
+            expiresAt);
+        Assert.True(outbox.TryRegisterVerifiedCommand(
+            command,
+            commandId!,
+            command.Command,
+            approvalId,
+            grantDigest));
     }
 
-    [Fact]
-    public void DbNonce_DuplicateUse_Fails()
-    {
-        _db.TryRecordNonce("nonce-dup-1");
-        Assert.False(_db.TryRecordNonce("nonce-dup-1"));
-    }
-
-    [Fact]
-    public void DbNonce_PruneThenReuse_Succeeds()
-    {
-        _db.TryRecordNonce("nonce-prune-1");
-        // Prune with zero window removes everything
-        _db.PruneOldNonces(TimeSpan.Zero);
-        Assert.True(_db.TryRecordNonce("nonce-prune-1"));
-    }
-
-    [Fact]
-    public async Task ProcessCommand_InvalidSignature_DoesNotPersistNonce()
-    {
-        var cmd = Sign("unknown_command");
-        var tampered = cmd with { Signature = Convert.ToBase64String(new byte[64]) };
-
-        await InvokeProcessAsync(BuildResponseJson(tampered));
-        await InvokeProcessAsync(BuildResponseJson(cmd));
-
-        Assert.False(_db.TryRecordNonce(cmd.Nonce));
-    }
-
-    // ── Command Dispatch: approve_pom ──
-
-    [Fact]
-    public async Task ApprovePom_ValidDigest_ApprovesSession()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        // Move through phases: discovery -> pattern -> model
-        _db.UpdateLearningPhase(sessionId, "pattern");
-        _db.UpdateLearningPhase(sessionId, "model");
-
-        var pomJson = """{"processes":[],"schemas":[],"queries":[]}""";
-        _db.StorePomSnapshot(sessionId, pomJson);
-
-        var digest = PomExporter.ComputeDigest(TestPharmacyId, sessionId, pomJson);
-
-        var response = BuildResponseJson("approve_pom", new
+    private static string FrozenPom(string sessionId, string templateDigest) =>
+        JsonSerializer.Serialize(new
         {
             sessionId,
-            approvedModelDigest = digest,
-            approvedBy = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        var session = _db.GetLearningSession(sessionId);
-        Assert.NotNull(session);
-        Assert.Equal("approved", session.Value.Phase);
-        Assert.Equal("supervised", session.Value.Mode);
-        Assert.Equal(digest, session.Value.ApprovedModelDigest);
-    }
-
-    [Fact]
-    public async Task ApprovePom_MismatchedDigest_Rejects()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-        _db.UpdateLearningPhase(sessionId, "pattern");
-        _db.UpdateLearningPhase(sessionId, "model");
-
-        var pomJson = """{"processes":[],"schemas":[],"queries":[]}""";
-        _db.StorePomSnapshot(sessionId, pomJson);
-
-        var response = BuildResponseJson("approve_pom", new
-        {
-            sessionId,
-            approvedModelDigest = "deadbeef00000000000000000000000000000000000000000000000000000000",
-            approvedBy = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        var session = _db.GetLearningSession(sessionId);
-        Assert.NotNull(session);
-        Assert.Equal("model", session.Value.Phase); // Unchanged
-        Assert.Null(session.Value.ApprovedModelDigest);
-    }
-
-    [Fact]
-    public async Task ApprovePom_MissingSession_NoOp()
-    {
-        var response = BuildResponseJson("approve_pom", new
-        {
-            sessionId = "nonexistent-session",
-            approvedModelDigest = "abc123",
-            approvedBy = "operator-1"
-        });
-
-        // Should not throw
-        await InvokeProcessAsync(response);
-    }
-
-    // ── Command Dispatch: force_learning_phase (test-only hook, M1 gate live testing) ──
-
-    [Fact]
-    public async Task ForceLearningPhase_Enabled_AdvancesDiscoveryToPattern()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-        Assert.Equal("discovery", _db.GetLearningSession(sessionId)!.Value.Phase);
-
-        var response = BuildResponseJson("force_learning_phase", new
-        {
-            commandId = "cmd-flp-1",
-            targetPhase = "pattern",
-            sessionId,
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Equal("pattern", _db.GetLearningSession(sessionId)!.Value.Phase);
-    }
-
-    [Fact]
-    public async Task ForceLearningPhase_NoSessionId_ResolvesActiveSession()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var response = BuildResponseJson("force_learning_phase", new
-        {
-            commandId = "cmd-flp-2",
-            targetPhase = "pattern",
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Equal("pattern", _db.GetLearningSession(sessionId)!.Value.Phase);
-    }
-
-    [Fact]
-    public async Task ForceLearningPhase_HookDisabled_NoOp()
-    {
-        // Flip the test-hook flag OFF on the worker under test.
-        var optsField = typeof(HeartbeatWorker)
-            .GetField("_options", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        var opts = (AgentOptions)optsField.GetValue(_worker)!;
-        opts.TestHooks.Enabled = false;
-
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var response = BuildResponseJson("force_learning_phase", new
-        {
-            commandId = "cmd-flp-3",
-            targetPhase = "pattern",
-            sessionId,
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Equal("discovery", _db.GetLearningSession(sessionId)!.Value.Phase); // unchanged
-    }
-
-    [Fact]
-    public async Task ForceLearningPhase_InvalidTransition_NoOp()
-    {
-        // discovery -> model is a two-step jump; UpdateLearningPhase only allows single-step.
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var response = BuildResponseJson("force_learning_phase", new
-        {
-            commandId = "cmd-flp-4",
-            targetPhase = "model",
-            sessionId,
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Equal("discovery", _db.GetLearningSession(sessionId)!.Value.Phase); // unchanged
-    }
-
-    [Fact]
-    public async Task ForceLearningPhase_ApprovedPhase_NotForceable()
-    {
-        // The hook must never reach the approval-gated phases — that would bypass approve_pom.
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-        _db.UpdateLearningPhase(sessionId, "pattern");
-        _db.UpdateLearningPhase(sessionId, "model"); // legitimately at 'model'
-
-        var response = BuildResponseJson("force_learning_phase", new
-        {
-            commandId = "cmd-flp-approved",
-            targetPhase = "approved",
-            sessionId,
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Equal("model", _db.GetLearningSession(sessionId)!.Value.Phase); // unchanged — refused
-        Assert.Null(_db.GetLearningSession(sessionId)!.Value.ApprovedModelDigest);
-    }
-
-    [Fact]
-    public async Task ForceLearningPhase_NoActiveSession_NoThrow()
-    {
-        var response = BuildResponseJson("force_learning_phase", new
-        {
-            commandId = "cmd-flp-5",
-            targetPhase = "pattern",
-        });
-
-        // No session exists for the pharmacy — must not throw, must be a no-op.
-        await InvokeProcessAsync(response);
-    }
-
-    [Fact]
-    public async Task ApprovePom_NoPomSnapshot_Rejects()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-        _db.UpdateLearningPhase(sessionId, "pattern");
-        _db.UpdateLearningPhase(sessionId, "model");
-        // No POM snapshot stored
-
-        var response = BuildResponseJson("approve_pom", new
-        {
-            sessionId,
-            approvedModelDigest = "someDigest",
-            approvedBy = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        var session = _db.GetLearningSession(sessionId);
-        Assert.NotNull(session);
-        Assert.Equal("model", session.Value.Phase); // Unchanged
-    }
-
-    // ── Command Dispatch: Feedback Commands ──
-
-    [Fact]
-    public async Task ApproveCandidate_InsertsFeedbackEvent_WithPromoteDirective()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var correlationKey = "corr-key-approve-1";
-        var response = BuildResponseJson("approve_candidate", new
-        {
-            correlationKey
-        });
-
-        await InvokeProcessAsync(response);
-
-        var events = _db.GetPendingFeedbackEvents(sessionId);
-        Assert.Single(events);
-        Assert.Equal(DirectiveType.Promote, events[0].DirectiveType);
-        Assert.Equal("operator_command", events[0].EventType);
-        Assert.Equal("operator", events[0].Source);
-        Assert.Equal("correlation_key", events[0].TargetType);
-        Assert.Equal(correlationKey, events[0].TargetId);
-    }
-
-    [Fact]
-    public async Task RejectCandidate_InsertsFeedbackEvent_WithDemoteDirective()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var correlationKey = "corr-key-reject-1";
-        var response = BuildResponseJson("reject_candidate", new
-        {
-            correlationKey
-        });
-
-        await InvokeProcessAsync(response);
-
-        var events = _db.GetPendingFeedbackEvents(sessionId);
-        Assert.Single(events);
-        Assert.Equal(DirectiveType.Demote, events[0].DirectiveType);
-        Assert.Equal(correlationKey, events[0].TargetId);
-    }
-
-    [Fact]
-    public async Task ReapproveCandidate_InsertsFeedbackEvent_WithPromoteDirective()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var correlationKey = "corr-key-reapprove-1";
-        var response = BuildResponseJson("reapprove_candidate", new
-        {
-            correlationKey
-        });
-
-        await InvokeProcessAsync(response);
-
-        var events = _db.GetPendingFeedbackEvents(sessionId);
-        Assert.Single(events);
-        Assert.Equal(DirectiveType.Promote, events[0].DirectiveType);
-    }
-
-    [Fact]
-    public async Task ForceRelearn_InsertsFeedbackEvent_WithReLearnDirective()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var correlationKey = "corr-key-relearn-1";
-        var response = BuildResponseJson("force_relearn", new
-        {
-            correlationKey
-        });
-
-        await InvokeProcessAsync(response);
-
-        var events = _db.GetPendingFeedbackEvents(sessionId);
-        Assert.Single(events);
-        Assert.Equal(DirectiveType.ReLearn, events[0].DirectiveType);
-    }
-
-    [Fact]
-    public async Task AdjustWindow_InsertsFeedbackEvent_WithRecalibrateDirective()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var correlationKey = "corr-key-window-1";
-        var response = BuildResponseJson("adjust_window", new
-        {
-            correlationKey,
-            windowSeconds = 5.0
-        });
-
-        await InvokeProcessAsync(response);
-
-        var events = _db.GetPendingFeedbackEvents(sessionId);
-        Assert.Single(events);
-        Assert.Equal(DirectiveType.Recalibrate, events[0].DirectiveType);
-    }
-
-    [Fact]
-    public async Task AcknowledgeStale_InsertsFeedbackEvent_WithPruneDirective()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var correlationKey = "corr-key-stale-1";
-        var response = BuildResponseJson("acknowledge_stale", new
-        {
-            correlationKey
-        });
-
-        await InvokeProcessAsync(response);
-
-        var events = _db.GetPendingFeedbackEvents(sessionId);
-        Assert.Single(events);
-        Assert.Equal(DirectiveType.Prune, events[0].DirectiveType);
-    }
-
-    [Fact]
-    public async Task FeedbackCommand_MissingCorrelationKey_NoOp()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        // No correlationKey in data
-        var response = BuildResponseJson("approve_candidate", new
-        {
-            somethingElse = "unrelated"
-        });
-
-        await InvokeProcessAsync(response);
-
-        var events = _db.GetPendingFeedbackEvents(sessionId);
-        Assert.Empty(events);
-    }
-
-    [Fact]
-    public async Task FeedbackCommand_NoActiveSession_NoOp()
-    {
-        // No session created — GetActiveSessionId returns null
-        var response = BuildResponseJson("approve_candidate", new
-        {
-            correlationKey = "corr-key-orphan"
-        });
-
-        await InvokeProcessAsync(response);
-        // No exception, no event inserted
-    }
-
-    [Fact]
-    public async Task FeedbackCommand_CreatesAuditEntry()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var correlationKey = "corr-key-audit-1";
-        var countBefore = _db.GetAuditEntryCount();
-
-        var response = BuildResponseJson("approve_candidate", new
-        {
-            correlationKey
-        });
-
-        await InvokeProcessAsync(response);
-
-        var countAfter = _db.GetAuditEntryCount();
-        Assert.True(countAfter > countBefore, "Audit entry should be appended for feedback commands");
-    }
-
-    [Fact]
-    public async Task RepairAgentCommand_RecordsAuditEntryEvenWhenBootstrapMissing()
-    {
-        var countBefore = _db.GetAuditEntryCount();
-
-        var response = BuildResponseJson("repair_agent", new
-        {
-            commandId = "cmd-repair-1",
-            reason = "watchdog_critical"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(_db.GetAuditEntryCount() > countBefore);
-    }
-
-    [Fact]
-    public async Task RepairCommand_CloudCommandAlias_RecordsAuditEntryEvenWhenBootstrapMissing()
-    {
-        var countBefore = _db.GetAuditEntryCount();
-
-        var response = BuildResponseJson("repair", new
-        {
-            commandId = "cmd-repair-1",
-            reason = "watchdog_critical"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(_db.GetAuditEntryCount() > countBefore);
-    }
-
-    [Fact]
-    public async Task RepairAgentCommand_QueuesWatchdogRepairRequest()
-    {
-        var response = BuildResponseJson("repair_agent", new
-        {
-            commandId = "cmd-repair-queued-1",
-            reason = "watchdog_critical"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(File.Exists(_repairRequestPath));
-        using var doc = JsonDocument.Parse(File.ReadAllText(_repairRequestPath));
-        var root = doc.RootElement;
-        Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
-        Assert.Equal("cmd-repair-queued-1", root.GetProperty("commandId").GetString());
-        Assert.Equal("watchdog_critical", root.GetProperty("reason").GetString());
-        Assert.Equal(TestAgentId, root.GetProperty("agentId").GetString());
-        Assert.Equal("signed_remote_repair", root.GetProperty("source").GetString());
-        Assert.False(string.IsNullOrWhiteSpace(root.GetProperty("requestedAt").GetString()));
-    }
-
-    [Fact]
-    public async Task RepairAgentCommand_RejectsFreeformRepairReason()
-    {
-        // Bug 20 — pre-fix, an unrecognized reason was silently re-mapped to
-        // "remote_command" and the command appeared to succeed. Now we NACK
-        // up front so the operator gets clear feedback. Watchdog-side
-        // redaction stays as defense-in-depth (see
-        // WatchdogWorkerTests.Tick_QueuedRemoteRepair_RedactsUnexpectedReasonInTelemetry).
-        if (File.Exists(_repairRequestPath)) File.Delete(_repairRequestPath);
-
-        var response = BuildResponseJson("repair_agent", new
-        {
-            commandId = "cmd-repair-rejected-1",
-            reason = "patient_john_smith"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.False(
-            File.Exists(_repairRequestPath),
-            "rejected reason must not result in a queued repair request");
-    }
-
-    [Theory]
-    [InlineData("remote_command")]
-    [InlineData("watchdog_critical")]
-    [InlineData("cloud_stale")]
-    [InlineData("install_repair")]
-    [InlineData("runtime_health_missing")]
-    [InlineData("operator_requested")]
-    public async Task RepairAgentCommand_AcceptsAllAllowedReasons(string reason)
-    {
-        if (File.Exists(_repairRequestPath)) File.Delete(_repairRequestPath);
-
-        var response = BuildResponseJson("repair_agent", new
-        {
-            commandId = $"cmd-allowed-{reason}",
-            reason
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(File.Exists(_repairRequestPath));
-        using var doc = JsonDocument.Parse(File.ReadAllText(_repairRequestPath));
-        Assert.Equal(reason, doc.RootElement.GetProperty("reason").GetString());
-    }
-
-    // ── Command Dispatch: acknowledge_drift ──
-
-    [Fact]
-    public async Task AcknowledgeDrift_ResumeSupervised_ClearsHold()
-    {
-        // Set up a canary hold
-        _db.UpsertCanaryHold(TestPharmacyId, "pioneerrx", "critical", "fp-baseline-1");
-
-        Assert.NotNull(_db.GetCanaryHold(TestPharmacyId, "pioneerrx"));
-
-        var response = BuildResponseJson("acknowledge_drift", new
-        {
-            action = "resume_supervised",
-            incidentId = "inc-001"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Null(_db.GetCanaryHold(TestPharmacyId, "pioneerrx"));
-    }
-
-    [Fact]
-    public async Task AcknowledgeDrift_ApproveNewBaseline_ClearsHold()
-    {
-        _db.UpsertCanaryHold(TestPharmacyId, "pioneerrx", "warning", "fp-baseline-2");
-
-        var response = BuildResponseJson("acknowledge_drift", new
-        {
-            action = "approve_new_baseline",
-            incidentId = "inc-002",
-            targetSchemaEpoch = 3
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Null(_db.GetCanaryHold(TestPharmacyId, "pioneerrx"));
-    }
-
-    [Fact]
-    public async Task AcknowledgeDrift_MissingAction_NoOp()
-    {
-        _db.UpsertCanaryHold(TestPharmacyId, "pioneerrx", "critical", "fp-baseline-3");
-
-        var response = BuildResponseJson("acknowledge_drift", new
-        {
-            incidentId = "inc-003"
-            // action missing
-        });
-
-        await InvokeProcessAsync(response);
-
-        // Hold should remain
-        Assert.NotNull(_db.GetCanaryHold(TestPharmacyId, "pioneerrx"));
-    }
-
-    [Fact]
-    public async Task AcknowledgeDrift_UnknownAction_DoesNotClearHold()
-    {
-        _db.UpsertCanaryHold(TestPharmacyId, "pioneerrx", "warning", "fp-baseline-4");
-
-        var response = BuildResponseJson("acknowledge_drift", new
-        {
-            action = "unknown_action",
-            incidentId = "inc-004"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.NotNull(_db.GetCanaryHold(TestPharmacyId, "pioneerrx"));
-    }
-
-    [Fact]
-    public async Task AcknowledgeDrift_CreatesAuditEntry()
-    {
-        var countBefore = _db.GetAuditEntryCount();
-
-        var response = BuildResponseJson("acknowledge_drift", new
-        {
-            action = "resume_supervised",
-            incidentId = "inc-audit"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(_db.GetAuditEntryCount() > countBefore);
-    }
-
-    // ── Command Dispatch: delivery_writeback ──
-
-    [Fact]
-    public async Task DeliveryWriteback_MissingTransition_NoOp()
-    {
-        var response = BuildResponseJson("delivery_writeback", new
-        {
-            rxNumber = 12345
-            // transition missing
-        });
-
-        // Should not throw
-        await InvokeProcessAsync(response);
-    }
-
-    [Fact]
-    public async Task DeliveryWriteback_MissingRxNumber_NoOp()
-    {
-        var response = BuildResponseJson("delivery_writeback", new
-        {
-            transition = "pickup"
-            // rxNumber missing — parser uses TryGetProperty with GetInt32, 0.ToString() = "0"
-            // Actually "0" is not empty, so it passes. But let's test missing field.
-        });
-
-        // Should not throw — the handler will get rxNumber as "0" which is non-empty
-        await InvokeProcessAsync(response);
-    }
-
-    [Fact]
-    public async Task DeliveryWriteback_CreatesAuditEntry()
-    {
-        var countBefore = _db.GetAuditEntryCount();
-
-        var response = BuildResponseJson("delivery_writeback", new
-        {
-            transition = "pickup",
-            rxNumber = 99001,
-            fillNumber = 1,
-            taskId = "wb-task-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(_db.GetAuditEntryCount() > countBefore,
-            "delivery_writeback should create an audit entry");
-    }
-
-    // ── Command Dispatch: show_intent_cursor ──
-
-    [Fact]
-    public async Task ShowIntentCursor_ValidPayload_RelaysToHelperAndAudits()
-    {
-        var before = _db.GetAuditEntryCount();
-        var response = BuildResponseJson("show_intent_cursor", new
-        {
-            x = 120.0,
-            y = 240.0,
-            durationMs = 900,
-            commandId = "cmd-cursor-1",
-            requesterId = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        var sent = Assert.Single(_intentCursorClient.Requests);
-        Assert.Equal(120.0, sent.X.GetValueOrDefault());
-        Assert.Equal(240.0, sent.Y.GetValueOrDefault());
-        Assert.Equal(900, sent.DurationMs);
-        Assert.True(_db.GetAuditEntryCount() > before);
-    }
-
-    [Fact]
-    public async Task ShowCursor_CloudCommandAlias_RelaysToHelperAndAudits()
-    {
-        var before = _db.GetAuditEntryCount();
-        var response = BuildResponseJson("show_cursor", new
-        {
-            x = 120.0,
-            y = 240.0,
-            durationMs = 900,
-            commandId = "cmd-cursor-1",
-            requesterId = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        var sent = Assert.Single(_intentCursorClient.Requests);
-        Assert.Equal(120.0, sent.X.GetValueOrDefault());
-        Assert.Equal(240.0, sent.Y.GetValueOrDefault());
-        Assert.Equal(900, sent.DurationMs);
-        Assert.True(_db.GetAuditEntryCount() > before);
-    }
-
-    [Fact]
-    public async Task ShowIntentCursor_PrimaryCenterAnchor_RelaysWithoutScreenCoordinates()
-    {
-        var response = BuildResponseJson("show_intent_cursor", new
-        {
-            anchor = "primary_center",
-            durationMs = 900,
-            commandId = "cmd-cursor-center",
-            requesterId = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        var sent = Assert.Single(_intentCursorClient.Requests);
-        Assert.Null(sent.X);
-        Assert.Null(sent.Y);
-        Assert.Equal(IntentCursorAnchors.PrimaryCenter, sent.Anchor);
-    }
-
-    [Fact]
-    public async Task ShowIntentCursor_TextBearingPayload_RejectsBeforeHelper()
-    {
-        var response = BuildResponseJson("show_intent_cursor", new
-        {
-            x = 120.0,
-            y = 240.0,
-            label = "Rx 12345",
-            commandId = "cmd-cursor-bad"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    [Fact]
-    public async Task ShowIntentCursor_GlidePayload_RelaysToHelperWithTarget()
-    {
-        // The agentic glide: x,y start + toX,toY target + easing. The PHI safety
-        // guard must ALLOW these (toX/toY are numbers; easing is a constrained
-        // enum) so the cursor can travel, not just appear. Regression guard for
-        // the v3.18.0 miss where the glide shipped but the guard rejected every
-        // toX/toY/easing payload before it reached the Helper.
-        var response = BuildResponseJson("show_cursor", new
-        {
-            x = 300.0,
-            y = 250.0,
-            toX = 1100.0,
-            toY = 680.0,
-            durationMs = 4500,
-            easing = "ease_in_out_cubic",
-            tone = "attention",
-            commandId = "cmd-glide-1",
-            requesterId = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        var sent = Assert.Single(_intentCursorClient.Requests);
-        Assert.Equal(300.0, sent.X.GetValueOrDefault());
-        Assert.Equal(1100.0, sent.ToX.GetValueOrDefault());
-        Assert.Equal(680.0, sent.ToY.GetValueOrDefault());
-        Assert.Equal("ease_in_out_cubic", sent.Easing);
-    }
-
-    [Fact]
-    public async Task ShowIntentCursor_FreeFormEasing_RejectsBeforeHelper()
-    {
-        // easing is a new string field — it must stay a closed enum so it cannot
-        // become a PHI side-channel. A free-form value is rejected before the Helper.
-        var response = BuildResponseJson("show_cursor", new
-        {
-            x = 300.0,
-            y = 250.0,
-            toX = 1100.0,
-            toY = 680.0,
-            easing = "Rx 12345 patient",
-            commandId = "cmd-glide-bad"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    [Fact]
-    public async Task ShowIntentCursor_UnknownStringPayload_RejectsBeforeHelper()
-    {
-        var response = BuildResponseJson("show_intent_cursor", new
-        {
-            x = 120.0,
-            y = 240.0,
-            note = "look at Rx 12345",
-            commandId = "cmd-cursor-unknown"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    [Fact]
-    public async Task ShowIntentCursor_UnknownAnchor_RejectsBeforeHelper()
-    {
-        var response = BuildResponseJson("show_intent_cursor", new
-        {
-            anchor = "patient_top_left",
-            commandId = "cmd-cursor-anchor"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    // ── Command Dispatch: computer-use observe/propose (synthetic, non-PHI) ──
-
-    [Fact]
-    public async Task ComputerUseObserve_SyntheticPayload_AuditsWithoutCapturingScreenshots()
-    {
-        var before = _db.GetAuditEntryCount();
-        var response = BuildResponseJson("computer_use_observe", new
-        {
-            pack = "workstation_health",
-            mode = "synthetic",
-            commandId = "cmd-cu-observe-1",
-            requesterId = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(_db.GetAuditEntryCount() > before);
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    [Fact]
-    public async Task ComputerUsePropose_SyntheticPayload_AuditsWithoutMutatingPioneerRx()
-    {
-        var before = _db.GetAuditEntryCount();
-        var response = BuildResponseJson("computer_use_propose", new
-        {
-            pack = "pioneerrx_shadow",
-            mode = "synthetic",
-            proposal = "run_diagnostics",
-            commandId = "cmd-cu-propose-1",
-            requesterId = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(_db.GetAuditEntryCount() > before);
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    [Fact]
-    public async Task ComputerUseObserve_PhiOrInputPayload_RejectsBeforeAudit()
-    {
-        var before = _db.GetAuditEntryCount();
-        var response = BuildResponseJson("computer_use_observe", new
-        {
-            pack = "workstation_health",
-            mode = "synthetic",
-            patientName = "Nadim",
-            click = true,
-            commandId = "cmd-cu-bad"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Equal(before, _db.GetAuditEntryCount());
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    [Fact]
-    public void PricingJobOperationalLogs_DoNotIncludeWorkbookPathTemplates()
-    {
-        var source = File.ReadAllText(
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
-
-        Assert.DoesNotContain("Pricing job {JobId} starting: {Path}", source);
-        Assert.DoesNotContain("auto-running pricing job {JobId} on {Path}", source);
-    }
-
-    [Fact]
-    public async Task CollectHealthProbe_PhiFreePayload_AuditsWithoutCapturingScreenshots()
-    {
-        var before = _db.GetAuditEntryCount();
-        var response = BuildResponseJson("collect_health_probe", new
-        {
-            reason = "dashboard_diagnostics",
-            commandId = "cmd-health-probe-1",
-            requesterId = "operator-1"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(_db.GetAuditEntryCount() > before);
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    [Fact]
-    public async Task CollectHealthProbe_FreeTextPayload_RejectsBeforeAudit()
-    {
-        var before = _db.GetAuditEntryCount();
-        var response = BuildResponseJson("collect_health_probe", new
-        {
-            reason = "patient Jane Doe machine froze",
-            patientName = "Jane Doe",
-            commandId = "cmd-health-probe-bad"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Equal(before, _db.GetAuditEntryCount());
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    [Fact]
-    public async Task ExportPioneerRxShadowFixture_UnsafePayload_RejectsBeforeAudit()
-    {
-        var before = _db.GetAuditEntryCount();
-        var response = BuildResponseJson("export_pioneerrx_shadow_fixture", new
-        {
-            commandId = "cmd-shadow-bad",
-            requesterId = "operator-1",
-            patientName = "Jane Doe",
-            rxNumber = "123456"
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.Equal(before, _db.GetAuditEntryCount());
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    [Fact]
-    public async Task ExportPioneerRxShadowFixture_NoSqlConnected_AuditsWithoutFixtureFile()
-    {
-        var before = _db.GetAuditEntryCount();
-        var response = BuildResponseJson("export_pioneerrx_shadow_fixture", new
-        {
-            commandId = "cmd-shadow-nosql",
-            requesterId = "operator-1",
-            maxRows = 3,
-            includeSyntheticPatientDetails = true
-        });
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(_db.GetAuditEntryCount() > before);
-        Assert.Empty(_intentCursorClient.Requests);
-    }
-
-    // ── Command Dispatch: run_pricing_job ──
-
-    [Fact]
-    public async Task RunPricingJob_UsesSqlFirstPricingExecutor()
-    {
-        var xlsx = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.xlsx");
-        await File.WriteAllTextAsync(xlsx, "placeholder");
-        try
-        {
-            var response = BuildResponseJson("run_pricing_job", new
+            pharmacyId = TestPharmacyId,
+            phase = "model",
+            learnedAdapterTemplate = new
             {
-                excelPath = xlsx,
-                ndcColumn = "NDC",
-                supplierColumn = "Supplier",
-                costColumn = "Cost (per unit)",
-                commandId = "cmd-pricing-1"
-            });
-            var sc = response.GetProperty("data").GetProperty("signedCommand");
-
-            await InvokeRunPricingAsync(sc);
-
-            var spec = Assert.Single(_pricingJobExecutor.Specs);
-            Assert.Equal(xlsx, spec.ExcelPath);
-            Assert.Equal("NDC", spec.NdcColumn);
-            Assert.Equal("Supplier", spec.SupplierColumn);
-            Assert.Equal("Cost (per unit)", spec.CostColumn);
-        }
-        finally
-        {
-            try { File.Delete(xlsx); } catch { }
-        }
-    }
-
-    [Fact]
-    public async Task RunPricingJob_DefaultsToNadimFriendlyOutputColumns()
-    {
-        var xlsx = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.xlsx");
-        await File.WriteAllTextAsync(xlsx, "placeholder");
-        try
-        {
-            var response = BuildResponseJson("run_pricing_job", new
-            {
-                excelPath = xlsx,
-                commandId = "cmd-pricing-defaults"
-            });
-            var sc = response.GetProperty("data").GetProperty("signedCommand");
-
-            await InvokeRunPricingAsync(sc);
-
-            var spec = Assert.Single(_pricingJobExecutor.Specs);
-            Assert.Equal(PricingJobDefaults.NdcColumn, spec.NdcColumn);
-            Assert.Equal(PricingJobDefaults.SupplierColumn, spec.SupplierColumn);
-            Assert.Equal(PricingJobDefaults.CostColumn, spec.CostColumn);
-        }
-        finally
-        {
-            try { File.Delete(xlsx); } catch { }
-        }
-    }
-
-    [Fact]
-    public async Task RunPricingJob_ResolvesOpaqueDiscoveryCandidateTokenLocally()
-    {
-        var xlsx = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.xlsx");
-        await File.WriteAllTextAsync(xlsx, "placeholder");
-        try
-        {
-            var token = _db.SavePricingDiscoveryCandidate(xlsx, Path.GetFileName(xlsx));
-            var response = BuildResponseJson("run_pricing_job", new
-            {
-                pricingCandidateToken = token,
-                commandId = "cmd-pricing-token"
-            });
-            var sc = response.GetProperty("data").GetProperty("signedCommand");
-
-            await InvokeRunPricingAsync(sc);
-
-            var spec = Assert.Single(_pricingJobExecutor.Specs);
-            Assert.Equal(xlsx, spec.ExcelPath);
-        }
-        finally
-        {
-            try { File.Delete(xlsx); } catch { }
-        }
-    }
-
-    [Fact]
-    public async Task RunPricingJob_RejectsUnknownDiscoveryCandidateToken()
-    {
-        var response = BuildResponseJson("run_pricing_job", new
-        {
-            pricingCandidateToken = "pdc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            commandId = "cmd-pricing-missing-token"
-        });
-        var sc = response.GetProperty("data").GetProperty("signedCommand");
-
-        await InvokeRunPricingAsync(sc);
-
-        Assert.Empty(_pricingJobExecutor.Specs);
-    }
-
-    // ── Command Dispatch: Unknown Command ──
-
-    [Fact]
-    public async Task UnknownCommand_DoesNotThrow()
-    {
-        var response = BuildResponseJson("totally_unknown_command", new
-        {
-            someData = "irrelevant"
+                sessionId,
+                templateDigest,
+                sourceIdentityDigest = new string('b', 64),
+                schemaContractDigest = new string('c', 64),
+            },
         });
 
-        // Should log a debug message but not throw
-        await InvokeProcessAsync(response);
-    }
-
-    // ── Nonce Replay at Dispatch Level ──
-
-    [Fact]
-    public async Task ProcessCommand_ReplayedNonce_RejectedByDb()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        var correlationKey = "corr-key-replay-test";
-        var response = BuildResponseJson("approve_candidate", new
-        {
-            correlationKey
-        });
-
-        // First call succeeds
-        await InvokeProcessAsync(response);
-        var events1 = _db.GetPendingFeedbackEvents(sessionId);
-        Assert.Single(events1);
-
-        // Second call with same response (same nonce) — rejected at DB layer
-        await InvokeProcessAsync(response);
-        var events2 = _db.GetPendingFeedbackEvents(sessionId);
-        // Still only one event (the verifier in-memory nonce may also block,
-        // but the DB nonce check is the first line of defense in ProcessSignedCommandAsync)
-        Assert.Single(events2);
-    }
-
-    // ── Null/Missing signedCommand ──
-
-    [Fact]
-    public async Task ProcessCommand_NullSignedCommand_NoOp()
-    {
-        var json = JsonSerializer.Deserialize<JsonElement>("""
-            {"data":{"signedCommand":null}}
-        """);
-
-        await InvokeProcessAsync(json);
-    }
-
-    [Fact]
-    public async Task ProcessCommand_NoSignedCommandField_NoOp()
-    {
-        var json = JsonSerializer.Deserialize<JsonElement>("""
-            {"data":{"status":"ok"}}
-        """);
-
-        await InvokeProcessAsync(json);
-    }
-
-    [Fact]
-    public async Task ProcessCommand_NoDataField_NoOp()
-    {
-        var json = JsonSerializer.Deserialize<JsonElement>("""
-            {"status":"ok"}
-        """);
-
-        await InvokeProcessAsync(json);
-    }
-
-    // ── Decommission Phase 1 ──
-
-    [Fact]
-    public async Task Decommission_Phase1_SetsAuditEntry()
-    {
-        var countBefore = _db.GetAuditEntryCount();
-
-        var response = BuildResponseJson("decommission");
-
-        await InvokeProcessAsync(response);
-
-        Assert.True(_db.GetAuditEntryCount() > countBefore,
-            "Decommission phase 1 should create an audit entry");
-    }
-
-    // ── Fetch Patient: validation ──
-
-    [Fact]
-    public async Task FetchPatient_InvalidRxNumber_NoOp()
-    {
-        // rxNumber > 20 chars
-        var response = BuildResponseJson("fetch_patient", new
-        {
-            rxNumber = "123456789012345678901", // 21 chars
-            requesterId = "user-1"
-        });
-
-        // Should not throw, just log warning
-        await InvokeProcessAsync(response);
-    }
-
-    [Fact]
-    public async Task FetchPatient_EmptyRxNumber_NoOp()
-    {
-        var response = BuildResponseJson("fetch_patient", new
-        {
-            rxNumber = "",
-            requesterId = "user-1"
-        });
-
-        await InvokeProcessAsync(response);
-    }
-
-    // ── DataHash Computation ──
-
-    [Fact]
-    public void ComputeDataHash_DeterministicForSameInput()
-    {
-        var json = """{"key":"value"}""";
-        var h1 = SignedCommandVerifier.ComputeDataHash(json);
-        var h2 = SignedCommandVerifier.ComputeDataHash(json);
-        Assert.Equal(h1, h2);
-    }
-
-    [Fact]
-    public void ComputeDataHash_DifferentInputs_DifferentHashes()
-    {
-        var h1 = SignedCommandVerifier.ComputeDataHash("""{"a":1}""");
-        var h2 = SignedCommandVerifier.ComputeDataHash("""{"a":2}""");
-        Assert.NotEqual(h1, h2);
-    }
-
-    // ── PomExporter.ComputeDigest ──
-
-    [Fact]
-    public void PomDigest_DeterministicForSameInput()
-    {
-        var d1 = PomExporter.ComputeDigest("pharm-1", "sess-1", """{"data":"test"}""");
-        var d2 = PomExporter.ComputeDigest("pharm-1", "sess-1", """{"data":"test"}""");
-        Assert.Equal(d1, d2);
-    }
-
-    [Fact]
-    public void PomDigest_DifferentPharmacy_DifferentDigest()
-    {
-        var d1 = PomExporter.ComputeDigest("pharm-1", "sess-1", """{"data":"test"}""");
-        var d2 = PomExporter.ComputeDigest("pharm-2", "sess-1", """{"data":"test"}""");
-        Assert.NotEqual(d1, d2);
-    }
-
-    [Fact]
-    public void PomDigest_DifferentPomJson_DifferentDigest()
-    {
-        var d1 = PomExporter.ComputeDigest("pharm-1", "sess-1", """{"data":"v1"}""");
-        var d2 = PomExporter.ComputeDigest("pharm-1", "sess-1", """{"data":"v2"}""");
-        Assert.NotEqual(d1, d2);
-    }
-
-    // ── Multiple Feedback Commands in Sequence ──
-
-    [Fact]
-    public async Task MultipleFeedbackCommands_AllRecorded()
-    {
-        var sessionId = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sessionId, TestPharmacyId);
-
-        await InvokeProcessAsync(BuildResponseJson("approve_candidate",
-            new { correlationKey = "key-1" }));
-        await InvokeProcessAsync(BuildResponseJson("reject_candidate",
-            new { correlationKey = "key-2" }));
-        await InvokeProcessAsync(BuildResponseJson("force_relearn",
-            new { correlationKey = "key-3" }));
-
-        var events = _db.GetPendingFeedbackEvents(sessionId);
-        Assert.Equal(3, events.Count);
-
-        Assert.Equal(DirectiveType.Promote, events[0].DirectiveType);
-        Assert.Equal(DirectiveType.Demote, events[1].DirectiveType);
-        Assert.Equal(DirectiveType.ReLearn, events[2].DirectiveType);
-    }
-
-    // ── CanaryHold State Transitions ──
-
-    [Fact]
-    public void CanaryHold_UpsertAndGet_RoundTrips()
-    {
-        _db.UpsertCanaryHold(TestPharmacyId, "pioneerrx", "warning", "fp-1");
-        var hold = _db.GetCanaryHold(TestPharmacyId, "pioneerrx");
-        Assert.NotNull(hold);
-        Assert.Equal("warning", hold.Value.Severity);
-    }
-
-    [Fact]
-    public void CanaryHold_ClearAndGet_ReturnsNull()
-    {
-        _db.UpsertCanaryHold(TestPharmacyId, "pioneerrx", "critical", "fp-2");
-        _db.ClearCanaryHold(TestPharmacyId, "pioneerrx");
-        Assert.Null(_db.GetCanaryHold(TestPharmacyId, "pioneerrx"));
-    }
-
-    [Fact]
-    public void CanaryHold_UpsertUpdatesSeverity()
-    {
-        _db.UpsertCanaryHold(TestPharmacyId, "pioneerrx", "warning", "fp-3");
-        _db.UpsertCanaryHold(TestPharmacyId, "pioneerrx", "critical", "fp-3-updated");
-        var hold = _db.GetCanaryHold(TestPharmacyId, "pioneerrx");
-        Assert.Equal("critical", hold!.Value.Severity);
-    }
-
-    // ── Learning Session Phase Transitions (used by approve_pom) ──
-
-    [Fact]
-    public void LearningSession_PhaseTransition_FollowsOrder()
-    {
-        var sid = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sid, TestPharmacyId);
-
-        Assert.Equal("discovery", _db.GetLearningSession(sid)!.Value.Phase);
-        _db.UpdateLearningPhase(sid, "pattern");
-        Assert.Equal("pattern", _db.GetLearningSession(sid)!.Value.Phase);
-        _db.UpdateLearningPhase(sid, "model");
-        Assert.Equal("model", _db.GetLearningSession(sid)!.Value.Phase);
-        _db.UpdateLearningPhase(sid, "approved");
-        Assert.Equal("approved", _db.GetLearningSession(sid)!.Value.Phase);
-    }
-
-    [Fact]
-    public void LearningSession_InvalidPhaseTransition_Throws()
-    {
-        var sid = $"sess-{Guid.NewGuid():N}";
-        _db.CreateLearningSession(sid, TestPharmacyId);
-
-        // Can't skip discovery -> model
-        Assert.Throws<InvalidOperationException>(() =>
-            _db.UpdateLearningPhase(sid, "model"));
-    }
-
-    // ── Decommission Path Security ──
-
-    [Fact]
-    public void DecommissionPath_UsesAppContext_NotHardcodedPath()
-    {
-        var source = File.ReadAllText(
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
-        var start = source.IndexOf("private async Task HandleDecommissionAsync", StringComparison.Ordinal);
-        var end = source.IndexOf("private async Task HandleUpdateAsync", StringComparison.Ordinal);
-        Assert.NotEqual(-1, start);
-        Assert.True(end > start);
-        var decommissionSource = source[start..end];
-
-        Assert.DoesNotContain(@"C:\Program Files\Suavo", decommissionSource);
-        Assert.DoesNotContain(@"C:\\Program Files\\Suavo", decommissionSource);
-        Assert.DoesNotContain("ExecutionPolicy Bypass", decommissionSource);
-        Assert.DoesNotContain("powershell.exe", decommissionSource);
-    }
-
-    [Fact]
-    public void HeartbeatPayload_DoesNotReportSqlAsPioneerRxStatus()
-    {
-        var source = File.ReadAllText(
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
-
-        Assert.DoesNotContain("pioneerrxStatus = sqlConnected", source);
-        Assert.Contains("pioneerRxObservation", source);
-    }
-
-    [Fact]
-    public void HeartbeatPayload_SurfacesVisionAndWatchdogHealthSignals()
-    {
-        var source = File.ReadAllText(
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
-
-        Assert.Contains("periodicCaptureEnabled", source);
-        Assert.Contains("VisionCaptureTelemetry", source);
-        Assert.Contains("watchdog = BuildWatchdogPayload()", source);
-        Assert.Contains("watchdog-health.json", source);
-    }
-
-    [Fact]
-    public void HeartbeatPayload_RecordsLastSuccessfulCloudSync()
-    {
-        var source = File.ReadAllText(
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
-
-        Assert.Contains("lastSyncAt = _lastSyncAt?.ToString(\"o\")", source);
-        Assert.Contains("_lastSyncAt = DateTimeOffset.UtcNow;", source);
-    }
-
-    [Fact]
-    public void HeartbeatPayload_CountsConsecutiveHelperAttachmentFailures()
-    {
-        var source = File.ReadAllText(
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-                "src", "SuavoAgent.Core", "Workers", "HeartbeatWorker.cs"));
-
-        Assert.Contains("_helperConsecutiveFailures = helperAttached ? 0 : _helperConsecutiveFailures + 1", source);
-        Assert.Contains("consecutiveFailures = _helperConsecutiveFailures", source);
-    }
-
-    private sealed class FakeIntentCursorClient : IIntentCursorClient
-    {
-        public List<IntentCursorRequest> Requests { get; } = new();
-
-        public Task<IntentCursorClientResult> ShowAsync(IntentCursorRequest request, CancellationToken ct)
-        {
-            Requests.Add(request);
-            return Task.FromResult(new IntentCursorClientResult(
-                true,
-                null,
-                new IntentCursorResponse(
-                    true,
-                    IntentCursorCoordinateSpaces.Screen,
-                    request.DurationMs,
-                    request.DiameterPx,
-                    request.Tone)));
-        }
-    }
-
-    private sealed class FakePricingJobExecutor : IPricingJobExecutor
-    {
-        public List<PricingJobSpec> Specs { get; } = new();
-
-        public Task<PricingJobExecutionResult> RunAsync(PricingJobSpec spec, CancellationToken ct)
-        {
-            Specs.Add(spec);
-            var progress = new PricingJobProgress(spec.JobId, 1, 1, 0, PricingJobStatus.Completed);
-            return Task.FromResult(new PricingJobExecutionResult(progress, "sql", true, null));
-        }
-    }
 }

@@ -1,3 +1,5 @@
+using SuavoAgent.Contracts.Reasoning;
+
 namespace SuavoAgent.Core.Config;
 
 /// <summary>
@@ -9,6 +11,36 @@ namespace SuavoAgent.Core.Config;
 /// </summary>
 public sealed class ReasoningOptions
 {
+    /// <summary>Exact offline publisher manifest schema. Zero means unsigned legacy config.</summary>
+    public int SchemaVersion { get; set; }
+
+    /// <summary>Deterministic identity of the signed model/native/tuning tuple.</summary>
+    public string? CohortId { get; set; }
+
+    /// <summary>UTC issuance instant covered by the publisher signature.</summary>
+    public string? IssuedAtUtc { get; set; }
+
+    /// <summary>UTC expiry instant covered by the publisher signature.</summary>
+    public string? ExpiresAtUtc { get; set; }
+
+    /// <summary>Legacy schema-v1 authority. Must be empty for schema v2.</summary>
+    public string? KeyId { get; set; }
+
+    /// <summary>Legacy schema-v1 signature. Must be empty for schema v2.</summary>
+    public string? Signature { get; set; }
+
+    /// <summary>Independent pinned model-publisher key identifier.</summary>
+    public string? ModelKeyId { get; set; }
+
+    /// <summary>Model authorization: exact P-256 P1363 signature as lowercase hex.</summary>
+    public string? ModelSignature { get; set; }
+
+    /// <summary>Independent pinned native-runtime-publisher key identifier.</summary>
+    public string? NativeKeyId { get; set; }
+
+    /// <summary>Native runtime authorization: exact P-256 P1363 signature as lowercase hex.</summary>
+    public string? NativeSignature { get; set; }
+
     /// <summary>
     /// When false, TieredBrain uses NullLocalInference and every Tier-1 NoMatch
     /// goes straight to the operator. Default false.
@@ -45,17 +77,25 @@ public sealed class ReasoningOptions
     public long? ModelSizeBytes { get; set; }
 
     /// <summary>
-    /// URL to a ZIP of the llama.cpp native DLLs (llama.dll + ggml*.dll + llava_shared.dll for ONE AVX
-    /// variant) to auto-download + extract into <see cref="NativeLibraryPath"/> on first run when those
-    /// DLLs are absent. The native libs are deliberately NOT shipped in the installer (stealth —
-    /// "vendor fingerprint"), so this is how a reasoning-enabled box self-equips. SHA256-verified
-    /// against <see cref="NativeLibsSha256"/>; failure is non-fatal (reasoning stays off). Empty =
-    /// expect operator-placed DLLs.
+    /// URL to the retained native-runtime package. New cohorts use the immutable repository-signed
+    /// LLamaSharp.Backend.Cpu 0.24.0 nupkg; only its exact
+    /// runtimes/win-x64/native/noavx DLL set is flattened into <see cref="NativeLibraryPath"/>.
+    /// The full package is SHA256-verified against <see cref="NativeLibsSha256"/> before extraction;
+    /// failure is non-fatal (reasoning stays off). Empty means no provisioning source.
     /// </summary>
     public string? NativeLibsUrl { get; set; }
 
-    /// <summary>Expected SHA256 (hex) of the native-libs ZIP from <see cref="NativeLibsUrl"/>.</summary>
+    /// <summary>Expected SHA256 (hex) of the retained package from <see cref="NativeLibsUrl"/>.</summary>
     public string? NativeLibsSha256 { get; set; }
+
+    /// <summary>Exact signed byte length of the retained native-runtime package.</summary>
+    public long? NativeLibsSizeBytes { get; set; }
+
+    /// <summary>
+    /// Signed extraction contract for the native package. Schema v3 accepts
+    /// only the exact LLamaSharp CPU/no-AVX NuGet layout.
+    /// </summary>
+    public string? NativePackageKind { get; set; }
 
     /// <summary>
     /// OPTIONAL AVX2-optimized variant of the native-libs ZIP. <see cref="NativeLibsUrl"/> stays the
@@ -108,7 +148,7 @@ public sealed class ReasoningOptions
     public int ContextSize { get; set; } = 4096;
 
     /// <summary>
-    /// Per-proposal token budget. 512 fits a well-reasoned action + rationale from
+    /// Per-proposal token budget. 512 fits a grounded action + fixed rationale code from
     /// a 3B model; cuts off runaway generation before it wastes wall time.
     /// </summary>
     public int MaxOutputTokens { get; set; } = 512;
@@ -159,4 +199,68 @@ public sealed class ReasoningOptions
     /// their own flags.
     /// </summary>
     public bool PricingBrainEnabled { get; set; }
+
+    public BrainCohortPublisherManifest PublisherManifest() => new(
+        SchemaVersion,
+        CohortId ?? string.Empty,
+        ModelId,
+        ModelUrl ?? string.Empty,
+        ModelSha256 ?? string.Empty,
+        ModelSizeBytes ?? 0,
+        NativeLibsUrl ?? string.Empty,
+        NativeLibsSha256 ?? string.Empty,
+        NativeLibsSizeBytes ?? 0,
+        ContextSize,
+        MaxOutputTokens,
+        IssuedAtUtc ?? string.Empty,
+        ExpiresAtUtc ?? string.Empty,
+        KeyId ?? string.Empty,
+        Signature ?? string.Empty,
+        ModelKeyId ?? string.Empty,
+        ModelSignature ?? string.Empty,
+        NativeKeyId ?? string.Empty,
+        NativeSignature ?? string.Empty,
+        NativePackageKind ?? string.Empty);
+
+    public BrainCohortValidationResult ValidatePublisher(DateTimeOffset now) =>
+        BrainCohortContract.Validate(PublisherManifest(), now);
+
+    public BrainCohortValidationResult ValidatePublisherInstallation(
+        string dataDirectory,
+        DateTimeOffset now)
+    {
+        var publisher = ValidatePublisher(now);
+        if (!publisher.IsValid) return publisher;
+        if (!string.IsNullOrWhiteSpace(NativeLibsUrlAvx2) ||
+            !string.IsNullOrWhiteSpace(NativeLibsSha256Avx2))
+            return new(false, "publisher_unsigned_native_variant");
+        try
+        {
+            var manifest = PublisherManifest();
+            var expectedModel = Path.GetFullPath(
+                BrainCohortContract.GetModelPath(dataDirectory, manifest));
+            var expectedNative = Path.GetFullPath(
+                BrainCohortContract.GetNativeDirectory(dataDirectory, manifest));
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            if (!string.Equals(Path.GetFullPath(ModelPath ?? string.Empty), expectedModel, comparison) ||
+                !string.Equals(
+                    Path.GetFullPath(NativeLibraryPath ?? string.Empty),
+                    expectedNative,
+                    comparison))
+                return new(false, "publisher_install_path_mismatch");
+            return publisher;
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return new(false, "publisher_install_path_invalid");
+        }
+    }
+
+    internal BrainCohortValidationResult ValidatePublisher(
+        IReadOnlyDictionary<string, string> trustedPublisherKeys,
+        DateTimeOffset now) =>
+        BrainCohortContract.Validate(PublisherManifest(), trustedPublisherKeys, now);
 }

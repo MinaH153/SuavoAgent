@@ -28,6 +28,8 @@ namespace SuavoAgent.Core.Tests.Workers;
 public sealed class RunLearnedTemplateHandlerTests : IDisposable
 {
     private const string SkillId = "pricing";
+    private const string ApprovalId = "11111111-1111-4111-8111-111111111111";
+    private const string YamlSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private static readonly JsonSerializerOptions CamelJson = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     private readonly string _dbPath;
@@ -96,14 +98,27 @@ public sealed class RunLearnedTemplateHandlerTests : IDisposable
 
     private void SetStatus(string ruleId, string templateId, AgentStateDb.AutoRuleStatus status)
     {
-        _db.UpsertAutoRuleApproval(ruleId, templateId, "yaml-sha-256");
+        _db.UpsertAutoRuleApproval(ruleId, templateId, YamlSha);
         _db.SetAutoRuleApprovalStatus(ruleId, status, approvedBy: "operator", approvedAt: "2026-04-20T00:00:00Z");
     }
 
-    private async Task InvokeAsync(string templateId)
+    private async Task InvokeAsync(string templateId, string ruleId)
     {
         var payload = JsonSerializer.Deserialize<JsonElement>(
-            JsonSerializer.Serialize(new { data = new { templateId, commandId = "cid-1" } }));
+            JsonSerializer.Serialize(new
+            {
+                data = new
+                {
+                    schemaVersion = 1,
+                    approvalId = ApprovalId,
+                    ruleId,
+                    templateId,
+                    yamlSha256 = YamlSha,
+                    runId = "22222222-2222-4222-8222-222222222222",
+                    deadlineSeconds = 300,
+                    commandId = "33333333-3333-4333-8333-333333333333",
+                },
+            }));
         var cmd = new SignedCommand("run_learned_template", "agent-run-tmpl", "fp-run-tmpl",
             DateTimeOffset.UtcNow.ToString("o"), Guid.NewGuid().ToString(), "k", "sig", "hash");
         await (Task)_handler.Invoke(_worker, new object[] { payload, cmd, CancellationToken.None })!;
@@ -129,7 +144,7 @@ public sealed class RunLearnedTemplateHandlerTests : IDisposable
         var (templateId, ruleId) = PersistTemplate();
         SetStatus(ruleId, templateId, status);
 
-        await InvokeAsync(templateId);
+        await InvokeAsync(templateId, ruleId);
 
         Assert.Equal(0, ReceivedAuditCount()); // refused at the approval gate — never reached execution
     }
@@ -137,9 +152,9 @@ public sealed class RunLearnedTemplateHandlerTests : IDisposable
     [Fact]
     public async Task MissingApproval_Refused_NoExecutionAudit()
     {
-        var (templateId, _) = PersistTemplate(); // no approval row at all
+        var (templateId, ruleId) = PersistTemplate(); // no approval row at all
 
-        await InvokeAsync(templateId);
+        await InvokeAsync(templateId, ruleId);
 
         Assert.Equal(0, ReceivedAuditCount());
     }
@@ -147,22 +162,22 @@ public sealed class RunLearnedTemplateHandlerTests : IDisposable
     [Fact]
     public async Task UnknownTemplateId_Refused_NoExecutionAudit()
     {
-        await InvokeAsync("does-not-exist");
+        var templateId = new string('c', 64);
+        await InvokeAsync(templateId, "auto.pricing.cccccccccccc");
 
         Assert.Equal(0, ReceivedAuditCount());
     }
 
     [Fact]
-    public async Task ApprovedStatus_PassesGate_WritesExecutionAudit()
+    public async Task LegacyApprovedStatusWithoutDurableLocalRegistry_IsRefused()
     {
-        // Positive control: an Approved template PASSES the gate and reaches the execution setup (which then
-        // no-ops here because the actuation DI — VerbRegistry — is intentionally unwired). The audit entry is
-        // written before that, so its presence proves the gate distinguishes Approved from every other state.
+        // A pre-007 status flip is not proof that the exact signed approval was applied locally. It has no
+        // approval_id or active registry row and must never reach actuation.
         var (templateId, ruleId) = PersistTemplate();
         SetStatus(ruleId, templateId, AgentStateDb.AutoRuleStatus.Approved);
 
-        await InvokeAsync(templateId);
+        await InvokeAsync(templateId, ruleId);
 
-        Assert.True(ReceivedAuditCount() >= 1);
+        Assert.Equal(0, ReceivedAuditCount());
     }
 }

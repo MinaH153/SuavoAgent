@@ -52,7 +52,7 @@ public sealed class VerbRegistry
             try { types = asm.GetTypes(); }
             catch (ReflectionTypeLoadException ex)
             {
-                logger.LogWarning(ex, "VerbRegistry: failed to load some types from {Assembly}", asm.FullName);
+                logger.LogSafeWarning(ex);
                 types = ex.Types.Where(t => t is not null).Cast<Type>().ToArray();
             }
 
@@ -66,7 +66,7 @@ public sealed class VerbRegistry
                 try { instance = (IVerb)Activator.CreateInstance(t)!; }
                 catch (Exception ex)
                 {
-                    logger.LogWarning(ex, "VerbRegistry: cannot instantiate {Type} (skipping)", t.FullName);
+                    logger.LogSafeWarning(ex);
                     continue;
                 }
 
@@ -76,7 +76,7 @@ public sealed class VerbRegistry
 
                 if (entries.ContainsKey(meta.Name))
                 {
-                    logger.LogError("VerbRegistry: duplicate verb name '{Name}' from {Type} (already registered)", meta.Name, t.FullName);
+                    logger.LogError("core.verb_registry.duplicate_verb");
                     continue;
                 }
                 entries[meta.Name] = entry;

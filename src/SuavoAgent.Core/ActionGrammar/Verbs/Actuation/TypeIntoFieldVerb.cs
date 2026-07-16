@@ -35,6 +35,8 @@ public sealed class TypeIntoFieldVerb : IVerb
         {
             new VerbParameterSpec("text", typeof(string), Required: true,
                 ValidationHint: "must not match PHI patterns (SSN, address, email, phone, NDC)"),
+            new VerbParameterSpec("process_name", typeof(string), Required: true,
+                ValidationHint: "must identify the allowlisted sandbox app whose focused field receives input"),
             new VerbParameterSpec("clear_first", typeof(bool), Required: false,
                 ValidationHint: "prepend Ctrl+A then Delete"),
             new VerbParameterSpec("per_key_delay_ms", typeof(int), Required: false,
@@ -64,6 +66,18 @@ public sealed class TypeIntoFieldVerb : IVerb
         {
             return Task.FromResult(VerbPreconditionResult.Fail("text_too_long", "text exceeds 10k characters"));
         }
+        if (!ctx.Parameters.TryGetValue("process_name", out var pn) ||
+            pn is not string processName || string.IsNullOrWhiteSpace(processName))
+        {
+            return Task.FromResult(VerbPreconditionResult.Fail(
+                "process_name_non_empty", "process_name must be a non-empty string"));
+        }
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(processName))
+        {
+            return Task.FromResult(VerbPreconditionResult.Fail(
+                "process_not_allowlisted",
+                $"process_name '{processName}' is not in the actuation allowlist"));
+        }
         if (ctx.Services.GetService<IActuationGateway>() is null)
         {
             return Task.FromResult(VerbPreconditionResult.Fail("gateway_missing", "IActuationGateway not registered"));
@@ -78,10 +92,11 @@ public sealed class TypeIntoFieldVerb : IVerb
     {
         var gateway = ctx.Services.GetRequiredService<IActuationGateway>();
         var text = (string)ctx.Parameters["text"]!;
+        var processName = (string)ctx.Parameters["process_name"]!;
         var clearFirst = ctx.Parameters.TryGetValue("clear_first", out var c) && c is bool cb && cb;
         var perKey = ctx.Parameters.TryGetValue("per_key_delay_ms", out var pk) && pk is int pkInt ? pkInt : 25;
 
-        var req = new TypeTextRequest(text, clearFirst, perKey, ctx.DryRun);
+        var req = new TypeTextRequest(text, clearFirst, perKey, ctx.DryRun, processName);
         var result = await gateway.TypeTextAsync(req, ct).ConfigureAwait(false);
         if (!result.Ok)
         {

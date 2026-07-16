@@ -7,6 +7,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Models;
+using SuavoAgent.Contracts.Security;
 
 namespace SuavoAgent.Broker.Honeytoken;
 
@@ -93,7 +94,7 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
         catch (Exception ex)
         {
             // FAIL-OPEN: a missing native dll / non-elevated / any ETW error → oracle off, Broker online.
-            _logger.LogError(ex, "ETW honeytoken oracle arm failed — running blind, Broker online");
+            _logger.LogSafeError(ex);
         }
         return Task.CompletedTask;
     }
@@ -111,7 +112,7 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
         // Reclaim a same-named session orphaned by a prior Broker crash/OTA (a real-time ETW session is a
         // named kernel object that outlives the process).
         try { TraceEventSession.GetActiveSession(SessionName)?.Stop(); }
-        catch (Exception ex) { _logger.LogWarning(ex, "stale ETW session stop (non-fatal)"); }
+        catch (Exception ex) { _logger.LogSafeWarning(ex); }
 
         _session = new TraceEventSession(SessionName) { StopOnDispose = true };
         _session.EnableProvider(KernelFileProvider, TraceEventLevel.Informational, Keywords);
@@ -122,7 +123,7 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
         _processThread = new Thread(() =>
         {
             try { _session.Source.Process(); }
-            catch (Exception ex) { _logger.LogWarning(ex, "ETW honeytoken process loop ended"); }
+            catch (Exception ex) { _logger.LogSafeWarning(ex); }
             finally
             {
                 var lost = _session?.Source?.EventsLost ?? 0;
@@ -202,20 +203,18 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
     [SupportedOSPlatform("windows")]
     private void HardenHandoffTmp(string tmpPath)
     {
-        var fi = new FileInfo(tmpPath);
-        var sec = fi.GetAccessControl();
-        sec.SetAccessRuleProtection(true, false); // strip inherited ACEs (incl. the dir's INTERACTIVE Modify)
-        foreach (FileSystemAccessRule rule in sec.GetAccessRules(true, false, typeof(SecurityIdentifier)))
-            sec.RemoveAccessRuleSpecific(rule); // purge any explicit ACEs → only our three remain
-        foreach (var sid in new[] { WellKnownSidType.LocalSystemSid, WellKnownSidType.BuiltinAdministratorsSid })
-        {
-            sec.AddAccessRule(new FileSystemAccessRule(
-                new SecurityIdentifier(sid, null), FileSystemRights.FullControl, AccessControlType.Allow));
-        }
-        sec.AddAccessRule(new FileSystemAccessRule(
-            new SecurityIdentifier(WellKnownSidType.InteractiveSid, null),
-            FileSystemRights.ReadAndExecute, AccessControlType.Allow));
-        fi.SetAccessControl(sec);
+        new HandleBoundAcl().ApplyBatch(
+        [
+            new(
+                tmpPath,
+                IsDirectory: false,
+                new(HandleBoundAcl.SystemSid,
+                [
+                    new(HandleBoundAcl.SystemSid, FileSystemRights.FullControl),
+                    new(HandleBoundAcl.AdministratorsSid, FileSystemRights.FullControl),
+                    new("S-1-5-4", FileSystemRights.ReadAndExecute),
+                ])),
+        ]);
     }
 
     /// <summary>
@@ -233,25 +232,30 @@ public sealed class EtwHoneytokenFileTracer : BackgroundService
     [SupportedOSPlatform("windows")]
     private void EnsureHardenedTempDir()
     {
-        var di = Directory.CreateDirectory(_hardenedTempDir);
-        var sec = di.GetAccessControl();
-        sec.SetAccessRuleProtection(true, false); // strip ProgramData's inherited INTERACTIVE Modify
-        foreach (FileSystemAccessRule rule in sec.GetAccessRules(true, false, typeof(SecurityIdentifier)))
-            sec.RemoveAccessRuleSpecific(rule);
-        foreach (var sid in new[] { WellKnownSidType.LocalSystemSid, WellKnownSidType.BuiltinAdministratorsSid })
-        {
-            sec.AddAccessRule(new FileSystemAccessRule(
-                new SecurityIdentifier(sid, null),
-                FileSystemRights.FullControl,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                PropagationFlags.None,
-                AccessControlType.Allow));
-        }
-        di.SetAccessControl(sec);
+        Directory.CreateDirectory(_hardenedTempDir);
+        const InheritanceFlags inherited =
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        new HandleBoundAcl().ApplyBatch(
+        [
+            new(
+                _hardenedTempDir,
+                IsDirectory: true,
+                new(HandleBoundAcl.SystemSid,
+                [
+                    new(HandleBoundAcl.SystemSid, FileSystemRights.FullControl, inherited),
+                    new(HandleBoundAcl.AdministratorsSid, FileSystemRights.FullControl, inherited),
+                ])),
+        ]);
 
         // VERIFY (don't assume the set took): re-read the DACL and assert NO non-System/Admin principal holds a
         // write-ish Allow ACE. Throw → arm aborts → oracle dark → no writes → fail-closed.
-        var verify = new DirectoryInfo(_hardenedTempDir).GetAccessControl()
+        var hardened = new DirectoryInfo(_hardenedTempDir).GetAccessControl(
+            AccessControlSections.Owner | AccessControlSections.Access);
+        if (!hardened.AreAccessRulesProtected ||
+            hardened.GetOwner(typeof(SecurityIdentifier))?.Value != HandleBoundAcl.SystemSid)
+            throw new InvalidOperationException(
+                "honeytoken temp dir owner or DACL protection is not exact");
+        var verify = hardened
             .GetAccessRules(true, true, typeof(SecurityIdentifier));
         const FileSystemRights writeish = FileSystemRights.WriteData | FileSystemRights.AppendData
             | FileSystemRights.CreateFiles | FileSystemRights.CreateDirectories | FileSystemRights.ChangePermissions

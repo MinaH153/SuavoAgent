@@ -19,10 +19,11 @@ public class LearningSessionTests : IDisposable
     {
         _db.CreateLearningSession("sess-1", "pharm-1");
         var session = _db.GetLearningSession("sess-1");
-        Assert.NotNull(session);
-        Assert.Equal("pharm-1", session.Value.PharmacyId);
-        Assert.Equal("discovery", session.Value.Phase);
-        Assert.Equal("observer", session.Value.Mode);
+        Assert.True(session.HasValue);
+        var persisted = session.GetValueOrDefault();
+        Assert.Equal("pharm-1", persisted.PharmacyId);
+        Assert.Equal("discovery", persisted.Phase);
+        Assert.Equal("observer", persisted.Mode);
     }
 
     [Fact]
@@ -31,7 +32,8 @@ public class LearningSessionTests : IDisposable
         _db.CreateLearningSession("sess-1", "pharm-1");
         _db.UpdateLearningPhase("sess-1", "pattern");
         var session = _db.GetLearningSession("sess-1");
-        Assert.Equal("pattern", session.Value.Phase);
+        Assert.True(session.HasValue);
+        Assert.Equal("pattern", session.GetValueOrDefault().Phase);
     }
 
     [Fact]
@@ -40,7 +42,8 @@ public class LearningSessionTests : IDisposable
         _db.CreateLearningSession("sess-1", "pharm-1");
         _db.UpdateLearningMode("sess-1", "supervised");
         var session = _db.GetLearningSession("sess-1");
-        Assert.Equal("supervised", session.Value.Mode);
+        Assert.True(session.HasValue);
+        Assert.Equal("supervised", session.GetValueOrDefault().Mode);
     }
 
     [Fact]

@@ -5,6 +5,12 @@ internal readonly record struct IpcPeerVerificationResult(
     string? RejectionReason,
     bool AcceptedByBrokerAttestation);
 
+public readonly record struct IpcBrokerAttestationEvidence(
+    uint ProcessId,
+    uint SessionId,
+    DateTimeOffset ProcessStartedAtUtc,
+    string CurrentHelperSha256);
+
 internal static class IpcPeerVerifier
 {
     public static IpcPeerVerificationResult Verify(
@@ -12,7 +18,8 @@ internal static class IpcPeerVerifier
         uint processId,
         string? executablePath,
         string coreBaseDirectory,
-        Func<uint, bool>? isBrokerAttestedHelper)
+        IpcBrokerAttestationEvidence? brokerEvidence,
+        Func<IpcBrokerAttestationEvidence, bool>? isBrokerAttestedHelper)
     {
         if (processName != "SuavoAgent.Helper" && processName != "SuavoAgent.Broker")
         {
@@ -21,7 +28,8 @@ internal static class IpcPeerVerifier
 
         if (string.IsNullOrWhiteSpace(executablePath))
         {
-            if (processName == "SuavoAgent.Helper" && (isBrokerAttestedHelper?.Invoke(processId) ?? false))
+            if (processName == "SuavoAgent.Helper" && brokerEvidence is { } evidence &&
+                (isBrokerAttestedHelper?.Invoke(evidence) ?? false))
             {
                 return new IpcPeerVerificationResult(true, null, true);
             }

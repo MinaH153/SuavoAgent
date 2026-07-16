@@ -1,54 +1,63 @@
 using System.IO;
+using System.Security.AccessControl;
 using SuavoAgent.Diagnostics;
 using Xunit;
 
 namespace SuavoAgent.Diagnostics.Tests;
 
 /// <summary>
-/// Guards the exact icacls grant the de-privileged Helper needs to self-extract its single-file
-/// apphost. The grant runs on Windows only (icacls), so these assert the ARGUMENT SHAPE — the same
-/// strategy as <c>ServiceInstallerTests</c> — so nobody silently widens it (e.g. adds (OI)(CI),
-/// which would leak appsettings.json reads) or changes the principal off BUILTIN\Users.
+/// Guards the exact handle-bound policy the de-privileged Helper needs to
+/// self-extract its single-file apphost.
 /// </summary>
 public class HelperExeAclGrantTests
 {
-    private const string Users = "*S-1-5-32-545"; // BUILTIN\Users
+    private const string Users = "S-1-5-32-545"; // BUILTIN\Users
 
     [Fact]
     public void Principal_is_builtin_users_sid()
     {
-        Assert.Equal(Users, HelperExeAclGrant.HelperPrincipal);
+        Assert.Equal(Users, HelperExeAclGrant.HelperSid);
     }
 
     [Fact]
-    public void BuildIcaclsArgs_grants_dir_traverse_then_helper_exe_rx()
+    public void BuildMutations_grants_dir_traverse_then_helper_exe_rx()
     {
         const string installDir = @"C:\Program Files\Suavo\Agent";
         // Expected helper path uses Path.Combine so the separator matches the host running the test
         // (the production target is Windows = backslash; this keeps the assertion green on the CI gate).
         var helperExe = Path.Combine(installDir, HelperExeAclGrant.HelperExeName);
-        var args = HelperExeAclGrant.BuildIcaclsArgs(installDir);
+        var mutations = HelperExeAclGrant.BuildMutations(installDir);
 
-        Assert.Equal(2, args.Count);
+        Assert.Equal(2, mutations.Count);
 
         // 1) Dir grant — traverse/list THIS DIR ONLY. RX, and crucially NO (OI)(CI): inherited file
-        //    reads would expose appsettings.json (ApiKey + SQL creds) + the other service binaries.
-        Assert.Equal($"\"{installDir}\" /grant \"{Users}:(RX)\"", args[0]);
-        Assert.DoesNotContain("(OI)", args[0]);
-        Assert.DoesNotContain("(CI)", args[0]);
+        //    reads would expose appsettings.json (configuration + DPAPI-sealed SQL creds)
+        //    + the other service binaries.
+        Assert.Equal(installDir, mutations[0].Path);
+        var rootUsers = Assert.Single(mutations[0].Policy.Aces, ace =>
+            ace.Sid == HelperExeAclGrant.HelperSid);
+        Assert.Equal(FileSystemRights.ReadAndExecute, rootUsers.Rights);
+        Assert.Equal(InheritanceFlags.None, rootUsers.InheritanceFlags);
 
         // 2) Per-file RX on the single-file apphost itself — the only install-dir file the Helper reads.
-        Assert.Equal($"\"{helperExe}\" /grant \"{Users}:(RX)\"", args[1]);
-        Assert.DoesNotContain("(OI)", args[1]);
-        Assert.DoesNotContain("(CI)", args[1]);
+        Assert.Equal(helperExe, mutations[1].Path);
+        var fileUsers = Assert.Single(mutations[1].Policy.Aces, ace =>
+            ace.Sid == HelperExeAclGrant.HelperSid);
+        Assert.Equal(FileSystemRights.ReadAndExecute, fileUsers.Rights);
+        Assert.Equal(InheritanceFlags.None, fileUsers.InheritanceFlags);
+        Assert.All(mutations, mutation => Assert.Equal(
+            "S-1-5-18",
+            mutation.Policy.OwnerSid));
     }
 
     [Fact]
-    public void BuildIcaclsArgs_targets_the_helper_apphost_by_name()
+    public void BuildMutations_targets_the_helper_apphost_by_name()
     {
-        var args = HelperExeAclGrant.BuildIcaclsArgs(@"D:\install");
-        Assert.Contains(HelperExeAclGrant.HelperExeName, args[1]);
-        Assert.EndsWith(Path.Combine("install", HelperExeAclGrant.HelperExeName) + "\" /grant \"" + Users + ":(RX)\"", args[1]);
+        var mutations = HelperExeAclGrant.BuildMutations(@"D:\install");
+        Assert.Contains(HelperExeAclGrant.HelperExeName, mutations[1].Path);
+        Assert.EndsWith(
+            Path.Combine("install", HelperExeAclGrant.HelperExeName),
+            mutations[1].Path);
     }
 
     [Fact]

@@ -6,97 +6,80 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  bootstrap-windows-smoke:
-    runs-on: windows-latest
+  production-shell-boundary:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Parse bootstrap.ps1 with Windows PowerShell 5.1
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($PSVersionTable.PSVersion.Major -ne 5) {
-            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
-          }
-          $source = Get-Content -Raw -LiteralPath .\bootstrap.ps1
-          $null = [scriptblock]::Create($source)
-          $parseErrors = $null
-          [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
-          if ($parseErrors -and $parseErrors.Count -gt 0) {
-            $parseErrors | Format-List * | Out-String | Write-Host
-            throw "bootstrap.ps1 has Windows PowerShell 5.1 parse errors"
-          }
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
-      - name: Parse operator update scripts with Windows PowerShell 5.1
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($PSVersionTable.PSVersion.Major -ne 5) {
-            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
-          }
-          # upgrade.ps1 + install.ps1 both write the H-8 binaries.manifest; a parse
-          # error there silently ships a broken deploy/update path (no app builds it).
-          foreach ($script in @('.\upgrade.ps1', '.\install.ps1')) {
-            $source = Get-Content -Raw -LiteralPath $script
-            $null = [scriptblock]::Create($source)
-            $parseErrors = $null
-            [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
-            if ($parseErrors -and $parseErrors.Count -gt 0) {
-              $parseErrors | Format-List * | Out-String | Write-Host
-              throw "$script has Windows PowerShell 5.1 parse errors"
-            }
-          }
+      - name: Enforce native production and customer boundary
+        run: bash scripts/verify-production-shell-boundary.sh
 
-      - name: Parse and run no-PHI release probe
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $source = Get-Content -Raw -LiteralPath .\scripts\Test-SuavoAgentReleaseProbe.ps1
-          $null = [scriptblock]::Create($source)
-          $parseErrors = $null
-          [System.Management.Automation.PSParser]::Tokenize($source, [ref]$parseErrors) | Out-Null
-          if ($parseErrors -and $parseErrors.Count -gt 0) {
-            $parseErrors | Format-List * | Out-String | Write-Host
-            throw "Test-SuavoAgentReleaseProbe.ps1 has Windows PowerShell 5.1 parse errors"
-          }
+  ota-manifest-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-          $probeDir = Join-Path $env:RUNNER_TEMP 'suavoagent-release-probe'
-          New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
-          foreach ($binary in @(
-            'SuavoAgent.Core.exe',
-            'SuavoAgent.Broker.exe',
-            'SuavoAgent.Helper.exe',
-            'SuavoAgent.Watchdog.exe',
-            'SuavoSetup.exe'
-          )) {
-            Set-Content -LiteralPath (Join-Path $probeDir $binary) -Value 'stub' -Encoding ASCII
-          }
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-SuavoAgentReleaseProbe.ps1 -Mode ReleaseArtifact -ReleaseDir $probeDir -BootstrapPath .\bootstrap.ps1 -Json
+      - name: Prove previous-stable and full-cohort manifest shapes
+        run: bash scripts/verify-ota-manifest-compatibility.sh
 
   build-and-test:
     runs-on: ubuntu-latest
-    needs: bootstrap-windows-smoke
+    needs: production-shell-boundary
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup .NET 8
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 8.0.128
 
       # Solution-level restore/build MUST NOT pass -r <RID>.
       # .NET SDK 8.0.400+ hard-errors on NETSDK1134 ("Building a solution with
       # a specific RuntimeIdentifier is not supported"). The RID only belongs
       # at publish time (see cross-compile job below). Tests don't need a RID.
       - name: Restore
-        run: dotnet restore SuavoAgent.sln
+        run: |
+          dotnet restore SuavoAgent.sln --locked-mode -p:ContinuousIntegrationBuild=true
+          for proj in Core Broker Helper Watchdog Setup; do
+            dotnet restore "src/SuavoAgent.$proj" -r win-x64 --locked-mode -p:ContinuousIntegrationBuild=true
+          done
+
+      - name: Verify locked runtime legal and provenance bundle
+        run: |
+          python3 scripts/verify-release-trust-inputs.py --trust-phase auto
+          python3 -m unittest \
+            tests/release_trust_tools_tests.py \
+            tests/test_verify_external_release_assets.py \
+            -v
 
       - name: Build
-        run: dotnet build SuavoAgent.sln -c Release --no-restore
+        run: dotnet build SuavoAgent.sln -c Release --no-restore -p:ContinuousIntegrationBuild=true
 
       - name: Test
-        run: dotnet test SuavoAgent.sln -c Release --no-build -v normal --logger "trx;LogFileName=test-results.trx"
+        run: >-
+          dotnet test SuavoAgent.sln -c Release --no-build -v normal
+          --logger "trx;LogFilePrefix=test-results"
+          --collect "XPlat Code Coverage"
+          --results-directory TestResults/coverage
+          -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.DeterministicReport=true
+
+      - name: Measure authored-code coverage
+        run: |
+          python3 -m unittest \
+            tests/test_aggregate_coverage.py \
+            tests/test_installer_rehearsal_script.py \
+            tests/test_release_workflow_gates.py \
+            -v
+          python3 scripts/aggregate_coverage.py TestResults/coverage \
+            --require-all-projects \
+            --json TestResults/coverage-summary.json
 
       # QA W2-C3: the compile-time PHI gate. Proves PhiInOutboundPayloadAnalyzer is still wired and
       # emits SUAVO0001 — if a CodeAnalysis bump or a broken Analyzer reference silences it, PHI could
@@ -110,7 +93,86 @@ jobs:
         if: always()
         with:
           name: test-results
-          path: "**/test-results.trx"
+          path: |
+            TestResults/coverage/**/*.trx
+            TestResults/coverage/**/coverage.cobertura.xml
+            TestResults/coverage-summary.json
+
+  windows-coverage:
+    runs-on: windows-latest
+    needs: production-shell-boundary
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.128
+
+      - name: Restore locked graph
+        shell: bash
+        run: |
+          dotnet restore SuavoAgent.sln --locked-mode -p:ContinuousIntegrationBuild=true
+          for proj in Core Broker Helper Watchdog Setup; do
+            dotnet restore "src/SuavoAgent.$proj" -r win-x64 --locked-mode -p:ContinuousIntegrationBuild=true
+          done
+
+      - name: Build
+        run: dotnet build SuavoAgent.sln -c Release --no-restore -p:ContinuousIntegrationBuild=true
+
+      - name: Run full Windows suite with coverage
+        run: >-
+          dotnet test SuavoAgent.sln -c Release --no-build -v normal
+          --logger "trx;LogFilePrefix=test-results"
+          --collect "XPlat Code Coverage"
+          --results-directory TestResults/coverage
+          -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.DeterministicReport=true
+
+      - name: Upload Windows test and coverage evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: windows-test-results
+          path: |
+            TestResults/coverage/**/*.trx
+            TestResults/coverage/**/coverage.cobertura.xml
+
+  coverage-report:
+    runs-on: ubuntu-latest
+    needs: [build-and-test, windows-coverage]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download Linux coverage
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: test-results
+          path: TestResults/combined/linux
+
+      - name: Download Windows coverage
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-test-results
+          path: TestResults/combined/windows
+
+      - name: Merge cross-platform coverage and prevent regression
+        run: |
+          python3 -m unittest \
+            tests/test_aggregate_coverage.py \
+            tests/test_installer_rehearsal_script.py \
+            tests/test_release_workflow_gates.py \
+            -v
+          python3 scripts/aggregate_coverage.py TestResults/combined \
+            --require-all-projects \
+            --minimum-line 61 \
+            --minimum-branch 52 \
+            --json TestResults/cross-platform-coverage-summary.json
+
+      - name: Upload cross-platform coverage summary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cross-platform-coverage-summary
+          path: TestResults/cross-platform-coverage-summary.json
 
   cross-compile:
     runs-on: ubuntu-latest
@@ -122,7 +184,7 @@ jobs:
       - name: Setup .NET 8
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 8.0.128
 
       - name: Publish Core (win-x64)
         run: dotnet publish src/SuavoAgent.Core -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o artifacts/
@@ -132,6 +194,9 @@ jobs:
 
       - name: Publish Helper (win-x64)
         run: dotnet publish src/SuavoAgent.Helper -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o artifacts/
+
+      - name: Publish Watchdog (win-x64)
+        run: dotnet publish src/SuavoAgent.Watchdog -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o artifacts/
 
       - name: Publish Setup (win-x64)
         run: dotnet publish src/SuavoAgent.Setup -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o artifacts/
@@ -156,7 +221,7 @@ jobs:
       - name: Setup .NET 8
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 8.0.128
 
       - name: Build Helper.Tests
         run: dotnet build tests/SuavoAgent.Helper.Tests/SuavoAgent.Helper.Tests.csproj -c Release
@@ -190,18 +255,23 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}\tinyllama-q4.gguf
-          key: gguf-tinyllama-1.1b-chat-v1.0-q4_k_m-v1
+          key: gguf-tinyllama-9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0
 
       - name: Download GGUF model (if not cached)
         if: steps.cache-gguf.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          # Ungated, Apache-2.0 (no HF license wall). curl -L follows the HF CDN redirect; --fail surfaces HTTP errors.
-          $url = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+          $url = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/52e7645ba7c309695bec7ac98f4f005b139cf465/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
           curl.exe -L --fail --retry 3 -o "$env:RUNNER_TEMP\tinyllama-q4.gguf" $url
+
+      - name: Verify exact TinyLlama test asset
+        shell: pwsh
+        run: |
+          $path = "$env:RUNNER_TEMP\tinyllama-q4.gguf"
           $size = (Get-Item "$env:RUNNER_TEMP\tinyllama-q4.gguf").Length
-          Write-Host "downloaded $size bytes"
-          if ($size -lt 100000000) { throw "model download too small ($size bytes) — likely an HTML error page" }
+          $sha = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($size -ne 668788096) { throw "TinyLlama size mismatch: $size" }
+          if ($sha -ne "9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0") { throw "TinyLlama SHA-256 mismatch" }
 
       - name: Real local-LLM reasoning smoke (loads a GGUF → grammar-constrained action)
         env:
@@ -212,24 +282,29 @@ jobs:
       # LLamaSharp 0.24.0 (it could NOT on 0.19.0 → "Architecture qwen3 not supported") and reasons + grounds
       # under the Qwen3Thinkless template (ChatML + empty-<think> prefill = non-thinking → clean JSON with no
       # grammar backstop on win-x64). The Backend.Cpu 0.24.0 nupkg auto-provides the 5-DLL native set.
-      # Cached so it only downloads once (~1.3 GB).
+      # Cached so it only downloads once (~1.1 GB).
       - name: Cache Qwen3-1.7B GGUF model
         id: cache-gguf-qwen3
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}\qwen3-1.7b-q4.gguf
-          key: gguf-qwen3-1.7b-q4_k_m-v1
+          key: gguf-qwen3-228fb5627f7510b8b3516cdb6435e4b0d2a2bf330fe5b0ab19284a3570a8bb1f # gitleaks:allow public model cache key
 
       - name: Download Qwen3-1.7B GGUF model (if not cached)
         if: steps.cache-gguf-qwen3.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          # bartowski mirror is ungated (Apache-2.0); curl -L follows the HF CDN redirect; --fail surfaces HTTP errors.
-          $url = "https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF/resolve/main/Qwen_Qwen3-1.7B-Q4_K_M.gguf"
+          $url = "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/e8e713d99f327fd01e47f1992a910a9e4cacf312/Qwen3-1.7B-Q4_K_M.gguf"
           curl.exe -L --fail --retry 3 -o "$env:RUNNER_TEMP\qwen3-1.7b-q4.gguf" $url
+
+      - name: Verify exact Qwen3 test asset
+        shell: pwsh
+        run: |
+          $path = "$env:RUNNER_TEMP\qwen3-1.7b-q4.gguf"
           $size = (Get-Item "$env:RUNNER_TEMP\qwen3-1.7b-q4.gguf").Length
-          Write-Host "downloaded $size bytes"
-          if ($size -lt 800000000) { throw "model download too small ($size bytes) — likely an HTML error page" }
+          $sha = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($size -ne 1107408544) { throw "Qwen3 size mismatch: $size" }
+          if ($sha -ne "228fb5627f7510b8b3516cdb6435e4b0d2a2bf330fe5b0ab19284a3570a8bb1f") { throw "Qwen3 SHA-256 mismatch" }
 
       - name: Real Qwen3-1.7B (thinking-off) reason+ground with multi-step memory (Qwen3 loads on 0.24.0)
         env:
@@ -239,10 +314,13 @@ jobs:
   agent-merge-gate:
     name: Agent Merge Gate
     runs-on: ubuntu-latest
-    needs: [bootstrap-windows-smoke, build-and-test]
+    needs: [production-shell-boundary, ota-manifest-compatibility, build-and-test, windows-coverage, coverage-report]
     if: always()
     steps:
       - name: Require agent checks before merge
         run: |
-          if [[ "${{ needs.bootstrap-windows-smoke.result }}" != "success" ]]; then exit 1; fi
+          if [[ "${{ needs.production-shell-boundary.result }}" != "success" ]]; then exit 1; fi
+          if [[ "${{ needs.ota-manifest-compatibility.result }}" != "success" ]]; then exit 1; fi
           if [[ "${{ needs.build-and-test.result }}" != "success" ]]; then exit 1; fi
+          if [[ "${{ needs.windows-coverage.result }}" != "success" ]]; then exit 1; fi
+          if [[ "${{ needs.coverage-report.result }}" != "success" ]]; then exit 1; fi

@@ -20,4 +20,19 @@
     <ProjectReference Include="..\..\src\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\fixtures\brain-cohort-contract-v1.json"
+          Link="fixtures\brain-cohort-contract-v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\fixtures\brain-cohort-contract-v3.json"
+          Link="fixtures\brain-cohort-contract-v3.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\fixtures\brain-cohort-production-manifest-v1.json"
+          Link="fixtures\brain-cohort-production-manifest-v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\fixtures\pricing-approval-contract-v1.json"
+          Link="fixtures\pricing-approval-contract-v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

@@ -24,6 +24,12 @@ public sealed record ScreenFrame
     public required int Width { get; init; }
     public required int Height { get; init; }
 
+    /// <summary>
+    /// Exact executable name resolved from the captured HWND. Null when the
+    /// capture has no trustworthy window/process binding. Structural only.
+    /// </summary>
+    public string? ProcessName { get; init; }
+
     /// <summary>OCR / VLM text regions. All text is PHI-scrubbed.</summary>
     public IReadOnlyList<TextRegion> TextRegions { get; init; } = Array.Empty<TextRegion>();
 
@@ -62,6 +68,15 @@ public sealed record VisualElement
     /// rather than the scrubbed Name. Null when the element has no AutomationId or for OCR-only elements.
     /// </summary>
     public string? AutomationId { get; init; }
+
+    /// <summary>UIA class name. Structural only; null for OCR-only elements.</summary>
+    public string? ClassName { get; init; }
+
+    /// <summary>
+    /// Complete UIA interaction-state byte. Null means one or more required
+    /// UIA properties were unavailable and cloud reasoning must fail closed.
+    /// </summary>
+    public byte? StructuralStateByte { get; init; }
 
     public required Rect Bounds { get; init; }
     public double Confidence { get; init; }

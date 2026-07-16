@@ -1,0 +1,201 @@
+{
+  "fixtureSchemaVersion": 1,
+  "contractDomain": "suavo-brain-cohort-v1",
+  "identityDomain": "suavo-brain-cohort-id-v1",
+  "nowUtc": "2026-07-11T12:00:00.000Z",
+  "testOnlyTrustedKey": {
+    "keyId": "test-brain-golden-v1",
+    "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEr3zx6+YUqTeDISi/yN5mPKphzN/aNjWGxCOGbAQwf6ScYFLMA6Ny9g0SKeUfD2AU9ejrT0jjPEVunK5YbijLfQ=="
+  },
+  "identityCanonical": "suavo-brain-cohort-id-v1|suavo-golden-model-v1|https://artifacts.suavollc.com/brain/golden-model.gguf|000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f|8589934592|https://artifacts.suavollc.com/brain/golden-native.zip|ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100|268435456|512|512",
+  "canonical": "suavo-brain-cohort-v1|1|4a0b879efb090e6be231f21b53f727c745518dc434bf035731ce0977a127a994|suavo-golden-model-v1|https://artifacts.suavollc.com/brain/golden-model.gguf|000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f|8589934592|https://artifacts.suavollc.com/brain/golden-native.zip|ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100|268435456|512|512|2026-07-11T11:00:00.000Z|2026-07-12T12:00:00.000Z|test-brain-golden-v1",
+  "manifest": {
+    "schemaVersion": 1,
+    "cohortId": "4a0b879efb090e6be231f21b53f727c745518dc434bf035731ce0977a127a994",
+    "modelId": "suavo-golden-model-v1",
+    "modelUrl": "https://artifacts.suavollc.com/brain/golden-model.gguf",
+    "modelSha256": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "modelSizeBytes": 8589934592,
+    "nativeLibsUrl": "https://artifacts.suavollc.com/brain/golden-native.zip",
+    "nativeLibsSha256": "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+    "nativeLibsSizeBytes": 268435456,
+    "contextSize": 512,
+    "maxOutputTokens": 512,
+    "issuedAtUtc": "2026-07-11T11:00:00.000Z",
+    "expiresAtUtc": "2026-07-12T12:00:00.000Z",
+    "keyId": "test-brain-golden-v1",
+    "signature": "086288ce8bb7dbe74cfa37fa1f08f3855faf695b994f4dc459ef6b8baf35574fec71c04ce5acb80a726c4ccf0b569e2cf23bf96425169de060ae2d32b13b96f3"
+  },
+  "rejectionCases": [
+    {
+      "name": "model-id-leading-whitespace",
+      "field": "modelId",
+      "stringValue": " suavo-golden-model-v1",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-id-canonical-delimiter",
+      "field": "modelId",
+      "stringValue": "suavo|golden-model-v1",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-id-internal-space",
+      "field": "modelId",
+      "stringValue": "suavo golden model",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-id-unicode",
+      "field": "modelId",
+      "stringValue": "suavo-model-µ",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-id-over-128",
+      "field": "modelId",
+      "repeatCharacter": "a",
+      "repeatCount": 129,
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-query",
+      "field": "modelUrl",
+      "stringValue": "https://artifacts.suavollc.com/brain/golden-model.gguf?token=secret",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-fragment",
+      "field": "modelUrl",
+      "stringValue": "https://artifacts.suavollc.com/brain/golden-model.gguf#fragment",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-userinfo",
+      "field": "modelUrl",
+      "stringValue": "https://user:secret@artifacts.suavollc.com/brain/golden-model.gguf",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-size-over-8-gib",
+      "field": "modelSizeBytes",
+      "integerValue": 8589934593,
+      "expectedCode": "publisher_artifact_size_invalid"
+    },
+    {
+      "name": "native-size-over-256-mib",
+      "field": "nativeLibsSizeBytes",
+      "integerValue": 268435457,
+      "expectedCode": "publisher_artifact_size_invalid"
+    },
+    {
+      "name": "context-below-minimum",
+      "field": "contextSize",
+      "integerValue": 511,
+      "expectedCode": "publisher_tuning_bounds_invalid"
+    },
+    {
+      "name": "context-above-maximum",
+      "field": "contextSize",
+      "integerValue": 32769,
+      "expectedCode": "publisher_tuning_bounds_invalid"
+    },
+    {
+      "name": "output-above-maximum",
+      "field": "maxOutputTokens",
+      "integerValue": 4097,
+      "expectedCode": "publisher_tuning_bounds_invalid"
+    },
+    {
+      "name": "unknown-key",
+      "field": "keyId",
+      "stringValue": "unknown-v1",
+      "expectedCode": "publisher_key_unknown"
+    },
+    {
+      "name": "issued-at-seven-fractional-digits",
+      "field": "issuedAtUtc",
+      "stringValue": "2026-07-11T11:00:00.0000000Z",
+      "expectedCode": "publisher_validity_window_invalid"
+    },
+    {
+      "name": "issued-at-no-fractional-digits",
+      "field": "issuedAtUtc",
+      "stringValue": "2026-07-11T11:00:00Z",
+      "expectedCode": "publisher_validity_window_invalid"
+    },
+    {
+      "name": "model-url-empty-query-delimiter",
+      "field": "modelUrl",
+      "stringValue": "https://artifacts.suavollc.com/brain/golden-model.gguf?",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-empty-fragment-delimiter",
+      "field": "modelUrl",
+      "stringValue": "https://artifacts.suavollc.com/brain/golden-model.gguf#",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-empty-userinfo",
+      "field": "modelUrl",
+      "stringValue": "https://@artifacts.suavollc.com/brain/golden-model.gguf",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-explicit-default-port",
+      "field": "modelUrl",
+      "stringValue": "https://artifacts.suavollc.com:443/brain/golden-model.gguf",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-invalid-port",
+      "field": "modelUrl",
+      "stringValue": "https://artifacts.suavollc.com:99999/brain/golden-model.gguf",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-ipv6-authority",
+      "field": "modelUrl",
+      "stringValue": "https://[2001:db8::1]/brain/golden-model.gguf",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-percent-encoded-control",
+      "field": "modelUrl",
+      "stringValue": "https://artifacts.suavollc.com/brain/golden%0amodel.gguf",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "model-url-raw-space",
+      "field": "modelUrl",
+      "stringValue": "https://artifacts.suavollc.com/brain/golden model.gguf",
+      "expectedCode": "publisher_artifact_metadata_invalid"
+    },
+    {
+      "name": "validity-window-over-90-days",
+      "field": "expiresAtUtc",
+      "stringValue": "2026-10-09T11:00:00.001Z",
+      "expectedCode": "publisher_validity_window_invalid"
+    }
+  ],
+  "acceptanceCases": [
+    {
+      "name": "github-release-artifact",
+      "field": "modelUrl",
+      "stringValue": "https://github.com/MinaH153/suavo-agent-models/releases/download/qwen3-1.7b-q4km-v1/qwen3-1.7b-q4_k_m.gguf"
+    },
+    {
+      "name": "percent-encoded-non-control-path",
+      "field": "nativeLibsUrl",
+      "stringValue": "https://artifacts.suavollc.com/brain/golden-native%20win-x64.zip"
+    }
+  ],
+  "validityAcceptanceCases": [
+    {
+      "name": "exactly-90-day-authorization",
+      "issuedAtUtc": "2026-07-11T11:00:00.000Z",
+      "expiresAtUtc": "2026-10-09T11:00:00.000Z"
+    }
+  ]
+}

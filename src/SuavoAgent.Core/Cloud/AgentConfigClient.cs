@@ -55,14 +55,8 @@ public sealed class AgentConfigClient : IAgentConfigClient
         try
         {
             LastFailureKind = null;
-            var timestamp = DateTimeOffset.UtcNow.ToString("o");
-            // GET body is empty — signer operates on "timestamp:" with no body.
-            var signature = _signer.Sign(timestamp, string.Empty);
-
             using var request = new HttpRequestMessage(HttpMethod.Get, Endpoint);
-            request.Headers.Add("x-agent-api-key", _options.ApiKey);
-            request.Headers.Add("x-agent-timestamp", timestamp);
-            request.Headers.Add("x-agent-signature", signature);
+            _signer.ApplyHeaders(request, string.Empty);
 
             using var response = await _http.SendAsync(request, ct);
             if (!response.IsSuccessStatusCode)
@@ -106,7 +100,7 @@ public sealed class AgentConfigClient : IAgentConfigClient
         catch (Exception ex)
         {
             LastFailureKind = ex.GetType().Name;
-            _logger.LogWarning(ex, "AgentConfigClient: fetch failed");
+            _logger.LogSafeWarning(ex);
             return null;
         }
     }

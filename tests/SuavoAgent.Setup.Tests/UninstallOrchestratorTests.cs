@@ -3,6 +3,7 @@ using SuavoAgent.Setup;
 using SuavoAgent.Setup.Gui.Services;
 using SuavoAgent.Setup.Gui.ViewModels;
 using SuavoAgent.Setup.Gui.Views;
+using SuavoAgent.Setup.Maintenance;
 using Xunit;
 
 namespace SuavoAgent.Setup.Tests;
@@ -27,6 +28,9 @@ public sealed class UninstallOrchestratorTests
             ServicesRemaining = 0,
             DataDirRemoved = true,
             InstallDirRemoved = true,
+            ScheduledUninstallTaskAbsent = true,
+            ProtocolRegistrationAbsent = true,
+            ArpRegistrationAbsent = true,
         };
 
         Assert.True(r.FullyClean);
@@ -49,6 +53,9 @@ public sealed class UninstallOrchestratorTests
             ServicesRemaining = servicesRemaining,
             DataDirRemoved = dataRemoved,
             InstallDirRemoved = installRemoved,
+            ScheduledUninstallTaskAbsent = true,
+            ProtocolRegistrationAbsent = true,
+            ArpRegistrationAbsent = true,
         };
 
         Assert.False(r.FullyClean);
@@ -89,11 +96,91 @@ public sealed class UninstallOrchestratorTests
     }
 
     [Fact]
-    public void Success_viewmodel_carries_the_clean_machine_message()
+    public void Success_viewmodel_carries_the_evidence_retention_message()
     {
         var vm = new UninstallSuccessViewModel(onFinish: () => { });
 
-        Assert.Equal("SuavoAgent removed — this computer is clean.", vm.Message);
+        Assert.Contains("Retained compliance evidence", vm.Message);
+    }
+
+    [Fact]
+    public async Task MissingSignedCloudClaimChangesNothingAndNeverFinalizes()
+    {
+        var finalizerCalls = 0;
+        var orchestrator = new UninstallOrchestrator(
+            installDir: "/install",
+            dataDir: "/data",
+            fileExists: _ => false,
+            finalize: (_, _, _, _) =>
+            {
+                finalizerCalls++;
+                return Task.FromResult(SelfUninstallFinalizationResult.Finalized());
+            });
+
+        var result = await orchestrator.RunAsync(
+            new Progress<UninstallOrchestrator.PhaseEvent>(),
+            CancellationToken.None);
+
+        Assert.False(result.IsFinalized);
+        Assert.Equal("signed_cloud_authority_required", result.Code);
+        Assert.Equal(0, finalizerCalls);
+        Assert.Null(result.Cleanup);
+    }
+
+    [Fact]
+    public async Task SignedClaimIsSuccessfulOnlyWithCloudFinalizationAndZeroResidue()
+    {
+        var cleanup = new ServiceInstaller.UninstallResult
+        {
+            ServicesRemaining = 0,
+            DataDirRemoved = true,
+            InstallDirRemoved = true,
+            ScheduledUninstallTaskAbsent = true,
+            ProtocolRegistrationAbsent = true,
+            ArpRegistrationAbsent = true,
+        };
+        var orchestrator = new UninstallOrchestrator(
+            installDir: "/install",
+            dataDir: "/data",
+            fileExists: _ => true,
+            finalize: (_, _, _, _) => Task.FromResult(
+                SelfUninstallFinalizationResult.Finalized(cleanup)));
+
+        var result = await orchestrator.RunAsync(
+            new Progress<UninstallOrchestrator.PhaseEvent>(),
+            CancellationToken.None);
+
+        Assert.True(result.IsFinalized);
+        Assert.True(result.Cleanup!.FullyClean);
+    }
+
+    [Fact]
+    public async Task CloudPendingResultNeverBecomesGuiSuccessAfterLocalCleanup()
+    {
+        var cleanup = new ServiceInstaller.UninstallResult
+        {
+            ServicesRemaining = 0,
+            DataDirRemoved = true,
+            InstallDirRemoved = true,
+            ScheduledUninstallTaskAbsent = true,
+            ProtocolRegistrationAbsent = true,
+            ArpRegistrationAbsent = true,
+        };
+        var orchestrator = new UninstallOrchestrator(
+            installDir: "/install",
+            dataDir: "/data",
+            fileExists: _ => true,
+            finalize: (_, _, _, _) => Task.FromResult(
+                SelfUninstallFinalizationResult.Pending(
+                    "cloud_completion_pending",
+                    cleanup)));
+
+        var result = await orchestrator.RunAsync(
+            new Progress<UninstallOrchestrator.PhaseEvent>(),
+            CancellationToken.None);
+
+        Assert.False(result.IsFinalized);
+        Assert.Equal("cloud_completion_pending", result.Code);
     }
 
     // ── Progress view reuse: uninstall titles render through the same VM ───
@@ -103,16 +190,17 @@ public sealed class UninstallOrchestratorTests
     {
         var vm = new ProgressViewModel(() => { }, new[]
         {
-            "Stop & remove services",
-            "Remove local data",
-            "Remove program files",
+            "Confirm dashboard authority",
+            "Remove authorized runtime",
+            "Preserve compliance evidence",
+            "Confirm cloud completion",
         })
         {
             Title = "Uninstalling SuavoAgent",
         };
 
-        Assert.Equal(3, vm.Phases.Count);
-        Assert.Equal("Stop & remove services", vm.Phases[0].Title);
+        Assert.Equal(4, vm.Phases.Count);
+        Assert.Equal("Confirm dashboard authority", vm.Phases[0].Title);
         Assert.Equal("Uninstalling SuavoAgent", vm.Title);
     }
 

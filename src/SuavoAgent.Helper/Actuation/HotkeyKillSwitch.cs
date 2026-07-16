@@ -120,7 +120,12 @@ public sealed class HotkeyKillSwitch : IDisposable
                     {
                         _gate.TripKillSwitch("ctrl_shift_esc");
                         try { KillSwitchActivated?.Invoke(); }
-                        catch (Exception ex) { _logger.Warning(ex, "KillSwitchActivated handler threw"); }
+                        catch (Exception ex)
+                        {
+                            _logger.Warning(
+                                "KillSwitchActivated handler threw ({ErrorType})",
+                                ex.GetType().Name);
+                        }
                     }
                     TranslateMessage(ref msg);
                     DispatchMessage(ref msg);

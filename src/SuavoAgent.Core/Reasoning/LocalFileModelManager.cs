@@ -25,6 +25,18 @@ public sealed class LocalFileModelManager : IModelManager
 
     public async Task<ModelVerificationResult> VerifyAsync(CancellationToken ct)
     {
+        var publisher = _options.ValidatePublisherInstallation(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent"),
+            DateTimeOffset.UtcNow);
+        if (!publisher.IsValid)
+            return new ModelVerificationResult(
+                false,
+                _options.ModelPath,
+                null,
+                $"publisher authorization rejected ({publisher.Code})");
+
         if (string.IsNullOrWhiteSpace(_options.ModelPath))
             return new ModelVerificationResult(false, null, null, "ModelPath not configured");
 
@@ -44,25 +56,31 @@ public sealed class LocalFileModelManager : IModelManager
 
         try
         {
+            if (new FileInfo(_options.ModelPath).Length != _options.ModelSizeBytes)
+                return new ModelVerificationResult(
+                    false,
+                    _options.ModelPath,
+                    null,
+                    "signed model size mismatch — fail-closed");
             var actual = await ComputeSha256Async(_options.ModelPath, ct);
             if (!string.Equals(actual, _options.ModelSha256, StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogError(
-                    "Model hash mismatch at {Path}. Expected {Expected} but got {Actual}. Fail-closed.",
-                    _options.ModelPath, _options.ModelSha256, actual);
+                _logger.LogError("core.model.hash_mismatch");
                 return new ModelVerificationResult(false, _options.ModelPath, actual,
                     "SHA-256 mismatch — fail-closed");
             }
 
-            _logger.LogInformation("Model verified at {Path} (SHA-256 {Hash})",
-                _options.ModelPath, actual);
+            _logger.LogInformation("core.model.verified");
             return new ModelVerificationResult(true, _options.ModelPath, actual, "verified");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Model hash verification failed for {Path}", _options.ModelPath);
-            return new ModelVerificationResult(false, _options.ModelPath, null,
-                $"hash verification error: {ex.Message}");
+            _logger.LogSafeError(ex);
+            return new ModelVerificationResult(
+                false,
+                _options.ModelPath,
+                null,
+                $"model_hash_verification_exception:{ex.GetType().Name}");
         }
     }
 

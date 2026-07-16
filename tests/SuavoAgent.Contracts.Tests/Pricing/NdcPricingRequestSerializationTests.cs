@@ -21,7 +21,7 @@ public class NdcPricingRequestSerializationTests
             new SelectorPatch("p1", "skill-x", SelectorStepId.QuickSearchField, "v1.2", "scrA",
                 new ElementSignature("Edit", "ndcSearchBox", "PioneerRxEdit"),
                 new[] { new ElementSignature("Edit", "altSearchBox", null) },
-                0.9, "seed-digest", 2),
+                0.9, "seed-digest", 2, "pharmacist_in_charge"),
         });
 
         var json = JsonSerializer.Serialize(req);
@@ -36,6 +36,7 @@ public class NdcPricingRequestSerializationTests
         Assert.Equal("PioneerRxEdit", p.Target.ClassName);
         Assert.Equal("altSearchBox", Assert.Single(p.Fallbacks).AutomationId);
         Assert.Equal(2, p.Version);
+        Assert.Equal("pharmacist_in_charge", p.ApprovedByRole);
     }
 
     [Fact]

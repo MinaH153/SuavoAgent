@@ -5,8 +5,10 @@ namespace SuavoAgent.Core.Tests.Cloud;
 
 public class UpdateManifestTests
 {
-    private const string ValidManifest =
+    private const string LegacyManifest =
         "https://github.com/core.exe|abc123|https://github.com/broker.exe|def456|https://github.com/helper.exe|789012|2.1.0|net8.0|win-x64";
+    private const string ValidManifest = LegacyManifest +
+        "|https://github.com/watchdog.exe|wd789";
 
     [Fact]
     public void Parse_ValidManifest_ReturnsRecord()
@@ -46,19 +48,16 @@ public class UpdateManifestTests
         Assert.False(m.MatchesRuntime("net8.0", "linux-x64"));
     }
 
-    // ---- Self-heal Chunk B: optional Watchdog (back-compat) ----
+    // Cloud and native privileged activation share the same 11/13-field cohort.
+    private const string WatchdogManifest = ValidManifest;
 
-    private const string WatchdogManifest = ValidManifest +
-        "|https://github.com/watchdog.exe|wd789";
+    private const string FullCohortManifest = WatchdogManifest +
+        "|https://github.com/setup.exe|setup012";
 
     [Fact]
-    public void WatchdoglessManifest_HasNoWatchdog_AndCanonicalIsUnchanged()
+    public void LegacyNineFieldManifest_IsRejectedBeforeSystemActivation()
     {
-        var m = UpdateManifest.Parse(ValidManifest)!;
-        Assert.False(m.HasWatchdog);
-        // CRITICAL: a watchdog-less manifest's canonical must be byte-identical to the legacy form,
-        // so existing signatures keep verifying after this change.
-        Assert.Equal(ValidManifest, m.ToCanonical());
+        Assert.Null(UpdateManifest.Parse(LegacyManifest));
     }
 
     [Fact]
@@ -82,6 +81,19 @@ public class UpdateManifestTests
     }
 
     [Fact]
+    public void Parse_FullCohortManifest_IncludesMaintenanceHostAndRoundTrips()
+    {
+        var m = UpdateManifest.Parse(FullCohortManifest);
+
+        Assert.NotNull(m);
+        Assert.True(m!.HasWatchdog);
+        Assert.True(m.HasMaintenance);
+        Assert.Equal("https://github.com/setup.exe", m.MaintenanceUrl);
+        Assert.Equal("setup012", m.MaintenanceSha256);
+        Assert.Equal(FullCohortManifest, m.ToCanonical());
+    }
+
+    [Fact]
     public void Parse_TenFields_ReturnsNull()
     {
         // Only 9 (legacy) or 11 (with watchdog) are valid — 10 is malformed.
@@ -89,8 +101,20 @@ public class UpdateManifestTests
     }
 
     [Fact]
+    public void Parse_TwelveFields_ReturnsNull()
+    {
+        Assert.Null(UpdateManifest.Parse("a|b|c|d|e|f|g|h|i|j|k|l"));
+    }
+
+    [Fact]
     public void Parse_WatchdogManifest_EmptyWatchdogField_ReturnsNull()
     {
-        Assert.Null(UpdateManifest.Parse(ValidManifest + "|https://wd|"));
+        Assert.Null(UpdateManifest.Parse(LegacyManifest + "|https://wd|"));
+    }
+
+    [Fact]
+    public void Parse_FullCohortManifest_EmptyMaintenanceField_ReturnsNull()
+    {
+        Assert.Null(UpdateManifest.Parse(WatchdogManifest + "|https://setup|"));
     }
 }

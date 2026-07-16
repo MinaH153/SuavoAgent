@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyTitle>SuavoAgent.Watchdog</AssemblyTitle>
-    <Description>Suavo pharmacy agent watchdog — auto-restarts Core/Broker and escalates to bootstrap --repair on persistent failure.</Description>
+    <Description>Suavo pharmacy agent watchdog — auto-restarts Core/Broker and escalates to native maintenance repair on persistent failure.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
@@ -23,6 +23,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
     <ProjectReference Include="..\SuavoAgent.Diagnostics\SuavoAgent.Diagnostics.csproj" />
   </ItemGroup>
 

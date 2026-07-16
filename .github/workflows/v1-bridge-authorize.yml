@@ -1,0 +1,29 @@
+name: OTA v1 bridge - authorize
+run-name: Authorize v1 bridge stage ${{ inputs.stage_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage_run_id:
+        description: Completed successful OTA v1 bridge stage run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: suavoagent-production-release
+  cancel-in-progress: false
+
+jobs:
+  authorize-reviewed-handoff:
+    uses: ./.github/workflows/production-signing.yml
+    with:
+      stage_run_id: ${{ inputs.stage_run_id }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write

@@ -1,5 +1,8 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using SuavoAgent.Contracts.Reasoning;
 using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Reasoning;
 using Xunit;
@@ -13,7 +16,13 @@ namespace SuavoAgent.Core.Tests.Reasoning;
 /// </summary>
 public sealed class BrainProvisioningStateTests : IDisposable
 {
+    private static readonly DateTimeOffset Now =
+        new(2026, 7, 11, 12, 0, 0, TimeSpan.Zero);
+    private const string ModelKeyId = "brain-model-provisioning-test-v1";
+    private const string NativeKeyId = "brain-native-provisioning-test-v1";
     private readonly string _root = Path.Combine(Path.GetTempPath(), "suavo-brain-test-" + Guid.NewGuid().ToString("N"));
+    private readonly ECDsa _modelKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    private readonly ECDsa _nativeKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
     private static readonly string[] RequiredDlls = { "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll" };
 
@@ -23,28 +32,103 @@ public sealed class BrainProvisioningStateTests : IDisposable
             Task.FromResult(new ModelVerificationResult(false, null, null, "stub"));
     }
 
-    private DeferredLocalInference NewInference(string? modelPath, string? nativeDir, long? modelSizeBytes = null)
+    private DeferredLocalInference NewInference(
+        string? modelPath,
+        string? nativeDir,
+        long? modelSizeBytes = 1_000,
+        bool publisherAuthorized = true)
     {
+        var unsigned = new BrainCohortPublisherManifest(
+            BrainCohortContract.SchemaVersion,
+            new string('0', 64),
+            "qwen3-1.7b",
+            "https://assets.example/model.gguf",
+            new string('a', 64),
+            modelSizeBytes ?? 0,
+            "https://assets.example/native.nupkg",
+            new string('b', 64),
+            4_096,
+            4_096,
+            512,
+            Utc(Now.AddHours(-1)),
+            Utc(Now.AddDays(1)),
+            string.Empty,
+            string.Empty,
+            ModelKeyId,
+            string.Empty,
+            NativeKeyId,
+            string.Empty,
+            BrainNativePackageExtractor.OfficialNuGetPackageKind);
+        var manifest = Sign(unsigned);
         var options = Options.Create(new AgentOptions
         {
             Reasoning = new ReasoningOptions
             {
                 Enabled = true,
-                ModelId = "qwen3-1.7b",
+                SchemaVersion = publisherAuthorized ? manifest.SchemaVersion : 0,
+                CohortId = publisherAuthorized ? manifest.CohortId : null,
+                ModelId = manifest.ModelId,
                 ModelPath = modelPath,
                 NativeLibraryPath = nativeDir,
                 ModelSizeBytes = modelSizeBytes,
-                // No URLs → the constructor's background provisioning is a no-op
-                // (logged + skipped), keeping these tests hermetic.
+                ModelUrl = publisherAuthorized ? manifest.ModelUrl : null,
+                ModelSha256 = publisherAuthorized ? manifest.ModelSha256 : null,
+                NativeLibsUrl = publisherAuthorized ? manifest.NativeLibsUrl : null,
+                NativeLibsSha256 = publisherAuthorized ? manifest.NativeLibsSha256 : null,
+                NativeLibsSizeBytes = publisherAuthorized ? manifest.NativeLibsSizeBytes : null,
+                NativePackageKind = publisherAuthorized ? manifest.NativePackageKind : null,
+                ContextSize = manifest.ContextSize,
+                MaxOutputTokens = manifest.MaxOutputTokens,
+                IssuedAtUtc = publisherAuthorized ? manifest.IssuedAtUtc : null,
+                ExpiresAtUtc = publisherAuthorized ? manifest.ExpiresAtUtc : null,
+                ModelKeyId = publisherAuthorized ? manifest.ModelKeyId : null,
+                ModelSignature = publisherAuthorized ? manifest.ModelSignature : null,
+                NativeKeyId = publisherAuthorized ? manifest.NativeKeyId : null,
+                NativeSignature = publisherAuthorized ? manifest.NativeSignature : null,
+                // The publisher manifest is real and signed in-process. Tests
+                // arrange present native files (or no path) during construction,
+                // so its background provisioner never reaches the network.
             },
         });
+        var keys = new Dictionary<string, string>
+        {
+            [ModelKeyId] = Convert.ToBase64String(_modelKey.ExportSubjectPublicKeyInfo()),
+            [NativeKeyId] = Convert.ToBase64String(_nativeKey.ExportSubjectPublicKeyInfo()),
+        };
         return new DeferredLocalInference(
             options,
             new NativeLibProvisioner(options, NullLogger<NativeLibProvisioner>.Instance),
             new StubModelManager(),
             NullLogger<LLamaLocalInference>.Instance,
-            NullLogger<DeferredLocalInference>.Instance);
+            NullLogger<DeferredLocalInference>.Instance,
+            _root,
+            keys,
+            () => Now);
     }
+
+    private BrainCohortPublisherManifest Sign(BrainCohortPublisherManifest manifest)
+    {
+        var identified = manifest with
+        {
+            CohortId = BrainCohortContract.ComputeCohortId(manifest),
+            ModelSignature = string.Empty,
+            NativeSignature = string.Empty,
+        };
+        return identified with
+        {
+            ModelSignature = Convert.ToHexString(_modelKey.SignData(
+                Encoding.UTF8.GetBytes(BrainCohortContract.BuildModelCanonical(identified)),
+                HashAlgorithmName.SHA256,
+                DSASignatureFormat.IeeeP1363FixedFieldConcatenation)).ToLowerInvariant(),
+            NativeSignature = Convert.ToHexString(_nativeKey.SignData(
+                Encoding.UTF8.GetBytes(BrainCohortContract.BuildNativeCanonical(identified)),
+                HashAlgorithmName.SHA256,
+                DSASignatureFormat.IeeeP1363FixedFieldConcatenation)).ToLowerInvariant(),
+        };
+    }
+
+    private static string Utc(DateTimeOffset value) =>
+        value.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'");
 
     private string NativeDirWithDlls()
     {
@@ -66,7 +150,9 @@ public sealed class BrainProvisioningStateTests : IDisposable
     [Fact]
     public void DllsAbsent_ReportsDownloadingLibs()
     {
-        var sut = NewInference(Path.Combine(_root, "models", "m.gguf"), Path.Combine(_root, "native-missing"));
+        var nativeDir = NativeDirWithDlls();
+        var sut = NewInference(Path.Combine(_root, "models", "m.gguf"), nativeDir);
+        File.Delete(Path.Combine(nativeDir, RequiredDlls[0]));
         Assert.Equal(BrainProvisioningState.DownloadingLibs, sut.ProvisioningState);
         Assert.Null(sut.ProvisioningPercent);
     }
@@ -94,23 +180,24 @@ public sealed class BrainProvisioningStateTests : IDisposable
     }
 
     [Fact]
-    public void DownloadingModel_UnknownTotalSize_ReportsNullPercent()
+    public void MissingSignedModelSize_FailsAuthorization()
     {
         var modelPath = Path.Combine(_root, "models", "m.gguf");
         var sut = NewInference(modelPath, NativeDirWithDlls(), modelSizeBytes: null);
+        Assert.Equal(BrainProvisioningState.Failed, sut.ProvisioningState);
         Assert.Null(sut.ProvisioningPercent);
     }
 
     [Fact]
-    public void AssetsAllPresent_ReportsReady_With100Percent()
+    public void Unsigned_assets_present_are_failed_not_ready()
     {
         var modelPath = Path.Combine(_root, "models", "m.gguf");
         Directory.CreateDirectory(Path.GetDirectoryName(modelPath)!);
         File.WriteAllBytes(modelPath, new byte[] { 1, 2, 3 });
 
-        var sut = NewInference(modelPath, NativeDirWithDlls());
-        Assert.Equal(BrainProvisioningState.Ready, sut.ProvisioningState);
-        Assert.Equal(100, sut.ProvisioningPercent);
+        var sut = NewInference(modelPath, NativeDirWithDlls(), publisherAuthorized: false);
+        Assert.Equal(BrainProvisioningState.Failed, sut.ProvisioningState);
+        Assert.Null(sut.ProvisioningPercent);
     }
 
     [Fact]
@@ -128,6 +215,8 @@ public sealed class BrainProvisioningStateTests : IDisposable
 
     public void Dispose()
     {
+        _modelKey.Dispose();
+        _nativeKey.Dispose();
         try { Directory.Delete(_root, recursive: true); } catch { /* best effort */ }
     }
 }

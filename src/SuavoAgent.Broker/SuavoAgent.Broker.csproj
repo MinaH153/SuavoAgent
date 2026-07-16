@@ -14,12 +14,14 @@
     <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
-    <!-- Direct pin overrides transitive 8.0.0 (GHSA-hh2w-p6rv-4g7w + GHSA-8g4q-xg66-9fp4, both HIGH DoS). -->
-    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!-- Explicit current servicing pin; TraceEvent 3.2 requires the 9.x serializer line. -->
+    <PackageReference Include="System.Text.Json" Version="9.0.17" />
     <!-- Honeytoken ETW attribution oracle (Windows-only at runtime; managed lib builds cross-platform, all
          ETW calls guarded by OperatingSystem.IsWindows()). Native KernelTraceControl bits ride the win-x64
          self-contained publish (IncludeNativeLibrariesForSelfExtract above). -->
-    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.16" />
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.2.4" />
+    <!-- Override TraceEvent's netstandard-era access-control floor with the maintained package. -->
+    <PackageReference Include="System.Security.AccessControl" Version="6.0.1" />
   </ItemGroup>
 
   <ItemGroup>

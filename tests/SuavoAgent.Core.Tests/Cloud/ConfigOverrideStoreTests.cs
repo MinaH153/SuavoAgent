@@ -119,7 +119,7 @@ public class ConfigOverrideStoreTests : IDisposable
 
         var root = JsonDocument.Parse(File.ReadAllText(_path)).RootElement;
         Assert.True(root.GetProperty("Good").GetProperty("Flag").GetBoolean());
-        Assert.Equal(1, root.EnumerateObject().Count());
+        Assert.Single(root.EnumerateObject());
     }
 
     [Fact]
@@ -135,8 +135,14 @@ public class ConfigOverrideStoreTests : IDisposable
             Override("Agent.SqlPassword", JsonDocument.Parse("\"pw\"").RootElement),
             Override("Agent.HmacSalt", JsonDocument.Parse("\"salt\"").RootElement),
             Override("Agent.CloudCertPin", JsonDocument.Parse("\"pin\"").RootElement),
+            Override("Agent.SqlTrustServerCertificate", JsonDocument.Parse("true").RootElement),
+            Override("Agent.SqlServerCertificateSha256", JsonDocument.Parse($"\"{new string('a', 64)}\"").RootElement),
+            Override("Agent.ValidatedSqlServerCertificatePath", JsonDocument.Parse("\"C:\\\\temp\\\\fake.cer\"").RootElement),
             Override("Agent.Pharmacies", JsonDocument.Parse("[{\"SqlPassword\":\"pw\"}]").RootElement),
             Override("Agent.Pharmacies.0.SqlPassword", JsonDocument.Parse("\"pw\"").RootElement),
+            Override("Agent.PricingCostBasisApproval", JsonDocument.Parse("{\"ApprovedByRole\":\"pharmacist_in_charge\"}").RootElement),
+            Override("Agent.PricingCostBasisApproval.Signature", JsonDocument.Parse("\"forged\"").RootElement),
+            Override("PricingCostBasisApproval.KeyId", JsonDocument.Parse("\"attacker\"").RootElement),
             Override("Agent.LearningMode", JsonDocument.Parse("true").RootElement),
         };
 
@@ -152,7 +158,12 @@ public class ConfigOverrideStoreTests : IDisposable
         Assert.False(agent.TryGetProperty("SqlPassword", out _));
         Assert.False(agent.TryGetProperty("HmacSalt", out _));
         Assert.False(agent.TryGetProperty("CloudCertPin", out _));
+        Assert.False(agent.TryGetProperty("SqlTrustServerCertificate", out _));
+        Assert.False(agent.TryGetProperty("SqlServerCertificateSha256", out _));
+        Assert.False(agent.TryGetProperty("ValidatedSqlServerCertificatePath", out _));
         Assert.False(agent.TryGetProperty("Pharmacies", out _));
+        Assert.False(agent.TryGetProperty("PricingCostBasisApproval", out _));
+        Assert.False(root.TryGetProperty("PricingCostBasisApproval", out _));
     }
 
     [Fact]
@@ -233,7 +244,7 @@ public class ConfigOverrideStoreTests : IDisposable
     }
 
     [Fact]
-    public void Apply_AllowsBoundedRuntimeTunables()
+    public void Apply_BlocksAllVisionOverrides_EvenWhenWellFormed()
     {
         var store = NewStore();
         var overrides = new[]
@@ -244,6 +255,7 @@ public class ConfigOverrideStoreTests : IDisposable
             Override("Vision.PeriodicCapture.IntervalSeconds", JsonDocument.Parse("30").RootElement),
             Override("Vision.Tesseract.MinConfidence", JsonDocument.Parse("60").RootElement),
             Override("Vision.PeriodicCapture.Enabled", JsonDocument.Parse("true").RootElement),
+            Override("Agent.Vision.Enabled", JsonDocument.Parse("true").RootElement),
         };
 
         store.Apply(overrides);
@@ -252,10 +264,8 @@ public class ConfigOverrideStoreTests : IDisposable
         Assert.Equal(30, root.GetProperty("Agent").GetProperty("HeartbeatIntervalSeconds").GetInt32());
         Assert.Equal(5, root.GetProperty("Agent").GetProperty("HeartbeatJitterSeconds").GetInt32());
         Assert.Equal(250, root.GetProperty("Agent").GetProperty("MaxDetectionBatchSize").GetInt32());
-        var vision = root.GetProperty("Vision");
-        Assert.Equal(30, vision.GetProperty("PeriodicCapture").GetProperty("IntervalSeconds").GetInt32());
-        Assert.True(vision.GetProperty("PeriodicCapture").GetProperty("Enabled").GetBoolean());
-        Assert.Equal(60, vision.GetProperty("Tesseract").GetProperty("MinConfidence").GetInt32());
+        Assert.False(root.TryGetProperty("Vision", out _));
+        Assert.False(root.GetProperty("Agent").TryGetProperty("Vision", out _));
     }
 
     [Fact]

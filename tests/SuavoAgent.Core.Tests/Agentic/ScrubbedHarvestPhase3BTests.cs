@@ -296,8 +296,9 @@ public class ScrubbedHarvestPhase3BTests
             Step("s1", "type_into_field", ("text", "hn")));
 
         Assert.Null(skill);
+        Assert.NotNull(reason);
         Assert.Contains("keyboard_stream", reason);
-        Assert.DoesNotContain("john", reason.ToLowerInvariant());
+        Assert.DoesNotContain("john", reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

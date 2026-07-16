@@ -62,15 +62,18 @@ public sealed class ActuationCommandHandler
                 ActuationIpcCommands.DiscoverElements => HandleDiscoverElements(data),
                 _ => ActuationResult.Reject(
                     ActuationRejectionCodes.MalformedRequest,
-                    $"unknown actuation command '{command}'",
+                    "unknown actuation command",
                     _gate.IsDryRun),
             };
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.Warning(ex, "ActuationCommandHandler unexpected exception for {Command}", command);
-            return ActuationResult.Reject(ActuationRejectionCodes.ExecutionException, ex.Message, _gate.IsDryRun);
+            _logger.Warning("ActuationCommandHandler failed locally");
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ExecutionException,
+                "actuation command failed locally",
+                _gate.IsDryRun);
         }
     }
 
@@ -89,13 +92,11 @@ public sealed class ActuationCommandHandler
         if (string.IsNullOrWhiteSpace(req.Label) || string.IsNullOrWhiteSpace(req.ProcessName))
             return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "label/processName required", effectiveDryRun);
 
-        var allowedProcesses = ActuationAllowlistedSandboxApps.ProcessNames.Values
-            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys);
-        if (!allowedProcesses.Contains(req.ProcessName, StringComparer.OrdinalIgnoreCase))
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(req.ProcessName))
         {
             return ActuationResult.Reject(
                 ActuationRejectionCodes.ProcessNotAllowed,
-                $"processName '{req.ProcessName}' not allowed for sandbox actuation",
+                "requested process is not an approved sandbox target",
                 effectiveDryRun);
         }
 
@@ -111,18 +112,35 @@ public sealed class ActuationCommandHandler
             ? TimeSpan.FromMilliseconds(req.TimeoutMs)
             : _config.DefaultUiaTimeout;
 
-        var resolved = _resolver.Resolve(req.Label, req.ProcessName, mode, timeout);
+        var sawUntrustedProcess = false;
+        bool TrustProcess(int pid)
+        {
+            var verdict = SandboxProcessTrustVerifier.VerifyResolvedProcess(pid, req.ProcessName);
+            if (!verdict.Trusted) sawUntrustedProcess = true;
+            return verdict.Trusted;
+        }
+
+        var resolved = _resolver.Resolve(req.Label, req.ProcessName, mode, timeout, TrustProcess);
         if (resolved is null)
         {
-            _presence?.Narrate("Couldn't find", req.Label, SuavoAgent.Helper.Presence.PresenceTones.Confirm);
+            _presence?.Narrate("Couldn't find", "approved target", SuavoAgent.Helper.Presence.PresenceTones.Confirm);
+            if (sawUntrustedProcess)
+            {
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "resolved process failed sandbox path/publisher identity verification",
+                    effectiveDryRun);
+            }
             return ActuationResult.Reject(
                 ActuationRejectionCodes.LabelNotFound,
-                $"label '{req.Label}' not found in '{req.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
+                "requested UI target was not found in the approved sandbox app",
                 effectiveDryRun);
         }
 
-        _presence?.Narrate("Clicking", req.Label);
-        return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct, resolved.Pid).ConfigureAwait(false);
+        _presence?.Narrate("Clicking", "approved target");
+        return await _driver.ClickAtAsync(
+            resolved.X, resolved.Y, req.DryRun, ct, resolved.Pid, req.ProcessName,
+            SendInputDriver.TargetTrustKind.Sandbox).ConfigureAwait(false);
     }
 
     private async Task<ActuationResult> HandleClickBySignatureAsync(JsonElement? data, CancellationToken ct)
@@ -136,13 +154,11 @@ public sealed class ActuationCommandHandler
         if (string.IsNullOrWhiteSpace(req.AutomationId) || string.IsNullOrWhiteSpace(req.ControlType) || string.IsNullOrWhiteSpace(req.ProcessName))
             return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "controlType/automationId/processName required", effectiveDryRun);
 
-        var allowedProcesses = ActuationAllowlistedSandboxApps.ProcessNames.Values
-            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys);
-        if (!allowedProcesses.Contains(req.ProcessName, StringComparer.OrdinalIgnoreCase))
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(req.ProcessName))
         {
             return ActuationResult.Reject(
                 ActuationRejectionCodes.ProcessNotAllowed,
-                $"processName '{req.ProcessName}' not allowed for sandbox actuation",
+                "requested process is not an approved sandbox target",
                 effectiveDryRun);
         }
 
@@ -151,18 +167,36 @@ public sealed class ActuationCommandHandler
 
         var timeout = req.TimeoutMs > 0 ? TimeSpan.FromMilliseconds(req.TimeoutMs) : _config.DefaultUiaTimeout;
 
-        var resolved = _signatureResolver.Resolve(req.ControlType, req.AutomationId, req.ClassName, req.ProcessName, timeout);
+        var sawUntrustedProcess = false;
+        bool TrustProcess(int pid)
+        {
+            var verdict = SandboxProcessTrustVerifier.VerifyResolvedProcess(pid, req.ProcessName);
+            if (!verdict.Trusted) sawUntrustedProcess = true;
+            return verdict.Trusted;
+        }
+
+        var resolved = _signatureResolver.Resolve(
+            req.ControlType, req.AutomationId, req.ClassName, req.ProcessName, timeout, TrustProcess);
         if (resolved is null)
         {
-            _presence?.Narrate("Couldn't find", req.AutomationId, SuavoAgent.Helper.Presence.PresenceTones.Confirm);
+            _presence?.Narrate("Couldn't find", "approved target", SuavoAgent.Helper.Presence.PresenceTones.Confirm);
+            if (sawUntrustedProcess)
+            {
+                return ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "resolved process failed sandbox path/publisher identity verification",
+                    effectiveDryRun);
+            }
             return ActuationResult.Reject(
                 ActuationRejectionCodes.LabelNotFound,
-                $"signature ({req.ControlType}|{req.AutomationId}) not found in '{req.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
+                "requested structural UI target was not found in the approved sandbox app",
                 effectiveDryRun);
         }
 
-        _presence?.Narrate("Clicking", req.AutomationId);
-        return await _driver.ClickAtAsync(resolved.X, resolved.Y, req.DryRun, ct, resolved.Pid).ConfigureAwait(false);
+        _presence?.Narrate("Clicking", "approved target");
+        return await _driver.ClickAtAsync(
+            resolved.X, resolved.Y, req.DryRun, ct, resolved.Pid, req.ProcessName,
+            SendInputDriver.TargetTrustKind.Sandbox).ConfigureAwait(false);
     }
 
     private async Task<ActuationResult> HandleTypeTextAsync(JsonElement? data, CancellationToken ct)
@@ -170,78 +204,17 @@ public sealed class ActuationCommandHandler
         if (data is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "missing data", _gate.IsDryRun);
         var req = data.Value.Deserialize<TypeTextRequest>();
         if (req is null) return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun);
-
-        _presence?.Narrate("Typing", null); // NEVER the text — PHI
-        var result = await _driver.TypeTextAsync(req, ct).ConfigureAwait(false);
-
-        // SELF-VERIFICATION (read-back): after a LIVE successful type, confirm the keystrokes actually
-        // landed by reading the focused field's value via UIA. This converts the type verb from "trust
-        // the SendInput return" to "prove the text is in the field" — it catches the dropped-char /
-        // wrong-control silent failures that previously required a human to eyeball the screen.
-        //
-        // Fail-GRACEFUL: only fail when we positively read a value that does NOT contain the typed text.
-        // A null read-back (no focus, control exposes no value, UIA hiccup) is treated as UNVERIFIED and
-        // does NOT fail an otherwise-successful type — never a false rejection.
-        if (result.Ok && !result.DryRun && !string.IsNullOrEmpty(req.Text))
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(req.ProcessName))
         {
-            try
-            {
-                // Retry the read-back: a control can commit the text slightly after SendInput returns, so
-                // a single read could miss it. Compare NORMALISED (alphanumeric, lower-cased) so fields
-                // that reformat input — phone masks, currency, case-normalisation, trimming — do NOT
-                // false-fail (Codex review). Verified as soon as a normalised read contains the normalised
-                // typed text.
-                var typedNorm = NormalizeForVerification(req.Text);
-                var verified = false;
-                var sawNonEmptyValue = false; // read a field value that had real content
-                var sawEmptyValue = false;    // read a field value that was effectively empty
-                for (var i = 0; i < 6 && !verified; i++)
-                {
-                    await Task.Delay(200, ct).ConfigureAwait(false);
-                    var readback = _resolver.ReadFocusedElementValue();
-                    if (readback is null) continue; // no readable VALUE this tick
-                    var readNorm = NormalizeForVerification(readback);
-                    if (readNorm.Length == 0) { sawEmptyValue = true; continue; }
-                    sawNonEmptyValue = true;
-                    if (typedNorm.Length == 0 || readNorm.Contains(typedNorm, StringComparison.Ordinal))
-                        verified = true;
-                }
-
-                if (verified)
-                {
-                    _logger.Information("TypeText verified: focused field reflects the typed text on read-back");
-                }
-                else if (!sawNonEmptyValue && sawEmptyValue)
-                {
-                    // Unambiguous failure: we read the focused field and it was EMPTY after a substantive
-                    // type — the keystrokes did not land (dropped / wrong control). A field that merely
-                    // REFORMATS input is never empty, so this can't false-fail it. Fail closed. Lengths
-                    // only — NEVER log the typed text or field contents (PHI).
-                    _logger.Warning(
-                        "TypeText verification FAILED: focused field read back EMPTY after a non-empty type (typedLen={Typed})",
-                        req.Text.Length);
-                    return ActuationResult.Reject(
-                        ActuationRejectionCodes.TypeNotVerified,
-                        "focused field is empty on UIA read-back after typing — keystrokes did not land",
-                        result.DryRun);
-                }
-                else
-                {
-                    // Either no readable value at all, OR a non-empty value that didn't match the
-                    // normalised typed text (a reformatting field, or a partial/append we can't confirm).
-                    // Do NOT fail an otherwise-successful type — degrade to UNVERIFIED.
-                    _logger.Information(
-                        "TypeText UNVERIFIED: read-back did not confirm the typed text (no value, or a value we can't match) — type allowed");
-                }
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                _logger.Debug(ex, "TypeText read-back verification errored — treating as unverified");
-            }
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessNotAllowed,
+                "processName is required and must identify a declared sandbox app",
+                req.DryRun || _gate.IsDryRun);
         }
 
-        return result;
+        _presence?.Narrate("Typing", null); // NEVER the text — PHI
+        return await _driver.TypeTextAsync(
+            req, ct, SendInputDriver.TargetTrustKind.Sandbox).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -282,12 +255,10 @@ public sealed class ActuationCommandHandler
         if (!hasLocator)
             return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "one of automationId/name/controlType required", effectiveDryRun));
 
-        var allowedProcesses = ActuationAllowlistedSandboxApps.ProcessNames.Values
-            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys);
-        if (!allowedProcesses.Contains(req.ProcessName, StringComparer.OrdinalIgnoreCase))
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(req.ProcessName))
             return Task.FromResult(ActuationResult.Reject(
                 ActuationRejectionCodes.ProcessNotAllowed,
-                $"processName '{req.ProcessName}' not allowed for sandbox actuation",
+                "requested process is not an approved sandbox target",
                 effectiveDryRun));
 
         // Dry-run: the actuation that would have produced the asserted state never fired — pass (no-op).
@@ -295,17 +266,37 @@ public sealed class ActuationCommandHandler
             return Task.FromResult(ActuationResult.Success(0, dryRun: true, evidenceHash: "assert_element_dryrun"));
 
         var timeout = req.TimeoutMs > 0 ? TimeSpan.FromMilliseconds(req.TimeoutMs) : _config.DefaultUiaTimeout;
-        var read = _resolver.ReadElementValue(req.ProcessName, req.AutomationId, req.Name, req.ControlType, timeout);
+        var sawUntrustedProcess = false;
+        bool TrustProcess(int pid)
+        {
+            var verdict = SandboxProcessTrustVerifier.VerifyResolvedProcess(pid, req.ProcessName);
+            if (!verdict.Trusted) sawUntrustedProcess = true;
+            return verdict.Trusted;
+        }
+        var read = _resolver.ReadElementValue(
+            req.ProcessName, req.AutomationId, req.Name, req.ControlType, timeout, TrustProcess);
         if (read is null)
         {
-            var locator = req.AutomationId ?? req.Name ?? req.ControlType ?? "?";
+            if (sawUntrustedProcess)
+            {
+                return Task.FromResult(ActuationResult.Reject(
+                    ActuationRejectionCodes.ProcessIdentityUntrusted,
+                    "resolved process failed sandbox path/publisher identity verification",
+                    effectiveDryRun));
+            }
             return Task.FromResult(ActuationResult.Reject(
                 ActuationRejectionCodes.ElementNotFound,
-                $"element (locator '{locator}') not found or no readable value in '{req.ProcessName}' within {(int)timeout.TotalMilliseconds}ms",
+                "requested UI element was unavailable or unreadable in the approved sandbox app",
                 effectiveDryRun));
         }
 
-        var matched = req.MatchMode switch
+        var safeMatchMode = req.MatchMode switch
+        {
+            "exact" => "exact",
+            "contains_ci" => "contains_ci",
+            _ => "normalized",
+        };
+        var matched = safeMatchMode switch
         {
             "exact" => string.Equals(read, req.Expected, StringComparison.Ordinal),
             "contains_ci" => read.Contains(req.Expected, StringComparison.OrdinalIgnoreCase),
@@ -314,17 +305,17 @@ public sealed class ActuationCommandHandler
 
         if (matched)
         {
-            _logger.Information("AssertElement PASS: element value matches expected (mode={Mode}, expectedLen={Len})", req.MatchMode, req.Expected.Length);
+            _logger.Information("AssertElement PASS: element value matches expected (mode={Mode}, expectedLen={Len})", safeMatchMode, req.Expected.Length);
             return Task.FromResult(ActuationResult.Success(0, dryRun: false, evidenceHash: "assert_element_pass"));
         }
 
         // Mismatch — lengths + mode ONLY; never the raw read value or expected text (PHI on a PMS box).
         _logger.Warning(
             "AssertElement MISMATCH: mode={Mode} expectedLen={Exp} actualLen={Act}",
-            req.MatchMode, req.Expected.Length, read.Length);
+            safeMatchMode, req.Expected.Length, read.Length);
         return Task.FromResult(ActuationResult.Reject(
             ActuationRejectionCodes.AssertMismatch,
-            $"element value did not match expected (mode={req.MatchMode}, expectedLen={req.Expected.Length}, actualLen={read.Length})",
+            $"element value did not match expected (mode={safeMatchMode}, expectedLen={req.Expected.Length}, actualLen={read.Length})",
             effectiveDryRun));
     }
 
@@ -341,17 +332,29 @@ public sealed class ActuationCommandHandler
         if (req is null || string.IsNullOrWhiteSpace(req.ProcessName))
             return ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "processName required", _gate.IsDryRun);
 
-        var allowedProcesses = ActuationAllowlistedSandboxApps.ProcessNames.Values
-            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys);
-        if (!allowedProcesses.Contains(req.ProcessName, StringComparer.OrdinalIgnoreCase))
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(req.ProcessName))
             return ActuationResult.Reject(
                 ActuationRejectionCodes.ProcessNotAllowed,
-                $"processName '{req.ProcessName}' not allowed for sandbox actuation",
+                "requested process is not an approved sandbox target",
                 _gate.IsDryRun);
 
-        var elements = _resolver.DiscoverElements(req.ProcessName, req.Max);
+        var sawUntrustedProcess = false;
+        bool TrustProcess(int pid)
+        {
+            var verdict = SandboxProcessTrustVerifier.VerifyResolvedProcess(pid, req.ProcessName);
+            if (!verdict.Trusted) sawUntrustedProcess = true;
+            return verdict.Trusted;
+        }
+        var elements = _resolver.DiscoverElements(req.ProcessName, req.Max, TrustProcess);
+        if (elements.Count == 0 && sawUntrustedProcess)
+        {
+            return ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessIdentityUntrusted,
+                "resolved process failed sandbox path/publisher identity verification",
+                _gate.IsDryRun);
+        }
         var payload = JsonSerializer.Serialize(elements);
-        _logger.Information("DiscoverElements: '{Process}' → {Count} elements", req.ProcessName, elements.Count);
+        _logger.Information("DiscoverElements returned {Count} structural elements", elements.Count);
         return ActuationResult.SuccessWithPayload(0, _gate.IsDryRun, evidenceHash: "discover_elements", payload);
     }
 
@@ -360,8 +363,15 @@ public sealed class ActuationCommandHandler
         if (data is null) return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "missing data", _gate.IsDryRun));
         var req = data.Value.Deserialize<PressKeysRequest>();
         if (req is null) return Task.FromResult(ActuationResult.Reject(ActuationRejectionCodes.MalformedRequest, "deserialise failed", _gate.IsDryRun));
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(req.ProcessName))
+        {
+            return Task.FromResult(ActuationResult.Reject(
+                ActuationRejectionCodes.ProcessNotAllowed,
+                "processName is required and must identify a declared sandbox app",
+                req.DryRun || _gate.IsDryRun));
+        }
         _presence?.Narrate("Pressing keys", null);
-        return _driver.PressKeysAsync(req, ct);
+        return _driver.PressKeysAsync(req, ct, SendInputDriver.TargetTrustKind.Sandbox);
     }
 
     private Task<ActuationResult> HandleLaunchSandboxAppAsync(JsonElement? data, CancellationToken ct)
@@ -373,16 +383,14 @@ public sealed class ActuationCommandHandler
     }
 
     /// <summary>
-    /// Re-apply the actuation app allowlist in THIS (Helper) process from actuation.json on disk — Core
-    /// has already persisted the merged AllowedApps and applied it in its own static; this makes the
-    /// Helper's AUTHORITATIVE allowlist agree, with no restart. The file is the single source of truth;
-    /// LoadAndExtendFromConfig re-reads it (defaults always retained, malformed entries dropped).
+    /// Remote callers cannot widen local sandbox authority. The immutable local policy remains unchanged.
     /// </summary>
     private ActuationResult HandleReloadAllowlist()
     {
-        ActuationAllowlistedSandboxApps.LoadAndExtendFromConfig();
-        var count = ActuationAllowlistedSandboxApps.ProcessNames.Count;
-        _logger.Information("Actuation allowlist reloaded from config — {Count} app(s) now allowed", count);
-        return ActuationResult.Success(0, _gate.IsDryRun, evidenceHash: "reload_allowlist");
+        _logger.Warning("Remote sandbox policy mutation was rejected");
+        return ActuationResult.Reject(
+            ActuationRejectionCodes.RemotePolicyMutationDenied,
+            "remote sandbox policy mutation is not permitted",
+            _gate.IsDryRun);
     }
 }

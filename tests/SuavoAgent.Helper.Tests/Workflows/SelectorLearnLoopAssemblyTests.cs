@@ -41,7 +41,7 @@ public class SelectorLearnLoopAssemblyTests : IDisposable
         new("p-asm", "skill-x", "QuickSearchField", Pms, Screen,
             new SeedElementSignature("Edit", Target, "PioneerRxEdit"),
             new[] { new SeedElementSignature("Edit", Fallback, null) },
-            0.9, 1);
+            0.9, 1, "pharmacist_in_charge");
 
     // The resolver as the job builds it once a patch is applied — WITH the live PMS/screen context
     // the gate requires.

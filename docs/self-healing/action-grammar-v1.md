@@ -358,9 +358,9 @@ already deployed.
    - Rollback: none needed (read-only operation)
    - Postcondition: canary completes within 60s, emits result event
 
-5. **`rerun_bootstrap_probe`** v1.0.0 — LOW risk
+5. **`fetch_diagnostics`** v1.0.0 — LOW risk
    - Params: none
-   - Preconditions: bootstrap.ps1 available at expected path
+   - Preconditions: the fixed signed native maintenance host and complete installed cohort validate
    - Rollback: none needed (read-only diagnostic)
    - Postcondition: probe JSON report emitted within 120s
 

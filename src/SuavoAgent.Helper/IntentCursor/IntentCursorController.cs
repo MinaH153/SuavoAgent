@@ -67,7 +67,9 @@ public sealed class IntentCursorController
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Intent cursor renderer failed");
+            _logger.Warning(
+                "Intent cursor renderer failed ({ExceptionType})",
+                ex.GetType().Name);
             return IntentCursorResult.Rejected("renderer_error");
         }
     }

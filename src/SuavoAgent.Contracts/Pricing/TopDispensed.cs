@@ -22,7 +22,8 @@ public sealed record TopDispensedRow(
 ///
 /// <para>Filters mirror Nadim's spoken recipe exactly ("generics only, Rx not OTC, no schedule"):
 /// <see cref="BrandGenericColumn"/> = <see cref="GenericValue"/> (required — the "generics only"
-/// gate), and the optional Rx-not-OTC and no-schedule gates when those columns are resolved.</para>
+/// gate), Rx-not-OTC, and no-schedule. All three classification gates are required before the SQL
+/// report can execute; unresolved Rx/OTC or schedule semantics halt with a fixed reason code.</para>
 /// </summary>
 public sealed record TopDispensedSpec(
     string ItemTableSchema,
@@ -36,7 +37,10 @@ public sealed record TopDispensedSpec(
     string? RxOtcColumn = null,
     string? RxValue = null,
     string? ScheduleColumn = null,
-    string? NoScheduleValue = null);
+    string? NoScheduleValue = null,
+    PricingSqlColumnShape? BrandGenericColumnShape = null,
+    PricingSqlColumnShape? RxOtcColumnShape = null,
+    PricingSqlColumnShape? ScheduleColumnShape = null);
 
 /// <summary>
 /// Operator overrides for top-dispensed schema resolution. Any non-null column name pins that

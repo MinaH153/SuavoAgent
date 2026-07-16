@@ -20,7 +20,7 @@ public sealed class UiaInteractionObserver : IDisposable
     private readonly string _pharmacySalt;
     private readonly BehavioralEventBuffer _buffer;
     private readonly ILogger _logger;
-    private readonly Action _triggerTreeResnapshot;
+    private readonly CoalescingResnapshotScheduler _resnapshotScheduler;
 
     private string? _currentTreeHash;
     private Window? _subscribedWindow;
@@ -60,11 +60,13 @@ public sealed class UiaInteractionObserver : IDisposable
         _pharmacySalt = pharmacySalt;
         _buffer = buffer;
         _logger = logger.ForContext<UiaInteractionObserver>();
-        _triggerTreeResnapshot = triggerTreeResnapshot;
+        _resnapshotScheduler = new CoalescingResnapshotScheduler(
+            triggerTreeResnapshot,
+            _logger);
     }
 
     /// <summary>Called by UiaTreeObserver when hash changes.</summary>
-    public void SetCurrentTreeHash(string treeHash)
+    public void SetCurrentTreeHash(string? treeHash)
     {
         Volatile.Write(ref _currentTreeHash, treeHash);
     }
@@ -84,7 +86,9 @@ public sealed class UiaInteractionObserver : IDisposable
             try { processId = window.Properties.ProcessId.Value; }
             catch (Exception ex)
             {
-                _logger.Warning(ex, "UiaInteractionObserver: could not read ProcessId from window");
+                _logger.Warning(
+                    "UiaInteractionObserver: could not read ProcessId from window ({ExceptionType})",
+                    ex.GetType().FullName);
                 return;
             }
 
@@ -112,7 +116,9 @@ public sealed class UiaInteractionObserver : IDisposable
             }
             catch (Exception ex)
             {
-                _logger.Warning(ex, "UiaInteractionObserver: InvokePattern.Invoked registration failed — button clicks will not be correlated");
+                _logger.Warning(
+                    "UiaInteractionObserver: InvokePattern.Invoked registration failed ({ExceptionType}) — button clicks will not be correlated",
+                    ex.GetType().FullName);
             }
 
             _logger.Information(
@@ -120,7 +126,9 @@ public sealed class UiaInteractionObserver : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Error(ex, "UiaInteractionObserver: Subscribe failed");
+            _logger.Error(
+                "UiaInteractionObserver: Subscribe failed ({ExceptionType})",
+                ex.GetType().FullName);
         }
     }
 
@@ -138,6 +146,7 @@ public sealed class UiaInteractionObserver : IDisposable
         if (_disposed) return;
         _disposed = true;
         Unsubscribe();
+        _resnapshotScheduler.Dispose();
     }
 
     // ── Private ──────────────────────────────────────────────────────────────
@@ -154,7 +163,9 @@ public sealed class UiaInteractionObserver : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "UiaInteractionObserver: UnregisterFocusChangedEvent warning");
+            _logger.Debug(
+                "UiaInteractionObserver: UnregisterFocusChangedEvent warning ({ExceptionType})",
+                ex.GetType().FullName);
         }
 
         try
@@ -169,7 +180,9 @@ public sealed class UiaInteractionObserver : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "UiaInteractionObserver: UnregisterStructureChangedEvent warning");
+            _logger.Debug(
+                "UiaInteractionObserver: UnregisterStructureChangedEvent warning ({ExceptionType})",
+                ex.GetType().FullName);
         }
 
         try
@@ -183,7 +196,9 @@ public sealed class UiaInteractionObserver : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "UiaInteractionObserver: UnregisterAutomationEventHandler (invoke) warning");
+            _logger.Debug(
+                "UiaInteractionObserver: UnregisterAutomationEventHandler warning ({ExceptionType})",
+                ex.GetType().FullName);
         }
 
         _subscribedWindow = null;
@@ -206,24 +221,24 @@ public sealed class UiaInteractionObserver : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "UiaInteractionObserver: OnFocusChanged error");
+            _logger.Debug(
+                "UiaInteractionObserver: OnFocusChanged error ({ExceptionType})",
+                ex.GetType().FullName);
         }
     }
 
     private void OnStructureChanged(AutomationElement element, StructureChangeType changeType, int[] runtimeId)
     {
-        try
-        {
-            // StructureChanged signals new grid/panel — trigger tree re-snapshot
-            _triggerTreeResnapshot();
+        // A structure notification invalidates the previous context. Do not
+        // make any UIA RPCs on the provider callback thread: providers can be
+        // re-entrant or hung. Atomic scheduling returns immediately, debounces
+        // bursts, rate-limits captures, and guarantees single-flight walking.
+        Volatile.Write(ref _currentTreeHash, null);
+        _resnapshotScheduler.Request();
 
-            var subtype = $"StructureChanged.{changeType}";
-            EmitInteractionEvent(subtype, element, depth: -1, childIndex: -1);
-        }
-        catch (Exception ex)
-        {
-            _logger.Debug(ex, "UiaInteractionObserver: OnStructureChanged error");
-        }
+        _ = element;
+        _ = changeType;
+        _ = runtimeId;
     }
 
     private void EmitInteractionEvent(
@@ -248,21 +263,31 @@ public sealed class UiaInteractionObserver : IDisposable
             var automationId = TryGet(() => element.AutomationId);
             var className = TryGet(() => element.ClassName);
             var name = TryGet(() => element.Name);
-            var boundingRect = TryGet(() => element.BoundingRectangle.ToString());
 
             var raw = new RawElementProperties(
                 ControlType: controlType,
                 AutomationId: automationId,
                 ClassName: className,
                 Name: name,
-                BoundingRect: boundingRect,
+                BoundingRect: null,
                 Depth: depth,
                 ChildIndex: childIndex);
 
             var scrubbed = UiaPropertyScrubber.TryScrub(raw, _pharmacySalt);
             if (scrubbed is null) return;
 
-            var elementId = UiaPropertyScrubber.BuildElementId(raw);
+            var elementId = WindowRelativeElementIdentity.Resolve(
+                element,
+                _subscribedWindow,
+                raw);
+            if (elementId is null)
+            {
+                _buffer.RecordDropped();
+                _logger.Debug(
+                    "UiaInteractionObserver: rejected non-unique anonymous element for {Subtype}",
+                    subtype);
+                return;
+            }
             var treeHash = Volatile.Read(ref _currentTreeHash);
 
             var ev = BehavioralEvent.Interaction(
@@ -277,7 +302,10 @@ public sealed class UiaInteractionObserver : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "UiaInteractionObserver: EmitInteractionEvent error for {Subtype}", subtype);
+            _logger.Debug(
+                "UiaInteractionObserver: EmitInteractionEvent error for {Subtype} ({ExceptionType})",
+                subtype,
+                ex.GetType().FullName);
         }
     }
 
@@ -293,12 +321,14 @@ public sealed class UiaInteractionObserver : IDisposable
 
         var now = Environment.TickCount64;
         var dropped = Interlocked.Increment(ref _droppedEvents);
+        _buffer.RecordDropped();
         if (now - Interlocked.Read(ref _lastDropLogTicks) > 5000)
         {
             _logger.Warning(
                 "UiaInteractionObserver: {Dropped} interaction events dropped by rate limiter " +
                 "(burst={Max}/refill={Hz}Hz). High-frequency UIA event source — review subtree subscription scope.",
                 dropped, RateLimitMaxBurst, 1000.0 / RateLimitRefillInterval.TotalMilliseconds);
+            _buffer.Enqueue(BehavioralEvent.ObserverStatus("uia_interaction", "rate_limited"));
             Interlocked.Exchange(ref _lastDropLogTicks, now);
             Interlocked.Exchange(ref _droppedEvents, 0);
         }

@@ -43,12 +43,51 @@ public sealed class SqlTopDispensedGenerator
         DateTime windowStart,
         CancellationToken ct)
     {
-        var query = SqlTopDispensedQueryBuilder.BuildTopDispensedQuery(spec, _dispensedStatusNames);
+        try
+        {
+            return (await GenerateVerifiedAsync(spec, topN, windowStart, ct)
+                    .ConfigureAwait(false)).Rows;
+        }
+        catch (OperationCanceledException)
+        {
+            return Array.Empty<TopDispensedRow>();
+        }
+    }
+
+    /// <summary>
+    /// Orchestration-facing variant. It preserves fixed structural failure evidence and lets
+    /// cancellation propagate so a signed command cannot be mislabeled as an empty report.
+    /// </summary>
+    public async Task<TopDispensedGenerationResult> GenerateVerifiedAsync(
+        TopDispensedSpec spec,
+        int topN,
+        DateTime windowStart,
+        CancellationToken ct)
+    {
+        string? query;
+        try
+        {
+            query = SqlTopDispensedQueryBuilder.BuildTopDispensedQuery(spec, _dispensedStatusNames);
+        }
+        catch (InvalidOperationException ex) when (
+            ex.Message is SqlTopDispensedQueryBuilder.RxFilterUnresolvedCode
+                or SqlTopDispensedQueryBuilder.ScheduleFilterUnresolvedCode
+                or SqlTopDispensedQueryBuilder.FilterTypeUnresolvedCode)
+        {
+            _logger.LogWarning(
+                "SqlTopDispensedGenerator: required report filter unresolved ({ReasonCode}) — yielding no worklist",
+                ex.Message);
+            return TopDispensedGenerationResult.Fail(ex.Message);
+        }
+
         if (query is null || topN <= 0)
         {
             _logger.LogWarning(
                 "SqlTopDispensedGenerator: cannot build query (schema unresolved, no dispensed statuses, or topN<=0) — yielding no worklist");
-            return Array.Empty<TopDispensedRow>();
+            return TopDispensedGenerationResult.Fail(
+                topN <= 0
+                    ? "top_dispensed_top_n_invalid"
+                    : "top_dispensed_schema_unresolved");
         }
 
         try
@@ -57,16 +96,7 @@ public sealed class SqlTopDispensedGenerator
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = query;
             cmd.CommandTimeout = CommandTimeoutSeconds;
-            cmd.Parameters.Add(new SqlParameter(SqlTopDispensedQueryBuilder.TopNParameter, topN));
-            cmd.Parameters.Add(new SqlParameter(SqlTopDispensedQueryBuilder.WindowStartParameter, windowStart));
-            cmd.Parameters.Add(new SqlParameter(SqlTopDispensedQueryBuilder.GenericParameter, spec.GenericValue));
-            if (!string.IsNullOrWhiteSpace(spec.RxOtcColumn) && !string.IsNullOrWhiteSpace(spec.RxValue))
-                cmd.Parameters.Add(new SqlParameter(SqlTopDispensedQueryBuilder.RxParameter, spec.RxValue));
-            if (!string.IsNullOrWhiteSpace(spec.ScheduleColumn) && !string.IsNullOrWhiteSpace(spec.NoScheduleValue))
-                cmd.Parameters.Add(new SqlParameter(SqlTopDispensedQueryBuilder.NoScheduleParameter, spec.NoScheduleValue));
-            for (var i = 0; i < _dispensedStatusNames.Count; i++)
-                cmd.Parameters.Add(new SqlParameter(
-                    $"{SqlTopDispensedQueryBuilder.StatusParameterPrefix}{i}", _dispensedStatusNames[i]));
+            BindParameters(cmd, spec, topN, windowStart, _dispensedStatusNames);
 
             var rows = new List<TopDispensedRow>();
             await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -81,16 +111,70 @@ public sealed class SqlTopDispensedGenerator
             }
 
             _logger.LogInformation("SqlTopDispensedGenerator: generated {Count} rows (topN={TopN})", rows.Count, topN);
-            return rows;
+            return TopDispensedGenerationResult.Success(rows);
         }
         catch (OperationCanceledException)
         {
-            return Array.Empty<TopDispensedRow>();
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogError("SqlTopDispensedGenerator failed ({ErrorType}) — yielding no worklist", ex.GetType().Name);
-            return Array.Empty<TopDispensedRow>();
+            return TopDispensedGenerationResult.Fail("top_dispensed_query_failed");
         }
     }
+
+    internal static void BindParameters(
+        SqlCommand command,
+        TopDispensedSpec spec,
+        int topN,
+        DateTime windowStart,
+        IReadOnlyList<string> dispensedStatusNames)
+    {
+        SqlTopDispensedQueryBuilder.ValidateFilterTypes(spec);
+        command.Parameters.Add(SqlTopDispensedQueryBuilder.TopNParameter, System.Data.SqlDbType.Int).Value = topN;
+        command.Parameters.Add(SqlTopDispensedQueryBuilder.WindowStartParameter, System.Data.SqlDbType.DateTime2).Value = windowStart;
+        if (!PricingSqlTypePolicy.TryAddClassificationParameter(
+                command,
+                SqlTopDispensedQueryBuilder.GenericParameter,
+                spec.GenericValue,
+                spec.BrandGenericColumnShape,
+                SqlTopDispensedQueryBuilder.MaximumClassificationSize) ||
+            !PricingSqlTypePolicy.TryAddClassificationParameter(
+                command,
+                SqlTopDispensedQueryBuilder.RxParameter,
+                spec.RxValue!,
+                spec.RxOtcColumnShape,
+                SqlTopDispensedQueryBuilder.MaximumClassificationSize) ||
+            !PricingSqlTypePolicy.TryAddTextOrIntegerParameter(
+                command,
+                SqlTopDispensedQueryBuilder.NoScheduleParameter,
+                spec.NoScheduleValue!,
+                spec.ScheduleColumnShape,
+                SqlTopDispensedQueryBuilder.MaximumClassificationSize))
+            throw new InvalidOperationException(SqlTopDispensedQueryBuilder.FilterTypeUnresolvedCode);
+
+        for (var i = 0; i < dispensedStatusNames.Count; i++)
+        {
+            var value = dispensedStatusNames[i];
+            if (string.IsNullOrWhiteSpace(value) || value.Length > SqlTopDispensedQueryBuilder.StatusParameterSize)
+                throw new InvalidOperationException(SqlTopDispensedQueryBuilder.FilterTypeUnresolvedCode);
+            command.Parameters.Add(
+                $"{SqlTopDispensedQueryBuilder.StatusParameterPrefix}{i}",
+                System.Data.SqlDbType.NVarChar,
+                SqlTopDispensedQueryBuilder.StatusParameterSize).Value = value;
+        }
+    }
+}
+
+public sealed record TopDispensedGenerationResult(
+    bool Ok,
+    IReadOnlyList<TopDispensedRow> Rows,
+    string? ErrorCode)
+{
+    public static TopDispensedGenerationResult Success(
+        IReadOnlyList<TopDispensedRow> rows) => new(true, rows, null);
+
+    public static TopDispensedGenerationResult Fail(string errorCode) =>
+        new(false, Array.Empty<TopDispensedRow>(), errorCode);
 }

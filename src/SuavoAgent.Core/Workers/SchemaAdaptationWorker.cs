@@ -74,7 +74,7 @@ public sealed class SchemaAdaptationWorker : BackgroundService
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "SchemaAdaptationWorker: tick failed — retrying next cycle");
+                _logger.LogSafeWarning(ex);
             }
 
             try
@@ -96,7 +96,7 @@ public sealed class SchemaAdaptationWorker : BackgroundService
         try { fp = _fingerprintProvider(); }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "SchemaAdaptationWorker: fingerprint provider threw");
+            _logger.LogSafeWarning(ex);
             return;
         }
 
@@ -110,8 +110,7 @@ public sealed class SchemaAdaptationWorker : BackgroundService
                 try { _applier.RevokeSigned(rev); }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex,
-                        "SchemaAdaptationWorker: revoke failed for {Id}", rev.TargetAdaptationId);
+                    _logger.LogSafeWarning(ex);
                 }
             }
         }
@@ -129,8 +128,7 @@ public sealed class SchemaAdaptationWorker : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex,
-                        "SchemaAdaptationWorker: apply failed for {Id}", a.AdaptationId);
+                    _logger.LogSafeWarning(ex);
                 }
             }
         }

@@ -18,9 +18,9 @@ public sealed class LogLine
 
     public IBrush Brush => Kind switch
     {
-        LogLineKind.Step => new SolidColorBrush(Color.Parse("#D4A24C")),
+        LogLineKind.Step => new SolidColorBrush(Color.Parse("#2563EB")),
         LogLineKind.Ok => new SolidColorBrush(Color.Parse("#7A9B6E")),
-        LogLineKind.Warn => new SolidColorBrush(Color.Parse("#E8B65C")),
+        LogLineKind.Warn => new SolidColorBrush(Color.Parse("#EA580C")),
         LogLineKind.Fail => new SolidColorBrush(Color.Parse("#C95454")),
         _ => new SolidColorBrush(Color.Parse("#A8A196")),
     };
@@ -96,13 +96,17 @@ public sealed class ProgressViewModel : ViewModelBase
     private string _activePhase = "Preparing…";
     private bool _cancelRequested;
 
-    public ProgressViewModel(Action onCancel, IReadOnlyList<string>? phaseTitles = null)
+    public ProgressViewModel(
+        Action onCancel,
+        IReadOnlyList<string>? phaseTitles = null,
+        bool canCancel = true)
     {
+        CanCancel = canCancel;
         CancelCommand = new RelayCommand(() =>
         {
             _cancelRequested = true;
             onCancel();
-        });
+        }, () => CanCancel);
 
         // Default to the install phases; the uninstall flow supplies its own
         // titles so the same progress view renders either workflow. Order MUST
@@ -155,12 +159,16 @@ public sealed class ProgressViewModel : ViewModelBase
     }
 
     public bool CancelRequested => _cancelRequested;
+    public bool CanCancel { get; }
 
     public ICommand CancelCommand { get; }
 
     public void AppendLog(string text, LogLineKind kind)
     {
-        LogLines.Add(new LogLine(text, kind));
+        // Defense in depth: ConsoleUI already scrubs its shared reporter input,
+        // but the view model must remain safe if another native UI path appends
+        // directly in the future.
+        LogLines.Add(new LogLine(SetupLog.SanitizeForLog(text), kind));
         if (LogLines.Count > 500) LogLines.RemoveAt(0);
     }
 

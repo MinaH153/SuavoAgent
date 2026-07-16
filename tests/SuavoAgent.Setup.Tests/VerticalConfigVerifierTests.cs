@@ -27,6 +27,40 @@ public class VerticalConfigVerifierTests
     }
 
     [Fact]
+    public void CanonicalizeRaw_cross_system_number_vector_matches_exact_bytes()
+    {
+        const string input =
+            """
+            {
+              "numbers": [333333333.33333329, 1E30, 4.50, 2e-3, 0.000000000000000000000000001],
+              "string": "\u20ac$\u000F\u000aA'\u0042\u0022\u005c\\\"\/",
+              "literals": [null, true, false]
+            }
+            """;
+        const string expected =
+            """{"literals":[null,true,false],"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27],"string":"€$\u000f\nA'B\"\\\\\"/"}""";
+
+        Assert.Equal(expected, VerticalConfigVerifier.CanonicalizeRaw(input));
+        Assert.Equal(
+            Encoding.UTF8.GetBytes(expected),
+            Encoding.UTF8.GetBytes(VerticalConfigVerifier.CanonicalizeRaw(input)));
+    }
+
+    [Theory]
+    [InlineData("{\"patient-name-sentinel\":1,\"patient-name-sentinel\":2}")]
+    [InlineData("{\"x\":01}")]
+    [InlineData("[1e400]")]
+    [InlineData("{\"x\":1,}")]
+    public void CanonicalizeRaw_rejects_non_signable_json_without_echoing_input(string input)
+    {
+        var error = Assert.Throws<JsonException>(() =>
+            VerticalConfigVerifier.CanonicalizeRaw(input));
+
+        Assert.Equal("rfc8785_input_invalid", error.Message);
+        Assert.DoesNotContain("patient-name-sentinel", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Canonicalize_default_dto_golden()
     {
         var dto = new VerticalConfigDto(
@@ -55,19 +89,21 @@ public class VerticalConfigVerifierTests
     // ── Five-state matrix ────────────────────────────────────────────────────
 
     [Fact]
-    public void State1_absent_raw_yields_Absent()
+    public void Absent_vertical_config_is_blocked()
     {
         var v = MakeVerifier();
         var r = v.Verify(new ParsedVerticalConfig(null, null, null, null));
-        Assert.Equal(VerticalVerificationOutcome.Absent, r.Outcome);
+        Assert.Equal(VerticalVerificationOutcome.Blocked, r.Outcome);
+        Assert.Equal("vertical_config_missing", r.FailureReason);
     }
 
     [Fact]
-    public void State2_present_unsigned_yields_UnsignedBackcompat()
+    public void Present_unsigned_vertical_config_is_blocked()
     {
         var v = MakeVerifier();
         var r = v.Verify(new ParsedVerticalConfig("{}", null, null, null));
-        Assert.Equal(VerticalVerificationOutcome.UnsignedBackcompat, r.Outcome);
+        Assert.Equal(VerticalVerificationOutcome.Blocked, r.Outcome);
+        Assert.Equal("vertical_config_signature_missing", r.FailureReason);
     }
 
     [Fact]

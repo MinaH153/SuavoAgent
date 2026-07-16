@@ -96,10 +96,59 @@ public class BehavioralPomExportTests : IDisposable
         Assert.Equal(1, total.GetInt32());
         Assert.True(fb.TryGetProperty("confidenceTrajectory", out var ct));
         Assert.Equal(1, ct.GetArrayLength());
+        Assert.Matches("^[a-f0-9]{64}$", ct[0].GetProperty("correlationToken").GetString());
+        Assert.False(ct[0].TryGetProperty("correlationKey", out _));
+        Assert.DoesNotContain("tree:elem:qshape", json, StringComparison.Ordinal);
         Assert.True(fb.TryGetProperty("windowOverrides", out _));
         Assert.True(fb.TryGetProperty("staleCorrelations", out _));
 
         db.Dispose();
+    }
+
+    [Fact]
+    public void Export_RoutineAndWritebackMetadata_ContainsOnlyCloudTokens()
+    {
+        const string rawTree = "legacy-tree-1234";
+        const string rawElement = "patient-search-box";
+        const string rawControl = "Edit";
+        const string rawCorrelation = "patient-search-correlation";
+        const string rawQueryHash = "legacy-query-shape";
+
+        var path = JsonSerializer.Serialize(new[]
+        {
+            new { treeHash = rawTree, elementId = rawElement, controlType = rawControl, queryShapeHash = (string?)rawQueryHash },
+            new { treeHash = "tree-b", elementId = "element-b", controlType = "Button", queryShapeHash = (string?)null },
+            new { treeHash = "tree-c", elementId = "element-c", controlType = "Text", queryShapeHash = (string?)null },
+        });
+        _db.UpsertLearnedRoutine("sess-beh", "legacy-routine", path, 3, 6, 0.9,
+            rawElement, "element-c", JsonSerializer.Serialize(new[] { rawQueryHash }), true);
+        _db.UpsertCorrelatedAction("sess-beh", rawCorrelation, rawTree, rawElement,
+            rawControl, rawQueryHash, true, "Prescription");
+
+        var json = PomExporter.Export(_db, "sess-beh", pmsVersionHash: "PioneerRx 6.1");
+        var root = JsonDocument.Parse(json).RootElement;
+        var behavioral = root.GetProperty("behavioral");
+        var routine = behavioral.GetProperty("routines")[0];
+        var step = routine.GetProperty("path")[0];
+        var candidate = behavioral.GetProperty("writebackCandidates")[0];
+
+        Assert.Matches("^[a-f0-9]{64}$", behavioral.GetProperty("pmsVersionHash").GetString());
+        Assert.Matches("^[a-f0-9]{64}$", routine.GetProperty("routineHash").GetString());
+        Assert.Matches("^[a-f0-9]{64}$", step.GetProperty("treeHash").GetString());
+        Assert.Matches("^[a-f0-9]{64}$", step.GetProperty("elementToken").GetString());
+        Assert.Matches("^[a-f0-9]{64}$", step.GetProperty("controlTypeToken").GetString());
+        Assert.Matches("^[a-f0-9]{64}$", step.GetProperty("queryShapeHash").GetString());
+        Assert.False(step.TryGetProperty("elementId", out _));
+        Assert.False(step.TryGetProperty("controlType", out _));
+        Assert.Matches("^[a-f0-9]{64}$", candidate.GetProperty("correlationToken").GetString());
+        Assert.Matches("^[a-f0-9]{64}$", candidate.GetProperty("elementToken").GetString());
+        Assert.False(candidate.TryGetProperty("correlationKey", out _));
+        Assert.False(candidate.TryGetProperty("elementId", out _));
+        Assert.DoesNotContain(rawTree, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(rawElement, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(rawControl, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(rawCorrelation, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(rawQueryHash, json, StringComparison.Ordinal);
     }
 
     public void Dispose()

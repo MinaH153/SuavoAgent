@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using SuavoAgent.Setup.Gui.Services;
 using SuavoAgent.Setup.Gui.ViewModels;
 using Xunit;
@@ -7,17 +9,16 @@ namespace SuavoAgent.Setup.Tests;
 public sealed class DestinationViewModelTests
 {
     [Fact]
-    public void Install_allowed_when_sql_deferred()
+    public void Install_blocked_when_sql_is_missing()
     {
-        // Minimum-viable-control: a box with no PioneerRx leaves SQL blank and
-        // installs anyway — the agent self-configures SQL once it's detected.
         var vm = NewVm();
         vm.SqlServer = "";
-        Assert.True(vm.InstallCommand.CanExecute(null));
+        Assert.True(vm.IsSqlMissing);
+        Assert.False(vm.InstallCommand.CanExecute(null));
     }
 
     [Fact]
-    public void Install_blocked_when_install_path_empty_even_if_sql_deferred()
+    public void Install_blocked_when_install_path_empty()
     {
         var vm = NewVm();
         vm.InstallPath = "";
@@ -37,15 +38,14 @@ public sealed class DestinationViewModelTests
     }
 
     [Fact]
-    public void Install_sets_null_credentials_when_sql_deferred()
+    public void Install_command_cannot_create_a_disconnected_context()
     {
         var ctx = NewContext();
         var vm = new DestinationViewModel(ctx, () => { });
         vm.SqlServer = "";
 
-        vm.InstallCommand.Execute(null);
-
         Assert.Null(ctx.SqlCredentials);
+        Assert.False(vm.InstallCommand.CanExecute(null));
     }
 
     [Fact]
@@ -100,16 +100,98 @@ public sealed class DestinationViewModelTests
     }
 
     [Fact]
-    public void Install_trims_install_path_on_context()
+    public void Install_rejects_a_custom_path_and_preserves_msi_owned_location()
     {
         var ctx = NewContext();
         var vm = new DestinationViewModel(ctx, () => { });
         vm.InstallPath = "  C:\\Custom\\Suavo\\Agent  ";
         vm.SqlServer = "host,49202";
 
-        vm.InstallCommand.Execute(null);
+        Assert.Throws<InvalidOperationException>(() =>
+            vm.InstallCommand.Execute(null));
+        Assert.Equal(@"C:\Program Files\Suavo\Agent", ctx.InstallDir);
+    }
 
-        Assert.Equal(@"C:\Custom\Suavo\Agent", ctx.InstallDir);
+    [Fact]
+    public void Install_path_is_always_locked_to_the_msi_owned_location()
+    {
+        var vm = NewVm();
+
+        Assert.True(vm.IsInstallPathLocked);
+        Assert.Equal(@"C:\Program Files\Suavo\Agent", vm.InstallPath);
+    }
+
+    [Fact]
+    public async Task Valid_public_sql_certificate_is_verified_before_install_and_saved_to_context()
+    {
+        var source = CreateCertificateFile();
+        try
+        {
+            var ctx = NewContext();
+            var vm = new DestinationViewModel(
+                ctx,
+                () => { },
+                () => Task.FromResult<string?>(source));
+            vm.SqlServer = "host,49202";
+
+            await vm.SelectSqlCertificateAsync();
+
+            Assert.Equal(Path.GetFullPath(source), vm.SqlCertificatePath);
+            Assert.Contains("validated", vm.SqlCertificateStatus);
+            Assert.True(vm.InstallCommand.CanExecute(null));
+            vm.InstallCommand.Execute(null);
+            Assert.Equal(Path.GetFullPath(source), ctx.SqlServerCertificateSourcePath);
+        }
+        finally
+        {
+            try { File.Delete(source); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task Invalid_certificate_blocks_advance_until_operator_clears_or_replaces_it()
+    {
+        var source = Path.Combine(
+            Path.GetTempPath(),
+            "suavo-invalid-sql-cert-" + Guid.NewGuid().ToString("N") + ".cer");
+        await File.WriteAllTextAsync(source, "not a certificate");
+        try
+        {
+            var ctx = NewContext();
+            var vm = new DestinationViewModel(
+                ctx,
+                () => { },
+                () => Task.FromResult<string?>(source));
+            vm.SqlServer = "host,49202";
+
+            await vm.SelectSqlCertificateAsync();
+
+            Assert.False(vm.InstallCommand.CanExecute(null));
+            Assert.Contains("invalid", vm.SqlCertificateStatus);
+            Assert.Null(ctx.SqlServerCertificateSourcePath);
+            vm.ClearSqlCertificateCommand.Execute(null);
+            Assert.True(vm.InstallCommand.CanExecute(null));
+            Assert.False(vm.HasSqlCertificate);
+        }
+        finally
+        {
+            try { File.Delete(source); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Destination_ui_exposes_optional_certificate_picker_status_and_clear_action()
+    {
+        var path = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory,
+            "../../../../../src/SuavoAgent.Setup/Gui/Views/DestinationView.axaml"));
+        var source = File.ReadAllText(path);
+
+        Assert.Contains("SQL server certificate (optional)", source);
+        Assert.Contains("SelectSqlCertificateCommand", source);
+        Assert.Contains("SqlCertificateStatus", source);
+        Assert.Contains("ClearSqlCertificateCommand", source);
+        Assert.Contains("IsReadOnly=\"True\"", source);
     }
 
     private static DestinationViewModel NewVm() => new(NewContext(), () => { });
@@ -120,4 +202,22 @@ public sealed class DestinationViewModelTests
         CloudUrl: "https://suavollc.com",
         ReleaseTag: "v3.13.6",
         LearningMode: false));
+
+    private static string CreateCertificateFile()
+    {
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=pioneerrx-sql",
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        using var certificate = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddDays(-1),
+            DateTimeOffset.UtcNow.AddDays(30));
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            "suavo-sql-cert-picker-" + Guid.NewGuid().ToString("N") + ".cer");
+        File.WriteAllBytes(path, certificate.Export(X509ContentType.Cert));
+        return path;
+    }
 }

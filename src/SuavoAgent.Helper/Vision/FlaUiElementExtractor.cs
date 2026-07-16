@@ -120,6 +120,10 @@ internal sealed class FlaUiElementExtractor : IUiaElementExtractor
                             var automationId = el.Properties.AutomationId.IsSupported
                                 ? el.Properties.AutomationId.ValueOrDefault
                                 : null;
+                            var className = el.Properties.ClassName.IsSupported
+                                ? el.Properties.ClassName.ValueOrDefault
+                                : null;
+                            var structuralStateByte = ReadStructuralState(el);
 
                             // Skip zero-size or off-screen elements.
                             if (bounds.Width > 0 && bounds.Height > 0)
@@ -129,6 +133,8 @@ internal sealed class FlaUiElementExtractor : IUiaElementExtractor
                                     Role = role,
                                     Name = string.IsNullOrWhiteSpace(name) ? null : name,
                                     AutomationId = string.IsNullOrWhiteSpace(automationId) ? null : automationId,
+                                    ClassName = string.IsNullOrWhiteSpace(className) ? null : className,
+                                    StructuralStateByte = structuralStateByte,
                                     Bounds = new VisionRect(
                                         (int)bounds.X, (int)bounds.Y,
                                         (int)bounds.Width, (int)bounds.Height),
@@ -152,8 +158,8 @@ internal sealed class FlaUiElementExtractor : IUiaElementExtractor
                     // Individual element walk failures shouldn't abort the
                     // whole walk. Log with type name for COM diagnosis.
                     _logger.Debug(
-                        "FlaUiElementExtractor: skipped node (exception {Type}: {Msg})",
-                        ex.GetType().FullName, ex.Message);
+                        "FlaUiElementExtractor: skipped node (exception {Type})",
+                        ex.GetType().Name);
                 }
                 // No per-element Dispose — FlaUI AutomationElement's UIA native
                 // handle is owned by the UIA2Automation instance. Disposing
@@ -169,14 +175,68 @@ internal sealed class FlaUiElementExtractor : IUiaElementExtractor
         catch (Exception ex)
         {
             _logger.Warning(
-                "FlaUiElementExtractor: UIA walk failed ({Type}: {Msg})",
-                ex.GetType().FullName, ex.Message);
+                "FlaUiElementExtractor: UIA walk failed ({Type})",
+                ex.GetType().Name);
             return Array.Empty<VisualElement>();
         }
         finally
         {
             automation?.Dispose();
         }
+    }
+
+    private static byte? ReadStructuralState(AutomationElement element)
+    {
+        var properties = element.Properties;
+        bool? enabled = properties.IsEnabled.TryGetValue(out var enabledValue)
+            ? enabledValue : null;
+        bool? offscreen = properties.IsOffscreen.TryGetValue(out var offscreenValue)
+            ? offscreenValue : null;
+        bool? focusable = properties.IsKeyboardFocusable.TryGetValue(out var focusableValue)
+            ? focusableValue : null;
+        bool? focused = properties.HasKeyboardFocus.TryGetValue(out var focusedValue)
+            ? focusedValue : null;
+        bool? control = properties.IsControlElement.TryGetValue(out var controlValue)
+            ? controlValue : null;
+        bool? content = properties.IsContentElement.TryGetValue(out var contentValue)
+            ? contentValue : null;
+        bool? password = properties.IsPassword.TryGetValue(out var passwordValue)
+            ? passwordValue : null;
+        bool? required = properties.IsRequiredForForm.TryGetValue(out var requiredValue)
+            ? requiredValue : null;
+        return EncodeStructuralState(
+            enabled,
+            offscreen.HasValue ? !offscreen.Value : null,
+            focusable,
+            focused,
+            control,
+            content,
+            password,
+            required);
+    }
+
+    internal static byte? EncodeStructuralState(
+        bool? enabled,
+        bool? visible,
+        bool? focusable,
+        bool? focused,
+        bool? control,
+        bool? content,
+        bool? password,
+        bool? required)
+    {
+        var bits = new[]
+        {
+            enabled, visible, focusable, focused,
+            control, content, password, required,
+        };
+        if (bits.Any(value => !value.HasValue)) return null;
+
+        byte result = 0;
+        for (var index = 0; index < bits.Length; index++)
+            if (bits[index]!.Value)
+                result |= (byte)(1 << (7 - index));
+        return result;
     }
 
 }

@@ -9,6 +9,7 @@
     <AssemblyTitle>SuavoAgent.Analyzers</AssemblyTitle>
     <Description>Roslyn diagnostic analyzers enforcing SuavoAgent compile-time invariants (Track 3 PHI compile-enforcement, plus future Wave 5+ sink markers).</Description>
     <IsRoslynComponent>true</IsRoslynComponent>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
     <!-- Internal-use analyzer; release-tracking + diagnostic-message-format
          best-practice rules don't apply (not a NuGet-shipped analyzer). -->
     <NoWarn>$(NoWarn);RS1032;RS2008</NoWarn>

@@ -1,3 +1,5 @@
+using System.IO.Compression;
+using System.Security.Cryptography;
 using ClosedXML.Excel;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Pricing;
@@ -5,88 +7,225 @@ using Xunit;
 
 namespace SuavoAgent.Core.Tests.Pricing;
 
-/// <summary>
-/// Feature B Excel-in reader: makes the preferred-NDC report runnable from an exported candidate sheet
-/// (before the live PioneerRx SQL read is mapped). Proves it groups candidates by (medication, plan),
-/// parses money leniently, keeps rows with a missing number (engine fails closed on them), and reports
-/// the distinct pairs as the report's row set.
-/// </summary>
 public sealed class ExcelPreferredNdcReaderTests : IDisposable
 {
-    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"suavo_pref_read_{Guid.NewGuid():N}");
-    public ExcelPreferredNdcReaderTests() => Directory.CreateDirectory(_dir);
-    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+    private readonly string _root = Path.Combine(
+        Path.GetTempPath(), $"suavo_pref_admission_{Guid.NewGuid():N}");
 
-    private string BuildSheet()
+    public ExcelPreferredNdcReaderTests() => Directory.CreateDirectory(_root);
+
+    [Fact]
+    public async Task Admits_exact_schema_and_carries_all_evidence_fields()
     {
-        var path = Path.Combine(_dir, "candidates.xlsx");
-        using var wb = new XLWorkbook();
-        var ws = wb.AddWorksheet("Candidates");
-        var headers = new[] { "Medication", "Insurance plan", "NDC", "Manufacturer", "Acquisition cost", "Reimbursement", "Status", "Basis" };
-        for (var c = 0; c < headers.Length; c++) ws.Cell(1, c + 1).Value = headers[c];
-        var rows = new (string, string, string, string, string, string, string, string)[]
+        var path = Workbook();
+
+        var admitted = PreferredNdcWorkbookAdmission.TryAdmit(path, out var lease, out var code);
+
+        Assert.True(admitted, code);
+        using var owned = lease!;
+        Assert.Contains(("omeprazole-40", "PLAN-A"), owned.Reader.Pairs);
+        var result = await owned.Reader.ReadCandidatesAsync(
+            new PreferredNdcRequest("job", 7, "omeprazole-40", "PLAN-A"),
+            default);
+        Assert.True(result.Found);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal("00093100001", candidate.Ndc);
+        Assert.True(candidate.Available);
+        Assert.True(candidate.Eligible);
+        Assert.Equal(PreferredNdcAmountBasis.PerDispensedFill, candidate.AcquisitionAmountBasis);
+        Assert.Equal(
+            PreferredNdcEvidenceProvenance.PioneerRxAcquisitionCostExport,
+            candidate.AcquisitionEvidenceProvenance);
+        Assert.Equal(
+            PreferredNdcEvidenceProvenance.PioneerRxContractOrMacExport,
+            candidate.ReimbursementEvidenceProvenance);
+        Assert.Equal(0, candidate.HistoricalSampleCount);
+    }
+
+    [Fact]
+    public async Task Admission_reads_private_snapshot_and_source_change_cannot_change_results()
+    {
+        var path = Workbook();
+        var originalHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)))
+            .ToLowerInvariant();
+        Assert.True(PreferredNdcWorkbookAdmission.TryAdmit(path, out var lease, out var code), code);
+        using var owned = lease!;
+        Assert.Equal(originalHash, owned.SourceSha256);
+
+        using (var changed = new XLWorkbook(path))
         {
-            ("omeprazole", "PLAN-A", "00093-1-01", "Row1", "$8.00", "12.00", "Active", "contract"),
-            ("omeprazole", "PLAN-A", "00093-3-01", "Best", "3.00", "11.00", "Active", "contract"),  // most profit
-            ("lisinopril", "PLAN-A", "11111-1-01", "X", "4.00", "", "Active", "contract"),           // missing reimb
-        };
-        var r = 2;
-        foreach (var (m, p, n, mf, cost, reimb, st, ba) in rows)
-        {
-            ws.Cell(r, 1).Value = m; ws.Cell(r, 2).Value = p; ws.Cell(r, 3).Value = n; ws.Cell(r, 4).Value = mf;
-            ws.Cell(r, 5).Value = cost; ws.Cell(r, 6).Value = reimb; ws.Cell(r, 7).Value = st; ws.Cell(r, 8).Value = ba;
-            r++;
+            changed.Worksheet(1).Cell(2, 3).SetValue("99999999999");
+            changed.SaveAs(path);
         }
-        wb.SaveAs(path);
+
+        var result = await owned.Reader.ReadCandidatesAsync(
+            new PreferredNdcRequest("job", 0, "omeprazole-40", "PLAN-A"),
+            default);
+        Assert.Equal("00093100001", Assert.Single(result.Candidates).Ndc);
+    }
+
+    [Theory]
+    [InlineData("Preferred NDC Candidate")]
+    [InlineData("preferred NDC Candidates")]
+    [InlineData("Sheet1")]
+    public void Rejects_any_sheet_name_other_than_exact_contract(string sheetName)
+    {
+        var path = Workbook();
+        using (var workbook = new XLWorkbook(path))
+        {
+            workbook.Worksheet(1).Name = sheetName;
+            workbook.SaveAs(path);
+        }
+
+        Assert.False(PreferredNdcWorkbookAdmission.TryAdmit(path, out _, out var code));
+        Assert.Equal("xlsx_preferred_ndc_schema_forbidden", code);
+    }
+
+    [Theory]
+    [InlineData("NDC11", "NDC11 code")]
+    [InlineData("Insurance Plan ID", "Plan")]
+    [InlineData("Expected Reimbursement", "Expected Reimbursement USD")]
+    public void Rejects_substring_or_alias_headers(string exactHeader, string replacement)
+    {
+        var path = Workbook();
+        ReplaceHeader(path, exactHeader, replacement);
+
+        Assert.False(PreferredNdcWorkbookAdmission.TryAdmit(path, out _, out var code));
+        Assert.Equal("xlsx_preferred_ndc_schema_forbidden", code);
+    }
+
+    [Fact]
+    public void Rejects_duplicate_required_header_even_when_column_count_matches()
+    {
+        var path = Workbook();
+        ReplaceHeader(path, "Manufacturer", "NDC11");
+
+        Assert.False(PreferredNdcWorkbookAdmission.TryAdmit(path, out _, out var code));
+        Assert.Equal("xlsx_preferred_ndc_schema_forbidden", code);
+    }
+
+    [Theory]
+    [InlineData("00093-1000-01")]
+    [InlineData("0009310001")]
+    [InlineData("0009310000A")]
+    [InlineData(" 00093100001")]
+    public void Rejects_noncanonical_ndc_identity(string ndc)
+    {
+        var path = Workbook(ndc);
+
+        Assert.False(PreferredNdcWorkbookAdmission.TryAdmit(path, out _, out var code));
+        Assert.Equal("xlsx_preferred_ndc_data_forbidden", code);
+    }
+
+    [Fact]
+    public void Rejects_duplicate_ndc_within_same_pair()
+    {
+        var path = Workbook();
+        using (var workbook = new XLWorkbook(path))
+        {
+            var sheet = workbook.Worksheet(1);
+            sheet.Row(2).CopyTo(sheet.Row(3));
+            workbook.SaveAs(path);
+        }
+
+        Assert.False(PreferredNdcWorkbookAdmission.TryAdmit(path, out _, out var code));
+        Assert.Equal("xlsx_preferred_ndc_duplicate_identity", code);
+    }
+
+    [Fact]
+    public void Rejects_formula_before_reader_uses_cached_value()
+    {
+        var path = Workbook();
+        using (var workbook = new XLWorkbook(path))
+        {
+            var sheet = workbook.Worksheet(1);
+            var column = HeaderColumn(sheet, "Acquisition Amount");
+            sheet.Cell(2, column).FormulaA1 = "=1+1";
+            workbook.SaveAs(path);
+        }
+
+        Assert.False(PreferredNdcWorkbookAdmission.TryAdmit(path, out _, out var code));
+        Assert.Equal("xlsx_formula_forbidden", code);
+    }
+
+    [Fact]
+    public void Rejects_active_or_external_workbook_parts()
+    {
+        var path = Workbook();
+        using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+            archive.CreateEntry("xl/externalLinks/externalLink1.xml");
+
+        Assert.False(PreferredNdcWorkbookAdmission.TryAdmit(path, out _, out var code));
+        Assert.Equal("xlsx_active_content_forbidden", code);
+    }
+
+    [Fact]
+    public void Rejects_phi_like_text_archive_wide_without_returning_it()
+    {
+        var path = Workbook();
+        using (var workbook = new XLWorkbook(path))
+        {
+            var sheet = workbook.Worksheet(1);
+            sheet.Cell(2, HeaderColumn(sheet, "Manufacturer")).SetValue("Patient Name");
+            workbook.SaveAs(path);
+        }
+
+        Assert.False(PreferredNdcWorkbookAdmission.TryAdmit(path, out _, out var code));
+        Assert.Equal("xlsx_phi_field_forbidden", code);
+        Assert.DoesNotContain("Patient", code, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string Workbook(string ndc = "00093100001")
+    {
+        var path = Path.Combine(_root, $"{Guid.NewGuid():N}.xlsx");
+        using var workbook = new XLWorkbook();
+        var sheet = workbook.AddWorksheet(ExcelPreferredNdcReader.RequiredWorksheetName);
+        for (var index = 0; index < ExcelPreferredNdcReader.RequiredHeaders.Length; index++)
+            sheet.Cell(1, index + 1).SetValue(ExcelPreferredNdcReader.RequiredHeaders[index]);
+
+        Set(sheet, "Drug Group Key", "omeprazole-40");
+        Set(sheet, "Insurance Plan ID", "PLAN-A");
+        Set(sheet, "NDC11", ndc);
+        Set(sheet, "Manufacturer", "Example Labs");
+        Set(sheet, "Acquisition Amount", "3.0000");
+        Set(sheet, "Acquisition Amount Basis", "per_dispensed_fill");
+        Set(sheet, "Expected Reimbursement", "11.0000");
+        Set(sheet, "Reimbursement Amount Basis", "per_dispensed_fill");
+        Set(sheet, "Available", "TRUE");
+        Set(sheet, "Eligible", "TRUE");
+        Set(sheet, "Reimbursement Basis", "contract_or_mac");
+        Set(sheet, "Acquisition Evidence Provenance", "pioneerrx_acquisition_cost_export");
+        Set(sheet, "Reimbursement Evidence Provenance", "pioneerrx_contract_or_mac_export");
+        Set(sheet, "Acquisition Evidence As Of UTC", "2026-07-13T08:00:00Z");
+        Set(sheet, "Reimbursement Evidence As Of UTC", "2026-07-13T08:00:00Z");
+        Set(sheet, "Historical Sample Count", "0");
+        workbook.SaveAs(path);
         return path;
     }
 
-    [Fact]
-    public async Task Groups_candidates_by_pair_and_parses_money_leniently()
+    private static void Set(IXLWorksheet sheet, string header, string value) =>
+        sheet.Cell(2, HeaderColumn(sheet, header)).SetValue(value);
+
+    private static int HeaderColumn(IXLWorksheet sheet, string header)
     {
-        var reader = ExcelPreferredNdcReader.Load(BuildSheet());
-
-        Assert.Contains(("omeprazole", "PLAN-A"), reader.Pairs);
-        Assert.Contains(("lisinopril", "PLAN-A"), reader.Pairs);
-
-        var oma = await reader.ReadCandidatesAsync(new PreferredNdcRequest("j", 0, "omeprazole", "PLAN-A"), default);
-        Assert.True(oma.Found);
-        Assert.Equal(2, oma.Candidates.Count);
-        Assert.Equal(ReimbursementBasis.ContractOrMac, oma.Basis);
-        Assert.Contains(oma.Candidates, c => c.Ndc == "00093-1-01" && c.AcquisitionCost == 8.00m); // "$8.00" parsed
-
-        var lis = await reader.ReadCandidatesAsync(new PreferredNdcRequest("j", 1, "lisinopril", "PLAN-A"), default);
-        Assert.True(lis.Found);
-        Assert.Null(lis.Candidates[0].Reimbursement);   // kept, missing number → engine fails closed downstream
-    }
-
-    [Fact]
-    public async Task Downgrades_basis_to_unspecified_when_rows_in_a_pair_disagree()
-    {
-        // Same (drug, plan) with conflicting Basis cells → don't brand the winner with row 1's basis.
-        var path = Path.Combine(_dir, "conflict.xlsx");
-        using (var wb = new XLWorkbook())
+        for (var column = 1; column <= ExcelPreferredNdcReader.RequiredHeaders.Length; column++)
         {
-            var ws = wb.AddWorksheet("C");
-            foreach (var (c, h) in new[] { (1, "Medication"), (2, "Plan"), (3, "NDC"), (4, "Acquisition"), (5, "Reimbursement"), (6, "Basis") })
-                ws.Cell(1, c).Value = h;
-            ws.Cell(2, 1).Value = "atorvastatin"; ws.Cell(2, 2).Value = "PLAN-A"; ws.Cell(2, 3).Value = "1-1-1"; ws.Cell(2, 4).Value = "3.00"; ws.Cell(2, 5).Value = "12.00"; ws.Cell(2, 6).Value = "contract";
-            ws.Cell(3, 1).Value = "atorvastatin"; ws.Cell(3, 2).Value = "PLAN-A"; ws.Cell(3, 3).Value = "2-2-2"; ws.Cell(3, 4).Value = "4.00"; ws.Cell(3, 5).Value = "40.00"; ws.Cell(3, 6).Value = "adjudicated estimate";
-            wb.SaveAs(path);
+            if (string.Equals(sheet.Cell(1, column).GetString(), header, StringComparison.Ordinal))
+                return column;
         }
-        var reader = ExcelPreferredNdcReader.Load(path);
-        var res = await reader.ReadCandidatesAsync(new PreferredNdcRequest("j", 0, "atorvastatin", "PLAN-A"), default);
-        Assert.True(res.Found);
-        Assert.Equal(2, res.Candidates.Count);
-        Assert.Equal(ReimbursementBasis.Unspecified, res.Basis);   // conflict -> fail closed, not "contract"
+        throw new InvalidOperationException("test header missing");
     }
 
-    [Fact]
-    public async Task Reports_pair_not_in_sheet_for_an_unknown_pair()
+    private static void ReplaceHeader(string path, string exactHeader, string replacement)
     {
-        var reader = ExcelPreferredNdcReader.Load(BuildSheet());
-        var res = await reader.ReadCandidatesAsync(new PreferredNdcRequest("j", 0, "unknown", "PLAN-Z"), default);
-        Assert.False(res.Found);
-        Assert.Equal("pair_not_in_sheet", res.ErrorMessage);
+        using var workbook = new XLWorkbook(path);
+        var sheet = workbook.Worksheet(1);
+        sheet.Cell(1, HeaderColumn(sheet, exactHeader)).SetValue(replacement);
+        workbook.SaveAs(path);
+    }
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_root, recursive: true); } catch { }
     }
 }

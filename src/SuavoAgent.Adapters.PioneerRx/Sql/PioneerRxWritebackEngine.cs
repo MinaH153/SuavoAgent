@@ -19,7 +19,6 @@ public sealed class PioneerRxWritebackEngine
     private DateTimeOffset _triggerCacheExpiry = DateTimeOffset.MinValue;
     private bool _hasInsteadOfTrigger;
     private bool _hasAfterTrigger;
-    private string? _blockedTriggerName;
 
     // Per-RxNumber serialization
     private readonly HashSet<int> _inProgressRxNumbers = new();
@@ -56,7 +55,7 @@ public sealed class PioneerRxWritebackEngine
     /// </summary>
     public async Task<WritebackResult?> DetectTriggersAsync(CancellationToken ct)
     {
-        if (DateTimeOffset.UtcNow < _triggerCacheExpiry) return null;
+        if (DateTimeOffset.UtcNow < _triggerCacheExpiry) return CurrentTriggerBlock();
 
         try
         {
@@ -75,47 +74,53 @@ public sealed class PioneerRxWritebackEngine
 
             _hasInsteadOfTrigger = false;
             _hasAfterTrigger = false;
-            _blockedTriggerName = null;
 
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
             {
-                var name = reader.GetString(0);
+                _ = reader.GetString(0);
                 var disabled = reader.GetBoolean(1);
                 var type = reader.GetString(2);
 
                 if (disabled)
                 {
-                    _logger.LogDebug("Trigger {Name} is disabled — ignoring", name);
+                    _logger.LogDebug("A disabled writeback trigger was ignored");
                     continue;
                 }
 
                 if (type == "INSTEAD_OF")
                 {
                     _hasInsteadOfTrigger = true;
-                    _blockedTriggerName = name;
-                    _logger.LogWarning("INSTEAD_OF UPDATE trigger detected: {Name} — writes BLOCKED", name);
+                    _logger.LogWarning("An INSTEAD_OF UPDATE trigger was detected; writes are blocked");
                 }
                 else
                 {
                     _hasAfterTrigger = true;
-                    _logger.LogWarning("AFTER UPDATE trigger detected: {Name} — supervised writes only", name);
+                    _logger.LogWarning("An AFTER UPDATE trigger was detected; writes are blocked without signed supervision");
                 }
             }
 
             _triggerCacheExpiry = DateTimeOffset.UtcNow.AddMinutes(5);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.LogWarning(ex, "Trigger detection failed — assuming triggers may exist");
+            _logger.LogWarning("Trigger detection failed; writeback is blocked");
             _hasAfterTrigger = true; // Fail safe
+            _triggerCacheExpiry = DateTimeOffset.UtcNow.AddMinutes(5);
         }
-
-        if (_hasInsteadOfTrigger)
-            return WritebackResult.TriggerBlocked(_blockedTriggerName!);
-
-        return null;
+        return CurrentTriggerBlock();
     }
+
+    internal WritebackResult? CurrentTriggerBlock() => TriggerVerdict(
+        _hasInsteadOfTrigger,
+        _hasAfterTrigger);
+
+    internal static WritebackResult? TriggerVerdict(bool hasInsteadOf, bool hasAfter) =>
+        hasInsteadOf
+            ? WritebackResult.TriggerBlocked("instead_of_trigger")
+            : hasAfter
+                ? WritebackResult.TriggerBlocked("after_trigger_requires_signed_approval")
+                : null;
 
     /// <summary>
     /// Resolves RxNumber + FillNumber to RxTransactionID.
@@ -127,18 +132,23 @@ public sealed class PioneerRxWritebackEngine
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct);
 
-        var statusFilter = transition == "pickup"
-            ? "rt.RxTransactionStatusTypeID IN (@g0, @g1, @g2)"
-            : "rt.RxTransactionStatusTypeID = @g0";
-
-        var query = $"""
-            SELECT TOP 1 rt.RxTransactionID, rt.RxTransactionStatusTypeID
+        const string pickupQuery = """
+            SELECT TOP (2) rt.RxTransactionID, rt.RxTransactionStatusTypeID
             FROM Prescription.RxTransaction rt
             JOIN Prescription.Rx r ON rt.RxID = r.RxID
             WHERE r.RxNumber = @rxNumber
               AND rt.RefillNumber = @fillNumber
-              AND {statusFilter}
+              AND rt.RxTransactionStatusTypeID IN (@g0, @g1, @g2)
             """;
+        const string completeQuery = """
+            SELECT TOP (2) rt.RxTransactionID, rt.RxTransactionStatusTypeID
+            FROM Prescription.RxTransaction rt
+            JOIN Prescription.Rx r ON rt.RxID = r.RxID
+            WHERE r.RxNumber = @rxNumber
+              AND rt.RefillNumber = @fillNumber
+              AND rt.RxTransactionStatusTypeID = @g0
+            """;
+        var query = transition == "pickup" ? pickupQuery : completeQuery;
 
         await using var cmd = new SqlCommand(query, conn);
         cmd.CommandTimeout = 10;
@@ -160,7 +170,78 @@ public sealed class PioneerRxWritebackEngine
         if (!await reader.ReadAsync(ct))
             return null;
 
-        return (reader.GetGuid(0), reader.GetGuid(1));
+        var result = (TxId: reader.GetGuid(0), CurrentStatus: reader.GetGuid(1));
+        if (await reader.ReadAsync(ct))
+            throw new InvalidOperationException("ambiguous_transaction");
+        return result;
+    }
+
+    /// <summary>
+    /// Executes one command-bound delivery transition and remains idempotent
+    /// across a crash after SQL commit: resolution includes the target state,
+    /// then ExecuteTransitionAsync returns already_at_target without UPDATE.
+    /// </summary>
+    public async Task<WritebackResult> ExecuteDeliveryTransitionAsync(
+        int rxNumber,
+        int fillNumber,
+        string transition,
+        DateTimeOffset transitionAt,
+        CancellationToken ct)
+    {
+        if (!WritebackEnabled)
+            return WritebackResult.TriggerBlocked("writeback_disabled");
+        if (transition is not ("pickup" or "complete"))
+            return WritebackResult.StatusConflict("unsupported_transition");
+
+        var resolved = await ResolveAnyTransactionIdAsync(rxNumber, fillNumber, ct);
+        if (resolved.Ambiguous)
+            return WritebackResult.StatusConflict("ambiguous_transaction");
+        if (resolved.Row is null)
+            return WritebackResult.StatusConflict("transaction_not_found");
+
+        var (txId, currentStatus) = resolved.Row.Value;
+        if (transition == "pickup")
+        {
+            if (!_statusGuids.TryGetValue("Out for Delivery", out var target) ||
+                !_statusGuids.TryGetValue("Waiting for Pick up", out var pickup) ||
+                !_statusGuids.TryGetValue("Waiting for Delivery", out var delivery) ||
+                !_statusGuids.TryGetValue("To Be Put in Bin", out var bin))
+                return WritebackResult.TriggerBlocked("status_map_incomplete");
+            if (currentStatus != target && currentStatus != pickup &&
+                currentStatus != delivery && currentStatus != bin)
+                return WritebackResult.StatusConflict("unexpected_status");
+            return await ExecutePickupAsync(txId, currentStatus, ct);
+        }
+
+        if (!_statusGuids.TryGetValue("Out for Delivery", out var outForDelivery) ||
+            !_statusGuids.TryGetValue("Completed", out var completed))
+            return WritebackResult.TriggerBlocked("status_map_incomplete");
+        if (currentStatus != outForDelivery && currentStatus != completed)
+            return WritebackResult.StatusConflict("unexpected_status");
+        return await ExecuteCompleteAsync(txId, transitionAt, ct);
+    }
+
+    private async Task<((Guid TxId, Guid CurrentStatus)? Row, bool Ambiguous)> ResolveAnyTransactionIdAsync(
+        int rxNumber,
+        int fillNumber,
+        CancellationToken ct)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new SqlCommand("""
+            SELECT TOP (2) rt.RxTransactionID, rt.RxTransactionStatusTypeID
+            FROM Prescription.RxTransaction rt
+            JOIN Prescription.Rx r ON rt.RxID = r.RxID
+            WHERE r.RxNumber = @rxNumber
+              AND rt.RefillNumber = @fillNumber
+            """, conn);
+        cmd.CommandTimeout = 10;
+        cmd.Parameters.AddWithValue("@rxNumber", rxNumber);
+        cmd.Parameters.AddWithValue("@fillNumber", fillNumber);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return (null, false);
+        var row = (TxId: reader.GetGuid(0), CurrentStatus: reader.GetGuid(1));
+        return await reader.ReadAsync(ct) ? (null, true) : (row, false);
     }
 
     /// <summary>
@@ -232,7 +313,7 @@ public sealed class PioneerRxWritebackEngine
             if (current != currentStatusGuid)
             {
                 await txn.RollbackAsync(ct);
-                return WritebackResult.StatusConflict(current.ToString());
+                return WritebackResult.StatusConflict("unexpected_status");
             }
 
             // Connection guard
@@ -305,7 +386,7 @@ public sealed class PioneerRxWritebackEngine
             if (writtenGuid != targetGuid)
             {
                 await txn.RollbackAsync(ct);
-                return WritebackResult.PostVerifyMismatch(writtenGuid.ToString());
+                return WritebackResult.PostVerifyMismatch("status_mismatch");
             }
 
             // For complete: verify CompletedDate
@@ -315,27 +396,26 @@ public sealed class PioneerRxWritebackEngine
                 if (writtenDate == null)
                 {
                     await txn.RollbackAsync(ct);
-                    return WritebackResult.PostVerifyMismatch("CompletedDate_null");
+                    return WritebackResult.PostVerifyMismatch("completed_date_null");
                 }
                 // Allow small time precision drift (SQL Server datetime vs DateTimeOffset)
                 var expectedUtc = deliveredAt.Value.UtcDateTime;
                 if (Math.Abs((writtenDate.Value - expectedUtc).TotalSeconds) > 2)
                 {
-                    await txn.CommitAsync(ct); // Status IS correct, just date drift
-                    return WritebackResult.VerifiedWithDrift(txId,
-                        expectedUtc.ToString("o"), writtenDate.Value.ToString("o"));
+                    await txn.RollbackAsync(ct);
+                    return WritebackResult.PostVerifyMismatch("completed_date_mismatch");
                 }
             }
 
             await txn.CommitAsync(ct);
-            _logger.LogInformation("Writeback {Transition} succeeded for TxId {TxId}", transition, txId);
+            _logger.LogInformation("Writeback {Transition} succeeded", transition);
             return WritebackResult.Succeeded(txId, transition);
         }
-        catch (SqlException ex)
+        catch (SqlException)
         {
             try { await txn.RollbackAsync(ct); } catch { }
-            _logger.LogWarning(ex, "Writeback SQL error for TxId {TxId}", txId);
-            return WritebackResult.SqlError(ex);
+            _logger.LogWarning("Writeback SQL operation failed");
+            return WritebackResult.SqlError();
         }
     }
 

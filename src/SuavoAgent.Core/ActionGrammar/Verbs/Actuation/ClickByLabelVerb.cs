@@ -58,10 +58,7 @@ public sealed class ClickByLabelVerb : IVerb
         {
             return Task.FromResult(VerbPreconditionResult.Fail("process_name_non_empty", "process_name must be a non-empty string"));
         }
-        var allowed = ActuationAllowlistedSandboxApps.ProcessNames.Values
-            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys)
-            .Any(allowedName => string.Equals(allowedName, ps, StringComparison.OrdinalIgnoreCase));
-        if (!allowed)
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(ps))
         {
             return Task.FromResult(VerbPreconditionResult.Fail(
                 "process_not_allowlisted",

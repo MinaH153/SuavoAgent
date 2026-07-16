@@ -1,0 +1,41 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <OutputName>SuavoAgent-Setup</OutputName>
+    <Platform>x64</Platform>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <DefaultCompressionLevel>high</DefaultCompressionLevel>
+    <Pedantic>true</Pedantic>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <VCRedistPath Condition="'$(VCRedistPath)' == ''"></VCRedistPath>
+    <VCRedistSha256>cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b</VCRedistSha256>
+    <VCRedistMinimumMajor>14</VCRedistMinimumMajor>
+    <VCRedistMinimumMinor>44</VCRedistMinimumMinor>
+    <VCRedistMinimumBuild>35211</VCRedistMinimumBuild>
+    <VCRedistMinimumRevision>0</VCRedistMinimumRevision>
+    <DefineConstants>SuavoAgentVersion=$(SuavoAgentVersion);VCRedistPath=$(VCRedistPath);VCRedistMinimumMajor=$(VCRedistMinimumMajor);VCRedistMinimumMinor=$(VCRedistMinimumMinor);VCRedistMinimumBuild=$(VCRedistMinimumBuild);VCRedistMinimumRevision=$(VCRedistMinimumRevision)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.BootstrapperApplications.wixext" Version="7.0.0" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="7.0.0" />
+    <ProjectReference Include="../SuavoAgent.Msi/SuavoAgent.Msi.wixproj" />
+  </ItemGroup>
+
+  <Target Name="ValidateBundleInputs" BeforeTargets="CoreCompile">
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(SuavoAgentVersion)', '^[0-9]+\.[0-9]+\.[0-9]+$')) != 'True'"
+           Text="SuavoAgentVersion is required and must use major.minor.patch." />
+    <Error Condition="!Exists('$(VCRedistPath)')"
+           Text="VCRedistPath must point to the reviewed x64 Visual C++ redistributable." />
+    <VerifyFileHash File="$(VCRedistPath)"
+                    Hash="$(VCRedistSha256)"
+                    Algorithm="SHA256"
+                    HashEncoding="hex" />
+  </Target>
+
+  <!-- Safe to invoke before legal acceptance. Loading this no-op target forces
+       full MSBuild/WiX SDK project evaluation and catches malformed conditions. -->
+  <Target Name="EvaluateInstallerProject" />
+
+</Project>

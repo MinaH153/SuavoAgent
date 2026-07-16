@@ -119,72 +119,7 @@ public class CriticalPathTests : IDisposable
         Assert.Single(verify.GetPendingWritebacks());
     }
 
-    // ── 3. Package self-update stages all 3 binaries + sentinel ──
-
-    [Fact]
-    public void CheckPendingUpdate_ValidSentinel_SwapsAndCleans()
-    {
-        // Create a temp "install dir" with staged binaries and sentinel
-        var tempDir = Path.Combine(Path.GetTempPath(), "suavo-crit-" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(tempDir);
-        try
-        {
-            // Stage binaries
-            File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe"), "old");
-            File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe.new"), "new-core");
-            File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Broker.exe"), "old");
-            File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Broker.exe.new"), "new-broker");
-            File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Helper.exe"), "old");
-            File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Helper.exe.new"), "new-helper");
-
-            // SwapBinaries swaps all 3
-            var result = SelfUpdater.SwapBinaries(tempDir, _logger);
-            Assert.True(result);
-
-            // Verify all swapped
-            Assert.Equal("new-core", File.ReadAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe")));
-            Assert.Equal("new-broker", File.ReadAllText(Path.Combine(tempDir, "SuavoAgent.Broker.exe")));
-            Assert.Equal("new-helper", File.ReadAllText(Path.Combine(tempDir, "SuavoAgent.Helper.exe")));
-
-            // Old files preserved for rollback
-            Assert.True(File.Exists(Path.Combine(tempDir, "SuavoAgent.Core.exe.old")));
-            Assert.True(File.Exists(Path.Combine(tempDir, "SuavoAgent.Broker.exe.old")));
-            Assert.True(File.Exists(Path.Combine(tempDir, "SuavoAgent.Helper.exe.old")));
-
-            // No .new files remain
-            Assert.Empty(Directory.GetFiles(tempDir, "*.exe.new"));
-        }
-        finally
-        {
-            Directory.Delete(tempDir, true);
-        }
-    }
-
-    [Fact]
-    public void SwapBinaries_PartialStagedSet_RefusesWithoutSwapping()
-    {
-        var tempDir = Path.Combine(Path.GetTempPath(), "suavo-crit-" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(tempDir);
-        try
-        {
-            // Only Core.exe.new is staged — Broker/Helper .new are absent. A partial set must be
-            // refused: swapping just Core leaves a new Core against an old Broker/Helper (version
-            // skew). #10 makes SwapBinaries all-or-nothing — it returns false and swaps nothing.
-            File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe"), "old-core");
-            File.WriteAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe.new"), "new-core");
-
-            var result = SelfUpdater.SwapBinaries(tempDir, _logger);
-
-            Assert.False(result);
-            Assert.Equal("old-core", File.ReadAllText(Path.Combine(tempDir, "SuavoAgent.Core.exe")));
-        }
-        finally
-        {
-            Directory.Delete(tempDir, true);
-        }
-    }
-
-    // ── 4. Retry counts survive restart ──
+    // ── 3. Retry counts survive restart ──
 
     [Fact]
     public void RetryCount_SurvivesDbReopen()

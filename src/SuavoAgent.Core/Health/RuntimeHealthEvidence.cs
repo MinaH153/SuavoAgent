@@ -129,6 +129,9 @@ public static class RuntimeHealthEvidence
     public static string CloudAuthHealthPath(string? root = null) =>
         Path.Combine(root ?? ProgramDataRoot, "cloud-auth-health.json");
 
+    public static string ActivationReadinessPath(string? root = null) =>
+        Path.Combine(root ?? ProgramDataRoot, "activation-readiness.json");
+
     public static string UpdateHealthPath(string? root = null) =>
         Path.Combine(root ?? ProgramDataRoot, "update-health.json");
 
@@ -440,6 +443,94 @@ public static class RuntimeHealthEvidence
             recoveryAttempted,
             recoveryOutcome,
             restartRequested,
+        };
+
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(payload, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+        }));
+        File.Move(tmp, path, overwrite: true);
+    }
+
+    internal static void WriteActivationReadiness(
+        string path,
+        string version,
+        string? agentId,
+        string? provisioningId,
+        DateTimeOffset checkedAt,
+        bool helperAttached,
+        bool ipcConnected,
+        bool actuationReady,
+        bool sqlConnected,
+        bool schemaCanaryGreen,
+        string pmsCode,
+        Cloud.SignedDeviceProvisioningProof? deviceProof,
+        Cloud.SignedDeviceProbationHealth? probationHealthProof = null)
+    {
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(dir))
+            Directory.CreateDirectory(dir);
+
+        var probationReady = probationHealthProof is not null &&
+                             !helperAttached && !ipcConnected && !actuationReady &&
+                             sqlConnected && schemaCanaryGreen &&
+                             string.Equals(pmsCode, "pms_schema_canary", StringComparison.Ordinal) &&
+                             deviceProof is not null;
+        var activeReady = probationHealthProof is null &&
+                          helperAttached && ipcConnected && actuationReady &&
+                          sqlConnected && schemaCanaryGreen &&
+                          string.Equals(pmsCode, "pms_operational", StringComparison.Ordinal) &&
+                          (string.IsNullOrWhiteSpace(provisioningId) || deviceProof is not null);
+        var ready = probationReady || activeReady;
+        var payload = new
+        {
+            status = ready ? "ok" : "not_ready",
+            version,
+            agentId,
+            provisioningId,
+            checkedAt = checkedAt.ToString("o"),
+            helperAttached,
+            ipcConnected,
+            actuationReady,
+            sqlConnected,
+            schemaCanaryGreen,
+            pmsCode,
+            deviceProof = deviceProof is null ? null : new
+            {
+                deviceCode = deviceProof.DeviceCode,
+                provisioningId = deviceProof.ProvisioningId,
+                agentId = deviceProof.AgentId,
+                pharmacyId = deviceProof.PharmacyId,
+                fingerprint = deviceProof.Fingerprint,
+                keyId = deviceProof.KeyId,
+                challenge = deviceProof.Challenge,
+                sqlServerCertificateSha256 = deviceProof.SqlServerCertificateSha256,
+                signature = deviceProof.Signature,
+                canonicalDigest = deviceProof.CanonicalDigest,
+            },
+            probationHealthProof = probationHealthProof is null ? null : new
+            {
+                deviceCode = probationHealthProof.Health.DeviceCode,
+                provisioningId = probationHealthProof.Health.ProvisioningId,
+                agentId = probationHealthProof.Health.AgentId,
+                pharmacyId = probationHealthProof.Health.PharmacyId,
+                fingerprint = probationHealthProof.Health.Fingerprint,
+                version = probationHealthProof.Health.Version,
+                keyId = probationHealthProof.Health.KeyId,
+                challenge = probationHealthProof.Health.Challenge,
+                sqlServerCertificateSha256 = probationHealthProof.Health.SqlServerCertificateSha256,
+                observedAtUtc = probationHealthProof.Health.ObservedAtUtc,
+                challengeCounter = probationHealthProof.Health.ChallengeCounter,
+                helperAttached = probationHealthProof.Health.HelperAttached,
+                ipcConnected = probationHealthProof.Health.IpcConnected,
+                actuationReady = probationHealthProof.Health.ActuationReady,
+                sqlConnected = probationHealthProof.Health.SqlConnected,
+                schemaCanaryGreen = probationHealthProof.Health.SchemaCanaryGreen,
+                pmsCode = probationHealthProof.Health.PmsCode,
+                signature = probationHealthProof.Signature,
+                canonicalDigest = probationHealthProof.CanonicalDigest,
+            },
         };
 
         var tmp = path + ".tmp";

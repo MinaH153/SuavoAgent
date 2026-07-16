@@ -49,11 +49,11 @@ public class ConsentComplianceModeTests
     }
 
     [Fact]
-    public void RequiresEmployeeNotice_true_in_hipaa_mode_for_mandatory_state()
+    public void RequiresEmployeeNotice_true_in_hipaa_mode_for_every_state()
     {
         var vm = NewVm();
         // default is hipaa
-        vm.StateCode = "NY";
+        vm.StateCode = "CA";
         Assert.True(vm.RequiresEmployeeNotice);
     }
 
@@ -80,6 +80,7 @@ public class ConsentComplianceModeTests
         vm.Name = "Jane";
         vm.StateCode = "CA";
         vm.AgreedToTerms = true;
+        vm.AgreedToNotice = true;
         vm.AgreeCommand.Execute(null);
         Assert.Equal("none", ctx.Consent!.ComplianceMode);
     }
@@ -93,6 +94,7 @@ public class ConsentComplianceModeTests
         vm.Name = "Jane";
         vm.StateCode = "CA";
         vm.AgreedToTerms = true;
+        vm.AgreedToNotice = true;
         vm.AgreeCommand.Execute(null);
         Assert.Equal("hipaa", ctx.Consent!.ComplianceMode);
     }

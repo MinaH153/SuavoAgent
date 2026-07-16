@@ -19,7 +19,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
     <ProjectReference Include="..\..\src\SuavoAgent.Diagnostics\SuavoAgent.Diagnostics.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="phi-golden-untrusted.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="Never" />
   </ItemGroup>
 
 </Project>

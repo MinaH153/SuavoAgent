@@ -7,7 +7,7 @@ using Xunit;
 namespace SuavoAgent.Core.Tests.Pricing;
 
 /// <summary>
-/// Feature B B3 report writer: turns the profit-optimized rows into the READ-ONLY Excel report Nadim
+/// Feature B B3 report writer: turns the margin-proxy rows into the READ-ONLY Excel report Nadim
 /// asked for. Round-trips a written report back out to prove the numbers + statuses land in the right
 /// cells — the deliverable the pharmacist reads to set the PioneerRx preferred item by hand.
 /// </summary>
@@ -23,9 +23,16 @@ public sealed class PreferredNdcReportWriterTests : IDisposable
         var rows = new[]
         {
             new PreferredNdcReportRow("omeprazole-40", "PLAN-A", PreferredNdcStatus.Ok,
-                "00093-3000-01", "Best Labs", 3.00m, 11.00m, 8.00m, 3.00m, ReimbursementBasis.ContractOrMac, 3),
+                "00093300001", "Best Labs", 3.00m, 11.00m, 8.00m, 3.00m,
+                ReimbursementBasis.ContractOrMac, PreferredNdcAmountBasis.PerDispensedFill,
+                PreferredNdcEvidenceProvenance.PioneerRxAcquisitionCostExport,
+                PreferredNdcEvidenceProvenance.PioneerRxContractOrMacExport,
+                new DateTimeOffset(2026, 7, 13, 8, 0, 0, TimeSpan.Zero),
+                new DateTimeOffset(2026, 7, 13, 8, 0, 0, TimeSpan.Zero), 0, 3),
             new PreferredNdcReportRow("lisinopril-20", "PLAN-A", PreferredNdcStatus.NoEligible,
-                null, null, null, null, null, null, ReimbursementBasis.Unspecified, 2),
+                null, null, null, null, null, null, ReimbursementBasis.Unspecified,
+                PreferredNdcAmountBasis.Unspecified, PreferredNdcEvidenceProvenance.Unspecified,
+                PreferredNdcEvidenceProvenance.Unspecified, null, null, null, 2),
         };
 
         var writer = new PreferredNdcReportWriter(NullLogger<PreferredNdcReportWriter>.Instance);
@@ -39,16 +46,47 @@ public sealed class PreferredNdcReportWriterTests : IDisposable
         using var wb = new XLWorkbook(res.OutputPath!);
         var ws = wb.Worksheet(1);
         int Col(string name) { for (int c = 1; c <= 20; c++) if (ws.Cell(1, c).GetString().Contains(name, StringComparison.OrdinalIgnoreCase)) return c; return -1; }
-        int ndc = Col("Preferred NDC"), profit = Col("Profit"), status = Col("Status"), delta = Col("next best");
+        int ndc = Col("Preferred NDC"), margin = Col("gross-margin proxy"), status = Col("Status"), delta = Col("next-best proxy");
+        int amountBasis = Col("Amount basis"), provenance = Col("Reimbursement evidence provenance"), samples = Col("Historical sample");
+        int scope = Col("Calculation scope");
 
         // OK row: winner + numbers present.
-        Assert.Equal("00093-3000-01", ws.Cell(2, ndc).GetString());
-        Assert.Equal(8.00, ws.Cell(2, profit).GetDouble(), 4);
+        Assert.Equal("00093300001", ws.Cell(2, ndc).GetString());
+        Assert.Equal(8.00, ws.Cell(2, margin).GetDouble(), 4);
         Assert.Equal(3.00, ws.Cell(2, delta).GetDouble(), 4);
         Assert.Equal("OK", ws.Cell(2, status).GetString());
-        // Flagged row: no NDC, no profit, explicit status.
+        Assert.Equal("per dispensed fill", ws.Cell(2, amountBasis).GetString());
+        Assert.Equal("PioneerRx contract/MAC export", ws.Cell(2, provenance).GetString());
+        Assert.Equal(0, ws.Cell(2, samples).GetDouble());
+        Assert.Contains("excludes downstream fees", ws.Cell(2, scope).GetString());
+        // Flagged row: no NDC, no margin proxy, explicit status.
         Assert.Equal("", ws.Cell(3, ndc).GetString());
-        Assert.Equal("", ws.Cell(3, profit).GetString());
+        Assert.Equal("", ws.Cell(3, margin).GetString());
         Assert.Equal(PreferredNdcStatus.NoEligible, ws.Cell(3, status).GetString());
+    }
+
+    [Fact]
+    public void Same_timestamp_refuses_overwrite_and_leaves_no_partial_file()
+    {
+        var writer = new PreferredNdcReportWriter(NullLogger<PreferredNdcReportWriter>.Instance);
+        var rows = new[]
+        {
+            new PreferredNdcReportRow(
+                "drug", "plan", PreferredNdcStatus.NoEligible,
+                null, null, null, null, null, null, ReimbursementBasis.Unspecified,
+                PreferredNdcAmountBasis.Unspecified,
+                PreferredNdcEvidenceProvenance.Unspecified,
+                PreferredNdcEvidenceProvenance.Unspecified,
+                null, null, null, 0),
+        };
+
+        var first = writer.Write(_dir, rows, "fixed");
+        var second = writer.Write(_dir, rows, "fixed");
+
+        Assert.True(first.Success, first.Error);
+        Assert.False(second.Success);
+        Assert.Equal(PreferredNdcReportWriter.OutputExistsError, second.Error);
+        Assert.Single(Directory.GetFiles(_dir, "*.xlsx"));
+        Assert.Empty(Directory.GetFiles(_dir, ".preferred-ndc-report-*.tmp"));
     }
 }

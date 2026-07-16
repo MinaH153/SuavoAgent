@@ -13,11 +13,12 @@ using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.State;
 using SuavoAgent.Contracts.Models;
 using SuavoAgent.Contracts.Adapters;
+using SuavoAgent.Contracts.Security;
 using SuavoAgent.Core.Adapters;
 
 namespace SuavoAgent.Core.Workers;
 
-public sealed class RxDetectionWorker : ResilientHostedService
+public sealed partial class RxDetectionWorker : ResilientHostedService
 {
     private static readonly JsonSerializerOptions SyncPayloadJsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -32,6 +33,9 @@ public sealed class RxDetectionWorker : ResilientHostedService
     private readonly bool _canaryEnabled;
     private readonly IServiceProvider _serviceProvider;
     private readonly AdapterConfig _adapterConfig;
+    private readonly IRxCorrelationStore? _rxCorrelationStore;
+    private readonly IActivePmsAdapterRegistry? _learnedAdapterRegistry;
+    private readonly ObservationActivationAuthority? _observationAuthority;
     private PioneerRxSqlEngine? _sqlEngine;
     private PioneerRxCanarySource? _canarySource;
     private PioneerRxWritebackEngine? _writebackEngine;
@@ -57,6 +61,8 @@ public sealed class RxDetectionWorker : ResilientHostedService
     private int _consecutiveSqlFailures;
     private DateTimeOffset? _sqlDownSince;
     private bool _degradedLogged;
+    private bool _learnedFallbackHealthy;
+    private string _activeDetectionSource = "none";
 
     public int DetectionIntervalSeconds { get; set; } = 300;
     public int LastDetectedCount { get; private set; }
@@ -64,10 +70,13 @@ public sealed class RxDetectionWorker : ResilientHostedService
     public bool IsSqlConnected => _sqlConnected;
     public int ConsecutiveSqlFailures => _consecutiveSqlFailures;
     public DateTimeOffset? SqlDownSince => _sqlDownSince;
+    public bool IsLearnedFallbackHealthy => _learnedFallbackHealthy;
+    public string ActiveDetectionSource => _activeDetectionSource;
 
     /// <summary>True when SQL has been down past the escalation threshold — a real detection outage,
     /// not a transient blip or a no-PMS dev box. Surfaced to the heartbeat as `rxDetectionDegraded`.</summary>
     public bool IsDetectionDegraded(DateTimeOffset now) =>
+        !_learnedFallbackHealthy &&
         _sqlDownSince is { } since && now - since >= SqlDarkEscalationThreshold;
 
     /// <summary>Seconds SQL has been continuously down (0 when connected), for heartbeat telemetry.</summary>
@@ -95,6 +104,11 @@ public sealed class RxDetectionWorker : ResilientHostedService
         _stateDb = stateDb;
         _serviceProvider = serviceProvider;
         _cloudClient = serviceProvider.GetService<SuavoCloudClient>();
+        _rxCorrelationStore = serviceProvider.GetService<IRxCorrelationStore>();
+        _learnedAdapterRegistry = serviceProvider.GetService<IActivePmsAdapterRegistry>();
+        _observationAuthority = serviceProvider.GetService<ObservationActivationAuthority>();
+        if (_observationAuthority is not null)
+            _observationAuthority.AuthorityLost += OnObservationAuthorityLost;
         _adapterConfig = serviceProvider.GetService<IAdapterRegistry>()?.Default ?? PioneerRxAdapterConfig.Create();
         _canaryEnabled = !_options.LearningMode;
     }
@@ -107,6 +121,7 @@ public sealed class RxDetectionWorker : ResilientHostedService
         // Exhausted in-process restarts: mark disconnected so the heartbeat reports degraded and
         // log CRITICAL — the cloud silent-agent / health-watch surfaces it for repair.
         _sqlConnected = false;
+        _learnedFallbackHealthy = false;
         _logger.LogCritical(
             "RxDetectionWorker exhausted supervised restarts — detection halted, awaiting repair");
         return Task.CompletedTask;
@@ -117,8 +132,6 @@ public sealed class RxDetectionWorker : ResilientHostedService
         _logger.LogInformation("Rx detection worker started (canary={Canary})", _canaryEnabled);
 
         _stateDb.PurgeExpiredDeadLetters();
-
-        await TryConnectSqlAsync(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -132,11 +145,15 @@ public sealed class RxDetectionWorker : ResilientHostedService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Rx detection cycle failed");
+                _logger.LogSafeWarning(ex);
                 _sqlConnected = false;
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(DetectionIntervalSeconds), stoppingToken);
+            var delay = _observationAuthority is not null &&
+                        !_observationAuthority.ObservationEnabled
+                ? TimeSpan.FromSeconds(1)
+                : TimeSpan.FromSeconds(DetectionIntervalSeconds);
+            await Task.Delay(delay, stoppingToken);
         }
 
         _sqlEngine?.Dispose();
@@ -145,34 +162,54 @@ public sealed class RxDetectionWorker : ResilientHostedService
 
     internal async Task RunCycleAsync(CancellationToken ct)
     {
+        using var activation = _observationAuthority?.TryAcquireExecutionLease(ct);
+        if (_observationAuthority is not null && activation is null)
+        {
+            SuspendObservation();
+            return;
+        }
+        if (activation is not null) ct = activation.Token;
+
         if (!_sqlConnected)
         {
             await TryConnectSqlAsync(ct);
             if (!_sqlConnected)
             {
-                var now = DateTimeOffset.UtcNow;
-                if (IsDetectionDegraded(now) && !_degradedLogged)
-                {
-                    _degradedLogged = true;
-                    _logger.LogCritical(
-                        "Rx detection DARK for {Seconds}s ({Failures} consecutive SQL failures) — pharmacy " +
-                        "not receiving delivery-ready detection; heartbeat now reports rxDetectionDegraded=true",
-                        SqlDarkSeconds(now), _consecutiveSqlFailures);
-                }
-                var backoff = _sqlBackoff.NextDelay();
-                _logger.LogDebug("SQL not connected, skipping detection cycle (retry in {Delay}s)", backoff.TotalSeconds);
-                await Task.Delay(backoff, ct);
+                if (await TryRunLearnedFallbackAsync("builtin_connection_unavailable", ct)) return;
+                await DelayUnavailableDetectionAsync(ct);
                 return;
             }
         }
 
-        if (_canarySource != null)
-            await RunCanaryDetectionAsync(ct);
-        else
-            await RunLegacyDetectionAsync(ct);
+        try
+        {
+            var builtInAvailable = _canarySource != null
+                ? await RunCanaryDetectionAsync(ct)
+                : await RunLegacyDetectionAsync(ct);
+            if (builtInAvailable)
+            {
+                _learnedFallbackHealthy = false;
+                SetDetectionSource("builtin", "builtin_available");
+                return;
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            MarkSqlConnectFailed(DateTimeOffset.UtcNow);
+            _logger.LogWarning(
+                "Built-in Rx detection unavailable; evaluating approved learned fallback (errorType={ErrorType})",
+                ex.GetType().Name);
+        }
+
+        if (await TryRunLearnedFallbackAsync("builtin_contract_unavailable", ct)) return;
+        await DelayUnavailableDetectionAsync(ct);
     }
 
-    private async Task RunLegacyDetectionAsync(CancellationToken ct)
+    private async Task<bool> RunLegacyDetectionAsync(CancellationToken ct)
     {
         // Retry persisted unsynced batches first
         await RetryPendingBatchesAsync(ct);
@@ -186,13 +223,12 @@ public sealed class RxDetectionWorker : ResilientHostedService
         {
             _logger.LogInformation("Detected {Count} ready prescriptions", readyRxs.Count);
 
-            var hmacSalt = _options.HmacSalt ?? "[no-hmac-salt]";
-            var patientMap = await EnrichPatientDetailsAsync(readyRxs, hmacSalt, ct);
+            var hmacSalt = RequireHmacSalt();
+            PersistRxCorrelations(readyRxs, hmacSalt);
 
             var json = SerializeRxBatch(
                 readyRxs,
                 hmacSalt,
-                patientMap,
                 pharmacyId: _options.PharmacyId,
                 agentInstallId: _options.AgentId,
                 includeLegacyDeliveryQueue: _options.EnableLegacyPhiDeliveryQueueSync);
@@ -203,9 +239,10 @@ public sealed class RxDetectionWorker : ResilientHostedService
         {
             _logger.LogDebug("No ready prescriptions found");
         }
+        return true;
     }
 
-    private async Task RunCanaryDetectionAsync(CancellationToken ct)
+    private async Task<bool> RunCanaryDetectionAsync(CancellationToken ct)
     {
         var pharmacyId = _options.PharmacyId ?? "unknown";
         var adapterType = _canarySource!.AdapterType;
@@ -223,8 +260,8 @@ public sealed class RxDetectionWorker : ResilientHostedService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Canary: baseline establishment failed — cannot verify PioneerRx schema");
-                return;
+                _logger.LogSafeWarning(ex);
+                return false;
             }
 
             var preflight = await _canarySource.VerifyPreflightAsync(establishedBaseline, ct);
@@ -234,7 +271,7 @@ public sealed class RxDetectionWorker : ResilientHostedService
                 _logger.LogWarning(
                     "Canary: observed baseline verification failed during establishment ({Severity})",
                     preflight.Severity);
-                return;
+                return false;
             }
 
             _stateDb.UpsertCanaryBaseline(pharmacyId, establishedBaseline);
@@ -245,13 +282,12 @@ public sealed class RxDetectionWorker : ResilientHostedService
             var result = await _canarySource.DetectWithCanaryAsync(establishedBaseline, ct);
             if (result.Rxs.Count > 0)
             {
-                var hmacSalt = _options.HmacSalt ?? "[no-hmac-salt]";
-                var patientMap = await EnrichPatientDetailsAsync(result.Rxs, hmacSalt, ct);
+                var hmacSalt = RequireHmacSalt();
+                PersistRxCorrelations(result.Rxs, hmacSalt);
                 RecordSchemaCanaryGate(result.PostflightVerification);
                 var json = SerializeRxBatch(
                     result.Rxs,
                     hmacSalt,
-                    patientMap,
                     schemaVerification: result.PostflightVerification,
                     pharmacyId: _options.PharmacyId,
                     agentInstallId: _options.AgentId,
@@ -262,7 +298,7 @@ public sealed class RxDetectionWorker : ResilientHostedService
 
             LastDetectedCount = result.Rxs.Count;
             LastDetectionTime = DateTimeOffset.UtcNow;
-            return;
+            return true;
         }
 
         // ── Retry pending batches (only when not in hold) ──
@@ -300,7 +336,7 @@ public sealed class RxDetectionWorker : ResilientHostedService
                 _holdState.BlockedCycles);
             LastDetectedCount = 0;
             LastDetectionTime = DateTimeOffset.UtcNow;
-            return;
+            return false;
         }
 
         // ── Clean — clear any prior hold ──
@@ -318,12 +354,11 @@ public sealed class RxDetectionWorker : ResilientHostedService
         if (detection.Rxs.Count > 0)
         {
             _logger.LogInformation("Canary: {Count} ready prescriptions — schema verified clean", detection.Rxs.Count);
-            var hmacSalt = _options.HmacSalt ?? "[no-hmac-salt]";
-            var patientMap = await EnrichPatientDetailsAsync(detection.Rxs, hmacSalt, ct);
+            var hmacSalt = RequireHmacSalt();
+            PersistRxCorrelations(detection.Rxs, hmacSalt);
             var json = SerializeRxBatch(
                 detection.Rxs,
                 hmacSalt,
-                patientMap,
                 schemaVerification: detection.PostflightVerification,
                 pharmacyId: _options.PharmacyId,
                 agentInstallId: _options.AgentId,
@@ -338,244 +373,15 @@ public sealed class RxDetectionWorker : ResilientHostedService
 
         LastDetectedCount = detection.Rxs.Count;
         LastDetectionTime = DateTimeOffset.UtcNow;
-    }
-
-    private async Task RetryPendingBatchesAsync(CancellationToken ct)
-    {
-        var pendingBatches = _stateDb.GetPendingBatches();
-        if (pendingBatches.Count > 0)
-        {
-            _logger.LogInformation("Retrying {Count} persisted unsynced batches", pendingBatches.Count);
-            foreach (var batch in pendingBatches)
-            {
-                if (await TrySyncPayloadToCloudAsync(batch.Payload, ct))
-                    _stateDb.DeleteBatch(batch.Id);
-                else
-                    _stateDb.IncrementBatchRetry(batch.Id);
-            }
-        }
-    }
-
-    private async Task<IReadOnlyDictionary<string, RxPatientDetails>> EnrichPatientDetailsAsync(
-        IReadOnlyList<RxMetadata> readyRxs,
-        string hmacSalt,
-        CancellationToken ct)
-    {
-        var patientMap = new Dictionary<string, RxPatientDetails>();
-        if (_sqlEngine is null || readyRxs.Count == 0)
-            return patientMap;
-
-        var failures = 0;
-        foreach (var rx in readyRxs)
-        {
-            var rxHash = PhiScrubber.HmacHash(rx.RxNumber, hmacSalt);
-
-            // HIPAA §164.312(b): audit before PHI access so a crash mid-read
-            // still leaves local evidence that patient fields were requested.
-            _stateDb.AppendChainedAuditEntry(new AuditEntry(
-                TaskId: rxHash,
-                EventType: "phi_access",
-                FromState: "",
-                ToState: "",
-                Trigger: "rx_detection_worker.enrich_for_delivery_sync",
-                RequesterId: "rx_detection_worker",
-                RxNumber: rxHash));
-
-            try
-            {
-                var patientDetails = await _sqlEngine.PullPatientForRxAsync(rx.RxNumber, ct);
-                if (patientDetails != null)
-                    patientMap[rx.RxNumber] = patientDetails;
-            }
-            catch (Exception ex)
-            {
-                failures++;
-                _logger.LogWarning(ex, "Patient detail enrichment failed for one Rx; continuing without patient fields");
-            }
-        }
-
-        if (failures > 0)
-        {
-            _logger.LogWarning(
-                "Patient detail enrichment completed with {Failures}/{Total} failures",
-                failures,
-                readyRxs.Count);
-        }
-        else
-        {
-            _logger.LogDebug(
-                "Enriched {Count}/{Total} Rxs with patient details",
-                patientMap.Count,
-                readyRxs.Count);
-        }
-
-        return patientMap;
-    }
-
-    // B2 state transitions — internal so tests can drive the degraded state machine without a live PMS.
-    internal void MarkSqlConnected()
-    {
-        _sqlConnected = true;
-        _consecutiveSqlFailures = 0;
-        _sqlDownSince = null;
-        _degradedLogged = false;
-        _sqlBackoff.Reset();
-    }
-
-    internal void MarkSqlConnectFailed(DateTimeOffset now)
-    {
-        _sqlConnected = false;
-        _consecutiveSqlFailures++;
-        _sqlDownSince ??= now; // first failure of this outage stamps when it went dark
-    }
-
-    // No PMS on this host (dev box / sandbox): not connected, but NOT an outage — clear any dark state
-    // so a machine without PioneerRx never reports `degraded`.
-    private void MarkSqlNotApplicable()
-    {
-        _sqlConnected = false;
-        _consecutiveSqlFailures = 0;
-        _sqlDownSince = null;
-        _degradedLogged = false;
-    }
-
-    private async Task TryConnectSqlAsync(CancellationToken ct)
-    {
-        // No-PMS short-circuit: skip the 30s SqlConnection.OpenAsync timeout
-        // (+ warning-log noise that counts toward error_event_count_24h) on
-        // sandboxes and dev workstations where PioneerRx isn't installed at
-        // all. Fail-open inside the detector handles the registry-permissions
-        // edge case. We log the skip once per worker lifetime so log volume
-        // stays bounded.
-        if (!PioneerRxInstallDetector.IsInstalled(_logger))
-        {
-            MarkSqlNotApplicable();
-            if (!_loggedNoPmsOnce)
-            {
-                _logger.LogInformation(
-                    "PioneerRx not installed on this host — skipping SQL detection (no-PMS mode)");
-                _loggedNoPmsOnce = true;
-            }
-            return;
-        }
-
-        var server = _options.SqlServer ?? "localhost";
-        var database = AdapterCatalog.Resolve(_options.SqlDatabase, _adapterConfig);
-
-        _sqlEngine?.Dispose();
-        // The canary source is bound to the engine instance. Disposing+replacing the engine on a
-        // reconnect (now more frequent under the worker supervisor) would otherwise leave the
-        // `_canarySource == null` guard below holding a source bound to the disposed engine — so
-        // clear it here to force a rebuild against the new engine.
-        _canarySource = null;
-        _sqlEngine = new PioneerRxSqlEngine(
-            server, database,
-            _loggerFactory.CreateLogger<PioneerRxSqlEngine>(),
-            _options.SqlUser, _options.SqlPassword, _options.SqlTrustServerCertificate);
-
-        var connected = await _sqlEngine.TryConnectAsync(ct);
-
-        if (connected)
-        {
-            MarkSqlConnected();
-            _logger.LogInformation("SQL connected to {Server}/{Db}", server, database);
-            await SyncSchemaDiscoveryAsync(ct);
-
-            // Create canary source after successful SQL connection
-            if (_canaryEnabled && _canarySource == null)
-            {
-                _canarySource = new PioneerRxCanarySource(_sqlEngine,
-                    _loggerFactory.CreateLogger<PioneerRxCanarySource>());
-                _logger.LogInformation("Canary detection source initialized for PioneerRx");
-            }
-
-            // Create writeback engine with separate connection pool
-            if (_sqlConnected && _sqlEngine != null)
-            {
-                var allGuids = _sqlEngine.GetAllDiscoveredGuids();
-                if (allGuids != null && allGuids.Count >= 5)
-                {
-                    var writebackCsb = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder();
-                    if (!string.IsNullOrEmpty(_options.SqlServer)) writebackCsb.DataSource = _options.SqlServer;
-                    if (!string.IsNullOrEmpty(_options.SqlDatabase)) writebackCsb.InitialCatalog = _options.SqlDatabase;
-                    writebackCsb.ApplicationName = "SuavoWriteback";
-                    writebackCsb.MaxPoolSize = 1;
-                    writebackCsb["Encrypt"] = "true";
-                    writebackCsb["TrustServerCertificate"] = _options.SqlTrustServerCertificate.ToString();
-                    if (!string.IsNullOrEmpty(_options.SqlUser))
-                    {
-                        writebackCsb.UserID = _options.SqlUser;
-                        writebackCsb.Password = _options.SqlPassword;
-                    }
-                    else
-                    {
-                        writebackCsb.IntegratedSecurity = true;
-                    }
-
-                    _writebackEngine = new PioneerRxWritebackEngine(
-                        writebackCsb.ConnectionString,
-                        allGuids,
-                        _loggerFactory.CreateLogger<PioneerRxWritebackEngine>());
-
-                    await _writebackEngine.DetectTriggersAsync(ct);
-                    _logger.LogInformation("Writeback engine created (enabled={Enabled})", _writebackEngine.WritebackEnabled);
-
-                    // Attach to WritebackProcessor if available
-                    var processor = _serviceProvider.GetService<WritebackProcessor>();
-                    processor?.SetWritebackEngine(_writebackEngine);
-                }
-                else
-                {
-                    _logger.LogWarning("Writeback engine NOT created — insufficient status GUIDs ({Count}/5)",
-                        allGuids?.Count ?? 0);
-                }
-            }
-        }
-        else
-        {
-            MarkSqlConnectFailed(DateTimeOffset.UtcNow);
-            _logger.LogWarning("SQL connection failed for {Server}/{Db}", server, database);
-            _canarySource = null;
-        }
-    }
-
-    private async Task SyncSchemaDiscoveryAsync(CancellationToken ct)
-    {
-        if (_cloudClient is null || _sqlEngine is null) return;
-
-        try
-        {
-            var schema = await _sqlEngine.DiscoverSchemaAsync(ct);
-            if (schema.Count == 0) return;
-
-            var payload = new
-            {
-                snapshotType = "schema_discovery",
-                data = new
-                {
-                    tables = schema.ToDictionary(
-                        kv => kv.Key,
-                        kv => (object)kv.Value),
-                    discoveredAt = DateTimeOffset.UtcNow.ToString("o")
-                },
-                sqlConnected = true
-            };
-
-            await _cloudClient.SyncRxAsync(payload, ct);
-            _logger.LogInformation("Schema discovery synced: {Count} tables", schema.Count);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Schema discovery sync failed — non-critical");
-        }
+        return true;
     }
 
     /// <summary>
-    /// Serializes Rx batch with optional patient delivery details.
-    /// Plain Rx numbers never leave the agent. The canonical
-    /// rxOrderCandidates payload uses a per-pharmacy HMAC key and carries
-    /// field provenance so the cloud can distinguish PHI ingestion from
-    /// telemetry/model-prompt data.
+    /// Serializes the pre-approval, hash-only candidate batch. Patient identity,
+    /// phone, address, city, state, ZIP, delivery hashes, missing-field flags,
+    /// and patient-field provenance are deliberately absent. The optional
+    /// patientDetails argument is retained only for binary/source compatibility
+    /// with old fixture callers and is never read.
     /// </summary>
     internal static string SerializeRxBatch(
         IReadOnlyList<RxMetadata> rxs,
@@ -587,22 +393,27 @@ public sealed class RxDetectionWorker : ResilientHostedService
         string? pmsVersion = null,
         string hashKeyVersion = "local-hmac-v1",
         DateTimeOffset? serializedAtUtc = null,
-        bool includeLegacyDeliveryQueue = false)
+        bool includeLegacyDeliveryQueue = false,
+        string sourcePms = "PioneerRx",
+        string schemaSignature = "pioneerrx.sql.metadata.v1",
+        string evidenceSourceKind = RxCorrelationSourceKinds.PioneerRxBuiltIn,
+        string? evidenceSourceBinding = null)
     {
         var serializedAt = serializedAtUtc ?? DateTimeOffset.UtcNow;
         var scanWindowId = $"rxscan-{serializedAt.ToUnixTimeMilliseconds()}";
         var candidates = rxs.Select(rx =>
         {
-            var pd = patientDetails != null && patientDetails.TryGetValue(rx.RxNumber, out var p) ? p : null;
             var rxHash = HashRxNumber(rx.RxNumber, hmacSalt);
-            var warnings = BuildCandidateWarnings(pd, schemaVerification);
+            var warnings = BuildCandidateWarnings(schemaVerification);
             var isControlled = rx.DrugSchedule is >= 2 and <= 5;
             const DetectionSource source = DetectionSource.Sql;
-            const string schemaSignature = "pioneerrx.sql.metadata.v1";
-            var localEvidenceId = BuildLocalEvidenceId(rxHash, rx.DetectedAt);
-            var patientDelivery = BuildPatientDelivery(pd, hmacSalt);
-            var fieldConfidence = BuildCandidateFieldConfidence(rx, pd);
-            var fieldProvenance = BuildCandidateProvenance(rx, pd, source, schemaSignature, localEvidenceId);
+            var localEvidenceId = BuildLocalEvidenceId(
+                rxHash,
+                rx,
+                evidenceSourceKind,
+                evidenceSourceBinding);
+            var fieldConfidence = BuildCandidateFieldConfidence(rx);
+            var fieldProvenance = BuildCandidateProvenance(rx, source, schemaSignature, localEvidenceId);
             var confidence = ComputeCandidateConfidence(fieldConfidence, fieldProvenance, schemaVerification);
 
             return new RxOrderCandidate(
@@ -621,12 +432,11 @@ public sealed class RxDetectionWorker : ResilientHostedService
                     CounselingRequired: false,
                     Priority: rx.Priority,
                     TemperatureRequirement: rx.TemperatureRequirement),
-                PatientDelivery: patientDelivery,
                 Provenance: new RxOrderCandidateProvenance(
                     PharmacyId: pharmacyId,
                     AgentInstallId: agentInstallId,
                     EvidenceId: localEvidenceId,
-                    Pms: "PioneerRx",
+                    Pms: sourcePms,
                     PmsVersion: pmsVersion,
                     ExtractionMethod: source,
                     CapturedAtUtc: rx.DetectedAt,
@@ -648,27 +458,11 @@ public sealed class RxDetectionWorker : ResilientHostedService
             ["syncedAt"] = serializedAt.ToString("o")
         };
 
-        if (includeLegacyDeliveryQueue)
-        {
-            // Track 3 invariant (Codex CRITICAL #15, closed 2026-05-12):
-            // the legacy rxDeliveryQueue ships ONLY operational metadata.
-            // PHI fields (patient name/phone/address) are intentionally
-            // absent — they were silently dropped cloud-side by
-            // sanitizeSnapshotData anyway, and HIPAA minimum-necessary
-            // forbids putting them on the wire in the first place.
-            // Patient delivery details flow exclusively through the typed,
-            // signed-command path SuavoCloudClient.SendPatientDetailsAsync.
-            data["rxDeliveryQueue"] = rxs.Select(rx => new
-            {
-                rxNumber = HashRxNumber(rx.RxNumber, hmacSalt),
-                drugName = rx.DrugName,
-                ndc = rx.Ndc,
-                dateFilled = rx.DateFilled?.ToString("o"),
-                quantity = rx.Quantity,
-                statusGuid = rx.StatusGuid.ToString(),
-                detectedAt = rx.DetectedAt.ToString("o"),
-            }).ToArray();
-        }
+        // includeLegacyDeliveryQueue is intentionally inert. That historical shape linked an Rx
+        // hash to raw drug/fill metadata and could be re-enabled by configuration. Keeping the
+        // parameter preserves old fixture callers while making the wire contract one-way: only
+        // hash-only rxOrderCandidates can leave the workstation before pharmacist approval.
+        _ = includeLegacyDeliveryQueue;
 
         var payload = new
         {
@@ -696,51 +490,51 @@ public sealed class RxDetectionWorker : ResilientHostedService
             !string.IsNullOrEmpty(hmacSalt) ? hmacSalt : "[no-hmac-salt]");
     }
 
-    private static RxOrderPatientDelivery BuildPatientDelivery(RxPatientDetails? pd, string hmacSalt)
-    {
-        var flags = BuildMissingAddressFlags(pd);
-        var zipDigits = new string((pd?.Zip ?? "").Where(char.IsDigit).Take(9).ToArray());
-        var zip5 = zipDigits.Length >= 5 ? zipDigits[..5] : null;
-        var zip4Present = zipDigits.Length >= 9;
-        var nameBasis = string.Join(" ", new[] { pd?.FirstName, pd?.LastInitial }
-            .Where(v => !string.IsNullOrWhiteSpace(v)));
-
-        return new RxOrderPatientDelivery(
-            NameHash: HashPhi(nameBasis, hmacSalt),
-            AddressLine1Hash: HashPhi(pd?.Address1, hmacSalt),
-            AddressLine2Hash: HashPhi(pd?.Address2, hmacSalt),
-            City: string.IsNullOrWhiteSpace(pd?.City) ? null : pd!.City!.Trim(),
-            State: string.IsNullOrWhiteSpace(pd?.State) ? null : pd!.State!.Trim().ToUpperInvariant(),
-            Zip5: zip5,
-            Zip4Present: zip4Present,
-            PhoneHash: HashPhi(pd?.Phone, hmacSalt),
-            MissingAddressFlags: flags);
-    }
-
-    private static string BuildLocalEvidenceId(string rxHash, DateTimeOffset detectedAt)
+    internal static string BuildLocalEvidenceId(
+        string rxHash,
+        RxMetadata rx,
+        string sourceKind = RxCorrelationSourceKinds.PioneerRxBuiltIn,
+        string? sourceBinding = null)
     {
         var shortHash = rxHash.Length >= 16 ? rxHash[..16] : rxHash;
-        return $"rxh-{shortHash}-{detectedAt.ToUnixTimeSeconds()}";
+        // DetectedAt is stamped on every poll, so using it directly created a new evidence row every
+        // five minutes and could hide an already-approved transition behind a newest duplicate. A
+        // bounded day bucket plus fill number is stable within the observation day. The cloud ingest
+        // is append-only (ON CONFLICT DO NOTHING), so a permanent fill-date key would freeze
+        // captured_at_utc and become unapprovably stale after 24 hours. Rotating once per UTC day
+        // preserves approval freshness without five-minute duplicate growth.
+        var basisDate = rx.DetectedAt.UtcDateTime.Date;
+        var utcBasis = new DateTimeOffset(
+            DateTime.SpecifyKind(basisDate, DateTimeKind.Utc),
+            TimeSpan.Zero);
+        var fillOffsetSeconds = Math.Clamp(rx.FillNumber, 0, 999);
+        long evidenceNumber;
+        if (sourceKind == RxCorrelationSourceKinds.LearnedApproved)
+        {
+            if (sourceBinding is not { Length: 64 } ||
+                !sourceBinding.All(Uri.IsHexDigit))
+                throw new InvalidOperationException("Learned evidence requires an exact template binding.");
+            var sourceDigest = PhiScrubber.HmacHash(
+                $"{rxHash}|{basisDate:yyyyMMdd}|{fillOffsetSeconds}",
+                sourceBinding);
+            evidenceNumber = 1_000_000_000_000L +
+                             (long)(Convert.ToUInt64(sourceDigest[..12], 16) % 9_000_000_000_000UL);
+        }
+        else if (sourceKind != RxCorrelationSourceKinds.PioneerRxBuiltIn || sourceBinding is not null)
+        {
+            throw new InvalidOperationException("Rx evidence source binding is invalid.");
+        }
+        else
+        {
+            evidenceNumber = utcBasis.ToUnixTimeSeconds() + fillOffsetSeconds;
+        }
+        return $"rxh-{shortHash}-{evidenceNumber}";
     }
 
     private static List<RxOrderCandidateWarning> BuildCandidateWarnings(
-        RxPatientDetails? pd,
         ContractVerification? schemaVerification = null)
     {
         var warnings = new List<RxOrderCandidateWarning>();
-        if (string.IsNullOrWhiteSpace(pd?.FirstName) || string.IsNullOrWhiteSpace(pd?.LastInitial))
-            warnings.Add(RxOrderCandidateWarning.MissingPatientIdentity);
-        if (string.IsNullOrWhiteSpace(pd?.Address1) ||
-            string.IsNullOrWhiteSpace(pd?.City) ||
-            string.IsNullOrWhiteSpace(pd?.State) ||
-            string.IsNullOrWhiteSpace(pd?.Zip))
-        {
-            warnings.Add(RxOrderCandidateWarning.MissingDeliveryAddress);
-        }
-        if (BuildMissingAddressFlags(pd).Contains(RxMissingAddressFlag.MissingZip5))
-        {
-            warnings.Add(RxOrderCandidateWarning.MissingZip5);
-        }
         if (schemaVerification?.Severity == CanarySeverity.Warning)
         {
             warnings.Add(RxOrderCandidateWarning.SchemaCanaryDrift);
@@ -777,28 +571,7 @@ public sealed class RxDetectionWorker : ResilientHostedService
             RecordedAtUtc: DateTimeOffset.UtcNow.ToString("o"));
     }
 
-    private static List<RxMissingAddressFlag> BuildMissingAddressFlags(RxPatientDetails? pd)
-    {
-        var flags = new List<RxMissingAddressFlag>();
-        if (string.IsNullOrWhiteSpace(pd?.FirstName) || string.IsNullOrWhiteSpace(pd?.LastInitial))
-            flags.Add(RxMissingAddressFlag.MissingName);
-        if (string.IsNullOrWhiteSpace(pd?.Phone))
-            flags.Add(RxMissingAddressFlag.MissingPhone);
-        if (string.IsNullOrWhiteSpace(pd?.Address1))
-            flags.Add(RxMissingAddressFlag.MissingAddressLine1);
-        if (string.IsNullOrWhiteSpace(pd?.City))
-            flags.Add(RxMissingAddressFlag.MissingCity);
-        if (string.IsNullOrWhiteSpace(pd?.State))
-            flags.Add(RxMissingAddressFlag.MissingState);
-
-        var zipDigits = new string((pd?.Zip ?? "").Where(char.IsDigit).Take(9).ToArray());
-        if (zipDigits.Length < 5)
-            flags.Add(RxMissingAddressFlag.MissingZip5);
-
-        return flags;
-    }
-
-    private static Dictionary<string, double> BuildCandidateFieldConfidence(RxMetadata rx, RxPatientDetails? pd)
+    private static Dictionary<string, double> BuildCandidateFieldConfidence(RxMetadata rx)
     {
         return new Dictionary<string, double>
         {
@@ -807,13 +580,6 @@ public sealed class RxDetectionWorker : ResilientHostedService
             ["medication.ndc"] = string.IsNullOrWhiteSpace(rx.Ndc) ? 0.4d : 1.0d,
             ["medication.quantity"] = rx.Quantity > 0 ? 1.0d : 0.4d,
             ["medication.daysSupply"] = rx.DaysSupply > 0 ? 1.0d : 0.4d,
-            ["patientDelivery.nameHash"] =
-                string.IsNullOrWhiteSpace(pd?.FirstName) || string.IsNullOrWhiteSpace(pd?.LastInitial) ? 0.4d : 1.0d,
-            ["patientDelivery.addressLine1Hash"] = string.IsNullOrWhiteSpace(pd?.Address1) ? 0.4d : 1.0d,
-            ["patientDelivery.city"] = string.IsNullOrWhiteSpace(pd?.City) ? 0.4d : 1.0d,
-            ["patientDelivery.state"] = string.IsNullOrWhiteSpace(pd?.State) ? 0.4d : 1.0d,
-            ["patientDelivery.zip5"] = BuildMissingAddressFlags(pd).Contains(RxMissingAddressFlag.MissingZip5) ? 0.4d : 1.0d,
-            ["patientDelivery.phoneHash"] = string.IsNullOrWhiteSpace(pd?.Phone) ? 0.4d : 1.0d,
         };
     }
 
@@ -856,7 +622,6 @@ public sealed class RxDetectionWorker : ResilientHostedService
 
     private static Dictionary<string, RxFieldProvenance> BuildCandidateProvenance(
         RxMetadata rx,
-        RxPatientDetails? pd,
         DetectionSource source,
         string schemaSignature,
         string localEvidenceId)
@@ -866,14 +631,6 @@ public sealed class RxDetectionWorker : ResilientHostedService
             SourceDetail: "sql_metadata",
             Confidence: confidence,
             Classification: "operational",
-            EvidenceId: localEvidenceId,
-            Signature: schemaSignature);
-
-        RxFieldProvenance SqlPhi(double confidence = 1.0d) => new(
-            Source: source,
-            SourceDetail: "sql_patient_detail",
-            Confidence: confidence,
-            Classification: "phi-direct",
             EvidenceId: localEvidenceId,
             Signature: schemaSignature);
 
@@ -900,18 +657,6 @@ public sealed class RxDetectionWorker : ResilientHostedService
             ["medication.drugSchedule"] = SqlOperational(rx.DrugSchedule.HasValue ? 1.0d : 0.4d),
         };
 
-        if (pd != null)
-        {
-            provenance["patientDelivery.nameHash"] =
-                SqlPhi(string.IsNullOrWhiteSpace(pd.FirstName) || string.IsNullOrWhiteSpace(pd.LastInitial) ? 0.4d : 1.0d);
-            provenance["patientDelivery.phoneHash"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Phone) ? 0.4d : 1.0d);
-            provenance["patientDelivery.addressLine1Hash"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Address1) ? 0.4d : 1.0d);
-            provenance["patientDelivery.addressLine2Hash"] = SqlPhi(string.IsNullOrWhiteSpace(pd.Address2) ? 0.7d : 1.0d);
-            provenance["patientDelivery.city"] = SqlPhi(string.IsNullOrWhiteSpace(pd.City) ? 0.4d : 1.0d);
-            provenance["patientDelivery.state"] = SqlPhi(string.IsNullOrWhiteSpace(pd.State) ? 0.4d : 1.0d);
-            provenance["patientDelivery.zip5"] = SqlPhi(BuildMissingAddressFlags(pd).Contains(RxMissingAddressFlag.MissingZip5) ? 0.4d : 1.0d);
-        }
-
         return provenance;
     }
 
@@ -922,13 +667,45 @@ public sealed class RxDetectionWorker : ResilientHostedService
         try
         {
             var payload = JsonSerializer.Deserialize<JsonElement>(json);
-            await _cloudClient.SyncRxAsync(payload, ct);
+            var localBinding = _learnedAdapterRegistry?.CurrentBinding()
+                ?? throw new InvalidOperationException(
+                    "No device-authorized learned source is active; built-in sync remains fail-closed until signed runtime provenance is enrolled.");
+            var cloudBinding = _stateDb.GetCloudLearnedSourceBinding(localBinding)
+                ?? throw new InvalidOperationException(
+                    "The active learned source has no cloud activation receipt.");
+            var signer = _serviceProvider.GetService<IDeviceAuthoritySigner>()
+                ?? throw new InvalidOperationException("Device authority signer is unavailable.");
+            var batchDigest = DeviceAuthorityCanonical.HashUnsignedSync(payload);
+            var persisted = _stateDb.GetOrCreateRxDeviceReceipt(
+                batchDigest,
+                cloudBinding,
+                _options,
+                signer);
+            var envelope = new
+            {
+                snapshotType = payload.GetProperty("snapshotType").Clone(),
+                data = payload.GetProperty("data").Clone(),
+                sqlConnected = payload.TryGetProperty("sqlConnected", out var sql) && sql.GetBoolean(),
+                uiaConnected = payload.TryGetProperty("uiaConnected", out var uia) && uia.GetBoolean(),
+                sourceReceipt = JsonSerializer.SerializeToElement(
+                    persisted.Signed.Receipt,
+                    SyncPayloadJsonOptions),
+                sourceKeyId = persisted.Signed.KeyId,
+                sourceSignature = persisted.Signed.Signature,
+            };
+            if (!await _cloudClient.SyncRxDeviceBoundAsync(
+                    envelope,
+                    persisted.Signed,
+                    ct).ConfigureAwait(false))
+                throw new InvalidOperationException(
+                    "Cloud returned no exact device-source acceptance receipt.");
+            _stateDb.MarkRxDeviceReceiptAccepted(batchDigest);
             _logger.LogInformation("Synced batch to cloud");
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Cloud sync FAILED — will retry next cycle");
+            _logger.LogSafeError(ex);
             return false;
         }
     }

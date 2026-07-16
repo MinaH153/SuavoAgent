@@ -73,7 +73,7 @@ public sealed class ProcessObserver : ILearningObserver
     public async Task StartAsync(string sessionId, CancellationToken ct)
     {
         _running = true;
-        _logger.LogInformation("ProcessObserver started for session {Session}", sessionId);
+        _logger.LogInformation("core.learning.process_observer_started");
 
         // Initial snapshot of all running processes
         ScanCurrentProcesses(sessionId);
@@ -106,7 +106,7 @@ public sealed class ProcessObserver : ILearningObserver
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Process scan failed");
+            _logger.LogSafeWarning(ex);
         }
     }
 

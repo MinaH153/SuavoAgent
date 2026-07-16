@@ -28,7 +28,11 @@ public class SqlPricingQueryBuilderTests
             StatusColumn: "Status",
             AvailableStatusValues: new[] { "Available", "Active" },
             ConfidenceScore: 0.9,
-            DiagnosticNotes: Array.Empty<string>());
+            DiagnosticNotes: Array.Empty<string>(),
+            CostColumnShape: MoneyShape(),
+            CostPerUnitColumnShape: MoneyShape(),
+            NdcColumnShape: TextShape("char", 11),
+            StatusColumnShape: TextShape("varchar", 16));
 
         var sql = SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema);
 
@@ -40,7 +44,9 @@ public class SqlPricingQueryBuilderTests
         Assert.Contains("FROM [Inventory].[ItemPricing] AS p", sql);
         Assert.DoesNotContain("JOIN", sql); // no item join, no supplier join
         Assert.Contains("WHERE p.[NDC] = @ndc", sql);
-        Assert.Contains("p.[Status] IN ('Available', 'Active')", sql);
+        Assert.Contains("p.[Status] IN (@status0, @status1)", sql);
+        Assert.DoesNotContain("'Available'", sql);
+        Assert.DoesNotContain("'Active'", sql);
         // CostPerUnitColumn is declared → rank by per-unit (the savings-ledger quantity), not pack cost.
         Assert.Contains("p.[CostPerUnit] > 0", sql);
         Assert.Contains("ORDER BY p.[CostPerUnit] ASC", sql);
@@ -48,7 +54,7 @@ public class SqlPricingQueryBuilderTests
     }
 
     [Fact]
-    public void Build_JoinedSupplier_WithItemJoinForNdc()
+    public void Build_RejectsJoinedSupplierSchemaWithoutDedicatedPerUnitCost()
     {
         var schema = new DiscoveredPricingSchema(
             CatalogSchema: "Inventory",
@@ -76,17 +82,10 @@ public class SqlPricingQueryBuilderTests
             ConfidenceScore: 0.8,
             DiagnosticNotes: Array.Empty<string>());
 
-        var sql = SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema);
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema));
 
-        Assert.Contains("sup.[SupplierName] AS SupplierName", sql);
-        Assert.Contains("INNER JOIN [Inventory].[Item] AS i ON i.[ItemID] = p.[ItemID]", sql);
-        Assert.Contains("INNER JOIN [Inventory].[Supplier] AS sup ON sup.[SupplierID] = p.[SupplierID]", sql);
-        Assert.Contains("WHERE i.[NDC] = @ndc", sql);
-        Assert.DoesNotContain("IN (", sql); // no status filter when column absent
-        Assert.Contains("p.[Cost] > 0", sql);
-        Assert.Contains("ORDER BY p.[Cost] ASC", sql);
-        // CostPerUnit falls back to Cost when not declared.
-        Assert.Contains("p.[Cost] AS CostPerUnit", sql);
+        Assert.Equal("pricing_cost_basis_unresolved", error.Message);
     }
 
     [Fact]
@@ -106,16 +105,14 @@ public class SqlPricingQueryBuilderTests
     }
 
     [Fact]
-    public void Build_RanksByPackCost_WhenNoPerUnitColumn()
+    public void Build_RejectsSchemaWhenNoPerUnitColumn()
     {
-        // No per-unit column → savings enrichment is suppressed upstream, so the cheapest-pack row is
-        // the correct cheapest-available pick and per-unit falls back to pack cost.
-        var schema = MakeSimpleSchema(); // CostPerUnitColumn: null
+        var schema = MakeSimpleSchema() with { CostPerUnitColumn = null };
 
-        var sql = SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema);
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema));
 
-        Assert.Contains("ORDER BY p.[Cost] ASC", sql);
-        Assert.Contains("p.[Cost] AS CostPerUnit", sql);
+        Assert.Equal("pricing_cost_basis_unresolved", error.Message);
     }
 
     [Fact]
@@ -128,16 +125,112 @@ public class SqlPricingQueryBuilderTests
     }
 
     [Fact]
+    public void Build_RejectsMissingStatusColumn()
+    {
+        var schema = MakeSimpleSchema() with { StatusColumn = null };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema));
+
+        Assert.Equal(SqlPricingQueryBuilder.StatusEligibilityUnresolvedCode, error.Message);
+    }
+
+    [Fact]
+    public void Build_RejectsEmptyStatusAllowlist()
+    {
+        var schema = MakeSimpleSchema() with { AvailableStatusValues = Array.Empty<string>() };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema));
+
+        Assert.Equal(SqlPricingQueryBuilder.StatusEligibilityUnresolvedCode, error.Message);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("AVAIL")]
+    [InlineData("A")]
+    [InlineData("Backordered")]
+    [InlineData("Available'); DROP TABLE Inventory.ItemPricing;--")]
+    public void Build_RejectsUnknownOrMalformedEligibleStatus(string value)
+    {
+        var schema = MakeSimpleSchema() with { AvailableStatusValues = new[] { value } };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema));
+
+        Assert.Equal(SqlPricingQueryBuilder.StatusEligibilityUnresolvedCode, error.Message);
+    }
+
+    [Fact]
+    public void Build_RejectsDuplicateStatusAllowlist()
+    {
+        var schema = MakeSimpleSchema() with
+        {
+            AvailableStatusValues = new[] { "Available", "available" },
+        };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema));
+
+        Assert.Equal(SqlPricingQueryBuilder.StatusEligibilityUnresolvedCode, error.Message);
+    }
+
+    [Fact]
+    public void Build_AcceptsKnownStatusesCaseInsensitively_WithoutEmbeddingValues()
+    {
+        var schema = MakeSimpleSchema() with
+        {
+            AvailableStatusValues = new[] { "available", "ACTIVE" },
+        };
+
+        var sql = SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema);
+
+        Assert.Contains("IN (@status0, @status1)", sql);
+        Assert.DoesNotContain("available", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ACTIVE", sql);
+    }
+
+    [Fact]
     public void Build_NdcParameterName_IsStable()
     {
         Assert.Equal("@ndc", SqlPricingQueryBuilder.NdcParameter);
+    }
+
+    [Fact]
+    public void Build_RejectsBitStatusColumn_InsteadOfBindingTextLabels()
+    {
+        var schema = MakeSimpleSchema() with
+        {
+            StatusColumnShape = new PricingSqlColumnShape("bit", 1, 1, 0, false),
+        };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema));
+
+        Assert.Equal(SqlPricingQueryBuilder.ColumnTypeUnresolvedCode, error.Message);
+    }
+
+    [Fact]
+    public void Build_RejectsNdcTypeMismatch()
+    {
+        var schema = MakeSimpleSchema() with
+        {
+            NdcColumnShape = new PricingSqlColumnShape("int", 4, 10, 0, false),
+        };
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            SqlPricingQueryBuilder.BuildCheapestSupplierQuery(schema));
+
+        Assert.Equal(SqlPricingQueryBuilder.ColumnTypeUnresolvedCode, error.Message);
     }
 
     private static DiscoveredPricingSchema MakeSimpleSchema() => new(
         CatalogSchema: "Inventory",
         CatalogTable: "ItemPricing",
         CostColumn: "Cost",
-        CostPerUnitColumn: null,
+        CostPerUnitColumn: "CostPerUnit",
         NdcColumn: "NDC",
         ItemJoin: null,
         SupplierSource: new CatalogSupplierSource(
@@ -149,8 +242,18 @@ public class SqlPricingQueryBuilderTests
             SupplierIdColumnInCatalog: null,
             SupplierIdColumnInSupplier: null,
             SupplierNameColumnInSupplier: null),
-        StatusColumn: null,
-        AvailableStatusValues: Array.Empty<string>(),
+        StatusColumn: "Status",
+        AvailableStatusValues: new[] { "Available", "Active" },
         ConfidenceScore: 0.8,
-        DiagnosticNotes: Array.Empty<string>());
+        DiagnosticNotes: Array.Empty<string>(),
+        CostColumnShape: MoneyShape(),
+        CostPerUnitColumnShape: MoneyShape(),
+        NdcColumnShape: TextShape("varchar", 11),
+        StatusColumnShape: TextShape("varchar", 16));
+
+    private static PricingSqlColumnShape MoneyShape() =>
+        new("decimal", 9, 18, 4, false);
+
+    private static PricingSqlColumnShape TextShape(string type, int characters) =>
+        new(type, type.StartsWith('n') ? characters * 2 : characters, null, null, false);
 }

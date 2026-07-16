@@ -43,6 +43,6 @@ public sealed class LivenessBeaconWorker : BackgroundService
     private void WriteOnce()
     {
         try { _store.Write(Component, DateTimeOffset.UtcNow); }
-        catch (Exception ex) { _logger.LogDebug(ex, "liveness beacon write failed (non-fatal)"); }
+        catch (Exception ex) { _logger.LogSafeDebug(ex); }
     }
 }

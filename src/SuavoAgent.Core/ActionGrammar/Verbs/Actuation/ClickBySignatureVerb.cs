@@ -61,10 +61,7 @@ public sealed class ClickBySignatureVerb : IVerb
         if (!ctx.Parameters.TryGetValue("process_name", out var pn) || pn is not string ps || string.IsNullOrWhiteSpace(ps))
             return Task.FromResult(VerbPreconditionResult.Fail("process_name_non_empty", "process_name must be a non-empty string"));
 
-        var allowed = ActuationAllowlistedSandboxApps.ProcessNames.Values
-            .Concat(ActuationAllowlistedSandboxApps.ProcessNames.Keys)
-            .Any(allowedName => string.Equals(allowedName, ps, StringComparison.OrdinalIgnoreCase));
-        if (!allowed)
+        if (!ActuationAllowlistedSandboxApps.IsDeclaredSandboxProcess(ps))
             return Task.FromResult(VerbPreconditionResult.Fail("process_not_allowlisted", $"process_name '{ps}' is not in the actuation allowlist"));
 
         if (ctx.Services.GetService<IActuationGateway>() is null)

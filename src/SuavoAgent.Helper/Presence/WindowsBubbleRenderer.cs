@@ -45,10 +45,10 @@ public sealed class WindowsBubbleRenderer : IBubbleRenderer, IDisposable
             ShowWindow(_hwnd, SW_HIDE);
             foreach (var cmd in _commands.GetConsumingEnumerable())
             {
-                try { cmd(); } catch (Exception ex) { _logger.Debug(ex, "bubble cmd failed"); }
+                try { cmd(); } catch (Exception ex) { _logger.Debug("bubble cmd failed ({ExceptionType})", ex.GetType().Name); }
             }
         }
-        catch (Exception ex) { _logger.Warning(ex, "bubble renderer loop ended"); }
+        catch (Exception ex) { _logger.Warning("bubble renderer loop ended ({ExceptionType})", ex.GetType().Name); }
         finally { if (_hwnd != IntPtr.Zero) DestroyWindow(_hwnd); }
     }
 

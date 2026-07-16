@@ -54,7 +54,9 @@ public sealed class HoneytokenWatcher : IDisposable
         catch (Exception ex)
         {
             // FAIL-OPEN: the immune reflex is best-effort; never block the Helper from running.
-            _logger.Warning(ex, "HoneytokenWatcher failed to start — immune reflex disarmed (non-fatal)");
+            _logger.Warning(
+                "HoneytokenWatcher failed to start — immune reflex disarmed ({ExceptionType})",
+                ex.GetType().Name);
         }
     }
 

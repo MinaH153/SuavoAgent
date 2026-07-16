@@ -51,6 +51,7 @@ public class AutoRuleApprovalDbTests : IDisposable
         Assert.Equal("auto.t.12345678", row.RuleId);
         Assert.Equal("tmpl-a", row.TemplateId);
         Assert.Equal("sha-abc", row.YamlSha256);
+        Assert.False(row.HasWriteback);
         Assert.Equal(AgentStateDb.AutoRuleStatus.Pending, row.Status);
         Assert.Equal(0, row.ShadowRuns);
         Assert.Equal(0, row.ShadowMatches);
@@ -186,5 +187,127 @@ public class AutoRuleApprovalDbTests : IDisposable
         Assert.Null(row.ApprovedBy);
         Assert.Null(row.ApprovedAt);
         Assert.Null(row.RejectedReason);
+    }
+
+    [Fact]
+    public void UpsertAutoRuleApproval_DerivesWritebackRiskFromBoundWorkflowTemplate()
+    {
+        UpsertWorkflowTemplate("tmpl-write", hasWriteback: true);
+
+        // The false fallback proves the persisted workflow template is the
+        // authoritative safety source, not a forgetful caller.
+        _db.UpsertAutoRuleApproval(
+            "auto.t.write",
+            "tmpl-write",
+            "sha-write",
+            hasWriteback: false);
+
+        Assert.True(_db.GetAutoRuleApproval("auto.t.write")!.HasWriteback);
+        Assert.True(Assert.Single(_db.GetAllAutoRuleApprovals()).HasWriteback);
+    }
+
+    [Fact]
+    public void WritebackRiskChange_DemotesApprovedRuleEvenWhenYamlHashIsUnchanged()
+    {
+        UpsertWorkflowTemplate("tmpl-read", hasWriteback: false);
+        UpsertWorkflowTemplate("tmpl-write", hasWriteback: true);
+        _db.UpsertAutoRuleApproval("auto.t.risk", "tmpl-read", "sha-stable");
+        _db.SetAutoRuleApprovalStatus(
+            "auto.t.risk",
+            AgentStateDb.AutoRuleStatus.Approved,
+            approvedBy: "operator",
+            approvedAt: "2026-07-10T12:00:00Z");
+
+        _db.UpsertAutoRuleApproval("auto.t.risk", "tmpl-write", "sha-stable");
+
+        var row = _db.GetAutoRuleApproval("auto.t.risk");
+        Assert.NotNull(row);
+        Assert.True(row!.HasWriteback);
+        Assert.Equal(AgentStateDb.AutoRuleStatus.Pending, row.Status);
+    }
+
+    [Fact]
+    public void Migration10_BackfillsExistingApprovalFromBoundWorkflowAndSurvivesRestart()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            "suavo-auto-rule-migration-" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            SQLitePCL.Batteries_V2.Init();
+            using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TEXT NOT NULL,
+                        description TEXT NOT NULL
+                    );
+                    INSERT INTO schema_migrations(version, applied_at, description) VALUES
+                        (1, '2026-07-01T00:00:00Z', 'legacy'),
+                        (2, '2026-07-01T00:00:00Z', 'legacy'),
+                        (3, '2026-07-01T00:00:00Z', 'legacy'),
+                        (4, '2026-07-01T00:00:00Z', 'legacy'),
+                        (5, '2026-07-01T00:00:00Z', 'legacy'),
+                        (6, '2026-07-01T00:00:00Z', 'legacy'),
+                        (7, '2026-07-01T00:00:00Z', 'legacy'),
+                        (8, '2026-07-01T00:00:00Z', 'legacy'),
+                        (9, '2026-07-01T00:00:00Z', 'legacy');
+                    CREATE TABLE workflow_templates (
+                        template_id TEXT PRIMARY KEY,
+                        has_writeback INTEGER NOT NULL
+                    );
+                    INSERT INTO workflow_templates(template_id, has_writeback)
+                    VALUES ('tmpl-legacy-write', 1);
+                    CREATE TABLE auto_rule_approvals (
+                        rule_id TEXT PRIMARY KEY,
+                        template_id TEXT NOT NULL,
+                        yaml_sha256 TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        shadow_runs INTEGER NOT NULL DEFAULT 0,
+                        shadow_matches INTEGER NOT NULL DEFAULT 0,
+                        shadow_mismatches INTEGER NOT NULL DEFAULT 0,
+                        approved_by TEXT,
+                        approved_at TEXT,
+                        rejected_reason TEXT
+                    );
+                    INSERT INTO auto_rule_approvals(rule_id, template_id, yaml_sha256, status)
+                    VALUES ('auto.legacy.write', 'tmpl-legacy-write', 'sha-legacy', 'Pending');
+                    """;
+                command.ExecuteNonQuery();
+            }
+
+            using (var migrated = new AgentStateDb(path))
+                Assert.True(migrated.GetAutoRuleApproval("auto.legacy.write")!.HasWriteback);
+            using (var restarted = new AgentStateDb(path))
+                Assert.True(restarted.GetAutoRuleApproval("auto.legacy.write")!.HasWriteback);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+            try { File.Delete(path + "-wal"); } catch { }
+            try { File.Delete(path + "-shm"); } catch { }
+        }
+    }
+
+    private void UpsertWorkflowTemplate(string templateId, bool hasWriteback)
+    {
+        _db.UpsertWorkflowTemplate(
+            templateId,
+            "1.0.0",
+            "learned",
+            "PioneerPharmacy*",
+            "[]",
+            "screen-" + templateId,
+            "steps-" + templateId,
+            null,
+            "[]",
+            0.95,
+            12,
+            hasWriteback,
+            "2026-07-10T12:00:00Z",
+            "test");
     }
 }

@@ -58,7 +58,9 @@ public sealed class MeshHeartbeatWorker : BackgroundService
         catch (Exception ex)
         {
             // Heartbeat must never crash the host. Log + continue.
-            _logger?.LogWarning(ex, "MeshHeartbeatWorker tick failed (continuing)");
+            _logger?.LogWarning(
+                "diagnostics.mesh_heartbeat_failed exception_type={ExceptionType}",
+                ex.GetType().Name);
         }
     }
 }

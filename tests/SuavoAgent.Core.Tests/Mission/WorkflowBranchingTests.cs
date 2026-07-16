@@ -24,10 +24,10 @@ public sealed class WorkflowBranchingTests
     {
         var harness = new BranchHarness();
         var def = MakeDef(
-            Step("press_keys", "{\"chords\":[\"Enter\"]}", stepId: "first"),
+            Step("press_keys", "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}", stepId: "first"),
             Step(
                 "press_keys",
-                "{\"chords\":[\"Tab\"]}",
+                "{\"chords\":[\"Tab\"],\"process_name\":\"calc.exe\"}",
                 stepId: "second",
                 condition: new WorkflowConditionDto("never", null, null, null)));
 
@@ -43,10 +43,10 @@ public sealed class WorkflowBranchingTests
         var harness = new BranchHarness();
         // First step succeeds; second runs only if previous == success → executes.
         var def = MakeDef(
-            Step("press_keys", "{\"chords\":[\"Enter\"]}"),
+            Step("press_keys", "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}"),
             Step(
                 "press_keys",
-                "{\"chords\":[\"Tab\"]}",
+                "{\"chords\":[\"Tab\"],\"process_name\":\"calc.exe\"}",
                 condition: new WorkflowConditionDto("previous_outcome", null, null, "success")));
 
         var result = await harness.Execute(def);
@@ -61,11 +61,11 @@ public sealed class WorkflowBranchingTests
         var def = MakeDef(
             Step(
                 "press_keys",
-                "{\"chords\":[\"Enter\"]}",
+                "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}",
                 stepId: "start",
                 onSuccess: new WorkflowControlFlowDto("goto", "tail", null, null, null)),
-            Step("press_keys", "{\"chords\":[\"Tab\"]}", stepId: "skipped"),
-            Step("press_keys", "{\"chords\":[\"Esc\"]}", stepId: "tail"));
+            Step("press_keys", "{\"chords\":[\"Tab\"],\"process_name\":\"calc.exe\"}", stepId: "skipped"),
+            Step("press_keys", "{\"chords\":[\"Esc\"],\"process_name\":\"calc.exe\"}", stepId: "tail"));
 
         var result = await harness.Execute(def);
         Assert.Equal(WorkflowRunOutcome.Completed, result.Outcome);
@@ -80,7 +80,7 @@ public sealed class WorkflowBranchingTests
         var def = MakeDef(
             Step(
                 "press_keys",
-                "{\"chords\":[\"Enter\"]}",
+                "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}",
                 stepId: "start",
                 onSuccess: new WorkflowControlFlowDto("goto", "does-not-exist", null, null, null)));
 
@@ -96,7 +96,7 @@ public sealed class WorkflowBranchingTests
         var def = MakeDef(
             Step(
                 "press_keys",
-                "{\"chords\":[\"Enter\"]}",
+                "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}",
                 stepId: "looper",
                 onSuccess: new WorkflowControlFlowDto("goto", "looper", null, null, null)));
 
@@ -114,7 +114,7 @@ public sealed class WorkflowBranchingTests
         var def = MakeDef(
             Step(
                 "press_keys",
-                "{\"chords\":[\"Enter\"]}",
+                "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}",
                 onFailure: new WorkflowControlFlowDto("retry", null, 2, null, null)));
 
         var result = await harness.Execute(def);
@@ -130,9 +130,9 @@ public sealed class WorkflowBranchingTests
         var def = MakeDef(
             Step(
                 "press_keys",
-                "{\"chords\":[\"Enter\"]}",
+                "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}",
                 onFailure: new WorkflowControlFlowDto("end", null, null, "aborted", "operator_handled_failure")),
-            Step("press_keys", "{\"chords\":[\"Tab\"]}"));
+            Step("press_keys", "{\"chords\":[\"Tab\"],\"process_name\":\"calc.exe\"}"));
 
         var result = await harness.Execute(def);
         Assert.Equal(WorkflowRunOutcome.Aborted, result.Outcome);
@@ -145,8 +145,8 @@ public sealed class WorkflowBranchingTests
     {
         var harness = new BranchHarness { CancelAfterFirstStep = true };
         var def = MakeDef(
-            Step("press_keys", "{\"chords\":[\"Enter\"]}"),
-            Step("press_keys", "{\"chords\":[\"Tab\"]}"));
+            Step("press_keys", "{\"chords\":[\"Enter\"],\"process_name\":\"calc.exe\"}"),
+            Step("press_keys", "{\"chords\":[\"Tab\"],\"process_name\":\"calc.exe\"}"));
 
         var result = await harness.Execute(def);
         Assert.Equal(WorkflowRunOutcome.Aborted, result.Outcome);

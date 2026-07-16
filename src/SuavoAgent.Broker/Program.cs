@@ -15,7 +15,7 @@ Wire.AttachUnhandledHooks(WireComponent.Broker, new WireOptions
     EnableSentry = true,
 });
 
-// Crash sink: wire a last-resort handler that persists unhandled exceptions
+// Crash sink: wire a last-resort handler that persists PHI-safe structural failures
 // to C:\ProgramData\SuavoAgent\logs\broker-crash.log even when the process
 // dies before .NET's exception machinery or Serilog are ready. Kept
 // alongside Wire so a Wire-init failure still leaves a plaintext audit.
@@ -26,12 +26,27 @@ static string BrokerCrashDir()
     try { Directory.CreateDirectory(dir); } catch { }
     return dir;
 }
-static void WriteBrokerCrash(string stage, Exception ex)
+static string SafeExceptionType(Exception? exception)
+{
+    var name = exception?.GetType().Name ?? "NonExceptionFailure";
+    return new string(name
+        .Take(96)
+        .Select(ch => char.IsAsciiLetterOrDigit(ch) ? ch : '_')
+        .ToArray());
+}
+static string SafeCrashStage(string stage) => stage switch
+{
+    "UnhandledException" => "unhandled_exception",
+    "UnobservedTaskException" => "unobserved_task_exception",
+    "Main" => "main",
+    _ => "unknown",
+};
+static void WriteBrokerCrash(string stage, Exception? exception)
 {
     try
     {
-        var line = $"[{DateTimeOffset.Now:O}] [{stage}] {ex.GetType().FullName}: {ex.Message}"
-                   + Environment.NewLine + ex.ToString() + Environment.NewLine + Environment.NewLine;
+        var line = $"[{DateTimeOffset.UtcNow:O}] code=broker.{SafeCrashStage(stage)}.fatal " +
+                   $"exception_type={SafeExceptionType(exception)}{Environment.NewLine}";
         File.AppendAllText(
             Path.Combine(BrokerCrashDir(), "broker-crash.log"),
             line,
@@ -41,7 +56,7 @@ static void WriteBrokerCrash(string stage, Exception ex)
 }
 
 AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-    WriteBrokerCrash("UnhandledException", e.ExceptionObject as Exception ?? new Exception(e.ExceptionObject?.ToString() ?? "unknown"));
+    WriteBrokerCrash("UnhandledException", e.ExceptionObject as Exception);
 TaskScheduler.UnobservedTaskException += (_, e) =>
     WriteBrokerCrash("UnobservedTaskException", e.Exception);
 
@@ -59,8 +74,7 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    Log.Information("SuavoAgent.Broker starting — account={Account}, sessionId={Session}",
-        Environment.UserName, Environment.ProcessId);
+    Log.Information("broker.process_started");
     Log.Information("IsWindowsService={IsService}",
         Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService());
 
@@ -89,7 +103,13 @@ try
 }
 catch (Exception ex)
 {
-    try { Log.Fatal(ex, "Broker terminated unexpectedly"); } catch { }
+    try
+    {
+        Log.Fatal(
+            "broker.main.fatal exception_type={ExceptionType}",
+            SafeExceptionType(ex));
+    }
+    catch { }
     WriteBrokerCrash("Main", ex);
     Environment.Exit(1);
 }

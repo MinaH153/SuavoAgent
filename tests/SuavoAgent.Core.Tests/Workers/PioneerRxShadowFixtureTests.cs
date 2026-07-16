@@ -358,7 +358,7 @@ public sealed class PioneerRxShadowFixtureTests
         Assert.Equal("rx_delivery_queue", root.GetProperty("snapshotType").GetString());
         Assert.Equal(replay.SerializedAtUtc.ToString("o"), root.GetProperty("data").GetProperty("syncedAt").GetString());
         Assert.Equal(1, replay.CandidateCount);
-        Assert.Equal(1, replay.LegacyQueueCount);
+        Assert.Equal(0, replay.LegacyQueueCount);
         Assert.Single(replay.EvidenceIds);
         Assert.Single(replay.RxHashes);
         Assert.True(replay.StableCandidateHashes);
@@ -367,6 +367,9 @@ public sealed class PioneerRxShadowFixtureTests
         Assert.Matches("^rxh-[a-f0-9]{16}-[0-9]{10}$", replay.EvidenceIds[0]);
 
         var candidate = root.GetProperty("data").GetProperty("rxOrderCandidates")[0];
+        Assert.False(root.GetProperty("data").TryGetProperty("rxDeliveryQueue", out _));
+        Assert.DoesNotContain("ShadowMed", replay.PayloadJson, StringComparison.Ordinal);
+        Assert.False(candidate.TryGetProperty("patientDelivery", out _));
 
         Assert.Equal($"rxscan-{replay.SerializedAtUtc.ToUnixTimeMilliseconds()}", candidate.GetProperty("provenance").GetProperty("scanWindowId").GetString());
         Assert.Equal(replay.PharmacyId, candidate.GetProperty("provenance").GetProperty("pharmacyId").GetString());

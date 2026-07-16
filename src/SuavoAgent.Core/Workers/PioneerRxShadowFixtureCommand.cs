@@ -97,7 +97,7 @@ internal static class PioneerRxShadowFixtureCommand
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "export_pioneerrx_shadow_fixture: replay gate failed");
+            logger.LogSafeWarning(ex);
             await AckAsync(false, new
             {
                 status = "replay_failed",
@@ -180,7 +180,7 @@ internal static class PioneerRxShadowFixtureCommand
                 continue;
             }
 
-            if (normalized is not ("commandid" or "requesterid" or "maxrows" or "includesyntheticpatientdetails") ||
+            if (normalized is not ("commandid" or "requesterid" or "maxrows" or "includesyntheticpatientdetails" or "expiresat") ||
                 property.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array ||
                 IsBlockedField(property.Name) ||
                 HasUnsafeValue(normalized, property.Value))
@@ -464,6 +464,9 @@ internal static class PioneerRxShadowFixtureCommand
                 rows > 25,
             "includesyntheticpatientdetails" =>
                 value.ValueKind is not (JsonValueKind.True or JsonValueKind.False),
+            "expiresat" =>
+                value.ValueKind != JsonValueKind.String ||
+                !DateTimeOffset.TryParse(value.GetString(), out _),
             _ => true,
         };
     }

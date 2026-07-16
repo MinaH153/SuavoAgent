@@ -20,12 +20,23 @@ public class ActuationReadinessProbeTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 6, 11, 12, 0, 0, TimeSpan.Zero);
 
-    private static JsonElement PingPayload(uint helperSession, uint activeConsole) =>
+    private static JsonElement PingPayload(
+        uint helperSession,
+        uint activeConsole,
+        VisionRuntimeReadiness? visionRuntime = null) =>
         JsonSerializer.SerializeToElement(new HelperPingInfo(4321, helperSession, activeConsole,
-            helperSession != 0 && helperSession == activeConsole));
+            helperSession != 0 && helperSession == activeConsole,
+            visionRuntime));
 
     private static IpcResponse PingOk(uint helperSession, uint activeConsole) =>
         new("id", IpcStatus.Ok, IpcCommands.Ping, PingPayload(helperSession, activeConsole), null);
+
+    private static IpcResponse PingOk(
+        uint helperSession,
+        uint activeConsole,
+        VisionRuntimeReadiness visionRuntime) =>
+        new("id", IpcStatus.Ok, IpcCommands.Ping,
+            PingPayload(helperSession, activeConsole, visionRuntime), null);
 
     private static (ActuationReadinessProbe Probe, ActuationReadinessTracker Tracker, ProbeFakeIpc Ipc) Build()
     {
@@ -53,6 +64,29 @@ public class ActuationReadinessProbeTests
         Assert.Equal(T0, s.LastConclusiveCheckAtUtc);
         Assert.Equal(0, s.ConsecutiveStrandFailures);
         Assert.Same(s, tracker.Current);
+    }
+
+    [Fact]
+    public async Task AuthenticatedPing_CarriesVisionRuntimeTruthIntoCoreSnapshot()
+    {
+        var (probe, _, ipc) = Build();
+        var runtime = new VisionRuntimeReadiness(
+            VisionRuntimeReadiness.CurrentContractVersion,
+            VisionEnabled: true,
+            OcrConfigured: true,
+            Ready: false,
+            OcrReady: false,
+            VisionRuntimeCodes.OcrRuntimeInitializationFailed,
+            ConfigurationGeneration: 4,
+            CheckedAtUtc: T0);
+        ipc.NextResponse = _ => PingOk(2, 2, runtime);
+
+        var snapshot = await probe.ProbeOnceAsync(T0, default);
+
+        Assert.True(snapshot.Ready); // the Helper can actuate
+        Assert.Equal(runtime, snapshot.VisionRuntime);
+        Assert.False(snapshot.VisionRuntime!.Ready); // OCR independently degraded
+        Assert.True(snapshot.VisionRuntime.RequiresAttention);
     }
 
     [Fact]

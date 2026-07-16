@@ -23,10 +23,8 @@ namespace SuavoAgent.Core.Agentic;
 /// Replay is still actuation — preflight (kill-switch / pause / never-blind-on-live-PMS) AND earned
 /// autonomy apply to replayed actions IDENTICALLY to reasoned ones (design risk #10: gate parity).</para>
 ///
-/// <para>Gate-state note (mirrors NavigateLoopFactory): Core has no live-gate IPC, so Preflight uses a
-/// permissive synthetic state — never-blind-on-live-PMS is still enforced from config, and the
-/// AUTHORITATIVE kill-switch / pause enforcement remains Helper-side ActuationGate.CheckOrReject at act
-/// time (it rejects mid-replay, which surfaces as StepRejected → fall through to the loop).</para>
+/// <para>The caller supplies the Helper-reported actuation-gate snapshot read over authenticated IPC.
+/// An unavailable snapshot fails preflight closed; Helper remains authoritative at act time.</para>
 /// </summary>
 public static class NavigateReplayFactory
 {
@@ -42,6 +40,7 @@ public static class NavigateReplayFactory
         MissionCharter charter,
         AuditChain audit,
         DateTimeOffset deadlineUtc,
+        ActuationGateState? helperGateState,
         string? targetProcess = null,
         ISafetyGate? safetyOverride = null)
     {
@@ -50,8 +49,7 @@ public static class NavigateReplayFactory
             targetProcess: targetProcess);
 
         var safety = safetyOverride ?? new CompositeSafetyGate(
-            gateState: () => new ActuationGateState(
-                Enabled: true, DryRun: false, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null),
+            gateState: () => helperGateState,
             ledger: services.GetRequiredService<TaskAutonomyLedger>(),
             options: safetyOptions);
 

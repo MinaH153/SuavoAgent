@@ -1,0 +1,285 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "SuavoAgent production OTA v2 signing root, GitHub Actions OIDC provider, and exact protected-main workflow trust. Update-only template for the existing SuavoAgentProductionOtaSigningV2 stack; never create a replacement stack.",
+  "Resources": {
+    "GitHubActionsOidcProvider": {
+      "Type": "AWS::IAM::OIDCProvider",
+      "Properties": {
+        "Url": "https://token.actions.githubusercontent.com",
+        "ClientIdList": [
+          "sts.amazonaws.com"
+        ],
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "SuavoAgent"
+          },
+          {
+            "Key": "Purpose",
+            "Value": "ProductionOtaSigning"
+          }
+        ]
+      }
+    },
+    "GitHubProductionSigningRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "SuavoAgentProductionOtaSigningV2",
+        "Path": "/github-actions/",
+        "Description": "Assumed only by the exact protected-main SuavoAgent bridge, release, and hotfix reusable-workflow call pairs after production-environment approval.",
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "GitHubProtectedBridgeAuthorizerOnly",
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Ref": "GitHubActionsOidcProvider"
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": "repo:MinaH153/SuavoAgent:environment:suavoagent-production-signing",
+                  "token.actions.githubusercontent.com:repository_id": "1206437092",
+                  "token.actions.githubusercontent.com:repository_owner_id": "256881824",
+                  "token.actions.githubusercontent.com:repository": "MinaH153/SuavoAgent",
+                  "token.actions.githubusercontent.com:ref": "refs/heads/main",
+                  "token.actions.githubusercontent.com:environment": "suavoagent-production-signing",
+                  "token.actions.githubusercontent.com:workflow": "OTA v1 bridge - authorize",
+                  "token.actions.githubusercontent.com:job_workflow_ref": "MinaH153/SuavoAgent/.github/workflows/production-signing.yml@refs/heads/main"
+                }
+              }
+            },
+            {
+              "Sid": "GitHubProtectedNormalReleaseOnly",
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Ref": "GitHubActionsOidcProvider"
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": "repo:MinaH153/SuavoAgent:environment:suavoagent-production-signing",
+                  "token.actions.githubusercontent.com:repository_id": "1206437092",
+                  "token.actions.githubusercontent.com:repository_owner_id": "256881824",
+                  "token.actions.githubusercontent.com:repository": "MinaH153/SuavoAgent",
+                  "token.actions.githubusercontent.com:ref": "refs/heads/main",
+                  "token.actions.githubusercontent.com:environment": "suavoagent-production-signing",
+                  "token.actions.githubusercontent.com:workflow": "Release",
+                  "token.actions.githubusercontent.com:job_workflow_ref": "MinaH153/SuavoAgent/.github/workflows/production-release-signing.yml@refs/heads/main"
+                }
+              }
+            },
+            {
+              "Sid": "GitHubProtectedHotfixOnly",
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Ref": "GitHubActionsOidcProvider"
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": "repo:MinaH153/SuavoAgent:environment:suavoagent-production-signing",
+                  "token.actions.githubusercontent.com:repository_id": "1206437092",
+                  "token.actions.githubusercontent.com:repository_owner_id": "256881824",
+                  "token.actions.githubusercontent.com:repository": "MinaH153/SuavoAgent",
+                  "token.actions.githubusercontent.com:ref": "refs/heads/main",
+                  "token.actions.githubusercontent.com:environment": "suavoagent-production-signing",
+                  "token.actions.githubusercontent.com:workflow": "Hotfix",
+                  "token.actions.githubusercontent.com:job_workflow_ref": "MinaH153/SuavoAgent/.github/workflows/production-release-signing.yml@refs/heads/main"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "OtaSigningKey": {
+      "Type": "AWS::KMS::Key",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "SuavoAgent production OTA update manifests and release checksums, v2 root",
+        "Enabled": true,
+        "KeySpec": "ECC_NIST_P256",
+        "KeyUsage": "SIGN_VERIFY",
+        "Origin": "AWS_KMS",
+        "PendingWindowInDays": 30,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AccountKeyAdministrationWithoutSigningOrGrants",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+                }
+              },
+              "Action": [
+                "kms:CancelKeyDeletion",
+                "kms:CreateAlias",
+                "kms:DeleteAlias",
+                "kms:DescribeKey",
+                "kms:DisableKey",
+                "kms:DisableKeyRotation",
+                "kms:EnableKey",
+                "kms:EnableKeyRotation",
+                "kms:GetKeyPolicy",
+                "kms:GetKeyRotationStatus",
+                "kms:GetPublicKey",
+                "kms:ListAliases",
+                "kms:ListGrants",
+                "kms:ListKeyPolicies",
+                "kms:ListResourceTags",
+                "kms:PutKeyPolicy",
+                "kms:RevokeGrant",
+                "kms:ScheduleKeyDeletion",
+                "kms:TagResource",
+                "kms:UntagResource",
+                "kms:UpdateAlias",
+                "kms:UpdateKeyDescription"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "GitHubRoleMayReadPublicKey",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "GitHubProductionSigningRole",
+                    "Arn"
+                  ]
+                }
+              },
+              "Action": "kms:GetPublicKey",
+              "Resource": "*"
+            },
+            {
+              "Sid": "GitHubRoleMaySignOnlyRawEcdsaSha256",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "GitHubProductionSigningRole",
+                    "Arn"
+                  ]
+                }
+              },
+              "Action": "kms:Sign",
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "kms:MessageType": "RAW",
+                  "kms:SigningAlgorithm": "ECDSA_SHA_256"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "OtaSigningKeyAlias": {
+      "Type": "AWS::KMS::Alias",
+      "Properties": {
+        "AliasName": "alias/suavoagent-production-ota-update-v2",
+        "TargetKeyId": {
+          "Ref": "OtaSigningKey"
+        }
+      }
+    },
+    "GitHubProductionSigningRoleInlinePolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "SuavoAgentProductionOtaSigningV2",
+        "Roles": [
+          {
+            "Ref": "GitHubProductionSigningRole"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "ReadOnlyTheV2PublicKey",
+              "Effect": "Allow",
+              "Action": "kms:GetPublicKey",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "OtaSigningKey",
+                  "Arn"
+                ]
+              }
+            },
+            {
+              "Sid": "SignOnlyRawEcdsaSha256WithV2",
+              "Effect": "Allow",
+              "Action": "kms:Sign",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "OtaSigningKey",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:MessageType": "RAW",
+                  "kms:SigningAlgorithm": "ECDSA_SHA_256"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "GithubOidcProviderArn": {
+      "Description": "GitHub Actions OIDC provider ARN.",
+      "Value": {
+        "Ref": "GitHubActionsOidcProvider"
+      }
+    },
+    "AwsSigningRoleArn": {
+      "Description": "Exact AWS_SIGNING_ROLE_ARN environment value required before protected Release 1 bridge authorization.",
+      "Value": {
+        "Fn::GetAtt": [
+          "GitHubProductionSigningRole",
+          "Arn"
+        ]
+      }
+    },
+    "AwsSigningRegion": {
+      "Description": "Exact AWS_SIGNING_REGION environment value required before protected Release 1 bridge authorization.",
+      "Value": {
+        "Ref": "AWS::Region"
+      }
+    },
+    "OtaKmsKeyId": {
+      "Description": "Exact OTA_KMS_KEY_ID environment value required before protected Release 1 bridge authorization.",
+      "Value": {
+        "Fn::GetAtt": [
+          "OtaSigningKey",
+          "Arn"
+        ]
+      }
+    },
+    "OtaKmsKeyAlias": {
+      "Description": "Human-readable alias for the v2 KMS key.",
+      "Value": {
+        "Ref": "OtaSigningKeyAlias"
+      }
+    }
+  }
+}

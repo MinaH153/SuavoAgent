@@ -5,7 +5,7 @@ namespace SuavoAgent.Setup.Gui.ViewModels;
 
 /// <summary>
 /// First consumer of <see cref="DeviceCodePairing"/> (slice C2a): the GUI screen
-/// shown when the installer has no setup.json / CLI config. It creates an 8-char
+/// shown when the native installer starts. It creates an 8-character
 /// device code, shows it to the operator (who approves it in the dashboard), and
 /// polls until authorized — then hands the resulting <see cref="SetupConfig"/>
 /// back so the existing install flow can run.
@@ -46,7 +46,7 @@ internal sealed class DeviceCodePairingViewModel : ViewModelBase
         _openUrl = openUrl ?? OpenUrlDefault;
 
         OpenBrowserCommand = new RelayCommand(
-            () => { if (!string.IsNullOrEmpty(VerificationUrl)) _openUrl(VerificationUrl); },
+            OpenBrowser,
             () => !string.IsNullOrEmpty(VerificationUrl));
         CancelCommand = new RelayCommand(Cancel);
         RetryCommand = new RelayCommand(() => _ = StartAsync(), () => IsFailed);
@@ -170,9 +170,13 @@ internal sealed class DeviceCodePairingViewModel : ViewModelBase
         {
             // User cancelled — Cancel() already drives the next step.
         }
-        catch (Exception ex)
+        catch (DeviceAuthorityUnavailableException)
         {
-            Fail(ex.Message);
+            Fail("device_authority_unavailable");
+        }
+        catch (Exception)
+        {
+            Fail("unexpected_failure");
         }
     }
 
@@ -185,7 +189,7 @@ internal sealed class DeviceCodePairingViewModel : ViewModelBase
         {
             "pending" => "Waiting for approval in your dashboard…",
             "authorized" => "Approved!",
-            _ => p.Status,
+            _ => "Waiting for secure approval…",
         };
     }
 
@@ -199,7 +203,11 @@ internal sealed class DeviceCodePairingViewModel : ViewModelBase
             "expired" =>
                 "This code expired. Generate a fresh one and approve it in the dashboard within 15 minutes.",
             "denied" => "This code was denied in the dashboard.",
-            _ => $"Pairing didn’t complete ({reason}). Try a new code.",
+            "transient_retry_exhausted" =>
+                "The pairing service could not be reached reliably. Check the internet connection and try again.",
+            "device_authority_unavailable" =>
+                "This PC could not create its secure device key. Enable TPM 2.0 in firmware, resolve any TPM warning in Windows Security, then restart Setup.",
+            _ => "Pairing didn’t complete. Try a new code. Support code: SETUP-PAIRING-UNEXPECTED",
         };
     }
 
@@ -209,15 +217,22 @@ internal sealed class DeviceCodePairingViewModel : ViewModelBase
         _onCancelled();
     }
 
-    private static void OpenUrlDefault(string url)
+    private void OpenBrowser()
     {
+        if (string.IsNullOrEmpty(VerificationUrl)) return;
         try
         {
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            _openUrl(VerificationUrl);
         }
         catch
         {
-            // Best-effort: the code + URL are on screen regardless.
+            StatusText =
+                "The browser could not open. Copy the secure dashboard link shown below.";
         }
+    }
+
+    private static void OpenUrlDefault(string url)
+    {
+        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     }
 }

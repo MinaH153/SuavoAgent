@@ -31,10 +31,7 @@ public static class NavigateSafety
     /// </summary>
     public static SafetyVerdict EvaluatePreflight(
         ActuationGateState? gateState,
-        DateTimeOffset now,
-        bool livePms,
-        PricingExecutorMode executorMode,
-        bool allowLiveActuation)
+        DateTimeOffset now)
     {
         if (gateState is null)
             return SafetyVerdict.Denied("gate_state_unavailable");
@@ -42,13 +39,52 @@ public static class NavigateSafety
         if (!gateState.Enabled || gateState.KillSwitchTrippedUtc is not null)
             return SafetyVerdict.Denied("kill_switch");
 
+        if (gateState.CompromiseDetected)
+            return SafetyVerdict.Denied("compromise_detected");
+
         if (gateState.PausedUntilUtc is { } until && until > now)
             return SafetyVerdict.Denied("paused_user_active");
 
-        if (livePms && executorMode == PricingExecutorMode.UiaFirst && !allowLiveActuation)
-            return SafetyVerdict.Denied("never_blind_live_pms");
-
         return SafetyVerdict.Allow;
+    }
+
+    /// <summary>
+    /// Target-specific never-blind gate. Live-PMS posture is derived from the
+    /// action's process identity; no caller-supplied boolean can downgrade it.
+    /// Helper-side PID/path/publisher verification remains authoritative.
+    /// </summary>
+    public static SafetyVerdict EvaluateTarget(
+        ActuationGateState? gateState,
+        DateTimeOffset now,
+        string? targetProcess,
+        PricingExecutorMode executorMode,
+        bool allowLiveActuation)
+    {
+        var preflight = EvaluatePreflight(gateState, now);
+        if (preflight.Decision == SafetyDecision.Deny) return preflight;
+        // This method is the per-action navigate/replay gate: reaching it means
+        // a UI verb is about to target the named process. Pricing's SqlFirst
+        // setting cannot relabel that UI action as read-only.
+        _ = executorMode;
+        const bool drivesDesktop = true;
+        if (ProtectedDesktopProcessClassifier.IsProtectedIdentity(targetProcess) &&
+            drivesDesktop &&
+            !allowLiveActuation)
+        {
+            return SafetyVerdict.Denied("never_blind_live_pms");
+        }
+        return SafetyVerdict.Allow;
+    }
+
+    public static string? TargetProcess(NextAction action)
+    {
+        if (action.Parameters is null) return null;
+        if (action.Parameters.TryGetValue("process_name", out var process) && process is string p && !string.IsNullOrWhiteSpace(p))
+            return p;
+        if (action.Parameters.TryGetValue("app_key", out var app) && app is string key &&
+            ActuationAllowlistedSandboxApps.ProcessNames.TryGetValue(key, out var executable))
+            return executable;
+        return null;
     }
 
     /// <summary>

@@ -38,7 +38,7 @@ public class ExcelPricingReaderTests : IDisposable
     }
 
     [Fact]
-    public void Read_CaseInsensitiveColumnMatch()
+    public void Read_RejectsPartialIdentityHeaderMatch()
     {
         var path = CreateExcel(new[]
         {
@@ -47,13 +47,51 @@ public class ExcelPricingReaderTests : IDisposable
         });
 
         var result = _reader.Read(path, "ndc");
-        Assert.True(result.Success);
-        Assert.Single(result.Rows);
-        Assert.Equal("12345678901", result.Rows[0].NdcNormalized);
+        Assert.False(result.Success);
+        Assert.Equal("ndc_identity_column_missing", result.Error);
     }
 
     [Fact]
-    public void Read_SkipsEmptyNdcRows()
+    public void Read_AcceptsExactNormalizedCaseInsensitiveIdentityHeader()
+    {
+        var path = CreateExcel(new[]
+        {
+            ("  ndc  ", "Item"),
+            ("12345-6789-01", "Drug A"),
+        });
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal("12345678901", Assert.Single(result.Rows).NdcNormalized);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Read_RejectsNdcAndNdc11RegardlessOfColumnOrder(bool swap)
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var sheet = workbook.AddWorksheet("Sheet1");
+            sheet.Cell(1, 1).Value = swap ? "NDC11" : "NDC";
+            sheet.Cell(1, 2).Value = swap ? "NDC" : "NDC11";
+            sheet.Cell(1, 3).Value = "Drug Name";
+            sheet.Cell(2, 1).Value = "55111064501";
+            sheet.Cell(2, 2).Value = "00093512401";
+            sheet.Cell(2, 3).Value = "Conflicting identity";
+            workbook.SaveAs(path);
+        }
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.False(result.Success);
+        Assert.Equal("ndc_identity_columns_ambiguous", result.Error);
+    }
+
+    [Fact]
+    public void Read_PopulatedRowWithBlankNdcRequiresManualReview()
     {
         var path = CreateExcel(new[]
         {
@@ -66,6 +104,28 @@ public class ExcelPricingReaderTests : IDisposable
         var result = _reader.Read(path, "NDC");
         Assert.True(result.Success);
         Assert.Equal(2, result.Rows.Count);
+        var invalid = Assert.Single(result.Invalid);
+        Assert.Equal(3, invalid.RowIndex);
+        Assert.Equal("blank_ndc_on_populated_row", invalid.Reason);
+        Assert.Empty(invalid.NdcRaw);
+    }
+
+    [Fact]
+    public void Read_TrulyBlankRowsAreSkipped()
+    {
+        var path = CreateExcel(new[]
+        {
+            ("NDC", "Name"),
+            ("55111-0645-01", "Drug A"),
+            ("", ""),
+            ("00093-5124-01", "Drug B"),
+        });
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(2, result.Rows.Count);
+        Assert.Empty(result.Invalid);
     }
 
     [Fact]
@@ -134,51 +194,205 @@ public class ExcelPricingReaderTests : IDisposable
     [Fact]
     public void Read_NadimRealTop500Layout_FindsHeaderPastPreamble()
     {
-        // Ground truth: Nadim's actual "top 500 generics jan 1 to may 30.xlsx" (Better Life
-        // Pharmacy PioneerRx export). The header is NOT row 1 — a title/pharmacy/address/filter
-        // preamble sits above "# | Drug | Strength | NDC | Total Dispensed | Price".
-        // Before header-row detection this returned Fail — i.e. the engine could not read the
-        // real input at all.
+        // Ground truth: Nadim's actual "top 500 generics jan 1 to may 30.xlsx" PioneerRx export.
+        // The data header is row 8, with spacer columns between several fields. Acquisition Cost
+        // is a stacked header on row 6 over the same data column, while Total Dispensed and NDC
+        // live on row 8. Looking only on the NDC header row silently drops the savings baseline.
         var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
         using (var wb = new XLWorkbook())
         {
             var ws = wb.Worksheets.Add("Sheet1");
             ws.Cell(1, 1).Value = "Top 500 Most Dispensed Rx Items";
-            ws.Cell(2, 1).Value = "Better Life Pharmacy";
-            ws.Cell(3, 1).Value = "528 E Main St";
-            ws.Cell(4, 1).Value = "El Cajon, CA 92020-4008";
             ws.Cell(5, 1).Value = "Dispensed Item Brand/Generic: Generic\nDispensed Item Dea Schedule: No Schedule";
-            // Header row 6 (his real columns + Acquisition Cost for the savings baseline)
-            ws.Cell(6, 1).Value = "#";
-            ws.Cell(6, 2).Value = "Drug";
-            ws.Cell(6, 3).Value = "Strength";
-            ws.Cell(6, 4).Value = "NDC";
-            ws.Cell(6, 5).Value = "Total Dispensed";
-            ws.Cell(6, 6).Value = "Acquisition Cost";
-            // His real first three rows
+            ws.Cell(6, 17).Value = "Acquisition\nCost";
+            ws.Cell(8, 1).Value = "#";
+            ws.Cell(8, 3).Value = "Drug";
+            ws.Cell(8, 4).Value = "Strength";
+            ws.Cell(8, 6).Value = "NDC";
+            ws.Cell(8, 7).Value = "Total Dispensed";
+            ws.Cell(8, 19).Value = "Price";
             string[,] data =
             {
-                { "1", "Fluticasone Prop 50 Mcg Spray", "50 mcg/actuation", "60505082901", "1523", "0.1625" },
-                { "2", "Omeprazole Dr 20 Mg Capsule", "20 mg", "59651000205", "1405", "0.0344" },
-                { "3", "Atorvastatin 40 Mg Tablet", "40 mg", "60505258008", "1300", "0.0500" },
+                { "1", "Drug A", "10 mg", "60505082901", "1523", "0.1625" },
+                { "2", "Drug B", "20 mg", "59651000205", "1405", "0.0344" },
+                { "3", "Drug C", "40 mg", "60505258008", "1300", "0.0500" },
             };
             for (int i = 0; i < data.GetLength(0); i++)
-                for (int c = 0; c < data.GetLength(1); c++)
-                    ws.Cell(7 + i, c + 1).Value = data[i, c];
+            {
+                var row = 9 + i;
+                ws.Cell(row, 1).Value = data[i, 0];
+                ws.Cell(row, 3).Value = data[i, 1];
+                ws.Cell(row, 4).Value = data[i, 2];
+                ws.Cell(row, 6).Value = data[i, 3];
+                ws.Cell(row, 7).Value = data[i, 4];
+                ws.Cell(row, 17).Value = data[i, 5];
+            }
             wb.SaveAs(path);
         }
 
         var result = _reader.Read(path, "NDC", baselineCostColumnHint: "Acquisition Cost", quantityColumnHint: "Total Dispensed");
 
         Assert.True(result.Success, result.Error);
-        Assert.Equal(4, result.NdcColumnIndex);              // header detected at row 6, NDC is col D
+        Assert.Equal(6, result.NdcColumnIndex);              // header detected at row 8, NDC is col F
+        Assert.Equal(8, result.HeaderRowIndex);
         Assert.Equal(3, result.Rows.Count);
-        Assert.Equal("60505082901", result.Rows[0].NdcNormalized);   // Fluticasone
-        Assert.Equal("59651000205", result.Rows[1].NdcNormalized);   // Omeprazole 20mg
-        Assert.Equal("60505258008", result.Rows[2].NdcNormalized);   // Atorvastatin
-        Assert.Equal(7, result.Rows[0].RowIndex);            // first data row is 7, not 2
-        Assert.Equal(0.1625m, result.Rows[0].BaselineCostPerUnit);   // Acquisition Cost mapped
+        Assert.Equal("60505082901", result.Rows[0].NdcNormalized);
+        Assert.Equal("59651000205", result.Rows[1].NdcNormalized);
+        Assert.Equal("60505258008", result.Rows[2].NdcNormalized);
+        Assert.Equal(9, result.Rows[0].RowIndex);
+        Assert.Null(result.Rows[0].BaselineCostPerUnit);            // aggregate report spend is not per-unit cost
         Assert.Equal(1523m, result.Rows[0].Quantity);                // Total Dispensed mapped
+    }
+
+    [Fact]
+    public void Read_RepeatedPageHeadersAreNotInvalidNdcs()
+    {
+        var path = CreateExcel(new[]
+        {
+            ("NDC", "Drug Name"),
+            ("55111-0645-01", "Drug A"),
+            ("NDC", "Drug Name"),
+            ("00093-5124-01", "Drug B"),
+        });
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(2, result.Rows.Count);
+        Assert.Empty(result.Invalid);
+    }
+
+    [Fact]
+    public void Read_NdcTextIsSkippedOnlyForAnExactRepeatedHeader()
+    {
+        var path = CreateExcel(new[]
+        {
+            ("NDC", "Drug Name"),
+            ("55111-0645-01", "Drug A"),
+            ("NDC", "Not the report header"),
+        });
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        Assert.Single(result.Rows);
+        var invalid = Assert.Single(result.Invalid);
+        Assert.Equal(3, invalid.RowIndex);
+    }
+
+    [Fact]
+    public void Read_RepeatedPreambleAndPrintedFooterAreNotInvalidRows()
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var sheet = workbook.AddWorksheet("Sheet1");
+            sheet.Cell(1, 1).Value = "Top 500 Most Dispensed Rx Items";
+            sheet.Cell(5, 1).Value = "Dispensed Item Brand/Generic: Generic";
+            sheet.Cell(6, 17).Value = "Acquisition\nCost";
+            sheet.Cell(8, 1).Value = "#";
+            sheet.Cell(8, 3).Value = "Drug";
+            sheet.Cell(8, 4).Value = "Strength";
+            sheet.Cell(8, 6).Value = "NDC";
+            sheet.Cell(8, 7).Value = "Total Dispensed";
+            sheet.Cell(8, 19).Value = "Price";
+            AddReportRow(sheet, 9, "1", "Drug A", "10 mg", "60505082901", "1523");
+
+            // Exact printed page furniture from the top of the report.
+            sheet.Cell(10, 1).Value = "Top 500 Most Dispensed Rx Items";
+            sheet.Cell(11, 1).Value = "Dispensed Item Brand/Generic: Generic";
+            sheet.Cell(12, 17).Value = "Acquisition\nCost";
+            sheet.Cell(13, 1).Value = "#";
+            sheet.Cell(13, 3).Value = "Drug";
+            sheet.Cell(13, 4).Value = "Strength";
+            sheet.Cell(13, 6).Value = "NDC";
+            sheet.Cell(13, 7).Value = "Total Dispensed";
+            sheet.Cell(13, 19).Value = "Price";
+            AddReportRow(sheet, 14, "2", "Drug B", "20 mg", "59651000205", "1405");
+            sheet.Cell(15, 1).Value = new DateTime(2026, 7, 15, 1, 30, 0);
+            sheet.Cell(15, 19).Value = "Page 1 of 2";
+            AddReportRow(sheet, 16, "3", "Drug C", "40 mg", "60505258008", "1300");
+            sheet.Cell(17, 1).Value = "7/15/2026 1:31 AM";
+            sheet.Cell(17, 19).Value = "Page 2 of 2";
+            workbook.SaveAs(path);
+        }
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(new[] { 9, 14, 16 }, result.Rows.Select(row => row.RowIndex));
+        Assert.Empty(result.Invalid);
+    }
+
+    [Theory]
+    [InlineData("Page 2 of 1", false)]
+    [InlineData("Page 0 of 1", false)]
+    [InlineData("Page 1 of 2", true)]
+    public void Read_PrintedFooterIsSkippedOnlyForTheExactBoundedShape(
+        string pageLabel,
+        bool expectedSkipped)
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var sheet = workbook.AddWorksheet("Sheet1");
+            sheet.Cell(1, 1).Value = "#";
+            sheet.Cell(1, 2).Value = "Drug";
+            sheet.Cell(1, 3).Value = "NDC";
+            sheet.Cell(2, 1).Value = new DateTime(2026, 7, 15);
+            sheet.Cell(2, 3).Value = pageLabel;
+            workbook.SaveAs(path);
+        }
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        if (expectedSkipped)
+            Assert.Empty(result.Invalid);
+        else
+            Assert.NotEmpty(Assert.Single(result.Invalid).Reason);
+    }
+
+    [Fact]
+    public void Read_PrintedFooterWithAnotherPopulatedCellRequiresReview()
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var sheet = workbook.AddWorksheet("Sheet1");
+            sheet.Cell(1, 1).Value = "#";
+            sheet.Cell(1, 2).Value = "Drug";
+            sheet.Cell(1, 3).Value = "NDC";
+            sheet.Cell(2, 1).Value = new DateTime(2026, 7, 15);
+            sheet.Cell(2, 2).Value = "Operator-visible row";
+            sheet.Cell(2, 3).Value = "Page 1 of 2";
+            workbook.SaveAs(path);
+        }
+
+        var result = _reader.Read(path, "NDC");
+
+        Assert.True(result.Success, result.Error);
+        Assert.NotEmpty(Assert.Single(result.Invalid).Reason);
+    }
+
+    [Fact]
+    public void Read_AmbiguousCostHintCannotMatchAggregateAcquisitionCost()
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var sheet = workbook.AddWorksheet("Sheet1");
+            sheet.Cell(1, 2).Value = "Acquisition Cost";
+            sheet.Cell(2, 1).Value = "NDC";
+            sheet.Cell(3, 1).Value = "60505082901";
+            sheet.Cell(3, 2).Value = 8297.11m;
+            workbook.SaveAs(path);
+        }
+
+        var result = _reader.Read(path, "NDC", baselineCostColumnHint: "Cost");
+
+        Assert.True(result.Success, result.Error);
+        Assert.Null(Assert.Single(result.Rows).BaselineCostPerUnit);
     }
 
     private string CreateExcel(IEnumerable<(string col1, string col2)> rows)
@@ -195,6 +409,22 @@ public class ExcelPricingReaderTests : IDisposable
         }
         wb.SaveAs(path);
         return path;
+    }
+
+    private static void AddReportRow(
+        IXLWorksheet sheet,
+        int row,
+        string rank,
+        string drug,
+        string strength,
+        string ndc,
+        string totalDispensed)
+    {
+        sheet.Cell(row, 1).Value = rank;
+        sheet.Cell(row, 3).Value = drug;
+        sheet.Cell(row, 4).Value = strength;
+        sheet.Cell(row, 6).Value = ndc;
+        sheet.Cell(row, 7).Value = totalDispensed;
     }
 
     public void Dispose()

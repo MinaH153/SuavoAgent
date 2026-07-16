@@ -1,5 +1,6 @@
 using System;
 using System.Text.Json;
+using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Helper.Actuation;
 using Xunit;
 
@@ -9,7 +10,8 @@ namespace SuavoAgent.Helper.Tests.Actuation;
 public class PioneerRxBaaScopeTests
 {
     private static JsonElement Json(string s) => JsonDocument.Parse(s).RootElement;
-    private static readonly string[] Allowed = { "BaaAmendment", "DeliveryWriteback" };
+    private static readonly IReadOnlySet<string> Allowed =
+        new HashSet<string>(new[] { "BaaAmendment", "DeliveryWriteback" }, StringComparer.Ordinal);
 
     [Fact]
     public void Allowlisted_scope_is_authorized()
@@ -37,7 +39,7 @@ public class PioneerRxBaaScopeTests
     [Fact]
     public void Empty_allowlist_rejects_even_a_present_tag()
         => Assert.False(PioneerRxCommandHandler.IsBaaScopeAuthorized(
-            Json("{\"baaScopeTag\":\"BaaAmendment\"}"), Array.Empty<string>(), out _));
+            Json("{\"baaScopeTag\":\"BaaAmendment\"}"), new HashSet<string>(), out _));
 
     [Fact]
     public void Null_data_is_rejected()
@@ -47,4 +49,14 @@ public class PioneerRxBaaScopeTests
     public void Scope_match_is_ordinal_case_sensitive()
         => Assert.False(PioneerRxCommandHandler.IsBaaScopeAuthorized(
             Json("{\"baaScopeTag\":\"baaamendment\"}"), Allowed, out _));
+
+    [Fact]
+    public void Unimplemented_query_and_writeback_never_report_success()
+    {
+        var result = PioneerRxCommandHandler.CapabilityUnavailable();
+        Assert.False(result.Ok);
+        Assert.False(result.DryRun);
+        Assert.Equal(ActuationRejectionCodes.CapabilityUnavailable, result.RejectionCode);
+        Assert.Null(result.EvidenceHash);
+    }
 }

@@ -51,11 +51,12 @@ public class VerticalPackTests
             additionalNameHints: extraHints);
 
         // Pack hints + operator additions, each appearing once.
-        Assert.Contains("generic", spec.NameHints!);      // from pack
-        Assert.Contains("custom-keyword", spec.NameHints); // operator addition
+        var nameHints = Assert.IsAssignableFrom<IReadOnlyList<string>>(spec.NameHints);
+        Assert.Contains("generic", nameHints);      // from pack
+        Assert.Contains("custom-keyword", nameHints); // operator addition
         Assert.Equal(
-            spec.NameHints!.Count,
-            spec.NameHints.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            nameHints.Count,
+            nameHints.Distinct(StringComparer.OrdinalIgnoreCase).Count());
     }
 
     [Fact]

@@ -55,8 +55,8 @@
     <CornerRadius x:Key="SuavoRadiusLarge">14</CornerRadius>
     <CornerRadius x:Key="SuavoRadiusPill">999</CornerRadius>
 
-    <!-- Deferred / self-healing state — calm amber (distinct from the orange warn), legible on light. -->
-    <Color x:Key="SuavoDeferred">#D97706</Color>
+    <!-- Deferred / self-healing is informational sapphire, never warning amber. -->
+    <Color x:Key="SuavoDeferred">#2563EB</Color>
     <SolidColorBrush x:Key="SuavoDeferredBrush" Color="{StaticResource SuavoDeferred}" />
 
     <!-- Elevated surface for chips / pills sitting on cards — cool slate tint. -->

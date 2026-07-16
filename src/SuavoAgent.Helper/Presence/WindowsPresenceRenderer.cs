@@ -41,10 +41,10 @@ public sealed class WindowsPresenceRenderer : IPresenceRenderer, IDisposable
             CreateOverlayWindow();
             foreach (var cmd in _commands.GetConsumingEnumerable()) // blocks at rest = no CPU
             {
-                try { cmd(); } catch (Exception ex) { _logger.Debug(ex, "presence cmd failed"); }
+                try { cmd(); } catch (Exception ex) { _logger.Debug("presence cmd failed ({ExceptionType})", ex.GetType().Name); }
             }
         }
-        catch (Exception ex) { _logger.Warning(ex, "presence renderer loop ended"); }
+        catch (Exception ex) { _logger.Warning("presence renderer loop ended ({ExceptionType})", ex.GetType().Name); }
         finally { if (_hwnd != IntPtr.Zero) DestroyWindow(_hwnd); }
     }
 

@@ -1,5 +1,10 @@
 # Pricing Schema Recon (Pre-Saturday 2026-04-25)
 
+> **ARCHIVED / DO NOT USE — pre-pilot engineering evidence only.** These
+> database-discovery steps and their script predate the native agent lifecycle.
+> Pharmacy staff must never be asked to run them or provide their raw output.
+> Customer lifecycle actions use `docs/sales/windows-agent-lifecycle.md`.
+
 Codex's review flagged that our `Inventory.ItemPricing` schema is **unverified** against Nadim's live
 database. Shipping an unattended 500-row batch without first proving the SQL matches the Pricing tab
 is the main Saturday risk. This folder is the pre-Saturday reconnaissance kit.
@@ -12,26 +17,17 @@ is the main Saturday risk. This folder is the pre-Saturday reconnaissance kit.
 
 **Everything is read-only.** No UPDATE / INSERT / DELETE / DDL statements.
 
-## How to run
+## Execution status
 
-### Option A — Chrome Remote Desktop into Nadim's PioneerRx PC
+Do not run this kit on a customer workstation. The script is retained only as
+historical engineering evidence. Current customer discovery and verification
+must flow through the signed native Setup wizard and dashboard diagnostics in
+`docs/sales/windows-agent-lifecycle.md`; a pharmacy employee must never open a
+terminal, paste a command, expose a database password, or transfer raw recon
+files. If the native product cannot produce the required PHI-free, signed
+evidence, the field gate remains incomplete.
 
-1. Joshua connects to PIONEER10 via CRD.
-2. Open PowerShell as Administrator.
-3. `cd C:\SuavoAgent`
-4. Copy `nadim-pricing-schema-recon.ps1` from this folder to `C:\SuavoAgent\recon-script.ps1`
-   (or paste it via CRD clipboard).
-5. Run: `powershell -ExecutionPolicy Bypass -File C:\SuavoAgent\recon-script.ps1`
-6. Enter the SQL server hostname and password when prompted.
-7. Output lands at `C:\SuavoAgent\recon\pioneer-pricing-recon-{timestamp}.json` and `.txt`.
-8. Copy both files back to Joshua's machine via CRD file transfer.
-
-### Option B — SQL Server Management Studio (fallback)
-
-Copy the four queries out of the `.ps1` file and run each one in SSMS. Save the results to CSV/TSV
-with the same four names. Then hand them to Claude in the next session.
-
-## What to do with the output (Joshua, Thursday)
+## Historical output interpretation
 
 Once the JSON is on your macOS machine, run the bundled interpreter:
 
@@ -51,7 +47,8 @@ Exit codes:
 
 ## What Claude will do with the output
 
-Feed the JSON into `PricingSchemaResolver.Resolve(...)` and confirm:
+Historical evidence was intended to be fed into
+`PricingSchemaResolver.Resolve(...)` to confirm:
 
 1. The resolver picks the table Nadim sees in the UI (likely `Inventory.ItemPricing`).
 2. The NDC format in `Inventory.Item.NDC` matches our normalizer (5-4-2 expected; 11-digit unhyphenated would require a schema-driven normalization step).
@@ -66,6 +63,7 @@ for Saturday**. Do NOT run an unattended 500-row SQL batch.
 
 ## Files
 
-- `nadim-pricing-schema-recon.ps1` — the runnable script
+- `nadim-pricing-schema-recon.ps1` — archived engineering artifact; not an
+  approved customer procedure
 - `README.md` — this file
 - (optional future) `interpret-recon-output.md` — playbook for reading the JSON

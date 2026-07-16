@@ -58,7 +58,7 @@ public sealed class MockLocalInference : ILocalInference
             },
             Confidence = confidence,
             ModelId = "mock",
-            Rationale = "test",
+            RationaleCode = InferenceRationaleCode.TargetPresent,
             LatencyMs = 0,
         });
     }

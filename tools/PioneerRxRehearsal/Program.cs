@@ -1,14 +1,18 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using PioneerRxSim;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Contracts.Discovery;
 using SuavoAgent.Core.Discovery;
+using SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation;
+using SuavoAgent.Core.Config;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.State;
+using SuavoAgent.Core.Vision;
 using SuavoAgent.Core.Verticals.Pharmacy;
 
 namespace PioneerRxRehearsal;
@@ -144,7 +148,28 @@ public static class Program
             }
 
             // ── REAL chain composition (PricingExecutor=UiaFirst) ────────────
-            await using var ipc = new IpcCommandClient(cmdPipe, loggerFactory.CreateLogger<IpcCommandClient>());
+            var visionDataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SuavoAgent");
+            var visionStore = new WindowsVisionConfigurationStore();
+            var visionState = VisionConfigurationRegistry.Load(
+                visionStore,
+                visionDataDirectory);
+            if (!visionState.IsValid)
+            {
+                log.LogError(
+                    "Protected vision registry state is invalid ({Code}); rehearsal refuses the live Helper",
+                    visionState.Code);
+                return 3;
+            }
+            var visionHandshake = new VisionConfigurationStatusProvider(
+                visionState,
+                visionStore,
+                visionDataDirectory).EffectiveHandshake;
+            await using var ipc = new IpcCommandClient(
+                cmdPipe,
+                loggerFactory.CreateLogger<IpcCommandClient>(),
+                visionHandshake);
 
             // Stage 1: the REAL blind-run gate (pipe reachable + ping + interactive session).
             log.LogInformation("STAGE 1 — HelperInteractivePreflight (real gate; Helper must be in the interactive console session)");
@@ -167,8 +192,23 @@ public static class Program
                 loggerFactory.CreateLogger<PricingJobRunner>(),
                 brainEvaluator: null, // prod default: Reasoning.PricingBrainEnabled=false
                 interLookupDelay: TimeSpan.FromMilliseconds(a.ThrottleMs));
+            var actuationGateway = new HelperActuationGateway(
+                () => new IpcCommandClient(
+                    cmdPipe,
+                    loggerFactory.CreateLogger<IpcCommandClient>(),
+                    visionHandshake),
+                loggerFactory.CreateLogger<HelperActuationGateway>());
             var executor = new UiaFirstPricingJobExecutor(
-                runner, ipc, db, loggerFactory.CreateLogger<UiaFirstPricingJobExecutor>());
+                runner,
+                ipc,
+                db,
+                actuationGateway,
+                loggerFactory.CreateLogger<UiaFirstPricingJobExecutor>(),
+                Options.Create(new AgentOptions
+                {
+                    PricingExecutor = PricingExecutorMode.UiaFirst,
+                    PricingThrottleMs = a.ThrottleMs,
+                }));
             log.LogInformation(
                 "Pricing executor selected: UiaFirst ({Type}); throttle={ThrottleMs}ms",
                 executor.GetType().Name, a.ThrottleMs);

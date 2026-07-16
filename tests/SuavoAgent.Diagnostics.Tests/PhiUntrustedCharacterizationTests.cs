@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 using SuavoAgent.Diagnostics;
 using Xunit;
@@ -21,7 +20,8 @@ namespace SuavoAgent.Diagnostics.Tests;
 /// PRE-merge engine and is the immovable baseline.
 ///
 /// Regenerate ONLY against known-good pre-merge code:
-///   PHI_GOLDEN_REGEN=1 dotnet test --filter FullyQualifiedName~PhiUntrustedCharacterization
+///   PHI_GOLDEN_REGEN=1 PHI_GOLDEN_REGEN_OUTPUT=/absolute/path/to/phi-golden-untrusted.json
+///     dotnet test --filter FullyQualifiedName~PhiUntrustedCharacterization
 /// </summary>
 public sealed class PhiUntrustedCharacterizationTests
 {
@@ -112,8 +112,17 @@ public sealed class PhiUntrustedCharacterizationTests
         // while still bounding a genuine hang.
         => new(new RulesetV1(), TimeSpan.FromSeconds(5));
 
-    private static string GoldenPath([CallerFilePath] string thisFile = "")
-        => Path.Combine(Path.GetDirectoryName(thisFile)!, "phi-golden-untrusted.json");
+    private static string GoldenPath()
+        => Path.Combine(AppContext.BaseDirectory, "phi-golden-untrusted.json");
+
+    private static string RegenerationPath()
+    {
+        var path = Environment.GetEnvironmentVariable("PHI_GOLDEN_REGEN_OUTPUT");
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidOperationException(
+                "PHI_GOLDEN_REGEN_OUTPUT must be an absolute reviewed fixture path.");
+        return Path.GetFullPath(path);
+    }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -130,7 +139,7 @@ public sealed class PhiUntrustedCharacterizationTests
             var s = Scrubber();
             foreach (var input in Corpus)
                 regen.Add(new GoldenEntry { Input = input, Sanitize = s.Sanitize(input) });
-            File.WriteAllText(GoldenPath(), JsonSerializer.Serialize(regen, JsonOpts));
+            File.WriteAllText(RegenerationPath(), JsonSerializer.Serialize(regen, JsonOpts));
             return;
         }
 

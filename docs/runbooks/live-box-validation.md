@@ -1,5 +1,11 @@
 # Live-Box Validation Runbook — the general agentic loop + self-healing
 
+> **INTERNAL HARDWARE VALIDATION — not a customer procedure.** Installation,
+> update, repair, diagnostics, and removal still use the same signed native
+> experience documented in `docs/sales/windows-agent-lifecycle.md`. A result that
+> depends on manual binary replacement or terminal-based lifecycle control does
+> not pass this runbook.
+
 The agent is code-complete and CI-proven end-to-end (real `TieredBrainReasoner` + real `VerbDispatcher`
 drive an app to completion in `tests/.../Agentic/EndToEnd/`). The one remaining inch is **live LLM +
 live UIA on a real app**, which is intrinsically a hardware-in-the-loop activity. This runbook makes
@@ -9,41 +15,35 @@ Box: Mina's Windows (agent `15c16aae`, Hillcrest) via Chrome Remote Desktop. CRD
 techniques: see `reference-crd-remote-windows-techniques` in memory (keystroke drops, no clipboard,
 type in ≤10-char chunks, verify-before-Enter).
 
-## 0. Deploy the new binaries to the box (one-time per build)
+## 0. Install or update the exact signed canary
 
-The deployable artifacts BUILD for win-x64 (verified): `dotnet publish -c Release -r win-x64` of
-`SuavoAgent.Core`, `.Broker`, `.Helper`, `.Watchdog` → the 4 `.exe` (+ `FlaUI.UIA2.dll` for the
-Helper's live UIA). Two deploy paths:
+Use the final signed canary artifact that already passed the release gate:
 
-- **OTA (preferred, exercises the crash-loop guard #166):** publish all 4 → upload to a SuavoAgent
-  GitHub release → sign the manifest (`signUpdateManifest`) → issue an `update` command from the
-  cloud. The agent downloads, swaps, enters **probation**; a healthy first heartbeat commits, a
-  crash-loop auto-downgrades to `.old`. (This validates OTA self-heal as a side effect.)
-- **Manual:** copy the 4 `.exe` over the install dir, regenerate `binaries.manifest`, restart the
-  Broker service. Faster for a first smoke; doesn't exercise OTA.
+- For a clean box, download `SuavoSetup.exe` from the authenticated sandbox
+  dashboard and complete the graphical pairing wizard.
+- For an installed box, request the target version through the dashboard's
+  native OTA control and wait for its matching acknowledgement.
+- Run built-in **Diagnostics** and record the installed version, service cohort,
+  Helper session, maintenance-host presence, and post-update health receipt.
 
-Confirm post-deploy: `agent_version` bumped + `last_heartbeat_at` fresh; Helper SI=1 (interactive).
+There is no manual deploy alternative. Copying executables, regenerating a
+manifest, restarting services, or editing update state proves only that an
+engineer can patch a machine; it does not prove the product.
 
-## 0b. Tier-2 native libs — Qwen3 on LLamaSharp 0.24.0 (⚠ DLL set changed 3→5)
+## 0b. Tier-2 inference package
 
-The runtime was bumped **0.19.0 → 0.24.0** (first Qwen3-capable llama.cpp `ceda28ef`). The native-lib set
-the operator drops at `ReasoningOptions.NativeLibraryPath` (e.g. `C:\ProgramData\SuavoAgent\native\`) grew
-from **3 DLLs** to **4** for text-only — `llama.dll`'s load-time deps were split (ggml → ggml + ggml-base +
-ggml-cpu). The folder MUST contain ALL of:
+The exact Qwen/LLamaSharp runtime, model, native libraries, and hashes used by
+this test must be delivered as a signed, versioned package through setup or the
+dashboard. The package must select a compatible CPU variant, verify every file,
+report load state in PHI-safe diagnostics, and roll back as one cohort.
 
-```
-ggml.dll   ggml-base.dll   ggml-cpu.dll   llama.dll
-```
+Do not drop DLLs or models into ProgramData and do not hand-edit reasoning
+configuration on the validation box. If the current build cannot provision its
+inference package through the native product experience, the live Tier-2 test is
+**BLOCKED**; record that product gap instead of side-loading it.
 
-(`llava_shared.dll` is **optional** — only needed for the future multimodal/vision path; text-only Qwen3
-loads without it.) Source them from the `LLamaSharp.Backend.Cpu` **0.24.0** nupkg (`runtimes/win-x64/native/avx2/`
-— or the `noavx/` folder for an old CPU without AVX2), or hand-compile llama.cpp at exactly commit `ceda28ef`.
-If any required one is missing, model load fails — `LLamaLocalInference` now logs `missing required native
-libs [ggml-cpu.dll]` (it names the missing file). Model file: **Qwen3-1.7B Q4_K_M** (`qwen3-1.7b` ModelId → thinking-off template)
-for the RAM-light efficiency path, or **Qwen3-4B-Instruct-2507** (`qwen3-4b-instruct-2507`) for the quality
-path. Set `Agent.Reasoning.ModelId` / `ModelPath` via `agent_config_overrides`. **Grammar is still assumed a
-no-op on win-x64** — verify with a forbidden-token spike before trusting it; the template + `ProposalParser`
-remain the JSON guarantee.
+The grammar constraint remains a required live assertion. A forbidden-token
+spike must fail closed before the model is trusted for actuation.
 
 ## 1. NL way-in — `navigate_app` (dryRun, sandbox first)
 

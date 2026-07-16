@@ -24,6 +24,10 @@ public class PricingPilotStressAndEdgeCasesTests : IDisposable
     {
         Directory.CreateDirectory(_tempDir);
         _db = new AgentStateDb(Path.Combine(_tempDir, "state.db"));
+        Assert.True(_db.RecordPricingCloudAuthorityHeartbeat(
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            out _));
     }
 
     public void Dispose()
@@ -63,7 +67,7 @@ public class PricingPilotStressAndEdgeCasesTests : IDisposable
         var sibling = FindSibling(xlsx);
         Assert.NotNull(sibling);
         AssertColumnFilled(sibling!, headerName: "Best Supplier", expectedNonEmpty: N);
-        AssertColumnFilled(sibling!, headerName: "Best Cost", expectedNonEmpty: N);
+        AssertColumnFilled(sibling!, headerName: PricingJobDefaults.CostColumn, expectedNonEmpty: N);
     }
 
     [Fact]
@@ -89,6 +93,7 @@ public class PricingPilotStressAndEdgeCasesTests : IDisposable
         // Done rows as completed — mimics a partial prior run that crashed
         // after committing the first batch.
         _db.UpsertPricingJob(spec, PricingJobStatus.Running, Total, Done, 0);
+        BindInputIdentity(spec);
         for (int rowIndex = 2; rowIndex < 2 + Done; rowIndex++)
         {
             var ndcRaw = ndcs[rowIndex - 2];
@@ -148,10 +153,10 @@ public class PricingPilotStressAndEdgeCasesTests : IDisposable
     [Fact]
     public async Task EmptyResults_AllNoMatch_StillWritesSidecarWithStatusMarkers()
     {
-        // If every NDC misses, the run should still complete (Status=Completed)
-        // and emit a sidecar with NO_MATCH / NO_SUPPLIER_ROWS markers so the
-        // operator can see WHICH NDCs need manual review. A silent "0 of 50"
-        // file would be a worse outcome than an explicit-failures file.
+        // If every NDC misses, the run must fail truthfully while still emitting
+        // a sidecar with NO_MATCH / NO_SUPPLIER_ROWS markers so the operator can
+        // see WHICH NDCs need manual review. A silent "0 of 50" file would be a
+        // worse outcome than an explicit-failures file.
         var ndcs = Enumerable.Range(0, 10)
             .Select(i => $"99999-{i:D4}-01")
             .ToList();
@@ -162,7 +167,8 @@ public class PricingPilotStressAndEdgeCasesTests : IDisposable
 
         var progress = await runner.RunAsync(spec, CancellationToken.None);
 
-        Assert.Equal(PricingJobStatus.Completed, progress.Status);
+        Assert.Equal(PricingJobStatus.Failed, progress.Status);
+        Assert.Equal("pricing_job_failed", progress.HaltReason);
         Assert.Equal(0, progress.CompletedItems);
         Assert.Equal(10, progress.FailedItems);
 
@@ -233,13 +239,42 @@ public class PricingPilotStressAndEdgeCasesTests : IDisposable
             .FirstOrDefault();
     }
 
-    private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup) =>
-        new(
+    private SqlPricingJobRunner NewRunner(ISupplierPriceLookup lookup)
+    {
+        var contract = PricingTestAuthority.Contract();
+        var authority = PricingTestAuthority.InstallAuthority(_db, contract);
+        return new(
             new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
             new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
             _db,
             lookup,
-            NullLogger<SqlPricingJobRunner>.Instance);
+            NullLogger<SqlPricingJobRunner>.Instance,
+            contract,
+            authority,
+            trustedApprovalKeys: PricingTestAuthority.TrustedPublicKeys);
+    }
+
+    private void BindInputIdentity(PricingJobSpec spec)
+    {
+        Assert.True(PricingWorkbookContentPolicy.TryPrepareForExecution(
+            spec.ExcelPath, out var lease, out var admissionCode), admissionCode);
+        using var execution = lease!;
+        var read = new ExcelPricingReader(
+            NullLogger<ExcelPricingReader>.Instance).Read(
+                execution.WorkbookPath, spec.NdcColumn);
+        Assert.True(read.Success, read.Error);
+        Assert.True(PricingRunIntegrity.TryCreateManifest(read, out var manifest));
+        var contract = PricingTestAuthority.Contract();
+        var authority = PricingTestAuthority.InstallAuthority(_db, contract);
+        Assert.True(_db.TryBindPricingInputIdentity(
+            spec.JobId,
+            execution.SourceSha256,
+            manifest.RowFingerprint,
+            contract,
+            authority,
+            DateTimeOffset.UtcNow,
+            out var identityCode), identityCode);
+    }
 
     private static PricingJobSpec NewSpec(string excelPath) =>
         new(
@@ -247,7 +282,7 @@ public class PricingPilotStressAndEdgeCasesTests : IDisposable
             ExcelPath: excelPath,
             NdcColumn: "NDC",
             SupplierColumn: "Best Supplier",
-            CostColumn: "Best Cost");
+            CostColumn: PricingJobDefaults.CostColumn);
 
     private static string NormalizeForLookup(string raw)
     {

@@ -187,7 +187,7 @@ public sealed class FileLocatorService
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "Sampler task failed for {Path}", candidate.AbsolutePath);
+            _logger?.LogSafeDebug(ex);
             return new FileCandidateSample(
                 Candidate: candidate,
                 Shape: null,

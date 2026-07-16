@@ -40,7 +40,10 @@ public static class InferencePromptBuilder
         "You are a pharmacy automation reasoner. Given the current UI state, propose ONE next action.\n" +
         "Respond with ONLY a JSON object of EXACTLY this shape — no prose, no markdown, no extra keys:\n" +
         "{\"action\":{\"type\":\"<one value from allowed_actions>\",\"parameters\":{\"name\":\"<a visible element>\"}}," +
-        "\"confidence\":0.0,\"rationale\":\"<short reason>\"}\n" +
+        "\"confidence\":0.0,\"rationaleCode\":\"<fixed code>\"}\n" +
+        "rationaleCode MUST be exactly one of: target_present, target_absent_wait, " +
+        "workflow_state_ambiguous, operator_input_required, verification_required, " +
+        "recovery_step_required, no_safe_action. Never write a free-text explanation.\n" +
         "Only propose actions whose target elements are visible in the state. " +
         "Set confidence to your certainty: 1.0 if sure, lower if uncertain.";
 
@@ -182,6 +185,10 @@ public static class InferencePromptBuilder
                 kv => kv.Key == PriorActionsFlag
                     ? TruncateTail(kv.Value, PriorActionsMaxLen)
                     : Truncate(kv.Value, MaxFieldLen));
+        if (!string.IsNullOrEmpty(ctx.LocalReasoningTranscript))
+            cappedFlags[PriorActionsFlag] = TruncateTail(
+                ctx.LocalReasoningTranscript,
+                PriorActionsMaxLen);
 
         // General navigate mode: the NL objective. Null in scoped mode ⇒ omitted from the
         // JSON (WhenWritingNull) so the legacy prompt is byte-identical when unset.

@@ -6,8 +6,6 @@ namespace SuavoAgent.Core.Tests.Reasoning;
 
 public class ProposalParserTests
 {
-    // --- Happy path ----------------------------------------------------------
-
     [Fact]
     public void TryParse_WellFormedJson_ReturnsProposal()
     {
@@ -18,7 +16,7 @@ public class ProposalParserTests
             "parameters": { "name": "Save" }
           },
           "confidence": 0.95,
-          "rationale": "Save button visible and skill expects to save"
+          "rationaleCode": "target_present"
         }
         """;
 
@@ -30,7 +28,10 @@ public class ProposalParserTests
         Assert.Equal(0.95, result.Confidence);
         Assert.Equal("llama-test", result.ModelId);
         Assert.Equal(250, result.LatencyMs);
-        Assert.Contains("Save", result.Rationale);
+        Assert.Equal(InferenceRationaleCode.TargetPresent, result.RationaleCode);
+        Assert.Equal(
+            "The requested target is present.",
+            result.RationaleCode.ToOperatorMessage());
     }
 
     [Fact]
@@ -40,9 +41,10 @@ public class ProposalParserTests
         {
           "action": { "type": "Log", "parameters": {} },
           "confidence": 1.0,
-          "rationale": "marker"
+          "rationaleCode": "no_safe_action"
         }
         """;
+
         var result = ProposalParser.TryParse(json, "m", 0);
 
         Assert.NotNull(result);
@@ -52,58 +54,104 @@ public class ProposalParserTests
     [Fact]
     public void TryParse_TrimsWhitespaceAroundJson()
     {
-        const string json = "\n  { \"action\": { \"type\": \"Log\", \"parameters\": {} }, \"confidence\": 1.0, \"rationale\": \"r\" }\n";
-        var result = ProposalParser.TryParse(json, "m", 0);
-        Assert.NotNull(result);
-    }
+        const string json = "\n  { \"action\": { \"type\": \"Log\", \"parameters\": {} }, \"confidence\": 1.0, \"rationaleCode\": \"no_safe_action\" }\n";
 
-    // --- Schema violations → null -------------------------------------------
+        Assert.NotNull(ProposalParser.TryParse(json, "m", 0));
+    }
 
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
     [InlineData(null)]
-    public void TryParse_EmptyInput_ReturnsNull(string? input)
-    {
+    public void TryParse_EmptyInput_ReturnsNull(string? input) =>
         Assert.Null(ProposalParser.TryParse(input!, "m", 0));
-    }
 
-    [Fact]
-    public void TryParse_MalformedJson_ReturnsNull()
-    {
-        Assert.Null(ProposalParser.TryParse("{not valid json", "m", 0));
-    }
-
-    [Fact]
-    public void TryParse_RootIsArray_ReturnsNull()
-    {
-        Assert.Null(ProposalParser.TryParse("[]", "m", 0));
-    }
+    [Theory]
+    [InlineData("{not valid json")]
+    [InlineData("[]")]
+    public void TryParse_InvalidJsonShape_ReturnsNull(string json) =>
+        Assert.Null(ProposalParser.TryParse(json, "m", 0));
 
     [Fact]
     public void TryParse_MissingAction_ReturnsNull()
     {
-        const string json = """{ "confidence": 0.9, "rationale": "r" }""";
+        const string json =
+            """{ "confidence": 0.9, "rationaleCode": "no_safe_action" }""";
         Assert.Null(ProposalParser.TryParse(json, "m", 0));
     }
 
     [Fact]
     public void TryParse_MissingActionType_ReturnsNull()
     {
-        const string json = """{ "action": { "parameters": {} }, "confidence": 0.9, "rationale": "r" }""";
+        const string json =
+            """{ "action": { "parameters": {} }, "confidence": 0.9, "rationaleCode": "no_safe_action" }""";
         Assert.Null(ProposalParser.TryParse(json, "m", 0));
     }
 
-    [Fact]
-    public void TryParse_UnknownActionType_ReturnsNull()
+    [Theory]
+    [InlineData("FlyToMars")]
+    [InlineData("click")]
+    [InlineData("0")]
+    public void TryParse_UnknownOrNonCanonicalActionType_ReturnsNull(string action)
     {
-        const string json = """
+        var json = $$"""
         {
-          "action": { "type": "FlyToMars", "parameters": {} },
+          "action": { "type": "{{action}}", "parameters": {} },
           "confidence": 0.9,
-          "rationale": "r"
+          "rationaleCode": "target_present"
         }
         """;
+
+        Assert.Null(ProposalParser.TryParse(json, "m", 0));
+    }
+
+    [Theory]
+    [InlineData("Click", "{\"name\":\"Save\"}")]
+    [InlineData("Type", "{\"source\":\"clipboard\"}")]
+    [InlineData("PressKey", "{\"key\":\"Enter\"}")]
+    [InlineData("WaitForElement", "{\"controlType\":\"DataGrid\"}")]
+    [InlineData("VerifyElement", "{\"containsFromContext\":\"expected_status\"}")]
+    [InlineData("Escalate", "{}")]
+    [InlineData("AskOperator", "{}")]
+    [InlineData("Log", "{}")]
+    public void TryParse_ExactPerActionParameterShape_Accepted(
+        string action,
+        string parameters)
+    {
+        var json = $$"""
+        {
+          "action": { "type": "{{action}}", "parameters": {{parameters}} },
+          "confidence": 0.9,
+          "rationaleCode": "target_present"
+        }
+        """;
+
+        Assert.NotNull(ProposalParser.TryParse(json, "m", 0));
+    }
+
+    [Theory]
+    [InlineData("Click", "{}")]
+    [InlineData("Click", "{\"controlType\":\"Button\"}")]
+    [InlineData("Click", "{\"name\":\"Save\",\"extra\":\"x\"}")]
+    [InlineData("Type", "{\"text\":\"  \"}")]
+    [InlineData("PressKey", "{\"key\":\"Enter\",\"name\":\"x\"}")]
+    [InlineData("WaitForElement", "{\"name\":\"\"}")]
+    [InlineData("VerifyElement", "{}")]
+    [InlineData("Escalate", "{\"name\":\"x\"}")]
+    [InlineData("AskOperator", "{\"reason\":\"x\"}")]
+    [InlineData("Log", "{\"message\":\"x\"}")]
+    public void TryParse_MissingExtraOrEmptyPerActionParameter_ReturnsNull(
+        string action,
+        string parameters)
+    {
+        var json = $$"""
+        {
+          "action": { "type": "{{action}}", "parameters": {{parameters}} },
+          "confidence": 0.9,
+          "rationaleCode": "target_present"
+        }
+        """;
+
         Assert.Null(ProposalParser.TryParse(json, "m", 0));
     }
 
@@ -113,7 +161,7 @@ public class ProposalParserTests
         const string json = """
         {
           "action": { "type": "Log", "parameters": {} },
-          "rationale": "r"
+          "rationaleCode": "no_safe_action"
         }
         """;
         Assert.Null(ProposalParser.TryParse(json, "m", 0));
@@ -123,22 +171,20 @@ public class ProposalParserTests
     [InlineData(-0.1)]
     [InlineData(1.01)]
     [InlineData(-99.0)]
-    public void TryParse_ConfidenceOutOfRange_ReturnsNull(double conf)
+    public void TryParse_ConfidenceOutOfRange_ReturnsNull(double confidence)
     {
         var json = $$"""
         {
           "action": { "type": "Log", "parameters": {} },
-          "confidence": {{conf}},
-          "rationale": "r"
+          "confidence": {{confidence}},
+          "rationaleCode": "no_safe_action"
         }
         """;
         Assert.Null(ProposalParser.TryParse(json, "m", 0));
     }
 
-    // --- Rationale handling -------------------------------------------------
-
     [Fact]
-    public void TryParse_OptionalRationale_Accepted()
+    public void TryParse_MissingRationaleCode_ReturnsNull()
     {
         const string json = """
         {
@@ -146,41 +192,96 @@ public class ProposalParserTests
           "confidence": 1.0
         }
         """;
-        var result = ProposalParser.TryParse(json, "m", 0);
-        Assert.NotNull(result);
-        Assert.Null(result.Rationale);
+        Assert.Null(ProposalParser.TryParse(json, "m", 0));
     }
 
-    [Fact]
-    public void TryParse_LongRationale_CappedAt500Chars()
+    [Theory]
+    [InlineData("target_present", InferenceRationaleCode.TargetPresent)]
+    [InlineData("target_absent_wait", InferenceRationaleCode.TargetAbsentWait)]
+    [InlineData("workflow_state_ambiguous", InferenceRationaleCode.WorkflowStateAmbiguous)]
+    [InlineData("operator_input_required", InferenceRationaleCode.OperatorInputRequired)]
+    [InlineData("verification_required", InferenceRationaleCode.VerificationRequired)]
+    [InlineData("recovery_step_required", InferenceRationaleCode.RecoveryStepRequired)]
+    [InlineData("no_safe_action", InferenceRationaleCode.NoSafeAction)]
+    public void TryParse_EachExactRationaleCode_Accepted(
+        string wireValue,
+        InferenceRationaleCode expected)
     {
-        var longRationale = new string('x', 2000);
         var json = $$"""
         {
           "action": { "type": "Log", "parameters": {} },
           "confidence": 1.0,
-          "rationale": "{{longRationale}}"
+          "rationaleCode": "{{wireValue}}"
         }
         """;
+
         var result = ProposalParser.TryParse(json, "m", 0);
+
         Assert.NotNull(result);
-        Assert.Equal(500, result.Rationale!.Length);
+        Assert.Equal(expected, result.RationaleCode);
+        Assert.Equal(wireValue, result.RationaleCode.ToWireValue());
+        Assert.NotEmpty(result.RationaleCode.ToOperatorMessage());
     }
 
-    // --- WS2: parser is the load-bearing JSON guarantee ---------------------
-    // The win-x64 llama.cpp GBNF grammar is a no-op (documented 2026-06-05), so
-    // the template + this parser are the real schema defense. Instruct models
-    // (Phi-3.5 / Qwen2.5) sometimes wrap JSON in a markdown code fence — strip it.
+    [Theory]
+    [InlineData("Target_Present")]
+    [InlineData("target present")]
+    [InlineData("Save button is visible")]
+    [InlineData("Patient: John Smith needs Rx 998877")]
+    [InlineData("")]
+    public void TryParse_UnknownOrFreeTextRationaleCode_ReturnsNull(string code)
+    {
+        var json = $$"""
+        {
+          "action": { "type": "Log", "parameters": {} },
+          "confidence": 1.0,
+          "rationaleCode": "{{code}}"
+        }
+        """;
+
+        Assert.Null(ProposalParser.TryParse(json, "m", 0));
+    }
+
+    [Fact]
+    public void TryParse_LegacyFreeTextRationale_ReturnsNull()
+    {
+        const string json = """
+        {
+          "action": { "type": "Log", "parameters": {} },
+          "confidence": 1.0,
+          "rationale": "Patient: John Smith needs Rx 998877"
+        }
+        """;
+
+        Assert.Null(ProposalParser.TryParse(json, "m", 0));
+    }
+
+    [Fact]
+    public void TryParse_UnknownTopLevelField_ReturnsNull()
+    {
+        const string json = """
+        {
+          "action": { "type": "Log", "parameters": {} },
+          "confidence": 1.0,
+          "rationaleCode": "no_safe_action",
+          "rationale": "dynamic prose"
+        }
+        """;
+
+        Assert.Null(ProposalParser.TryParse(json, "m", 0));
+    }
 
     [Fact]
     public void TryParse_JsonInMarkdownFence_Parses()
     {
         const string json = """
         ```json
-        { "action": { "type": "Click", "parameters": { "name": "Save" } }, "confidence": 0.9, "rationale": "r" }
+        { "action": { "type": "Click", "parameters": { "name": "Save" } }, "confidence": 0.9, "rationaleCode": "target_present" }
         ```
         """;
+
         var result = ProposalParser.TryParse(json, "phi-3.5", 0);
+
         Assert.NotNull(result);
         Assert.Equal(RuleActionType.Click, result.Action.Type);
     }
@@ -188,27 +289,32 @@ public class ProposalParserTests
     [Fact]
     public void TryParse_JsonInBareFence_Parses()
     {
-        const string json = "```\n{ \"action\": { \"type\": \"Log\", \"parameters\": {} }, \"confidence\": 1.0 }\n```";
+        const string json = "```\n{ \"action\": { \"type\": \"Log\", \"parameters\": {} }, \"confidence\": 1.0, \"rationaleCode\": \"no_safe_action\" }\n```";
+
         var result = ProposalParser.TryParse(json, "qwen2.5", 0);
+
         Assert.NotNull(result);
         Assert.Equal(RuleActionType.Log, result.Action.Type);
     }
 
     [Fact]
-    public void TryParse_LeadingQwenThinkBlock_Parses()
+    public void TryParse_LeadingQwenThinkBlock_ParsesAndDiscardsProse()
     {
         const string json = """
         <think>
-        I should use the visible Save button.
+        Patient John Smith's Save button is visible.
         </think>
-        { "action": { "type": "Click", "parameters": { "name": "Save" } }, "confidence": 0.9, "rationale": "Save is visible" }
+        { "action": { "type": "Click", "parameters": { "name": "Save" } }, "confidence": 0.9, "rationaleCode": "target_present" }
         """;
 
         var result = ProposalParser.TryParse(json, "qwen3-1.7b", 0);
 
         Assert.NotNull(result);
-        Assert.Equal(RuleActionType.Click, result.Action.Type);
-        Assert.Equal("Save", result.Action.Parameters["name"]);
+        Assert.Equal(InferenceRationaleCode.TargetPresent, result.RationaleCode);
+        Assert.DoesNotContain(
+            "John Smith",
+            result.RationaleCode.ToOperatorMessage(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -217,7 +323,7 @@ public class ProposalParserTests
         const string json = """
         <think>
         unfinished reasoning
-        { "action": { "type": "Log", "parameters": {} }, "confidence": 1.0 }
+        { "action": { "type": "Log", "parameters": {} }, "confidence": 1.0, "rationaleCode": "no_safe_action" }
         """;
 
         Assert.Null(ProposalParser.TryParse(json, "qwen3-1.7b", 0));
@@ -226,42 +332,31 @@ public class ProposalParserTests
     [Fact]
     public void TryParse_ConfidenceAsString_ReturnsNull()
     {
-        // A model that emits "confidence":"high" must NOT be trusted — fail closed.
-        const string json = """{ "action": { "type": "Log", "parameters": {} }, "confidence": "high" }""";
+        const string json = """{ "action": { "type": "Log", "parameters": {} }, "confidence": "high", "rationaleCode": "no_safe_action" }""";
         Assert.Null(ProposalParser.TryParse(json, "m", 0));
     }
 
     [Fact]
     public void TryParse_ProseWrappedJson_ReturnsNull()
     {
-        // Strict contract: free prose around the object is not silently mined for
-        // JSON — it escalates (returns null) rather than guessing the model's intent.
-        const string json = "Sure! Here is my decision: { \"action\": { \"type\": \"Log\", \"parameters\": {} }, \"confidence\": 1.0 } Hope that helps!";
+        const string json = "Sure! { \"action\": { \"type\": \"Log\", \"parameters\": {} }, \"confidence\": 1.0, \"rationaleCode\": \"no_safe_action\" } Done!";
         Assert.Null(ProposalParser.TryParse(json, "m", 0));
     }
 
-    // --- Parameters with non-string values ----------------------------------
-
     [Fact]
-    public void TryParse_NonStringParameterValues_Skipped()
+    public void TryParse_NonStringParameterValue_ReturnsNull()
     {
-        // Grammar constrains parameters to strings, but defense-in-depth.
         const string json = """
         {
           "action": {
             "type": "Click",
-            "parameters": {
-              "name": "Save",
-              "x": 100
-            }
+            "parameters": { "name": "Save", "x": 100 }
           },
           "confidence": 0.95,
-          "rationale": "r"
+          "rationaleCode": "target_present"
         }
         """;
-        var result = ProposalParser.TryParse(json, "m", 0);
-        Assert.NotNull(result);
-        Assert.Equal("Save", result.Action.Parameters["name"]);
-        Assert.DoesNotContain("x", result.Action.Parameters.Keys);
+
+        Assert.Null(ProposalParser.TryParse(json, "m", 0));
     }
 }

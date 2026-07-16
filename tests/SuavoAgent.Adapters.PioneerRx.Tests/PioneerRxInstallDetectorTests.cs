@@ -36,6 +36,18 @@ public class PioneerRxInstallDetectorTests
         Assert.Null(ex);
     }
 
+    [Fact]
+    public void ProbeFailure_IsIndeterminateAndCannotActivateCapability()
+    {
+        var result = PioneerRxInstallDetector.DetectFromProbes(
+            _ => throw new IOException("synthetic"),
+            _ => null,
+            NullLogger.Instance);
+
+        Assert.Equal(PioneerRxInstallDetector.DetectionStatus.Indeterminate, result.Status);
+        Assert.Equal("probe_failed", result.Code);
+    }
+
     private sealed class CapturingLogger : ILogger
     {
         public List<string> Entries { get; } = new();

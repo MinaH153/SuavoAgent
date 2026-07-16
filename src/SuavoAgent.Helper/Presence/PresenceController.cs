@@ -61,6 +61,12 @@ public sealed class PresenceController
         }
     }
 
+    /// <summary>
+    /// Current activity-derived mode for other local, PHI-free presence
+    /// surfaces such as the pharmacist panda companion.
+    /// </summary>
+    public PresenceMode CurrentMode => (PresenceMode)_mode;
+
     public void MoveTo(int x, int y)
     {
         if (!Active) return;
@@ -86,7 +92,7 @@ public sealed class PresenceController
                 }
             }
         }
-        catch (Exception ex) { _logger.Debug(ex, "presence MoveTo failed (non-fatal)"); }
+        catch (Exception ex) { _logger.Debug("presence MoveTo failed ({ExceptionType})", ex.GetType().Name); }
     }
 
     public void Reticle(int x, int y)
@@ -98,7 +104,7 @@ public sealed class PresenceController
             var prefs = _store.Current;
             _renderer.Reticle(x, y, prefs.CursorSizePx, ActiveTone(prefs));
         }
-        catch (Exception ex) { _logger.Debug(ex, "presence Reticle failed (non-fatal)"); }
+        catch (Exception ex) { _logger.Debug("presence Reticle failed ({ExceptionType})", ex.GetType().Name); }
     }
 
     public void Click(int x, int y)
@@ -106,7 +112,7 @@ public sealed class PresenceController
         if (!Active) return;
         StampAgent(); EvaluateMode();
         try { _renderer.ClickPulse(x, y, ActiveTone(_store.Current)); }
-        catch (Exception ex) { _logger.Debug(ex, "presence Click failed (non-fatal)"); }
+        catch (Exception ex) { _logger.Debug("presence Click failed ({ExceptionType})", ex.GetType().Name); }
     }
 
     /// <summary>Cursor stays where it is (persistent). Nothing to tear down.</summary>
@@ -129,7 +135,7 @@ public sealed class PresenceController
             _bubbleText = text;
             lock (_lock) { _bubble.Show(text, tone ?? ActiveTone(prefs), _lastX, _lastY); }
         }
-        catch (Exception ex) { _logger.Debug(ex, "presence Narrate failed (non-fatal)"); }
+        catch (Exception ex) { _logger.Debug("presence Narrate failed ({ExceptionType})", ex.GetType().Name); }
     }
 
     /// <summary>Record human input (cheap, hook-safe: an interlocked timestamp write only).
@@ -163,7 +169,7 @@ public sealed class PresenceController
             var tone = mode == PresenceMode.Observing ? PresenceTones.Observing : prefs.Tone;
             _glow.Show(tone, prefs.GlowIntensity);
         }
-        catch (Exception ex) { _logger.Debug(ex, "presence glow apply failed (non-fatal)"); }
+        catch (Exception ex) { _logger.Debug("presence glow apply failed ({ExceptionType})", ex.GetType().Name); }
     }
 
     private void OnPrefsChanged(PresencePreferences prefs)
@@ -173,6 +179,6 @@ public sealed class PresenceController
             if (prefs.IsCursorActive) _renderer.Show();
             else { _renderer.Hide(); _bubble?.Hide(); _glow?.Hide(); }
         }
-        catch (Exception ex) { _logger.Debug(ex, "presence visibility toggle failed (non-fatal)"); }
+        catch (Exception ex) { _logger.Debug("presence visibility toggle failed ({ExceptionType})", ex.GetType().Name); }
     }
 }

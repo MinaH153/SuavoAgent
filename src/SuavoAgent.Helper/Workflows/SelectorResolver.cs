@@ -21,6 +21,7 @@ namespace SuavoAgent.Helper.Workflows;
 /// </summary>
 public sealed class SelectorResolver
 {
+    internal const string PharmacistInChargeRole = "pharmacist_in_charge";
     private readonly IReadOnlyList<SelectorPatch> _patches;
     private readonly string? _pmsFingerprint;
     private readonly string? _screenSignature;
@@ -56,6 +57,11 @@ public sealed class SelectorResolver
         foreach (var p in _patches)
         {
             if (p.StepId != step) continue;
+            if (step == SelectorStepId.QuickSearchField &&
+                !string.Equals(
+                    p.ApprovedByRole,
+                    PharmacistInChargeRole,
+                    StringComparison.Ordinal)) continue;
             if (p.PmsFingerprint is not null
                 && !string.Equals(p.PmsFingerprint, _pmsFingerprint, StringComparison.Ordinal)) continue;
             if (p.ScreenSignatureV1 is not null

@@ -114,6 +114,8 @@
             <Button DockPanel.Dock="Right"
                     Content="Cancel"
                     Command="{Binding CancelCommand}"
+                    IsEnabled="{Binding CanCancel}"
+                    AutomationProperties.Name="Cancel current setup operation"
                     Padding="18,10"
                     Background="Transparent"
                     Foreground="{DynamicResource SuavoTextMutedBrush}"

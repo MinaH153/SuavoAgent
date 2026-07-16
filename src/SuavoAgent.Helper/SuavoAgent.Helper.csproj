@@ -24,19 +24,27 @@
     <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
-    <!-- System.Drawing.Common: GDI BitBlt screen capture. Windows-only supported
-         surface; guarded at runtime with OperatingSystem.IsWindows(). -->
+    <!-- System.Drawing.Common: exact-window PrintWindow rendering + PNG encoding.
+         Full-monitor/framebuffer capture is intentionally not implemented. -->
     <PackageReference Include="System.Drawing.Common" Version="8.0.10" />
-    <!-- Tesseract OCR managed wrapper only. Native tesseract.dll + leptonica
-         binaries are operator-provided at TesseractOptions.NativeLibraryPath,
-         same stealth pattern as LLamaSharp (Codex C-1 precedent). -->
-    <PackageReference Include="Tesseract" Version="5.2.0" ExcludeAssets="runtime;native" />
+    <!-- Retain the managed Tesseract.dll wrapper, but exclude the package's build
+         target that copies its unreviewed x86/x64 tesseract50 + Leptonica DLLs.
+         Native code may enter only through the separately approved cohort. -->
+    <PackageReference Include="Tesseract" Version="5.2.0"
+                      ExcludeAssets="build;buildTransitive" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\SuavoAgent.Contracts\SuavoAgent.Contracts.csproj" />
     <ProjectReference Include="..\SuavoAgent.Core\SuavoAgent.Core.csproj" />
     <ProjectReference Include="..\SuavoAgent.Diagnostics\SuavoAgent.Diagnostics.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Embedded so the panda ships inside single-file and framework-dependent
+         publish outputs; no mutable external image path is trusted at runtime. -->
+    <EmbeddedResource Include="Assets\pharmacist-panda-v2.png"
+                      LogicalName="SuavoAgent.Helper.Assets.pharmacist-panda-v2.png" />
   </ItemGroup>
 
 </Project>

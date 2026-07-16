@@ -88,9 +88,7 @@ public sealed class LlmFileRanker : IFileRanker
             }
             catch (Exception ex)
             {
-                _logger?.LogWarning(ex,
-                    "LlmFileRanker: tier {Tier}/{Model} threw — falling through",
-                    tier.Tier, tier.ModelId);
+                _logger?.LogSafeWarning(ex);
                 continue;
             }
 

@@ -33,6 +33,7 @@ public class AdapterGeneratorTests : IDisposable
                 ("guid-delivery", "Waiting for Delivery"),
                 ("guid-complete", "Completed"),
             });
+        _db.CompleteLearnedTemplateEvidence("sess-1");
 
         var generator = new AdapterGenerator(_db);
         var adapter = generator.Generate("sess-1");
@@ -76,6 +77,7 @@ public class AdapterGeneratorTests : IDisposable
                 ("guid-pickup", "Waiting for Pick up"),
                 ("guid-complete", "Completed"),
             });
+        _db.CompleteLearnedTemplateEvidence("sess-1");
 
         var generator = new AdapterGenerator(_db);
         var adapter = generator.Generate("sess-1");
@@ -123,10 +125,39 @@ public class AdapterGeneratorTests : IDisposable
         Assert.Contains("[DateFilled]", pq.Query);
         Assert.Contains("@s0", pq.Query);
         Assert.Contains("@s1", pq.Query);
+        Assert.Contains("TOP (@pageSize)", pq.Query);
+        Assert.Contains("@cursor IS NULL OR [RxNum] > @cursor", pq.Query);
+        Assert.Contains("ORDER BY [RxNum] ASC", pq.Query);
         Assert.DoesNotContain("'Ready'", pq.Query);
         Assert.DoesNotContain("'InTransit'", pq.Query);
         Assert.Equal("Ready", pq.Parameters["@s0"]);
         Assert.Equal("InTransit", pq.Parameters["@s1"]);
+    }
+
+    [Fact]
+    public void Describe_RequiresCompletedCurrentStatusEvidence()
+    {
+        SeedPioneerRxLikeSchema();
+        SeedCandidateAndReadyStatus();
+        var generator = new AdapterGenerator(_db);
+        var before = generator.Describe("sess-1");
+        Assert.NotNull(before);
+
+        _db.InsertDiscoveredStatus(
+            "sess-1",
+            "Prescription.RxTransaction",
+            "StatusTypeID",
+            "guid-new",
+            "ready_pickup",
+            9,
+            1,
+            0.9);
+
+        Assert.Null(generator.Describe("sess-1"));
+        _db.CompleteLearnedTemplateEvidence("sess-1");
+        var after = generator.Describe("sess-1");
+        Assert.NotNull(after);
+        Assert.NotEqual(before!.TemplateDigest, after!.TemplateDigest);
     }
 
     [Fact]
@@ -137,8 +168,116 @@ public class AdapterGeneratorTests : IDisposable
         Assert.Equal("[Col]]Name]", escaped);
     }
 
+    [Fact]
+    public void Describe_ExactPatientForeignKey_BindsParameterizedPatientQueryIntoDigest()
+    {
+        SeedPioneerRxLikeSchema();
+        SeedCandidateAndReadyStatus();
+        var generator = new AdapterGenerator(_db);
+        var before = generator.Describe("sess-1");
+        Assert.NotNull(before);
+        Assert.Null(before!.PatientLookupQuery);
+
+        SeedExactPatientSchema();
+        var after = generator.Describe("sess-1");
+
+        Assert.NotNull(after);
+        Assert.NotNull(after!.PatientLookupQuery);
+        Assert.NotEqual(before.TemplateDigest, after.TemplateDigest);
+        Assert.Contains("SELECT TOP 2", after.PatientLookupQuery);
+        Assert.Contains("INNER JOIN [Person].[Patient] AS patient", after.PatientLookupQuery);
+        Assert.Contains("rx.[PatientID] = patient.[PatientID]", after.PatientLookupQuery);
+        Assert.Contains("WHERE rx.[RxNumber] = @rx", after.PatientLookupQuery);
+        Assert.DoesNotContain("@s0", after.PatientLookupQuery);
+    }
+
+    [Fact]
+    public void Describe_PatientColumnsWithoutExactForeignKey_DisablesPatientLookup()
+    {
+        SeedPioneerRxLikeSchema();
+        SeedCandidateAndReadyStatus();
+        SeedPatientColumnsOnly();
+
+        var template = new AdapterGenerator(_db).Describe("sess-1");
+
+        Assert.NotNull(template);
+        Assert.Null(template!.PatientLookupQuery);
+    }
+
+    [Fact]
+    public void Describe_AmbiguousPatientFieldMapping_DisablesPatientLookup()
+    {
+        SeedPioneerRxLikeSchema();
+        SeedCandidateAndReadyStatus();
+        SeedExactPatientSchema();
+        _db.InsertDiscoveredSchema("sess-1", "svr", "TestDB",
+            "Person", "Patient", "Mobile", "nvarchar", 30,
+            true, false, false, null, null, "unknown");
+        _db.CompleteDiscoveredSchemaSnapshot("sess-1");
+        _db.CompleteLearnedTemplateEvidence("sess-1");
+
+        var template = new AdapterGenerator(_db).Describe("sess-1");
+
+        Assert.NotNull(template);
+        Assert.Null(template!.PatientLookupQuery);
+    }
+
+    private void SeedCandidateAndReadyStatus()
+    {
+        _db.InsertRxQueueCandidate("sess-1", "Prescription.RxTransaction",
+            "RxNumber", "StatusTypeID", "DateFilled", "PatientID",
+            0.8, "[\"evidence\"]", null);
+        new StatusOrderingEngine(_db).InferAndPersist(
+            "sess-1",
+            "Prescription.RxTransaction",
+            "StatusTypeID",
+            new[] { ("guid-pickup", "Waiting for Pick up") });
+        _db.CompleteLearnedTemplateEvidence("sess-1");
+    }
+
+    private void SeedExactPatientSchema()
+    {
+        SeedPatientColumnsOnly();
+        _db.BindDiscoveredForeignKey(
+            "sess-1",
+            "Prescription",
+            "RxTransaction",
+            "PatientID",
+            "Person",
+            "Patient",
+            "PatientID");
+        _db.InsertDiscoveredUniqueColumn("sess-1", "Person", "Patient", "PatientID");
+        _db.CompleteDiscoveredSchemaSnapshot("sess-1");
+        _db.CompleteLearnedTemplateEvidence("sess-1");
+    }
+
+    private void SeedPatientColumnsOnly()
+    {
+        var columns = new[]
+        {
+            ("PatientID", "uniqueidentifier", false),
+            ("FirstName", "nvarchar", false),
+            ("LastName", "nvarchar", false),
+            ("Phone1", "nvarchar", true),
+            ("Address1", "nvarchar", true),
+            ("Address2", "nvarchar", true),
+            ("City", "nvarchar", true),
+            ("State", "nvarchar", true),
+            ("Zip", "nvarchar", true),
+        };
+        foreach (var (column, type, nullable) in columns)
+        {
+            _db.InsertDiscoveredSchema("sess-1", "svr", "TestDB",
+                "Person", "Patient", column, type, 200,
+                nullable, column == "PatientID", false, null, null, "unknown");
+        }
+        _db.CompleteDiscoveredSchemaSnapshot("sess-1");
+        _db.CompleteLearnedTemplateEvidence("sess-1");
+    }
+
     private void SeedPioneerRxLikeSchema()
     {
+        _db.BeginDiscoveredSchemaSnapshot("sess-1", new string('a', 64), "TestDB");
         var columns = new[]
         {
             ("RxTransactionID", "uniqueidentifier", "identifier"),
@@ -154,6 +293,9 @@ public class AdapterGeneratorTests : IDisposable
                 "Prescription", "RxTransaction", col, type, null,
                 false, col.EndsWith("ID"), false, null, null, purpose);
         }
+        _db.InsertDiscoveredUniqueColumn(
+            "sess-1", "Prescription", "RxTransaction", "RxNumber");
+        _db.CompleteDiscoveredSchemaSnapshot("sess-1");
     }
 
     public void Dispose()

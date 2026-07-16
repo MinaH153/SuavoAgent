@@ -15,4 +15,15 @@
                       ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- One reviewed source of truth for Setup, Core, Watchdog, Maintenance, and CI. -->
+    <EmbeddedResource Include="..\..\security\ota-update-trust-roots.json"
+                      LogicalName="SuavoAgent.Contracts.Maintenance.ota-update-trust-roots.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SuavoAgent.Contracts.Tests" />
+    <InternalsVisibleTo Include="SuavoAgent.Setup.Tests" />
+  </ItemGroup>
+
 </Project>

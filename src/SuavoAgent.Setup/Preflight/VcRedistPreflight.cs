@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using SuavoAgent.Diagnostics.Maintenance;
 
 namespace SuavoAgent.Setup.Preflight;
 
@@ -16,26 +17,47 @@ public sealed class VcRedistPreflight
     private readonly VcRedistChecker _checker;
     private readonly Func<VcRedistProvider> _providerFactory;
     private readonly VcRedistInstaller _installer;
+    private readonly Func<string> _createStagingDirectory;
+    private readonly Func<string, string, bool> _protectAndVerifyExecutable;
+    private readonly Action<string, string?> _cleanupStagingDirectory;
 
     public VcRedistPreflight(
-        VcRedistChecker checker, Func<VcRedistProvider> providerFactory, VcRedistInstaller installer)
+        VcRedistChecker checker,
+        Func<VcRedistProvider> providerFactory,
+        VcRedistInstaller installer,
+        Func<string>? createStagingDirectory = null,
+        Func<string, string, bool>? protectAndVerifyExecutable = null,
+        Action<string, string?>? cleanupStagingDirectory = null)
     {
         _checker = checker;
         _providerFactory = providerFactory;
         _installer = installer;
+        _createStagingDirectory = createStagingDirectory ??
+                                  (() => PrivilegedExecutableStaging.CreateDirectory());
+        _protectAndVerifyExecutable = protectAndVerifyExecutable ??
+            PrivilegedExecutableStaging.ProtectAndVerifyMicrosoftExecutable;
+        _cleanupStagingDirectory = cleanupStagingDirectory ??
+                                   PrivilegedExecutableStaging.TryCleanupDirectory;
     }
 
-    public async Task<VcRedistPreflightOutcome> EnsureAsync(string tempDir, CancellationToken ct)
+    public async Task<VcRedistPreflightOutcome> EnsureAsync(CancellationToken ct)
     {
         if (_checker.Check().Installed)
             return new VcRedistPreflightOutcome(VcRedistPreflightState.AlreadyPresent, "VC++ runtime present", false);
 
+        string? stagingDirectory = null;
+        string? path = null;
         try
         {
-            var dest = Path.Combine(tempDir, "vc_redist.x64.exe");
-            var path = await _providerFactory().EnsureLocalAsync(dest, ct);
+            stagingDirectory = _createStagingDirectory();
+            var dest = PrivilegedExecutableStaging.CreateExecutablePath(
+                stagingDirectory,
+                PrivilegedExecutableStaging.VcRedistFilePrefix);
+            path = await _providerFactory().EnsureLocalAsync(dest, ct);
+            if (!_protectAndVerifyExecutable(path, Sha256))
+                throw new VcRedistVerificationException(
+                    "vc_redist failed final placement trust validation.");
             var result = await _installer.InstallAsync(path, ct);
-            try { File.Delete(path); } catch { /* best effort */ }
 
             return result.Success
                 ? new VcRedistPreflightOutcome(VcRedistPreflightState.Installed,
@@ -43,10 +65,15 @@ public sealed class VcRedistPreflight
                 : new VcRedistPreflightOutcome(VcRedistPreflightState.Failed,
                     $"VC++ install did not verify (exit {result.ExitCode}). Install vc_redist.x64.exe manually, then retry.", false);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             return new VcRedistPreflightOutcome(VcRedistPreflightState.Failed,
-                $"VC++ runtime install failed: {ex.Message}. Run: winget install Microsoft.VCRedist.2015+.x64", false);
+                "VC++ runtime setup could not complete. Install vc_redist.x64.exe from Microsoft, then retry. Support code: SETUP-RUNTIME-INSTALL", false);
+        }
+        finally
+        {
+            if (stagingDirectory is not null)
+                _cleanupStagingDirectory(stagingDirectory, path);
         }
     }
 }

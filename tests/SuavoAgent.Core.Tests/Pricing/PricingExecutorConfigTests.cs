@@ -1,8 +1,11 @@
 using ClosedXML.Excel;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using SuavoAgent.Contracts.Ipc;
 using SuavoAgent.Contracts.Pricing;
 using SuavoAgent.Core.Config;
+using SuavoAgent.Core.ActionGrammarV1.Verbs.Actuation;
+using SuavoAgent.Core.Autonomy;
 using SuavoAgent.Core.Ipc;
 using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.State;
@@ -17,6 +20,14 @@ namespace SuavoAgent.Core.Tests.Pricing;
 /// </summary>
 public class PricingExecutorConfigTests : IDisposable
 {
+    private static readonly string TestScreenSignature = new('c', 64);
+    private static readonly PioneerRxAutonomyIdentity TestPmsIdentity = new(
+        "1.2.3",
+        new string('a', 64),
+        new string('b', 64),
+        new string('d', 64),
+        new string('e', 64),
+        7);
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), $"suavo_exec_cfg_{Guid.NewGuid():N}");
     private readonly AgentStateDb _db;
 
@@ -24,6 +35,10 @@ public class PricingExecutorConfigTests : IDisposable
     {
         Directory.CreateDirectory(_tempDir);
         _db = new AgentStateDb(Path.Combine(_tempDir, "state.db"));
+        Assert.True(_db.RecordPricingCloudAuthorityHeartbeat(
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            out _));
     }
 
     public void Dispose()
@@ -56,6 +71,17 @@ public class PricingExecutorConfigTests : IDisposable
         // apply. SQL-first paths may safely lower this via config.
         var options = new AgentOptions();
         Assert.Equal(1500, options.PricingThrottleMs);
+    }
+
+    [Fact]
+    public void PricingPayloadBudget_Enforces_Top500_Before_Actuation()
+    {
+        Assert.Equal(500, PricingResultPayloadBudget.MaximumRequiredRows);
+        Assert.True(
+            PricingResultPayloadBudget.MaximumTransportRows >
+            PricingResultPayloadBudget.MaximumRequiredRows);
+        Assert.True(PricingResultPayloadBudget.CanAdmitWorkload(500, 500));
+        Assert.False(PricingResultPayloadBudget.CanAdmitWorkload(501, 501));
     }
 
     [Fact]
@@ -107,7 +133,11 @@ public class PricingExecutorConfigTests : IDisposable
             runner,
             new UnreachableIpcCommandClient(),
             _db,
-            NullLogger<UiaFirstPricingJobExecutor>.Instance);
+            new FixedGateGateway(new ActuationGateState(true, false, null, null, null)),
+            NullLogger<UiaFirstPricingJobExecutor>.Instance,
+            Microsoft.Extensions.Options.Options.Create(ApprovedUiaOptions()),
+            new FixedPmsIdentityProvider(),
+            PricingTestAuthority.TrustedPublicKeys);
 
         var spec = new PricingJobSpec(
             JobId: "job-blindrun-1",
@@ -130,6 +160,47 @@ public class PricingExecutorConfigTests : IDisposable
         public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct) => Task.FromResult(false);
         public Task<IpcResponse?> SendAsync(IpcRequest request, TimeSpan timeout, CancellationToken ct) =>
             throw new InvalidOperationException("SendAsync must not be called when the pipe is unreachable");
+    }
+
+    [Theory]
+    [InlineData(false, false, false, false, ActuationRejectionCodes.GateDisabled)]
+    [InlineData(true, true, false, false, ActuationRejectionCodes.GateDryRun)]
+    [InlineData(true, false, true, false, ActuationRejectionCodes.KillSwitchTripped)]
+    [InlineData(true, false, false, true, ActuationRejectionCodes.CompromiseDetected)]
+    public void PricingActuationPreflight_RejectsEveryClosedLiveGateAxis(
+        bool enabled, bool dryRun, bool killed, bool compromised, string expected)
+    {
+        var state = new ActuationGateState(
+            enabled,
+            dryRun,
+            null,
+            null,
+            killed ? DateTimeOffset.UtcNow : null,
+            CompromiseDetected: compromised);
+
+        Assert.Equal(expected, PricingActuationPreflight.RejectionCode(state, DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
+    public void PricingActuationPreflight_RejectsActiveUserPause()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var state = new ActuationGateState(true, false, now.AddMinutes(1), "user", null);
+
+        Assert.Equal(ActuationRejectionCodes.GatePaused, PricingActuationPreflight.RejectionCode(state, now));
+    }
+
+    private sealed class FixedGateGateway(ActuationGateState state) : IActuationGateway
+    {
+        public Task<ActuationGateState> GetStateAsync(CancellationToken ct) => Task.FromResult(state);
+        public Task<ActuationResult> ClickByLabelAsync(ClickByLabelRequest req, CancellationToken ct) => throw new NotSupportedException();
+        public Task<ActuationResult> ClickBySignatureAsync(ClickBySignatureRequest req, CancellationToken ct) => throw new NotSupportedException();
+        public Task<ActuationResult> TypeTextAsync(TypeTextRequest req, CancellationToken ct) => throw new NotSupportedException();
+        public Task<ActuationResult> PressKeysAsync(PressKeysRequest req, CancellationToken ct) => throw new NotSupportedException();
+        public Task<ActuationResult> LaunchSandboxAppAsync(LaunchSandboxAppRequest req, CancellationToken ct) => throw new NotSupportedException();
+        public Task<ActuationResult> ReloadAllowlistAsync(CancellationToken ct) => throw new NotSupportedException();
+        public Task<ActuationResult> AssertElementAsync(AssertElementRequest req, CancellationToken ct) => throw new NotSupportedException();
+        public Task<ActuationResult> DiscoverElementsAsync(DiscoverElementsRequest req, CancellationToken ct) => throw new NotSupportedException();
     }
 
     [Fact]
@@ -165,7 +236,7 @@ public class PricingExecutorConfigTests : IDisposable
         var runner = NewIpcRunner();
         var deadHelper = new CountingNullIpcClient();
 
-        var progress = await runner.RunAsync(spec, deadHelper, CancellationToken.None);
+        var progress = await RunIpcAsync(runner, spec, deadHelper);
 
         Assert.Equal(PricingJobStatus.Halted, progress.Status);                       // distinct, resumable status
         Assert.Equal("helper_unreachable", progress.HaltReason);                      // stable code threaded to the cockpit badge
@@ -185,23 +256,282 @@ public class PricingExecutorConfigTests : IDisposable
         var runner = NewIpcRunner();
         var flakyHelper = new TwoNullThenReachableIpcClient(); // null, null, reachable, repeating
 
-        var progress = await runner.RunAsync(spec, flakyHelper, CancellationToken.None);
+        var progress = await RunIpcAsync(runner, spec, flakyHelper);
 
-        Assert.Equal(PricingJobStatus.Completed, progress.Status); // never 3 consecutive nulls → never aborts
+        Assert.Equal(PricingJobStatus.Failed, progress.Status); // not halted, but row failures still forbid success
+        Assert.Equal("pricing_job_failed", progress.HaltReason);
         Assert.Equal(9, flakyHelper.SendCount);                    // every row attempted exactly once
+    }
+
+    [Fact]
+    public async Task UiaFirstExecutor_NoMatch_WritesReviewOutputButReturnsFailed()
+    {
+        var xlsx = CreateNdcWorkbook(rowCount: 1);
+        var spec = NewSpec(xlsx, "job-uia-no-match");
+        var ipc = new InteractiveNoMatchIpcClient();
+        PricingTestAuthority.InstallApproval(_db, ApprovedUiaContract());
+        var executor = new UiaFirstPricingJobExecutor(
+            NewIpcRunner(),
+            ipc,
+            _db,
+            new FixedGateGateway(new ActuationGateState(true, false, null, null, null)),
+            NullLogger<UiaFirstPricingJobExecutor>.Instance,
+            Microsoft.Extensions.Options.Options.Create(ApprovedUiaOptions()),
+            new FixedPmsIdentityProvider(),
+            PricingTestAuthority.TrustedPublicKeys);
+
+        var result = await executor.RunAsync(spec, CancellationToken.None);
+
+        Assert.False(result.Ok);
+        Assert.Equal(PricingJobStatus.Failed, result.Progress.Status);
+        Assert.Equal("pricing_job_failed", result.Progress.HaltReason);
+        Assert.Equal(0, result.Progress.CompletedItems);
+        Assert.Equal(1, result.Progress.FailedItems);
+        Assert.Equal(1, ipc.LookupCount);
+        Assert.Single(Directory.GetFiles(_tempDir, "*-priced-*.xlsx"));
+    }
+
+    [Fact]
+    public async Task RunAsync_ActuationGateCloses_HaltsImmediately_AndLeavesCurrentRowResumable()
+    {
+        var xlsx = CreateNdcWorkbook(rowCount: 10);
+        var spec = NewSpec(xlsx, "job-gate-closed");
+        var runner = NewIpcRunner();
+        var helper = new GateClosedIpcClient();
+
+        var progress = await RunIpcAsync(runner, spec, helper);
+
+        Assert.Equal(PricingJobStatus.Halted, progress.Status);
+        Assert.Equal("actuation_gate_closed", progress.HaltReason);
+        Assert.Equal(1, helper.SendCount);
+        Assert.Empty(_db.GetPricingResults(spec.JobId));
+    }
+
+    [Fact]
+    public async Task RunAsync_HelperInnerResultIdentityMismatch_HaltsWithoutPersistence()
+    {
+        var xlsx = CreateNdcWorkbook(rowCount: 1);
+        var spec = NewSpec(xlsx, "job-helper-inner-mismatch");
+
+        var progress = await RunIpcAsync(
+            NewIpcRunner(), spec, new MismatchedInnerResultIpcClient());
+
+        Assert.Equal(PricingJobStatus.Halted, progress.Status);
+        Assert.Equal("pricing_result_integrity_failed", progress.HaltReason);
+        Assert.Empty(_db.GetPricingResults(spec.JobId));
+        Assert.Empty(Directory.GetFiles(_tempDir, "*-priced-*.xlsx"));
     }
 
     private PricingJobRunner NewIpcRunner() => new(
         new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
         new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
         _db, NullLogger<PricingJobRunner>.Instance,
-        brainEvaluator: null, interLookupDelay: TimeSpan.Zero);
+        brainEvaluator: null,
+        interLookupDelay: TimeSpan.Zero,
+        trustedApprovalKeys: PricingTestAuthority.TrustedPublicKeys);
+
+    [Fact]
+    public async Task PricingJobRunner_OversizeRequiredPayloadFailsBeforeAnyHelperActuation()
+    {
+        var xlsx = CreateNdcWorkbook(
+            PricingResultPayloadBudget.MaximumRequiredRows + 1);
+        var spec = NewSpec(xlsx, "job-payload-oversize");
+        var runner = NewIpcRunner();
+        var helper = new CountingNullIpcClient();
+
+        var progress = await RunIpcAsync(runner, spec, helper);
+
+        Assert.Equal(PricingJobStatus.Failed, progress.Status);
+        Assert.Equal("pricing_result_payload_too_large", progress.HaltReason);
+        Assert.Equal(0, helper.SendCount);
+        Assert.Empty(_db.GetPricingResults(spec.JobId));
+    }
+
+    [Fact]
+    public async Task PricingJobRunner_InvalidHeavyMetricsFailBeforeAnyHelperActuation()
+    {
+        var xlsx = CreateInvalidNdcWorkbook(
+            PricingResultPayloadBudget.MaximumSerializedMetric + 1);
+        var spec = NewSpec(xlsx, "job-invalid-heavy");
+        var runner = NewIpcRunner();
+        var helper = new CountingNullIpcClient();
+
+        var progress = await RunIpcAsync(runner, spec, helper);
+
+        Assert.Equal(PricingJobStatus.Failed, progress.Status);
+        Assert.Equal("pricing_result_payload_too_large", progress.HaltReason);
+        Assert.Equal(PricingResultPayloadBudget.MaximumSerializedMetric + 1, progress.TotalItems);
+        Assert.Equal(0, helper.SendCount);
+        Assert.Empty(_db.GetPricingResults(spec.JobId));
+    }
+
+    [Fact]
+    public async Task PricingJobRunner_InvalidNdc_WritesReviewOutputButReturnsFailed()
+    {
+        var xlsx = CreateInvalidNdcWorkbook(rowCount: 1);
+        var spec = NewSpec(xlsx, "job-uia-invalid-ndc");
+        var helper = new CountingNullIpcClient();
+
+        var progress = await RunIpcAsync(NewIpcRunner(), spec, helper);
+
+        Assert.Equal(PricingJobStatus.Failed, progress.Status);
+        Assert.Equal("pricing_job_failed", progress.HaltReason);
+        Assert.Equal(0, progress.CompletedItems);
+        Assert.Equal(1, progress.FailedItems);
+        Assert.Equal(0, helper.SendCount);
+        Assert.Single(Directory.GetFiles(_tempDir, "*-priced-*.xlsx"));
+    }
+
+    [Fact]
+    public async Task PricingJobRunner_ReportsOnlyFixedPhiFreeLocalPhases()
+    {
+        var updates = new List<PricingJobLocalProgress>();
+        var runner = new PricingJobRunner(
+            new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
+            new ExcelPricingWriter(NullLogger<ExcelPricingWriter>.Instance),
+            _db,
+            NullLogger<PricingJobRunner>.Instance,
+            interLookupDelay: TimeSpan.Zero,
+            trustedApprovalKeys: PricingTestAuthority.TrustedPublicKeys,
+            localProgressObserver: updates.Add);
+        var spec = NewSpec(
+            CreateInvalidNdcWorkbook(rowCount: 1),
+            "job-uia-local-progress");
+
+        await RunIpcAsync(runner, spec, new CountingNullIpcClient());
+
+        Assert.Equal(
+            new[]
+            {
+                PricingJobLocalPhase.PricingItems,
+                PricingJobLocalPhase.PricingItems,
+                PricingJobLocalPhase.CreatingSpreadsheet,
+                PricingJobLocalPhase.VerifyingResults,
+            },
+            updates.Select(update => update.Phase));
+        Assert.Equal(1, updates[^1].ProcessedItems);
+        Assert.Equal(1, updates[^1].TotalItems);
+        Assert.Equal(1, updates[^1].NeedsReviewItems);
+    }
+
+    [Fact]
+    public async Task PricingJobRunner_RevocationAfterTempFlush_NeverPublishesSibling()
+    {
+        var issuedAt = DateTimeOffset.UtcNow;
+        var contract = PricingTestAuthority.Contract(modality: "uia");
+        var grant = PricingTestAuthority.InstallApproval(
+            _db,
+            contract,
+            issuedAt,
+            issuedAt.AddDays(7));
+        var authority = PricingObservationPolicy.TryAdmitAuthority(
+            grant,
+            PricingTestAuthority.PharmacyId,
+            PricingTestAuthority.AgentId,
+            PricingTestAuthority.MachineFingerprint,
+            contract,
+            issuedAt,
+            PricingTestAuthority.TrustedPublicKeys,
+            out var authorityCode);
+        Assert.NotNull(authority);
+        Assert.Equal("pricing_cost_basis_approval_admitted", authorityCode);
+        var xlsx = CreateInvalidNdcWorkbook(rowCount: 1);
+        var sourceBytes = File.ReadAllBytes(xlsx);
+        var outputPath = Path.Combine(_tempDir, "uia-revoked-priced.xlsx");
+        AgentStateDb.PricingApprovalLedgerResult? revocationResult = null;
+        var writer = new ExcelPricingWriter(
+            NullLogger<ExcelPricingWriter>.Instance,
+            _ => outputPath,
+            () =>
+            {
+                var revokedAt = DateTimeOffset.UtcNow;
+                revocationResult = PricingTestAuthority.InstallRevocation(
+                    _db,
+                    PricingTestAuthority.Revocation(grant, revokedAt),
+                    revokedAt);
+            });
+        var runner = new PricingJobRunner(
+            new ExcelPricingReader(NullLogger<ExcelPricingReader>.Instance),
+            writer,
+            _db,
+            NullLogger<PricingJobRunner>.Instance,
+            brainEvaluator: null,
+            interLookupDelay: TimeSpan.Zero,
+            trustedApprovalKeys: PricingTestAuthority.TrustedPublicKeys);
+        var spec = NewSpec(xlsx, "job-uia-revoke-before-publication");
+
+        var progress = await runner.RunAsync(
+            spec,
+            new CountingNullIpcClient(),
+            contract,
+            authority!,
+            CancellationToken.None);
+
+        Assert.NotNull(revocationResult);
+        Assert.True(revocationResult!.Succeeded, revocationResult.Code);
+        Assert.Equal(PricingJobStatus.Halted, progress.Status);
+        Assert.Equal("pricing_cost_basis_approval_revoked", progress.HaltReason);
+        Assert.False(File.Exists(outputPath));
+        Assert.Equal(sourceBytes, File.ReadAllBytes(xlsx));
+        Assert.Empty(Directory.EnumerateFiles(_tempDir, ".suavo-priced-*"));
+    }
 
     private static PricingJobSpec NewSpec(string xlsx, string jobId) => new(
         JobId: jobId, ExcelPath: xlsx,
         NdcColumn: PricingJobDefaults.NdcColumn,
         SupplierColumn: PricingJobDefaults.SupplierColumn,
         CostColumn: PricingJobDefaults.CostColumn);
+
+    private Task<PricingJobProgress> RunIpcAsync(
+        PricingJobRunner runner,
+        PricingJobSpec spec,
+        IIpcCommandClient client)
+    {
+        var contract = PricingTestAuthority.Contract(modality: "uia");
+        var authority = PricingTestAuthority.InstallAuthority(_db, contract);
+        return runner.RunAsync(
+            spec,
+            client,
+            contract,
+            authority,
+            CancellationToken.None);
+    }
+
+    private static AgentOptions ApprovedUiaOptions()
+    {
+        var contract = ApprovedUiaContract();
+        return new AgentOptions
+        {
+            PharmacyId = PricingTestAuthority.PharmacyId,
+            AgentId = PricingTestAuthority.AgentId,
+            MachineFingerprint = PricingTestAuthority.MachineFingerprint,
+            PricingExecutor = PricingExecutorMode.UiaFirst,
+            PricingCostBasisApproval = PricingTestAuthority.ApprovalOptions(contract),
+        };
+    }
+
+    private static PricingObservationContract ApprovedUiaContract()
+    {
+        var pmsFingerprint = PricingObservationPolicy.Digest(
+            "pioneerrx_live_process_identity_v1",
+            TestPmsIdentity.FileVersion,
+            TestPmsIdentity.ExecutableSha256,
+            TestPmsIdentity.SignerCertificateSha256,
+            TestPmsIdentity.ApprovalReceiptDigest,
+            TestPmsIdentity.AuthorityDigest,
+            TestPmsIdentity.ApprovalCounter.ToString(
+                System.Globalization.CultureInfo.InvariantCulture));
+        return PricingObservationPolicy.CreateUia(
+            "uia",
+            pmsFingerprint,
+            TestScreenSignature,
+            Array.Empty<SuavoAgent.Contracts.Learning.SelectorPatch>());
+    }
+
+    private sealed class FixedPmsIdentityProvider : IPioneerRxAutonomyIdentityProvider
+    {
+        public PioneerRxAutonomyIdentity? Current(DateTimeOffset now) => TestPmsIdentity;
+    }
 
     private string CreateNdcWorkbook(int rowCount)
     {
@@ -212,6 +542,18 @@ public class PricingExecutorConfigTests : IDisposable
         for (int i = 0; i < rowCount; i++)
             ws.Cell(i + 2, 1).Value = $"{50000 + i:D5}-{1000 + i:D4}-01"; // valid 5-4-2 NDC format
         wb.SaveAs(path);
+        return path;
+    }
+
+    private string CreateInvalidNdcWorkbook(int rowCount)
+    {
+        var path = Path.Combine(_tempDir, $"{Guid.NewGuid():N}.xlsx");
+        using var workbook = new XLWorkbook();
+        var sheet = workbook.Worksheets.Add("Sheet1");
+        sheet.Cell(1, 1).Value = PricingJobDefaults.NdcColumn;
+        for (var index = 0; index < rowCount; index++)
+            sheet.Cell(index + 2, 1).Value = $"invalid-{index:D4}";
+        workbook.SaveAs(path);
         return path;
     }
 
@@ -243,6 +585,94 @@ public class PricingExecutorConfigTests : IDisposable
                     request.Id, IpcStatus.InternalError, request.Command, null,
                     new IpcError("E_BUSY", "supplier grid busy", Retryable: true, AttemptCount: 0)));
             return Task.FromResult<IpcResponse?>(null);
+        }
+    }
+
+    private sealed class GateClosedIpcClient : IIpcCommandClient
+    {
+        public int SendCount;
+        public bool IsConnected => true;
+        public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+
+        public Task<IpcResponse?> SendAsync(IpcRequest request, TimeSpan timeout, CancellationToken ct)
+        {
+            SendCount++;
+            var pricing = JsonSerializer.Deserialize<NdcPricingRequest>(request.Data!.Value)!;
+            var result = new SupplierPriceResult(
+                pricing.JobId, pricing.RowIndex, pricing.Ndc, false, null, null,
+                PricingSafetyErrors.ActuationGateClosed(ActuationRejectionCodes.GatePaused));
+            return Task.FromResult<IpcResponse?>(new IpcResponse(
+                request.Id,
+                IpcStatus.Ok,
+                request.Command,
+                JsonSerializer.SerializeToElement(result),
+                null));
+        }
+    }
+
+    private sealed class MismatchedInnerResultIpcClient : IIpcCommandClient
+    {
+        public bool IsConnected => true;
+        public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct) =>
+            Task.FromResult(true);
+
+        public Task<IpcResponse?> SendAsync(
+            IpcRequest request, TimeSpan timeout, CancellationToken ct)
+        {
+            var pricing = JsonSerializer.Deserialize<NdcPricingRequest>(
+                request.Data!.Value)!;
+            var result = new SupplierPriceResult(
+                pricing.JobId,
+                pricing.RowIndex,
+                "00093512401",
+                true,
+                "McKesson",
+                0.01m,
+                null);
+            return Task.FromResult<IpcResponse?>(new IpcResponse(
+                request.Id,
+                IpcStatus.Ok,
+                request.Command,
+                JsonSerializer.SerializeToElement(result),
+                null));
+        }
+    }
+
+    private sealed class InteractiveNoMatchIpcClient : IIpcCommandClient
+    {
+        public int LookupCount { get; private set; }
+        public bool IsConnected => true;
+        public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+
+        public Task<IpcResponse?> SendAsync(IpcRequest request, TimeSpan timeout, CancellationToken ct)
+        {
+            if (request.Command == IpcCommands.Ping)
+            {
+                var data = JsonSerializer.SerializeToElement(
+                    new HelperPingInfo(1234, 1, 1, true));
+                return Task.FromResult<IpcResponse?>(new IpcResponse(
+                    request.Id, IpcStatus.Ok, request.Command, data, null));
+            }
+
+            if (request.Command == IpcCommands.PricingObservationContext)
+            {
+                var data = JsonSerializer.SerializeToElement(
+                    new PricingScreenObservationContext(4321, TestScreenSignature));
+                return Task.FromResult<IpcResponse?>(new IpcResponse(
+                    request.Id, IpcStatus.Ok, request.Command, data, null));
+            }
+
+            var pricing = JsonSerializer.Deserialize<NdcPricingRequest>(request.Data!.Value)!;
+            LookupCount++;
+            var result = new SupplierPriceResult(
+                pricing.JobId, pricing.RowIndex, pricing.Ndc,
+                false, null, null, "No supplier rows found");
+            return Task.FromResult<IpcResponse?>(new IpcResponse(
+                request.Id,
+                IpcStatus.Ok,
+                request.Command,
+                JsonSerializer.SerializeToElement(result),
+                null));
         }
     }
 }

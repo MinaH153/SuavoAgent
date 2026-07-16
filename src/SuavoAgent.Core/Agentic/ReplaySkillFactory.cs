@@ -21,16 +21,13 @@ public static class ReplaySkillFactory
         IServiceProvider services,
         MissionCharter charter,
         AuditChain audit,
-        DateTimeOffset deadlineUtc)
+        DateTimeOffset deadlineUtc,
+        ActuationGateState? helperGateState)
     {
         var perceiver = new HelperPerceiver(services.GetRequiredService<IIpcCommandClient>());
 
-        // Core has no live-gate IPC, so a synthetic clean state (matches NavigateLoopFactory); the
-        // authoritative kill/pause enforcement is Helper-side at act time, and the per-action allowlist
-        // check is the structural confinement.
         var safety = new SandboxExploreSafetyGate(
-            gateState: () => new ActuationGateState(
-                Enabled: true, DryRun: false, PausedUntilUtc: null, PauseReason: null, KillSwitchTrippedUtc: null));
+            gateState: () => helperGateState);
 
         var actuator = new VerbActuator(
             services.GetRequiredService<VerbRegistry>(),

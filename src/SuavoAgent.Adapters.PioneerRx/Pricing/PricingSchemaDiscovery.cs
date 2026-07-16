@@ -35,10 +35,10 @@ public sealed class PricingSchemaDiscovery
         {
             columns = await FetchColumnsAsync(conn, ct);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.LogWarning(ex, "PricingSchemaDiscovery: metadata query failed");
-            return PricingDiscoveryOutcome.Fail($"Metadata query failed: {ex.Message}");
+            _logger.LogWarning("PricingSchemaDiscovery: metadata query failed");
+            return PricingDiscoveryOutcome.Fail("Metadata query failed");
         }
 
         _logger.LogInformation(
@@ -59,12 +59,49 @@ public sealed class PricingSchemaDiscovery
         return outcome;
     }
 
+    /// <summary>
+    /// Resolves the aggregate top-dispensed source from the same bounded Inventory metadata
+    /// snapshot used by pricing discovery. No prescription or patient rows are inspected.
+    /// </summary>
+    public async Task<TopDispensedSpec?> DiscoverTopDispensedSpecAsync(
+        SqlConnection conn,
+        TopDispensedColumnOverrides overrides,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(conn);
+        ArgumentNullException.ThrowIfNull(overrides);
+        if (conn.State != System.Data.ConnectionState.Open) return null;
+
+        try
+        {
+            var columns = await FetchColumnsAsync(conn, ct).ConfigureAwait(false);
+            var pricing = PricingSchemaResolver.Resolve(columns);
+            if (!pricing.Ok || pricing.Schema?.ItemJoin is null) return null;
+            return TopDispensedSchemaResolver.Resolve(
+                pricing.Schema.ItemJoin,
+                columns,
+                overrides);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                "PricingSchemaDiscovery: top-dispensed metadata resolution failed ({Type})",
+                exception.GetType().Name);
+            return null;
+        }
+    }
+
     private static async Task<List<InventoryColumnInfo>> FetchColumnsAsync(
         SqlConnection conn, CancellationToken ct)
     {
         const string sql = @"
 SELECT s.name AS SchemaName, t.name AS TableName, c.name AS ColumnName,
-       tp.name AS DataTypeName, c.is_nullable AS IsNullable
+       tp.name AS DataTypeName, c.is_nullable AS IsNullable,
+       c.max_length AS MaxLength, c.precision AS Precision, c.scale AS Scale
 FROM sys.tables t
 JOIN sys.schemas s ON s.schema_id = t.schema_id
 JOIN sys.columns c ON c.object_id = t.object_id
@@ -88,7 +125,10 @@ ORDER BY s.name, t.name, c.column_id;";
                 TableName: reader.GetString(1),
                 ColumnName: reader.GetString(2),
                 DataType: reader.GetString(3),
-                IsNullable: reader.GetBoolean(4)));
+                IsNullable: reader.GetBoolean(4),
+                MaxLength: Convert.ToInt32(reader.GetValue(5)),
+                Precision: Convert.ToInt32(reader.GetValue(6)),
+                Scale: Convert.ToInt32(reader.GetValue(7))));
         }
         return rows;
     }

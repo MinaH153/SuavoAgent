@@ -21,7 +21,7 @@ public class RuleEngineTests
         var result = engine.Evaluate(ctx);
 
         Assert.Equal(MatchOutcome.NoMatch, result.Outcome);
-        Assert.Contains("nonexistent", result.Reason);
+        Assert.Equal("rule_no_match", result.Reason);
     }
 
     [Fact]
@@ -128,7 +128,7 @@ public class RuleEngineTests
 
         Assert.Equal(MatchOutcome.NoMatch, result.Outcome);
         Assert.Equal("r1", result.MatchedRule!.Id);
-        Assert.Contains("Shadow", result.Reason);
+        Assert.Equal("rule_shadow_match", result.Reason);
     }
 
     // --- Predicate: process name glob ---------------------------------------

@@ -35,6 +35,7 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
 {
     private readonly string _pipeName;
     private readonly ILogger<IpcCommandClient> _logger;
+    private readonly VisionStateHandshake? _visionStateHandshake;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private NamedPipeClientStream? _pipe;
 
@@ -47,10 +48,14 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
     /// <summary>A command round-trip is in flight (the send lock is held). See <see cref="IIpcCommandClient.IsBusy"/>.</summary>
     public bool IsBusy => _lock.CurrentCount == 0;
 
-    public IpcCommandClient(string pipeName, ILogger<IpcCommandClient> logger)
+    public IpcCommandClient(
+        string pipeName,
+        ILogger<IpcCommandClient> logger,
+        VisionStateHandshake? visionStateHandshake = null)
     {
         _pipeName = pipeName;
         _logger = logger;
+        _visionStateHandshake = visionStateHandshake;
     }
 
     public async Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken ct)
@@ -78,17 +83,23 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
         try
         {
             // Identification level EXPLICITLY: the Helper's primary identity proof is reading
-            // this client's token SID via RunAsClient impersonation. The parameterless overload
-            // sends no SQOS at all, leaving the impersonation ceiling to OS defaults — on field
-            // boxes that rung then comes back inconclusive and the de-privileged Helper falls
-            // through to image-path reads that ACCESS_DENY (the command-pipe strand).
+            // this client's enabled token groups from the pipe impersonation token. The
+            // parameterless overload sends no SQOS at all, leaving the impersonation ceiling to
+            // OS defaults and making that identity check inconclusive on field boxes.
             // Identification is the least privilege that still lets the server read WHO we are.
             var pipe = new NamedPipeClientStream(
                 ".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous,
                 System.Security.Principal.TokenImpersonationLevel.Identification);
             await pipe.ConnectAsync((int)timeout.TotalMilliseconds, ct);
             _pipe = pipe;
-            _logger.LogInformation("IpcCommandClient connected to Helper on pipe {Name}", _pipeName);
+            if (_visionStateHandshake is not null &&
+                !await PerformVisionHandshakeAsync(_visionStateHandshake, ct).ConfigureAwait(false))
+            {
+                TeardownPipe();
+                _logger.LogError("core.ipc.vision_state_handshake_failed");
+                return false;
+            }
+            _logger.LogInformation("core.ipc.command_channel_connected");
             return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -97,9 +108,42 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "IpcCommandClient failed to connect to pipe {Name}", _pipeName);
+            _logger.LogSafeWarning(ex);
             return false;
         }
+    }
+
+    private async Task<bool> PerformVisionHandshakeAsync(
+        VisionStateHandshake handshake,
+        CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(2));
+        var request = new IpcRequest(
+            Guid.NewGuid().ToString("N"),
+            IpcCommands.VisionStateHandshake,
+            VisionStateHandshake.CurrentSchemaVersion,
+            JsonSerializer.SerializeToElement(handshake));
+        var json = JsonSerializer.Serialize(request);
+        await IpcFraming.WriteFrameAsync(_pipe!, json, deadline.Token).ConfigureAwait(false);
+        var responseJson = await IpcFraming.ReadFrameAsync(_pipe!, deadline.Token)
+            .ConfigureAwait(false);
+        if (responseJson is null) return false;
+        var response = JsonSerializer.Deserialize<IpcResponse>(responseJson);
+        if (response is null || response.Id != request.Id ||
+            response.Command != IpcCommands.VisionStateHandshake ||
+            response.Status != IpcStatus.Ok || response.Data is not { } data)
+            return false;
+        return data.TryGetProperty("matched", out var matched) && matched.ValueKind == JsonValueKind.True &&
+               data.TryGetProperty("generation", out var generation) &&
+               generation.TryGetInt64(out var confirmedGeneration) &&
+               confirmedGeneration == handshake.Generation &&
+               data.TryGetProperty("configDigest", out var digest) &&
+               digest.ValueKind == JsonValueKind.String &&
+               string.Equals(
+                   digest.GetString(),
+                   handshake.ConfigDigest,
+                   StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -141,13 +185,13 @@ public sealed class IpcCommandClient : IAsyncDisposable, IIpcCommandClient
         {
             // [C-2] Timeout — teardown so next request doesn't read stale response
             TeardownPipe();
-            _logger.LogWarning("IpcCommandClient timeout for {Command}", request.Command);
+            _logger.LogWarning("core.ipc.command_timeout");
             return null;
         }
         catch (Exception ex)
         {
             TeardownPipe();
-            _logger.LogWarning(ex, "IpcCommandClient send error for {Command}", request.Command);
+            _logger.LogSafeWarning(ex);
             return null;
         }
         finally

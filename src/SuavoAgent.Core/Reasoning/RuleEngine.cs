@@ -29,17 +29,22 @@ public sealed class RuleEngine
 
     private readonly ILogger<RuleEngine> _logger;
     private readonly System.Collections.Frozen.FrozenDictionary<string, System.Collections.Immutable.ImmutableArray<Rule>> _bySkill;
+    private readonly IActiveLearnedRuleRegistry? _activeLearnedRules;
     private readonly int _totalRules;
 
     /// <summary>Number of rules loaded — useful for DI logging and /health.</summary>
-    public int RuleCount => _totalRules;
+    public int RuleCount => _totalRules + (_activeLearnedRules?.Count ?? 0);
 
     /// <summary>Set of skill ids the engine knows about.</summary>
     public IReadOnlyCollection<string> KnownSkills => (IReadOnlyCollection<string>)_bySkill.Keys;
 
-    public RuleEngine(IEnumerable<Rule> rules, ILogger<RuleEngine> logger)
+    public RuleEngine(
+        IEnumerable<Rule> rules,
+        ILogger<RuleEngine> logger,
+        IActiveLearnedRuleRegistry? activeLearnedRules = null)
     {
         _logger = logger;
+        _activeLearnedRules = activeLearnedRules;
 
         var dict = rules
             .GroupBy(r => r.SkillId)
@@ -72,15 +77,13 @@ public sealed class RuleEngine
 
                 if (!gate.AutonomousOk)
                 {
-                    _logger.LogInformation(
-                        "RuleEngine: precondition {Id} blocked skill {Skill} — operator approval required",
-                        gate.Id, ctx.SkillId);
+                    _logger.LogInformation("core.rule_engine.precondition_blocked");
                     return new EvaluationResult
                     {
                         Outcome = MatchOutcome.Blocked,
                         MatchedRule = gate,
                         Actions = gate.Then,
-                        Reason = $"Blocked by precondition '{gate.Id}'",
+                        Reason = "precondition_blocked",
                     };
                 }
                 // Autonomous-ok preconditions just mean "safety clear, keep going".
@@ -88,64 +91,69 @@ public sealed class RuleEngine
             }
         }
 
-        if (!_bySkill.TryGetValue(ctx.SkillId, out var candidates))
+        // Immutable built-in/hand-authored rules always run first. A live learned rule is consulted
+        // only when none of those rules match, so runtime admission can never replace a shipped guard.
+        if (_bySkill.TryGetValue(ctx.SkillId, out var candidates))
         {
-            return new EvaluationResult
-            {
-                Outcome = MatchOutcome.NoMatch,
-                Reason = $"No rules registered for skill '{ctx.SkillId}'",
-            };
+            var staticMatch = EvaluateCandidates(candidates, ctx, shadowMode);
+            if (staticMatch is not null) return staticMatch;
         }
 
+        var learnedCandidates = _activeLearnedRules?.GetRulesForSkill(ctx.SkillId)
+            ?? Array.Empty<Rule>();
+        var learnedMatch = EvaluateCandidates(learnedCandidates, ctx, shadowMode);
+        if (learnedMatch is not null) return learnedMatch;
+
+        return new EvaluationResult
+        {
+            Outcome = MatchOutcome.NoMatch,
+            Reason = "rule_no_match",
+        };
+    }
+
+    private EvaluationResult? EvaluateCandidates(
+        IEnumerable<Rule> candidates,
+        RuleContext ctx,
+        bool shadowMode)
+    {
         foreach (var rule in candidates)
         {
-            if (!PredicateMatches(rule.When, ctx))
-                continue;
+            if (!PredicateMatches(rule.When, ctx)) continue;
 
-            // Guard: autonomousOk=false always goes to operator approval.
             if (!rule.AutonomousOk)
             {
-                _logger.LogInformation(
-                    "RuleEngine: rule {RuleId} matched but requires operator approval (autonomousOk=false)",
-                    rule.Id);
+                _logger.LogInformation("core.rule_engine.operator_approval_required");
                 return new EvaluationResult
                 {
                     Outcome = MatchOutcome.Blocked,
                     MatchedRule = rule,
                     Actions = rule.Then,
-                    Reason = "Rule requires operator approval",
+                    Reason = "rule_operator_approval_required",
                 };
             }
 
             if (shadowMode)
             {
                 _logger.LogInformation(
-                    "RuleEngine: [SHADOW] rule {RuleId} would match — returning NoMatch",
-                    rule.Id);
+                    "core.rule_engine.shadow_match");
                 return new EvaluationResult
                 {
                     Outcome = MatchOutcome.NoMatch,
                     MatchedRule = rule,
-                    Reason = $"Shadow mode — rule '{rule.Id}' would have matched",
+                    Reason = "rule_shadow_match",
                 };
             }
 
-            _logger.LogDebug("RuleEngine: rule {RuleId} matched for skill {Skill}", rule.Id, ctx.SkillId);
+            _logger.LogDebug("core.rule_engine.rule_matched");
             return new EvaluationResult
             {
                 Outcome = MatchOutcome.Matched,
                 MatchedRule = rule,
                 Actions = rule.Then,
-                Reason = $"Matched rule '{rule.Id}'",
+                Reason = "rule_matched",
             };
         }
-
-        return new EvaluationResult
-        {
-            Outcome = MatchOutcome.NoMatch,
-            Reason = $"No rule in skill '{ctx.SkillId}' matched context "
-                     + $"(process={ctx.ProcessName}, elements={ctx.VisibleElements.Count})",
-        };
+        return null;
     }
 
     /// <summary>
@@ -340,7 +348,7 @@ public sealed class RuleEngine
             catch (ArgumentException ex)
             {
                 throw new InvalidOperationException(
-                    $"Rule '{ruleId}' has invalid windowTitlePattern: {ex.Message}", ex);
+                    $"rule_window_pattern_invalid:{ex.GetType().Name}", ex);
             }
         }
     }

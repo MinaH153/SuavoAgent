@@ -61,7 +61,7 @@ public sealed class DefaultFileEnumerator : IFileEnumerator
             catch (IOException ex)
             {
                 ioErrors++;
-                _logger?.LogDebug(ex, "Enumerator skipped root {Path}", root.Path);
+                _logger?.LogSafeDebug(ex);
                 continue;
             }
 
@@ -80,7 +80,7 @@ public sealed class DefaultFileEnumerator : IFileEnumerator
                 catch (IOException ex)
                 {
                     ioErrors++;
-                    _logger?.LogDebug(ex, "Enumerator iteration halted in {Path}", root.Path);
+                    _logger?.LogSafeDebug(ex);
                     break;
                 }
                 if (!hasNext) break;
