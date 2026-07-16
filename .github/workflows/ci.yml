@@ -78,7 +78,7 @@ jobs:
             tests/test_release_workflow_gates.py \
             -v
           python3 scripts/aggregate_coverage.py TestResults/coverage \
-            --expect-reports 10 \
+            --expect-reports 20 \
             --require-all-projects \
             --json TestResults/coverage-summary.json
 
@@ -164,7 +164,7 @@ jobs:
             tests/test_release_workflow_gates.py \
             -v
           python3 scripts/aggregate_coverage.py TestResults/combined \
-            --expect-reports 20 \
+            --expect-reports 40 \
             --require-all-projects \
             --minimum-line 61 \
             --minimum-branch 52 \

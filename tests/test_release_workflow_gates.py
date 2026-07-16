@@ -537,7 +537,7 @@ class ReleaseWorkflowGateTests(unittest.TestCase):
         self.assertIn("DeterministicReport=true", linux)
         self.assertIn("DeterministicReport=true", windows)
         self.assertIn("needs: [build-and-test, windows-coverage]", merger)
-        self.assertIn("--expect-reports 20", merger)
+        self.assertIn("--expect-reports 40", merger)
         self.assertIn("--require-all-projects", merger)
 
     def test_repository_does_not_break_coverlet_with_a_synthetic_path_map(self):
