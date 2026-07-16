@@ -8,8 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import unittest
-from unittest import mock
+from unittest import TestCase, main, mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -354,7 +353,7 @@ class ConvergenceFixture:
         )
 
 
-class V1BridgeConvergenceTests(unittest.TestCase):
+class V1BridgeConvergenceTests(TestCase):
     def test_install_receipt_matches_native_and_web_golden_vector(self) -> None:
         receipt = {
             "schemaVersion": 1,
@@ -773,4 +772,4 @@ class V1BridgeConvergenceTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()

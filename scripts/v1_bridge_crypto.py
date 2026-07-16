@@ -15,6 +15,10 @@ class HistoricKeyError(ValueError):
     pass
 
 
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+
+
 class HistoricKey:
     def __init__(self, descriptor: int) -> None:
         self._descriptor = descriptor
@@ -70,10 +74,7 @@ def open_historic_key(path: Path) -> Iterator[HistoricKey]:
             yield HistoricKey(descriptor)
         finally:
             after = os.fstat(descriptor)
-            identity = lambda value: (
-                value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
-            )
-            if identity(before) != identity(after):
+            if _stat_identity(before) != _stat_identity(after):
                 raise HistoricKeyError("v1 bridge key changed during the signing ceremony")
     finally:
         os.close(descriptor)

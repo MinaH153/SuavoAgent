@@ -212,7 +212,7 @@ def discover_reports(input_path: Path) -> List[Path]:
                 raise CoverageDataError(f"coverage report escapes input directory: {candidate}")
             if resolved.is_file():
                 reports.append(resolved)
-        reports = sorted(set(reports), key=lambda value: str(value))
+        reports = sorted(set(reports), key=str)
     else:
         raise CoverageDataError(f"coverage input does not exist: {requested}")
 
@@ -402,7 +402,7 @@ def _resolve_source_file(
 
     eligible = sorted(
         (candidate for candidate in candidates if candidate in authored_sources),
-        key=lambda value: str(value),
+        key=str,
     )
     if len(eligible) > 1:
         rendered = ", ".join(str(value) for value in eligible)
@@ -519,7 +519,7 @@ def aggregate_coverage(
     require_all_projects: bool = False,
 ) -> CoverageSummary:
     root = repo_root.resolve()
-    unique_reports = sorted({Path(report).resolve() for report in reports}, key=lambda value: str(value))
+    unique_reports = sorted({Path(report).resolve() for report in reports}, key=str)
     if not unique_reports:
         raise CoverageDataError("no coverage reports were supplied")
     if expect_reports is not None and len(unique_reports) != expect_reports:
@@ -591,7 +591,7 @@ def aggregate_coverage(
             )
         represented_exclusions = sorted(
             noninstrumentable_sources & included_sources,
-            key=lambda value: str(value),
+            key=str,
         )
         if represented_exclusions:
             rendered = ", ".join(
@@ -602,7 +602,7 @@ def aggregate_coverage(
                 + rendered
             )
         expected_sources = authored_sources - noninstrumentable_sources
-        missing_sources = sorted(expected_sources - included_sources, key=lambda value: str(value))
+        missing_sources = sorted(expected_sources - included_sources, key=str)
         if missing_sources:
             rendered = ", ".join(
                 str(source.relative_to(root)) for source in missing_sources[:20]

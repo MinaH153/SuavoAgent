@@ -7,6 +7,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -216,22 +217,15 @@ def assert_normal_release(
         raise BridgeError(
             "normal release/hotfix requires OTA_FULL_COHORT_MANIFEST exactly true"
         )
-    from v1_bridge_convergence import (
-        DEFAULT_CLAIM,
-        DEFAULT_EVIDENCE,
-        DEFAULT_INVENTORY,
-        DEFAULT_INVENTORY_SIGNATURE,
-        DEFAULT_SIGNATURE,
-        verify_convergence_claim,
-    )
+    convergence = importlib.import_module("v1_bridge_convergence")
 
-    verify_convergence_claim(
+    convergence.verify_convergence_claim(
         registry_path,
-        evidence_path or DEFAULT_EVIDENCE,
-        claim_path or DEFAULT_CLAIM,
-        signature_path or DEFAULT_SIGNATURE,
-        inventory_path or DEFAULT_INVENTORY,
-        inventory_signature_path or DEFAULT_INVENTORY_SIGNATURE,
+        evidence_path or convergence.DEFAULT_EVIDENCE,
+        claim_path or convergence.DEFAULT_CLAIM,
+        signature_path or convergence.DEFAULT_SIGNATURE,
+        inventory_path or convergence.DEFAULT_INVENTORY,
+        inventory_signature_path or convergence.DEFAULT_INVENTORY_SIGNATURE,
     )
 
 
