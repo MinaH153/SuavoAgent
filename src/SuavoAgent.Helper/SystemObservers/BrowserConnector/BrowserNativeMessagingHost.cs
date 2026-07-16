@@ -577,7 +577,7 @@ public sealed class BrowserNativeMessagingHost : IDisposable
             ? reasonCode
             : BrowserConnectorReasonCodes.InternalFailure;
         Report(BrowserConnectorState.Degraded, safeReason);
-        _logger.Warning("Browser connector rejected ({ReasonCode})", safeReason);
+        _logger.Warning("Browser connector rejected.");
         return new(false, safeReason, acceptedMessages);
     }
 

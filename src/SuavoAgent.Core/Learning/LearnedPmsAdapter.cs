@@ -66,7 +66,12 @@ public sealed class LearnedPmsAdapter : ILocalPmsAdapter, IDisposable
         string rxNumberDataType = "nvarchar")
     {
         PmsName = pmsName;
-        _connectionString = connectionString;
+        var sqlConnection = new SqlConnectionStringBuilder(connectionString)
+        {
+            Encrypt = true,
+            TrustServerCertificate = false,
+        };
+        _connectionString = sqlConnection.ConnectionString;
         DetectionQuery = detectionQuery;
         StatusParameters = statusParameters;
         DetectionValidationQuery = detectionValidationQuery;

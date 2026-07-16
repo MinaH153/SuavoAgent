@@ -119,7 +119,7 @@ def _read_regular(path: Path, maximum_bytes: int, label: str) -> bytes:
         return read_regular_once(path, maximum_bytes, label)
     except SecureFileError as error:
         raise BridgeError(str(error)) from error
-def _exclusive_write(path: Path, data: bytes, mode: int = 0o644) -> None:
+def _exclusive_write(path: Path, data: bytes, mode: int = 0o600) -> None:
     if path.exists() or path.is_symlink():
         raise BridgeError(f"output already exists: {path}")
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
