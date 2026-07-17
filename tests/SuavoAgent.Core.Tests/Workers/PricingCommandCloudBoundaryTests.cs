@@ -1,5 +1,6 @@
 using Xunit;
 using SuavoAgent.Core.Pricing;
+using System.Text.Json;
 
 namespace SuavoAgent.Core.Tests.Workers;
 
@@ -35,6 +36,10 @@ public sealed class PricingCommandCloudBoundaryTests
         var notFound = PricingTerminalAck.NotFound();
         Assert.Equal(PricingTerminalAck.NotFoundResult, notFound.ResultKind);
         Assert.Equal("pricing_workbook_not_found", notFound.ErrorCode);
+        var notFoundJson = JsonSerializer.Serialize(notFound.BuildResult());
+        Assert.Contains("\"status\":\"needs_input\"", notFoundJson, StringComparison.Ordinal);
+        Assert.Contains("\"reason\":\"pricing_workbook_not_found\"", notFoundJson, StringComparison.Ordinal);
+        Assert.Contains("\"recovery\":\"place_local_workbook\"", notFoundJson, StringComparison.Ordinal);
 
         var confirmation = PricingTerminalAck.LocalConfirmation(candidateCount: 2);
         Assert.Equal(PricingTerminalAck.LocalConfirmationResult, confirmation.ResultKind);

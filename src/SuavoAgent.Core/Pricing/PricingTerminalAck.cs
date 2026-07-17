@@ -170,7 +170,12 @@ internal sealed record PricingTerminalAck(
             failedItems = 0,
         },
         PathRejectedResult => new { status = "path_rejected" },
-        NotFoundResult => new { status = "not_found" },
+        NotFoundResult => new
+        {
+            status = "needs_input",
+            reason = "pricing_workbook_not_found",
+            recovery = "place_local_workbook",
+        },
         PricingFailedResult => new
         {
             status = "pricing_failed",

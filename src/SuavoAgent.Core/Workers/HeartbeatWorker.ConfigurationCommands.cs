@@ -26,6 +26,7 @@ using SuavoAgent.Core.Learning;
 using SuavoAgent.Core.Mission;
 using SuavoAgent.Core.Pricing;
 using SuavoAgent.Core.Receipts;
+using SuavoAgent.Core.Reasoning;
 using SuavoAgent.Core.State;
 
 namespace SuavoAgent.Core.Workers;
@@ -350,6 +351,15 @@ public sealed partial class HeartbeatWorker
         var prompt = dataEl.TryGetProperty("prompt", out var pe) ? pe.GetString() : null;
         if (string.IsNullOrWhiteSpace(prompt))
             return AckAsync(false, null, "prompt required");
+
+        var groundedCapabilityReply = CapabilityTruthPolicy.TryReply(prompt);
+        if (groundedCapabilityReply is not null)
+        {
+            return AckAsync(
+                true,
+                new { reply = groundedCapabilityReply, ready = true, model = "capability_policy" },
+                null);
+        }
 
         if (_localInference is null || !_localInference.IsReady)
             return AckAsync(true, new { reply = (string?)null, ready = false, model = _localInference?.ModelId ?? "none" }, null);

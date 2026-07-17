@@ -100,6 +100,29 @@ public sealed class LLamaLocalInferenceBoundaryTests
     }
 
     [Fact]
+    public void ChatCapabilityPolicyNeverClaimsUnverifiedHardwareOrAppControl()
+    {
+        Assert.Equal(
+            "I haven't verified this computer's hardware specifications.",
+            CapabilityTruthPolicy.TryReply("tell me the specs of this computer"));
+        Assert.Equal(
+            "I haven't verified access to PioneerRx or computer-control authority for this request.",
+            CapabilityTruthPolicy.TryReply("do you see and have access to PioneerRx"));
+        Assert.Equal(
+            "I haven't verified access to Calculator or computer-control authority for this request.",
+            CapabilityTruthPolicy.TryReply("Can you open Calculator and type 2=2"));
+        Assert.Null(CapabilityTruthPolicy.TryReply("Why did the pricing run stop?"));
+    }
+
+    [Fact]
+    public void ChatSystemPromptRequiresEvidenceBeforeCapabilityClaims()
+    {
+        Assert.Contains("Only claim a capability when this request includes verified evidence", LLamaLocalInference.ChatSystemPrompt);
+        Assert.DoesNotContain("You can see the screen", LLamaLocalInference.ChatSystemPrompt);
+        Assert.DoesNotContain("control the mouse and keyboard", LLamaLocalInference.ChatSystemPrompt);
+    }
+
+    [Fact]
     public async Task IdleWatcherHonorsInFlightRecentUseAndAbsentWeightsBranches()
     {
         await using var inference = Create();
