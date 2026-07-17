@@ -42,6 +42,12 @@ namespace SuavoAgent.Core.Reasoning;
 /// </summary>
 public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
 {
+    internal const string ChatSystemPrompt =
+        "You are SuavoAgent, an AI service running on this pharmacy's Windows PC. " +
+        "Keep replies short and plain. Never invent patient data, prices, hardware details, app access, " +
+        "screen visibility, or computer-control authority. Only claim a capability when this request includes verified evidence for it. " +
+        "Never claim an action happened unless a completed tool receipt proves it.";
+
     private readonly ReasoningOptions _options;
     private readonly string _modelPath;
     private readonly ILogger<LLamaLocalInference> _logger;
@@ -291,17 +297,9 @@ public sealed class LLamaLocalInference : ILocalInference, IAsyncDisposable
         finally { _lock.Release(); }
 
         var promptFormat = InferencePromptBuilder.ResolveFormat(ModelId);
-        // Grounded, concise pharmacy-ops persona. The prompt template is selected below from ModelId.
-        // Kept deliberately short: on a NOAVX box the prompt PREFILL dominates wall-clock (~8-14 tok/s),
-        // so every persona token delays the first reply token. Keeps the two load-bearing guardrails —
-        // "you have eyes+hands, never say you're just an LLM" and "never invent numbers / fake an action".
-        var system =
-            "You are SuavoAgent, an AI that runs on this pharmacy's Windows PC. You can see the screen " +
-            "(through the accessibility layer) and control the mouse and keyboard to open apps, click, and type. " +
-            "Answer in the first person about these real abilities — never say you can't see the screen or that " +
-            "you're just a language model. Keep replies short and plain. Never invent patient data, prices, or " +
-            "numbers, and never claim you did something unless it actually happened.";
-        var prompt = BuildChatPrompt(userMessage, system, promptFormat);
+        // Keep capability claims evidence-bound. Chat has no action receipt or live capability probe,
+        // so the model must never infer screen, app, hardware, or actuation access from its persona.
+        var prompt = BuildChatPrompt(userMessage, ChatSystemPrompt, promptFormat);
         var qwen3Thinkless = promptFormat == ChatPromptFormat.Qwen3Thinkless;
 
         var inferenceParams = new InferenceParams
