@@ -10,7 +10,7 @@ jobs:
   bootstrap-windows-smoke:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Parse bootstrap.ps1 with Windows PowerShell 5.1
         shell: powershell
@@ -78,10 +78,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: bootstrap-windows-smoke
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 8.0.x
 
@@ -106,7 +106,7 @@ jobs:
         run: bash tests/SuavoAgent.Analyzers.IntegrationTest/run-integration.sh
 
       - name: Upload test results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-results
@@ -117,10 +117,10 @@ jobs:
     needs: build-and-test
     if: github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 8.0.x
 
@@ -137,7 +137,7 @@ jobs:
         run: dotnet publish src/SuavoAgent.Setup -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o artifacts/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: win-x64-binaries
           path: artifacts/*.exe
@@ -151,10 +151,10 @@ jobs:
     # session-sensitive, so this proves-when-it-can without gating merges; build-and-test stays the gate.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 8.0.x
 
@@ -187,7 +187,7 @@ jobs:
       # (llama.cpp via LLamaSharp, CPU) under its GBNF grammar. Cached so it only downloads once.
       - name: Cache GGUF model
         id: cache-gguf
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\tinyllama-q4.gguf
           key: gguf-tinyllama-1.1b-chat-v1.0-q4_k_m-v1
@@ -215,7 +215,7 @@ jobs:
       # Cached so it only downloads once (~1.3 GB).
       - name: Cache Qwen3-1.7B GGUF model
         id: cache-gguf-qwen3
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\qwen3-1.7b-q4.gguf
           key: gguf-qwen3-1.7b-q4_k_m-v1
