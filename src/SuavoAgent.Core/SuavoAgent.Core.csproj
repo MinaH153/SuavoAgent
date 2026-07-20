@@ -19,8 +19,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
-    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.3" />
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.10" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
     <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
@@ -29,8 +29,8 @@
     <PackageReference Include="Stateless" Version="5.20.1" />
     <!-- ClosedXML (MIT) replaces EPPlus (NonCommercial in v7). Commercial pilot cannot ship
          EPPlus under its free license; re-evaluation only if ClosedXML perf blocks a workflow. -->
-    <PackageReference Include="ClosedXML" Version="0.104.2" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.4" />
+    <PackageReference Include="ClosedXML" Version="0.105.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.18" />
     <PackageReference Include="YamlDotNet" Version="16.3.0" />
     <!-- Managed LLamaSharp binding only. Native llama.cpp backend (llama.dll,
          ggml.dll) is NOT shipped by default — its presence would be a vendor
@@ -42,7 +42,7 @@
          3->5 per AVX folder (ggml.dll + ggml-base.dll + ggml-cpu.dll + llama.dll + llava_shared.dll) —
          the operator-provided NativeLibraryPath on the box MUST carry all 5 (see live-box-validation runbook).
          Backend pin (LLamaSharp.Backend.Cpu, in Helper.Tests) MUST equal this version exactly. -->
-    <PackageReference Include="LLamaSharp" Version="0.24.0" />
+    <PackageReference Include="LLamaSharp" Version="0.27.0" />
   </ItemGroup>
 
   <ItemGroup>
