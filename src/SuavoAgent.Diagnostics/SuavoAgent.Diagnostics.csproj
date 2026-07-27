@@ -38,7 +38,7 @@
     <!-- JsonSchema.Net for build-time + runtime ruleset-v1 validation.
          Runtime path is loaded-from-embedded-resource only; the runtime
          crash reporter does NOT depend on this package (AOT compat). -->
-    <PackageReference Include="JsonSchema.Net" Version="7.2.3" />
+    <PackageReference Include="JsonSchema.Net" Version="9.4.0" />
   </ItemGroup>
 
   <ItemGroup>
