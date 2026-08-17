@@ -32,13 +32,13 @@
          AppDomain/UnobservedTask hooks). -->
     <PackageReference Include="JsonCanonicalizer" Version="1.0.0" />
     <PackageReference Include="Sentry" Version="4.13.0" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="8.0.0" />
     <!-- JsonSchema.Net for build-time + runtime ruleset-v1 validation.
          Runtime path is loaded-from-embedded-resource only; the runtime
          crash reporter does NOT depend on this package (AOT compat). -->
-    <PackageReference Include="JsonSchema.Net" Version="7.2.3" />
+    <PackageReference Include="JsonSchema.Net" Version="7.4.0" />
   </ItemGroup>
 
   <ItemGroup>

@@ -11,9 +11,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.2" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
-    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <!--
       Avalonia headless test infrastructure (Mesh PR 3). Catches Bug 24's
@@ -21,8 +21,8 @@
       ship green without a UI smoke check. Versions track SuavoAgent.Setup's
       Avalonia 11.2.0 PackageReferences.
     -->
-    <PackageReference Include="Avalonia.Headless" Version="11.2.0" />
-    <PackageReference Include="Avalonia.Headless.XUnit" Version="11.2.0" />
+    <PackageReference Include="Avalonia.Headless" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Headless.XUnit" Version="11.3.20" />
   </ItemGroup>
 
   <ItemGroup>
